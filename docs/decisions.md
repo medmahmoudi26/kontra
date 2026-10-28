@@ -2344,7 +2344,7 @@ docker driver's builder only (`BUILDX_BUILDER=default`), never with another proj
 node (the e2e FakeGate serves no node-opened blob stream), and a node's own `replayed` refusal of an answer the gate
 sent twice (the gate takes one answer per gate request id, relay.md §11.7). The dual-era client run D177 asks to record
 before M4 was Claude Code 2.1.281's `claude mcp list` against a modern and a legacy-only service on the gate's one
-origin: both connected, the modern one in the modern era.
+origin: both connected, the modern one in the modern era. Amended by D266 (the second run, after the review rounds).
 
 ## From M3's spec conflicts and its review (28 Oct)
 
@@ -3506,3 +3506,23 @@ resumed `GET`, the first proposal, would keep resumability for plain calls at th
 cut call. Gate-written streams keep their `k.` ids (§11.7) ([`relay.md`](../spec/relay.md) §11.2, §11.4; `mcprelay`
 exchange.go `relaySSE`, `relayJSON`, stream.go `dropID`; `TestReview4CallStreamIsNotResumable`,
 `TestReview4GETCarriesNoResponse`).
+
+## From M3's second pentest run (29 Oct)
+
+### D266. The pentest ran again after the review rounds, under a project and an image of its own — **decided under the owner's standing instruction, 29 Oct** (amends D186, D190)
+
+The review rounds (D191–D265) changed sealing, the hiring endpoint, the MCP session cap and the envelope after the
+pentest of D190, which therefore no longer covered the branch, and some of its controls no longer held for the reason
+they probe: the session cap (D231) refused buyer A's fifth `vaultmcp` session, and the hiring endpoint binds both
+loopback families (D262). Another checkout (M4's) also runs its own pentest on this host's Docker, under D186's project
+`m3pentest` and image `kontra-gate:m3`: a run under the same names would tear down the other's stack, or run the
+other's gate. Decision: the harness probes what the rounds added (each named in [`pentest-m3.md`](pentest-m3.md):
+D195, D197, D207, D208, D217, D218, D221, D223, D224, D226, D227, D228, D229, D231, D235, D236, D237, D239, D247, D249,
+D252, D259, D262, D265), its controls are corrected (a client ends its MCP sessions; the listener check expects both
+families), and the run is repeated on the committed tree. `KONTRA_PENTEST_PROJECT` and `KONTRA_PENTEST_IMAGE` name the
+run's project (its network `<project>_net`) and the gate's image, D186's names by default, in the harness, the
+`Makefile` and `compose.pentest.yaml`; the second run used `m3pentest2` and `kontra-gate:m3-pentest2`. The session
+cap's eviction probe backdates its sessions' `last_seen_at` in the gate's database instead of waiting two minutes, the
+only write a probe makes to the gate's state. The second run (`33f06a8`): 232 probes held, no finding, and two
+observations recorded, D223's accepted residual (a forged `kid`-only seller signature, where a gate names no seller
+key set, leaves an unverified `kid:` pin unchanged) and the dual-era client of D177 (`test/pentest`; `pentest-m3.md`).

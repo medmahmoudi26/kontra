@@ -40,8 +40,9 @@ spec wins once the owner has signed it, and the difference is a numbered entry i
 A team gate on one host is [`../compose.yaml`](../compose.yaml) (D43, D168): the gate built from the repository's
 `Dockerfile`, terminating TLS itself, `temporalio/server` 1.32.1 with its two `admin-tools` jobs, and Postgres 16, with
 no Temporal or Postgres port published. [`../deploy/compose/kontra.yaml`](../deploy/compose/kontra.yaml) is its
-configuration and says what to edit. PRD §12's pentest list and M3's own surface were run against it on 27 Oct
-(`make pentest`, D186): [`pentest-m3.md`](pentest-m3.md) records every probe, the findings and their fixes.
+configuration and says what to edit. PRD §12's pentest list and M3's own surface were run against it on 27 Oct and,
+after the M3 review rounds, again on 29 Oct (`make pentest`, D186, D266): [`pentest-m3.md`](pentest-m3.md) records every
+probe of the second run, the findings and their fixes.
 
 ## Hiring from another agent (decided 25 Oct)
 
