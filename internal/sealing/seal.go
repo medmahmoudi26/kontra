@@ -362,7 +362,19 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 }
 
 // SellerKeyIDs checks an upstream card against the hex SHA-256 of its JCS that the gate signed (kontra.upstream.sha256)
-// and returns the key ids (kid) of its signatures, sorted: what the pins record of the seller (ext-sealed.md §7).
+// and returns what the pins record of the seller's keys (ext-sealed.md §7), sorted: for each seller signature that
+// carries its public key (a jwk in its protected header, EC P-256) and verifies with it over the JCS of the card
+// without signatures, the RFC 7638 thumbprint of that key; for each that names its key by kid only, "kid:<kid>". A
+// signature that carries a key and does not verify with it, or is malformed, is no key of the seller's.
+//
+// SPEC-CONFLICT (ext-sealed.md §7, relay.md §3: a verifier "checks the seller's signatures against keys it trusts for
+// the seller", and the pins hold "the seller key thumbprints that verified its upstream card"; D187 prints them as
+// thumbprints): the node is given no seller key set (seller_keys is the gate's configuration), so a signature that
+// names its key by kid only cannot be verified by it, and its kid is only what the signature claims. The closest
+// faithful behaviour: a signature that carries its key is verified, and its key's thumbprint pinned (a gate that
+// replaces the card and its signature changes it); one that does not is pinned as the unverified "kid:<kid>", and
+// printed so, never as a thumbprint. A gate that forges a kid-only signature naming the pinned kid is not detected:
+// that residual stays until the node can verify with the seller's own key set.
 func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 	c, err := jcs.Transform(upstream)
 	if err != nil {
@@ -383,16 +395,22 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 		}
 	}
 	var ids []string
+	add := func(id string) {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
 	for _, e := range elems {
 		sm, err := strictjson.Members(e)
 		if err != nil {
 			continue
 		}
-		var prot string
-		if json.Unmarshal(sm["protected"], &prot) != nil {
+		var sig jws.Signature
+		if json.Unmarshal(sm["protected"], &sig.Protected) != nil || json.Unmarshal(sm["signature"], &sig.Signature) != nil {
 			continue
 		}
-		b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(prot, "="))
+		sig.Header = sm["header"]
+		b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(sig.Protected, "="))
 		if err != nil {
 			continue
 		}
@@ -400,8 +418,29 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		if kid, ok := a2awire.String(pm, "kid"); ok && kid != "" && !slices.Contains(ids, kid) {
-			ids = append(ids, kid)
+		kid, ok := a2awire.String(pm, "kid")
+		if !ok || kid == "" {
+			continue
+		}
+		jwk, has := pm["jwk"]
+		if !has {
+			add("kid:" + kid)
+			continue
+		}
+		key, err := strictjson.Members(jwk)
+		if err != nil {
+			continue
+		}
+		key["kid"] = a2awire.Quote(kid)
+		set, err := jws.ParseJWKS(a2awire.Encode(map[string]json.RawMessage{"keys": a2awire.EncodeArray([]json.RawMessage{a2awire.Encode(key)})}))
+		if err != nil {
+			continue
+		}
+		if _, err := jws.Verify(upstream, sig, set); err != nil {
+			continue
+		}
+		if t, ok := set.Thumbprint(kid); ok {
+			add(t)
 		}
 	}
 	slices.Sort(ids)

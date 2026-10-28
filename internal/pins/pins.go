@@ -37,10 +37,13 @@ const maxFile = 16 << 20
 
 // Pin is what was last accepted for one service at one gate.
 type Pin struct {
-	Sealed     bool      `json:"sealed"`
-	Recipients []string  `json:"recipients"`  // key ids (k1_…), sorted
-	SellerKeys []string  `json:"seller_keys"` // RFC 7638 thumbprints that verified the upstream card, sorted
-	Signed     bool      `json:"signed"`      // the upstream card carried a seller signature the gate verified
+	Sealed     bool     `json:"sealed"`
+	Recipients []string `json:"recipients"` // key ids (k1_…), sorted
+	// SellerKeys are the RFC 7638 thumbprints of the seller keys that verified the upstream card (a signature that
+	// carries its key), and "kid:<kid>" for a signature that names its key only, which the node cannot verify
+	// (sealing.SellerKeyIDs), sorted.
+	SellerKeys []string  `json:"seller_keys"`
+	Signed     bool      `json:"signed"` // the upstream card carried a seller signature the gate verified
 	At         time.Time `json:"at"`
 }
 
