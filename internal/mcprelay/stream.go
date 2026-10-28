@@ -28,13 +28,20 @@ type event struct {
 // streamable_http only "message".
 func (e *event) message() bool { return e.typ == "" || e.typ == "message" }
 
+// utf8BOM is the UTF-8 encoding of U+FEFF.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
 // errEventTooLarge is an event over upstream.MaxSSEEvent (spec §6.6).
 var errEventTooLarge = fmt.Errorf("%w: one SSE event over %d bytes", upstream.ErrLimit, upstream.MaxSSEEvent)
 
-// sseReader reads events from an upstream's event stream. Lines end in LF, CR or CRLF.
+// sseReader reads events from an upstream's event stream. Lines end in LF, CR or CRLF, and one UTF-8 byte order mark
+// at the start of the stream is dropped, as WHATWG SSE says ("One leading U+FEFF BYTE ORDER MARK character must be
+// ignored") and stock clients do (the TypeScript SDK decodes with TextDecoderStream, which drops it): kept, it would
+// make the first event's field "U+FEFF data", an event the relay would pass unread that every client dispatches.
 type sseReader struct {
-	br  *bufio.Reader
-	max int
+	br      *bufio.Reader
+	max     int
+	started bool
 }
 
 func newSSEReader(r io.Reader) *sseReader {
@@ -44,6 +51,14 @@ func newSSEReader(r io.Reader) *sseReader {
 // next returns the next event, io.EOF at a clean end (an unterminated last event is dropped, as a client drops
 // it), errEventTooLarge over the limit.
 func (s *sseReader) next() (*event, error) {
+	if !s.started {
+		s.started = true
+		if b, err := s.br.Peek(1); err == nil && b[0] == utf8BOM[0] {
+			if b, err := s.br.Peek(3); err == nil && bytes.Equal(b, utf8BOM) {
+				_, _ = s.br.Discard(3)
+			}
+		}
+	}
 	ev := &event{}
 	var data []string
 	for {

@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -187,7 +190,7 @@ func (c *callMeter) observe(m *mcpwire.Message) {
 		c.isError = nil
 	default:
 		c.isError = &f
-		if v, ok := mcpwire.Member(m.Result, "isError"); ok && bytes.Equal(bytes.TrimSpace(v), []byte("true")) {
+		if set, ok := mcpwire.IsErrorFlag(m.Result); set || !ok {
 			c.isError = &t
 		}
 	}
@@ -419,6 +422,17 @@ func (h *Handler) process(o *relayOpts, m *mcpwire.Message, raw []byte) ([]byte,
 	isResp := m.Method == "" && sameID(m.ID, o.reqID)
 	if isResp {
 		o.answered = true
+		if o.method == mcpwire.MethodToolsCall && m.Result != nil {
+			if _, ok := mcpwire.IsErrorFlag(m.Result); !ok {
+				// A top-level isError that is not a JSON boolean ("true", 1, null): clients disagree on it (pydantic
+				// reads "true" as true, the TypeScript SDK's schema refuses the result), so it is a malformed upstream
+				// message, not relayed and metered an error, the value-level twin of D172's key rule.
+				o.meter.fail()
+				h.log.Warn("mcp: an upstream result's isError is not a boolean; it is not relayed")
+				b, _ := mcpwire.ErrorBody(o.reqID, mcpwire.CodeInternal, msgUpstreamError, nil)
+				return nil, &mcpwire.Refusal{Status: http.StatusBadGateway, Body: b}
+			}
+		}
 		o.meter.observe(m)
 		if o.onResponse != nil {
 			return o.onResponse(m, raw)
@@ -584,17 +598,126 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 	}
 }
 
-// sameID reports whether two JSON-RPC ids are the same id: equal strings, or equal numbers as written.
+// sameID reports whether a response's id a answers a request whose id is b, as stock clients match them: equal
+// strings; for a numeric request id, a number of the same value (1, 1.0 and 1e0 are one id) or a string whose
+// JavaScript Number() is that value (the TypeScript SDK looks its handler up by Number(response.id), so "7" answers
+// request 7). The relay meters, ends a stream after, and opens a session on the response the client takes: an
+// upstream that answered first with another spelling of the id, then with the id as written, would otherwise have
+// the gate meter the second while the client acted on the first (relay §11.4, D172).
 func sameID(a, b json.RawMessage) bool {
 	a, b = bytes.TrimSpace(a), bytes.TrimSpace(b)
 	if len(a) == 0 || len(b) == 0 {
 		return false
 	}
-	if a[0] == '"' || b[0] == '"' {
-		var sa, sb string
-		return a[0] == b[0] && json.Unmarshal(a, &sa) == nil && json.Unmarshal(b, &sb) == nil && sa == sb
+	str := func(raw json.RawMessage) (string, bool) {
+		var s string
+		return s, raw[0] == '"' && json.Unmarshal(raw, &s) == nil
 	}
-	return bytes.Equal(a, b)
+	num := func(raw json.RawMessage) (float64, bool) {
+		if raw[0] != '-' && (raw[0] < '0' || raw[0] > '9') {
+			return 0, false
+		}
+		f, err := strconv.ParseFloat(string(raw), 64)
+		return f, err == nil || errors.Is(err, strconv.ErrRange)
+	}
+	as, aStr := str(a)
+	bs, bStr := str(b)
+	switch {
+	case aStr && bStr:
+		return as == bs
+	case bStr:
+		return false // a string request id is answered by that string only
+	}
+	bn, ok := num(b)
+	if !ok {
+		return false
+	}
+	if aStr {
+		an, ok := jsNumber(as)
+		return ok && an == bn
+	}
+	an, ok := num(a)
+	return ok && an == bn
+}
+
+// jsNumber is JavaScript's Number(s) for a string (ECMAScript StringToNumber): white space around it trimmed, "" is
+// 0, a decimal literal, Infinity with an optional sign, or a 0x, 0o or 0b integer; ok false where Number gives NaN.
+func jsNumber(s string) (float64, bool) {
+	s = strings.TrimFunc(s, func(c rune) bool {
+		switch c {
+		case '\t', '\v', '\f', ' ', '\n', '\r', '\u00a0', '\ufeff', '\u2028', '\u2029':
+			return true
+		}
+		return unicode.Is(unicode.Zs, c)
+	})
+	switch s {
+	case "":
+		return 0, true
+	case "Infinity", "+Infinity":
+		return math.Inf(1), true
+	case "-Infinity":
+		return math.Inf(-1), true
+	}
+	if len(s) > 2 && s[0] == '0' {
+		base := 0
+		switch s[1] {
+		case 'x', 'X':
+			base = 16
+		case 'o', 'O':
+			base = 8
+		case 'b', 'B':
+			base = 2
+		}
+		if base != 0 {
+			v := 0.0
+			for _, c := range s[2:] {
+				d := strings.IndexRune("0123456789abcdef", unicode.ToLower(c))
+				if d < 0 || d >= base {
+					return 0, false
+				}
+				v = v*float64(base) + float64(d)
+			}
+			return v, true
+		}
+	}
+	// [+-]? (digits ("." digits?)? | "." digits) ([eE] [+-]? digits)?
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	digits := func() int {
+		n := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+			n++
+		}
+		return n
+	}
+	n := digits()
+	if i < len(s) && s[i] == '.' {
+		i++
+		n += digits()
+	}
+	if n == 0 {
+		return 0, false
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		if digits() == 0 {
+			return 0, false
+		}
+	}
+	if i != len(s) {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return 0, false
+	}
+	return f, true
 }
 
 // idString is a JSON-RPC id as the tunnel preamble's mcp_request_id carries it (tunnel.md §8.1): a string's

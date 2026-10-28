@@ -60,6 +60,31 @@ func (k *mcpLink) held() bool {
 	return err == nil
 }
 
+// heldGrace is how long a read that failed mid-answer on a tunnelled link waits for the registry to drop a session
+// that is going: its streams fail a moment before its end is noticed.
+const heldGrace = time.Second
+
+// cut classifies a read that failed mid-answer (a body or an event stream cut before the answer): on a tunnelled link
+// whose session this replica no longer holds, the tunnel was lost (§6.4: tunnel_lost, after the first upstream id
+// too, D178); otherwise the upstream ended it (unreachable).
+func (k *mcpLink) cut(ctx context.Context, msg string) *exchangeError {
+	if k.tunnelled {
+		for deadline := time.Now().Add(heldGrace); ; {
+			if !k.held() {
+				return &exchangeError{class: classTunnelLost, msg: msg + " (the tunnel session is gone)"}
+			}
+			if !time.Now().Before(deadline) || ctx.Err() != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
+	return &exchangeError{class: classUnreachable, msg: msg}
+}
+
 // Classes of a dispatch exchange's failure (spec §6.4's rows).
 type exchangeClass int
 
@@ -249,7 +274,7 @@ func (k *mcpLink) call(ctx context.Context, body []byte, id json.RawMessage, onM
 				if errors.Is(err, errEventTooLarge) {
 					return nil, nil, nil, &exchangeError{class: classProtocol, msg: "an upstream event over the limit"}
 				}
-				return nil, nil, nil, &exchangeError{class: classUnreachable, msg: "the upstream's event stream ended before the answer"}
+				return nil, nil, nil, k.cut(ctx, "the upstream's event stream ended before the answer")
 			}
 			if !ev.message() || !ev.hasData || strings.TrimSpace(ev.data) == "" {
 				continue
@@ -264,7 +289,7 @@ func (k *mcpLink) call(ctx context.Context, body []byte, id json.RawMessage, onM
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, upstream.MaxBody+1))
 	switch {
 	case err != nil:
-		return nil, nil, nil, &exchangeError{class: classUnreachable, msg: "the upstream's body could not be read"}
+		return nil, nil, nil, k.cut(ctx, "the upstream's body could not be read")
 	case len(raw) > upstream.MaxBody:
 		return nil, nil, nil, &exchangeError{class: classProtocol, msg: "an upstream body over the limit"}
 	case mt != "application/json" || len(bytes.TrimSpace(raw)) == 0:
@@ -850,9 +875,11 @@ func (r *legacyRun) finishResult(ctx context.Context, m *mcpwire.Message, raw []
 	if err != nil {
 		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
-	isErr := false
-	if v, ok := mcpwire.Member(res, "isError"); ok && bytes.Equal(bytes.TrimSpace(v), []byte("true")) {
-		isErr = true
+	isErr, ok := mcpwire.IsErrorFlag(res)
+	if !ok {
+		// A top-level isError that is not a JSON boolean: a malformed upstream message (exchange.go's process).
+		r.log.Warn("the upstream's result has an isError that is not a boolean: the task fails upstream_error")
+		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
 	state := store.StateCompleted
 	if isErr {
@@ -881,8 +908,14 @@ func (r *legacyRun) finishError(ctx context.Context, xe *exchangeError) (lifecyc
 		return r.fail(ctx, store.ReasonUpstreamError, "upstream task expired")
 	}
 	raw := xe.raw
-	if len(raw) == 0 {
-		b, err := json.Marshal(xe.rpc)
+	if len(raw) == 0 || r.sealed {
+		e := *xe.rpc
+		if r.sealed {
+			// A sealed service's error keeps its code only: its message and data may quote the sealed arguments,
+			// and the task's log is Postgres (ext-sealed.md §7; the hosting node replaces them too).
+			e = mcpwire.Error{Code: xe.rpc.Code, Message: "the service returned an error (its text is not kept for a sealed service)"}
+		}
+		b, err := json.Marshal(e)
 		if err != nil {
 			return r.fail(ctx, store.ReasonUpstreamError, "")
 		}

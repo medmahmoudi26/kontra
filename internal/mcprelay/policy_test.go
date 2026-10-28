@@ -296,7 +296,9 @@ func TestIDs(t *testing.T) {
 	for _, tc := range []struct {
 		a, b string
 		same bool
-	}{{`1`, `1`, true}, {`"1"`, `1`, false}, {`"a"`, `"a"`, true}, {`1`, `2`, false}, {``, ``, false}} {
+	}{{`1`, `1`, true}, {`"1"`, `1`, true}, {`1`, `"1"`, false}, {`"a"`, `"a"`, true}, {`1`, `2`, false}, {``, ``, false}} {
+		// "1" answers request 1 as the TypeScript SDK reads it (Number("1")); a string request id only its string (M3
+		// review mcp-spec-2, TestReviewSameIDAsClients).
 		if got := sameID(json.RawMessage(tc.a), json.RawMessage(tc.b)); got != tc.same {
 			t.Errorf("sameID(%s, %s) = %v", tc.a, tc.b, got)
 		}

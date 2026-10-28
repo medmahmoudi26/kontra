@@ -273,7 +273,60 @@ func (x *mcpExchange) response(res *http.Response) error {
 			filter: func(data []byte) ([]byte, bool, bool) { return x.filter(sid, data) }}
 		res.ContentLength = -1
 		res.Header.Del("Content-Length")
+	default:
+		if x.seal != nil && res.StatusCode/100 == 2 {
+			// A 2xx body labelled otherwise (text/plain, none) is read as one JSON message all the same, as the A2A
+			// side reads every 2xx body (sealing.Hosting.Response): a sealed call's result labelled text/plain would
+			// otherwise reach the gate unsealed (ext-sealed.md §5, "seals every part of every reply").
+			return x.unlabelled(sid, res)
+		}
 	}
+	return nil
+}
+
+// unlabelled reads a 2xx response that is neither JSON nor an event stream, on an exchange with sealing, as one JSON
+// message through filter: the sealed message is relayed as application/json, an empty body as it came, and one
+// the filter refuses (or that is no JSON-RPC message with exact keys) is the node's refusal; nothing of it is
+// relayed unread.
+func (x *mcpExchange) unlabelled(sid string, res *http.Response) error {
+	if !identityCoded(res.Header) {
+		_ = res.Body.Close()
+		x.refuse(res)
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxMCPMessage+1))
+	_ = res.Body.Close()
+	if err != nil {
+		return fmt.Errorf("the MCP server's response could not be read: %w", err)
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		res.Body = io.NopCloser(bytes.NewReader(body))
+		return nil
+	}
+	if len(body) > maxMCPMessage {
+		x.refuse(res)
+		return nil
+	}
+	out, keep, ok := x.filter(sid, body)
+	if x.refused != nil {
+		status, hdr, b := sealing.RejectAnswer(x.reqID, x.refused)
+		res.StatusCode, res.Status = status, fmt.Sprintf("%d %s", status, http.StatusText(status))
+		res.Header, res.Trailer = hdr, nil
+		res.Body = io.NopCloser(bytes.NewReader(b))
+		res.ContentLength = int64(len(b))
+		res.Header.Set("Content-Length", strconv.Itoa(len(b)))
+		res.TransferEncoding = nil
+		return nil
+	}
+	if !ok || !keep {
+		x.refuse(res)
+		return nil
+	}
+	res.Header.Set("Content-Type", "application/json") // what it was read as
+	res.Body = io.NopCloser(bytes.NewReader(out))
+	res.ContentLength = int64(len(out))
+	res.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	res.TransferEncoding = nil
 	return nil
 }
 
@@ -407,11 +460,16 @@ var errEventTooLarge = errors.New("node: an SSE event over the MCP filter's boun
 // would otherwise have each event held until it writes again, minutes on a GET stream). A \n that turns out to
 // follow it is the rest of that line end, \r\n, and goes where the \r went: with its line, or with the event the
 // filter removed. The bytes relayed are those that came, in order.
+//
+// One UTF-8 byte order mark at the start of the stream is dropped (WHATWG SSE; stock clients drop it): kept, it would
+// make the first event's field "U+FEFF data", which the filter would pass unread (roots, sealing) and clients dispatch.
 type sseFilter struct {
 	src    *bufio.Reader
 	body   io.Closer
 	max    int
 	filter func(data []byte) (out []byte, keep, ok bool)
+	// started is set once the stream's first bytes were looked at for a byte order mark.
+	started bool
 
 	out []byte
 	err error
@@ -436,6 +494,14 @@ func (s *sseFilter) Close() error { return s.body.Close() }
 
 // next reads one event and sets what is relayed of it.
 func (s *sseFilter) next() {
+	if !s.started {
+		s.started = true
+		if b, err := s.src.Peek(1); err == nil && b[0] == 0xEF {
+			if b, err := s.src.Peek(3); err == nil && bytes.Equal(b, []byte{0xEF, 0xBB, 0xBF}) {
+				_, _ = s.src.Discard(3)
+			}
+		}
+	}
 	var (
 		raw     [][]byte // the event's lines, each with its end
 		data    [][]byte

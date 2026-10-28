@@ -693,9 +693,11 @@ func (r *modernRun) finishModernResult(ctx context.Context, result json.RawMessa
 	if err != nil {
 		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
-	isErr := false
-	if v, ok := mcpwire.Member(res, "isError"); ok && bytes.Equal(bytes.TrimSpace(v), []byte("true")) {
-		isErr = true
+	isErr, ok := mcpwire.IsErrorFlag(res)
+	if !ok {
+		// A top-level isError that is not a JSON boolean: a malformed upstream message (exchange.go's process).
+		r.log.Warn("the upstream's result has an isError that is not a boolean: the task fails upstream_error")
+		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
 	state := store.StateCompleted
 	if isErr {

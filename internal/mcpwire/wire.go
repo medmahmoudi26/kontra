@@ -415,6 +415,23 @@ func IDKey(id json.RawMessage) (string, bool) {
 	return "", false
 }
 
+// IsErrorFlag reads a CallToolResult's top-level isError (exact key): set when it is the JSON literal true; ok false
+// when it is present and not a JSON boolean ("true", 1, null), a malformed result, since clients do not agree on it
+// (the Python SDK's pydantic reads "true" and 1 as true, the TypeScript SDK's schema refuses the result).
+func IsErrorFlag(result json.RawMessage) (set, ok bool) {
+	v, has := Member(result, "isError")
+	if !has {
+		return false, true
+	}
+	switch string(bytes.TrimSpace(v)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	return false, false
+}
+
 // parseError decodes an error object with exact keys: code an integer, message a string, data any value. A null
 // error (some JSON-RPC 1.0 habits write one beside a result) is no error.
 func parseError(v json.RawMessage) (*Error, error) {
