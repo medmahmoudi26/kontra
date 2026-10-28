@@ -56,7 +56,8 @@ through one outbound connection (spec/tunnel.md):
                              and these); repeatable
   --session-idle DURATION    stop a stdio server whose MCP session has been idle this long (default 1h; at least the
                              gate's session_idle_s)
-  --max-sessions N           stdio server processes per service at most, durable tasks included (default 8)
+  --max-sessions N           stdio server processes per service at most, durable tasks included (default 8); when
+                             full, a new session stops the one idle longest, if idle for 5 minutes or more
   --key PATH                 the identity key (default ~/.kontra/identity.key, or $KONTRA_KEY)
   --enroll TOKEN|@FILE|-     a one-time enrollment token from kontra-gate enroll <service>; repeatable
   --api-key KEY|@FILE|-      an API key for this gate: who this node hires as (else node:<key id>); a node that only

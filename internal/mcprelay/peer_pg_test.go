@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,42 @@ func TestPeerHop(t *testing.T) {
 	})
 	if rep := c.call(a.url+"/mcp/tun", 9, "echo", "x"); rep.status != 404 {
 		t.Errorf("after B's tunnel closed: %d", rep.status)
+	}
+}
+
+// D213 through the peer hop: a principal's sessions are pinned to a tunnel replica B holds, and the client reaches
+// replica A. Its third initialize closes its longest-idle session on A, and that session's upstream DELETE goes
+// through B's peer listener before the new initialize does: the upstream ends the session.
+func TestSessionsPerPrincipalThroughTheHop(t *testing.T) {
+	e := newEnv(t)
+	e.service("tun", "", func(s *Service) { s.MaxSessionsPerPrincipal = 2 })
+	a := e.replica("a", replicaOpts{peer: true})
+	b := e.replica("b", replicaOpts{peer: true})
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
+	e.node(b, up, "tun")
+	key, _ := e.apiKey("buyer")
+	c1, c2, c3 := newClient(t, key), newClient(t, key), newClient(t, key)
+	c1.initialize(a.url + "/mcp/tun")
+	first := e.row(c1.sid).upstreamSID
+	c2.initialize(a.url + "/mcp/tun")
+	if n := len(up.Sessions()); n != 2 {
+		t.Fatalf("%d upstream sessions, want 2", n)
+	}
+	c3.initialize(a.url + "/mcp/tun")
+	if row := e.row(c1.sid); !row.closed || *row.reason != string(CloseIdle) {
+		t.Fatalf("the longest-idle session over the cap: %+v", row)
+	}
+	if slices.Contains(up.Sessions(), first) || len(up.Sessions()) != 2 {
+		t.Fatalf("the evicted session's upstream DELETE did not go through the hop: %v (evicted %s)", up.Sessions(), first)
+	}
+	if rep := c1.call(a.url+"/mcp/tun", 1, "echo", "x"); rep.status != http.StatusNotFound {
+		t.Errorf("the evicted session: %d", rep.status)
+	}
+	for _, c := range []*client{c2, c3} {
+		if rep := c.call(a.url+"/mcp/tun", 2, "echo", "x"); rep.status != http.StatusOK {
+			t.Errorf("a session within the cap: %d %s", rep.status, rep.body)
+		}
 	}
 }
 

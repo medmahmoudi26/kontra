@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/peer"
 	"kontra.sh/kontra/internal/tunnel"
@@ -765,7 +766,9 @@ func (h *Handler) deleteUpstream(ctx context.Context, t target, s Session) {
 func (h *Handler) deleteUpstreamNow(ctx context.Context, t target, s Session) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	rq := &request{r: (&http.Request{}).WithContext(ctx), svc: &Service{}, sess: &s}
+	// The session's own principal, which a peer hop's assertion names to the holding replica.
+	rq := &request{r: (&http.Request{}).WithContext(ctx), svc: &Service{}, sess: &s,
+		p: auth.Principal{ID: s.Principal, BuyerID: s.BuyerID, Via: auth.Via(s.Via)}}
 	rq.svc.Ref.TenantID, rq.svc.Ref.Name = s.TenantID, s.Service
 	hdr := http.Header{}
 	if s.ProtocolVersion != "" {
