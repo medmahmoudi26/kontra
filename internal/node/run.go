@@ -11,6 +11,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
@@ -63,29 +64,30 @@ func (n *Node) Run(ctx context.Context) error {
 	defer tick.Stop()
 
 	// Hiring (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
-	// stops kontra connect at once; its requests wait for a session.
-	//
-	// SPEC-CONFLICT (D208; spec/tunnel.md §9; M3 WP-03 review): §9 has every node serve 127.0.0.1:7777 (--listen),
-	// and none turns it off. So every kontra connect binds it, hosting-only ones included: a second node on the
-	// same host stops at start unless it is given another --listen (this host's kontra-node-hello and
-	// kontra-seller-hello units would collide on an upgrade), and every hosting node offers its hiring principal
-	// (its --api-key, or node:<key_id>, which org:<tenant> admits) to every local process without a token. Built as
-	// written; D208 decides that --listen off turns hiring off, which is not built yet.
-	ln, err := net.Listen("tcp", n.cfg.Listen)
-	if err != nil {
-		return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>)", n.cfg.Listen, err)
-	}
-	hdone := make(chan struct{})
-	go func() {
-		defer close(hdone)
-		if err := n.hire.Serve(ctx, ln); err != nil {
-			n.logger.Error("the local hiring endpoint stopped", "err", err)
+	// stops kontra connect at once; its requests wait for a session. --listen off binds nothing: a node that only
+	// hosts offers its hiring principal to no local process, and a second node on the host needs no port of its own
+	// (D208).
+	if n.cfg.Listen == hiring.ListenOff {
+		fmt.Fprintln(n.out, "kontra connect: hiring is off (--listen off): this node only hosts")
+		n.logger.Info("hiring: off (--listen off)")
+	} else {
+		ln, err := net.Listen("tcp", n.cfg.Listen)
+		if err != nil {
+			return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>, "+
+				"or --listen off for a node that only hosts)", n.cfg.Listen, err)
 		}
-	}()
-	defer func() { cancel(); <-hdone }()
-	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	fmt.Fprintf(n.out, "kontra connect: hiring at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
-	n.logger.Info("hiring: serving local clients", "listen", ln.Addr().String())
+		hdone := make(chan struct{})
+		go func() {
+			defer close(hdone)
+			if err := n.hire.Serve(ctx, ln); err != nil {
+				n.logger.Error("the local hiring endpoint stopped", "err", err)
+			}
+		}()
+		defer func() { cancel(); <-hdone }()
+		_, port, _ := net.SplitHostPort(ln.Addr().String())
+		fmt.Fprintf(n.out, "kontra connect: hiring at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
+		n.logger.Info("hiring: serving local clients", "listen", ln.Addr().String())
+	}
 
 	var wait time.Duration
 	for {

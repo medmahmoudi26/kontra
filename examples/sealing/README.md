@@ -32,8 +32,8 @@ export KONTRA_API_KEY="$(./kontra-gate enroll -f $CFG --api-key demo)"
 
 examples/sellers/hello-exec/run.sh &                        # the seller on 127.0.0.1:9999
 
-# The hosting node: enrolled for hello, so its key is one of the service's recipients.
-HOME=/tmp/seller ./kontra connect --gate http://localhost:8080 --listen 127.0.0.1:7781 \
+# The hosting node: enrolled for hello, so its key is one of the service's recipients; it only hosts (--listen off).
+HOME=/tmp/seller ./kontra connect --gate http://localhost:8080 --listen off \
   --enroll "$(./kontra-gate enroll -f $CFG hello)" --serve a2a:hello=http://127.0.0.1:9999 &
 
 # The hiring node: it hires with the API key, and seals for its local clients on 127.0.0.1:7777.

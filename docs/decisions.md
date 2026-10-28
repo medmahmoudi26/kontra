@@ -2612,9 +2612,10 @@ operator of a shared machine to set `--local-token` ([`tunnel.md`](../spec/tunne
 another `--listen` (this host's `kontra-node-hello` and `kontra-seller-hello` units would collide on an upgrade),
 and a hosting node offers its hiring principal to local processes (M3 WP-03 review). Decision, the builder's
 recommended option: `--listen off` turns the hiring endpoint off, for a node that only hosts; the default stays
-`127.0.0.1:7777`, so a node that hosts and hires needs nothing new. It is not built in M3 (D225); until it is, every
-node binds `--listen` as §9 says, and D207's own-user check bounds who may use it ([`tunnel.md`](../spec/tunnel.md)
-§9; `node` run.go).
+`127.0.0.1:7777`, so a node that hosts and hires needs nothing new. Built (D225): `--listen off` binds no port; a
+`--local-token` or an `--allow-origin` beside it, which guard `--listen`, and `--listen off` with no `--serve` (a node
+that would neither host nor hire) are usage errors ([`tunnel.md`](../spec/tunnel.md) §9; `node` run.go, node.go;
+`hiring` hiring.go `ListenOff`; `TestRunListenOff`, `TestNewChecksListen`).
 
 ### D209. A blob that cannot be fetched — **decided under the owner's standing instruction, 28 Oct**
 

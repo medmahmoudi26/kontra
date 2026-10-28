@@ -52,6 +52,10 @@ import (
 // DefaultListen is --listen's default.
 const DefaultListen = "127.0.0.1:7777"
 
+// ListenOff is the --listen value that turns the hiring endpoint off, for a node that only hosts (D208): the node
+// binds no local port and hires for no one.
+const ListenOff = "off"
+
 // Local listener timeouts: a header read timeout and an idle timeout, never a write timeout (SSE answers last
 // as long as their task).
 const (
@@ -241,6 +245,9 @@ func New(cfg Config, open Opener, log *slog.Logger) (*Server, error) {
 	if err := CheckListen(cfg.Listen, cfg.LocalToken); err != nil {
 		return nil, err
 	}
+	if cfg.Listen == ListenOff && len(cfg.AllowOrigins) > 0 {
+		return nil, fmt.Errorf("--allow-origin names an Origin allowed to call --listen, which is off (D208)")
+	}
 	s := &Server{cfg: cfg, open: open, log: log.With("component", "hiring"), origins: map[string]bool{}}
 	for _, o := range cfg.AllowOrigins {
 		c, err := canonicalOrigin(o)
@@ -261,7 +268,9 @@ func New(cfg Config, open Opener, log *slog.Logger) (*Server, error) {
 			return blob.Fetch(ctx, st, ref, w)
 		}}
 	}
-	s.listen, s.local = cfg.Listen, localBase(cfg.Listen)
+	if cfg.Listen != ListenOff {
+		s.listen, s.local = cfg.Listen, localBase(cfg.Listen)
+	}
 	gate := cfg.Gate
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -291,8 +300,15 @@ func New(cfg Config, open Opener, log *slog.Logger) (*Server, error) {
 	return s, nil
 }
 
-// CheckListen refuses a --listen that is not host:port, and one off loopback without a local token (§9).
+// CheckListen refuses a --listen that is not host:port or off, one off loopback without a local token (§9), and a
+// local token with --listen off (D208).
 func CheckListen(listen, token string) error {
+	if listen == ListenOff {
+		if token != "" {
+			return fmt.Errorf("--local-token guards --listen, which is off (D208)")
+		}
+		return nil
+	}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return fmt.Errorf("--listen %q: want host:port", listen)

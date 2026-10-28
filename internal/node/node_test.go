@@ -28,6 +28,7 @@ import (
 
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/tunnel/tunneltest"
@@ -481,6 +482,26 @@ func TestRunServesAnAgent(t *testing.T) {
 			t.Errorf("a forwarding header reached the agent: %v", r.Header)
 		}
 	}
+}
+
+// --listen off (D208): a node that only hosts serves its services and binds no hiring endpoint, so that a second
+// node on the host needs no port of its own, and no local process hires as this node.
+func TestRunListenOff(t *testing.T) {
+	g := newTestGate(t, nil)
+	agent := startAgent(t, slowagent.Config{Chunks: 1, Interval: time.Millisecond})
+	cfg := testConfig(t, g.url, "", agentServe(t, "hello", agent))
+	cfg.Listen = hiring.ListenOff
+	tn := mustNode(t, g, cfg).run(t)
+	g.session(t)
+	eventually(t, 5*time.Second, "hiring is off", func() bool {
+		return strings.Contains(tn.out.String(), "hiring is off (--listen off)")
+	})
+	if strings.Contains(tn.out.String(), "hiring at") || strings.Contains(tn.logs.String(), "serving local clients") {
+		t.Fatalf("a node with --listen off serves hiring: %s", tn.out.String())
+	}
+	eventually(t, 5*time.Second, "the welcome's service URLs printed", func() bool {
+		return strings.Contains(tn.out.String(), "a2a hello  https://gate.example/agents/hello")
+	})
 }
 
 // {"t": "drain"} makes the node dial a second session at once, while the first goes on serving its
@@ -1362,6 +1383,11 @@ func TestParseArgs(t *testing.T) {
 	if cfg, err := parseArgs(nil, defaultEnv, nil); err != nil || len(cfg.Serves) != 0 {
 		t.Fatalf("no flags at all (hire only): %v", err)
 	}
+	// --listen off: a node that only hosts binds no hiring endpoint (D208).
+	if cfg, err := parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--listen", "off"}, defaultEnv, nil); err != nil ||
+		cfg.Listen != hiring.ListenOff {
+		t.Fatalf("--listen off: %+v %v", cfg, err)
+	}
 
 	// KONTRA_KEY, then --key over it.
 	cfg, _ = parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999"}, env(map[string]string{"HOME": home, "KONTRA_KEY": "/run/secrets/key"}), nil)
@@ -1411,6 +1437,10 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"--listen", "0.0.0.0:7777"}, "", "--local-token"},
 		{[]string{"--listen", "10.1.2.3:7777"}, "", "--local-token"},
 		{[]string{"--listen", "7777"}, "", "host:port"},
+		{[]string{"--listen", "off"}, "", "neither host nor hire"},
+		{[]string{"--serve", serve, "--listen", "off", "--local-token", tokenFile}, "", "--local-token guards --listen"},
+		{[]string{"--serve", serve, "--listen", "off", "--allow-origin", "http://app.local:3000"}, "", "--allow-origin"},
+		{[]string{"--serve", serve, "--listen", "OFF"}, "", "host:port"},
 		{[]string{"--local-token", "/nonexistent/token"}, "", "--local-token"},
 		{[]string{"--allow-origin", "http://app.local/path"}, "", "--allow-origin"},
 		{[]string{"--serve", "mcp:fs=stdio:"}, "", "empty"},

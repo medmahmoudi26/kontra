@@ -34,7 +34,7 @@ const usage = `usage:
   kontra connect [--gate <url>] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
                  [--roots <name>=<dir> …] [--env <name> …] [--session-idle <duration>] [--max-sessions <n>]
                  [--key <path>] [--enroll <token>|@file|-] [--api-key <key>|@file|-] [--name <name>] [--rotate]
-                 [--require-channel-binding] [--max-inflight <n>] [--listen <addr>] [--local-token <file>]
+                 [--require-channel-binding] [--max-inflight <n>] [--listen <addr>|off] [--local-token <file>]
                  [--allow-origin <origin> …] [--sealed-max-age <duration>] [--sealed-required <name> …]
                  [--pin-recipients] [--accept-change <name> …] [--log json]
   kontra seal --service <service URL> [--api-key <key>|@<file>] [--context <id>] [--task <id>]
@@ -65,8 +65,9 @@ through one outbound connection (spec/tunnel.md):
   --rotate                   rotate the identity key (the old one stays decrypt-only for 24 h)
   --require-channel-binding  refuse a gate that offers no TLS channel binding
   --max-inflight N           requests in flight per session (default 64)
-  --listen ADDR              where local clients hire through the gate (default 127.0.0.1:7777): /agents/…, /mcp/…,
-                             /mcp and /.well-known/… are forwarded with this node's principal
+  --listen ADDR|off          where local clients hire through the gate (default 127.0.0.1:7777): /agents/…, /mcp/…,
+                             /mcp and /.well-known/… are forwarded with this node's principal; off: no hiring, for a
+                             node that only hosts
   --local-token FILE         a token every local request must carry (Authorization: Bearer); required off loopback
   --allow-origin ORIGIN      a browser Origin allowed to call --listen; repeatable (default none)
   --sealed-max-age DURATION  how old a sealed request may be when it reaches a hosted service (default 25h; at least

@@ -441,6 +441,16 @@ func TestNewChecksListen(t *testing.T) {
 	if _, err := New(Config{Gate: gate, AllowOrigins: []string{"http://x/path"}}, &fakeTunnel{}, nil); err == nil {
 		t.Error("an --allow-origin with a path accepted")
 	}
+	// --listen off (D208): accepted alone; a local token or an allowed Origin, which guard --listen, are refused.
+	if _, err := New(Config{Listen: ListenOff, Gate: gate}, &fakeTunnel{}, nil); err != nil {
+		t.Errorf("--listen off: %v", err)
+	}
+	if _, err := New(Config{Listen: ListenOff, Gate: gate, LocalToken: "0123456789abcdef"}, &fakeTunnel{}, nil); err == nil {
+		t.Error("--listen off with a local token accepted")
+	}
+	if _, err := New(Config{Listen: ListenOff, Gate: gate, AllowOrigins: []string{"http://app.local:3000"}}, &fakeTunnel{}, nil); err == nil {
+		t.Error("--listen off with an allowed Origin accepted")
+	}
 }
 
 // Forwarding: the path unchanged on a stream with preamble {"v":1,"op":"http"}; the local token, Authorization,

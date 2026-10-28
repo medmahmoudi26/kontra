@@ -390,10 +390,12 @@ and `503` with `Kontra-Node: full`, which the gate retries, when it may succeed 
 
 ## 9. Hiring: streams the node opens
 
-The node serves `127.0.0.1:7777` (`--listen`) to local clients, a node that only hosts too (D208), and forwards
-each request on a stream it opens (D34), with the preamble `{"v": 1, "op": "http"}`, followed by the request with
-its path unchanged: `/agents/…`, `/mcp/…`, `/mcp`, `/.well-known/…`. Anything else is refused by the node with
-`404`.
+The node serves `127.0.0.1:7777` (`--listen`) to local clients, a node that only hosts too, unless `--listen off`
+turns the hiring endpoint off: such a node binds no local port and hires for no one, and `--local-token` and
+`--allow-origin`, which guard `--listen`, are refused beside it, as is `--listen off` without a `--serve` (D208). It
+forwards each request on a stream it opens (D34), with the preamble `{"v": 1, "op": "http"}`, followed by the
+request with its path unchanged: `/agents/…`, `/mcp/…`, `/mcp`, `/.well-known/…`. Anything else is refused by the
+node with `404`.
 
 **Local requests are checked first** (DNS rebinding and other local users, MCP's Origin rule):
 
