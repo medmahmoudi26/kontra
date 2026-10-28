@@ -368,6 +368,14 @@ func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, b
 }
 
 // reserve counts a child about to be spawned against MaxSessions; false when the service is full or closed.
+//
+// SPEC-CONFLICT (spec/tunnel.md §10: "At most 8 children per service (--max-sessions); an initialize beyond that is
+// 503 with Kontra-Node: full"; relay.md §11.2 caps no principal): every principal admitted to the service, and every
+// durable task's own upstream session, shares these children, so one principal holding eight idle sessions has every
+// other initialize answered full until --session-idle (1 h) and the gate's session_idle_s pass (M3 review
+// security-10). The bridge sees tunnel sessions, never principals, and neither spec names a per-principal limit or an
+// eviction order. The closest faithful behaviour is §10's as written; a per-principal cap at the gate (§11.2), or an
+// eviction of the longest-idle child when full, needs the owner's decision.
 func (b *Bridge) reserve() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
