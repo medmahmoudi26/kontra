@@ -589,3 +589,77 @@ func TestHiringWriteDeadline(t *testing.T) {
 		t.Fatal("the handler is still writing to a node that does not read")
 	}
 }
+
+// stallStore is a blob.Store whose object brings its first bytes and then nothing, until its context ends or it is
+// closed.
+type stallStore struct {
+	fakeStore
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (s *stallStore) Open(ctx context.Context, _ blob.Key) (io.ReadCloser, int64, error) {
+	return &stallObject{s: s, ctx: ctx, first: []byte("age-encryption.org/v1\n")}, 1 << 20, nil
+}
+
+type stallObject struct {
+	s     *stallStore
+	ctx   context.Context
+	first []byte
+}
+
+func (o *stallObject) Read(p []byte) (int, error) {
+	if len(o.first) > 0 {
+		n := copy(p, o.first)
+		o.first = o.first[n:]
+		return n, nil
+	}
+	select {
+	case <-o.ctx.Done():
+		return 0, o.ctx.Err()
+	case <-o.s.closed:
+		return 0, errors.New("closed")
+	}
+}
+
+func (o *stallObject) Close() error {
+	o.s.once.Do(func() { close(o.s.closed) })
+	return nil
+}
+
+// Finding robustness-10: a blob stream copied the object from the bucket with nothing bounding the read, on the tunnel
+// session's context: a bucket that stalled mid-object held the stream, and its slot of the session's cap, until the
+// session ended. A stream whose bucket brings no bytes for blobIdle ends now, the object closed.
+func TestReviewBlobStreamStallEnds(t *testing.T) {
+	old := blobIdle
+	blobIdle = 200 * time.Millisecond
+	t.Cleanup(func() { blobIdle = old })
+	ref, err := blob.NewRef()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &stallStore{closed: make(chan struct{})}
+	b := &Blobs{Store: store, Lookup: func(context.Context, blob.Ref, uuid.UUID) (BlobRow, bool, error) {
+		return BlobRow{Row: blob.Row{Ref: ref, Tenant: testTenantID, Task: uuid.Must(uuid.NewV7()), Size: 1 << 20}, Serves: true}, true, nil
+	}}
+	sess := &Session{ID: uuid.Must(uuid.NewV7()), KeyID: "k1_" + strings.Repeat("b", 26), TenantID: testTenantID}
+	done := make(chan error, 1)
+	var out bytes.Buffer
+	go func() { done <- b.ServeBlob(context.Background(), sess, string(ref), &out) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a stalled object was served")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a blob stream whose bucket stalled mid-object is still open")
+	}
+	select {
+	case <-store.closed:
+	default:
+		t.Fatal("the stalled object was not closed")
+	}
+	if !strings.Contains(out.String(), "age-encryption.org/v1") {
+		t.Fatalf("the bytes before the stall: %q", out.String())
+	}
+}
