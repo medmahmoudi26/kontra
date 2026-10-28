@@ -152,6 +152,21 @@ do $$ begin
     raise exception 'FAIL: two open virtual sessions of the gate''s own /mcp for one principal';
 exception when unique_violation then null; end $$;
 
+-- 0002 (D213): a service caps its principals' MCP sessions at 2 unless set, and at 1 to 10000.
+do $$ begin
+    if (select max_sessions_per_principal from services where name = 'hello') <> 2 then
+        raise exception 'FAIL: max_sessions_per_principal does not default to 2';
+    end if;
+end $$;
+do $$ begin
+    update services set max_sessions_per_principal = 0 where name = 'hello';
+    raise exception 'FAIL: a cap of 0 sessions per principal';
+exception when check_violation then null; end $$;
+do $$ begin
+    update services set max_sessions_per_principal = 10001 where name = 'hello';
+    raise exception 'FAIL: a cap over 10000 sessions per principal';
+exception when check_violation then null; end $$;
+
 -- 0002: a task's blobs go with it.
 delete from tasks where id = '01900000-0000-7000-8000-0000000000aa';
 do $$ begin
