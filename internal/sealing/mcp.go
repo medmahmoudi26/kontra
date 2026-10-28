@@ -101,6 +101,23 @@ func (x *MCPExchange) FromClient(body []byte, m *mcpwire.Message) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
+	if m.Method != "" && len(m.ID) > 0 && job != nil {
+		// A request that reuses the id of a sealed request the job answered: that request's record goes, so that this
+		// one's answer is not taken for it (a sealed call's record is made again below when this is one).
+		key := respKey(x.upstreamSID, m.ID)
+		if job.Calls[key] != nil {
+			delete(job.Calls, key)
+			if e, ok := svc.Responses[key]; ok && e.Job == job.ID {
+				svc.del(setResponses, key)
+				if err := h.st.saveService(x.service, svc); err != nil {
+					return nil, err
+				}
+			}
+			if err := h.saveJob(x.service, job); err != nil {
+				return nil, err
+			}
+		}
+	}
 	switch {
 	case m.Method == mcpwire.MethodToolsCall:
 		return x.toolsCall(svc, job, body, m)

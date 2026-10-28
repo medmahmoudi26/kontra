@@ -898,3 +898,32 @@ func TestReviewSessionKeyReleased(t *testing.T) {
 		t.Fatal("an idle session stays known")
 	}
 }
+
+// A client that reuses a sealed call's id for a later request (JSON-RPC allows it once the call was answered): that
+// request's answer is its own on both nodes, not taken for the sealed call's.
+func TestReviewReusedIDAfterSealedCall(t *testing.T) {
+	f := newFixture(t)
+	b := newBuyer(t)
+	s1 := sessionHash("gate-session-reuse")
+	x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
+	if _, r := fromClient(t, x, f.sealedCallBody(b, s1, "echo", "1", `{"message":"in"}`, false)); r != "" {
+		t.Fatal(r)
+	}
+	x.Accepted()
+	fromServer(t, x, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"sealed"}],"isError":false}}`)
+	y := f.h.MCPOn(mcpPre(s1, "", ""), "up-1")
+	if _, r := fromClient(t, y, []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)); r != "" {
+		t.Fatal(r)
+	}
+	y.Accepted()
+	if out := fromServer(t, y, `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}`); !strings.Contains(out, `"tools"`) {
+		t.Fatalf("the reused id's answer: %s", out)
+	}
+
+	_, hr, sid := sealedMCPSession(t)
+	mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"m":"x"}}}`)
+	_, job := mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":4,"method":"tools/list"}`)
+	if got := mcpAnswer(t, hr, job, `{"jsonrpc":"2.0","id":4,"result":{"tools":[]}}`, false, nil); !strings.Contains(got, `"tools"`) {
+		t.Fatalf("the hiring node's answer to a reused id: %s", got)
+	}
+}

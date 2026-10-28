@@ -1677,6 +1677,15 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 			req.Header.Del(k) // §2: never for a sealed call
 		}
 	}
+	if m.Method != "" && len(m.ID) > 0 && j.session != "" {
+		// A request that reuses the id of one whose answer was sealed: that one's record goes, so that this one's
+		// answer is not taken for it (a sealed call or task result is tracked again below).
+		if hj, err := h.loadJob("mcp-" + j.session); err == nil && hj != nil {
+			if k, ok := mcpwire.IDKey(m.ID); ok {
+				delete(hj.calls, k)
+			}
+		}
+	}
 	switch {
 	case m.Method == mcpwire.MethodToolsCall:
 		out, err := h.sealCall(j, b, m)
