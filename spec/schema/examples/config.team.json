@@ -33,7 +33,8 @@
       "tools": { "allow": ["read_*", "list_*"], "deny": ["delete_*"] },
       "tasks": "passthrough",
       "sealed": { "required": false },
-      "session_idle_s": 1800
+      "session_idle_s": 1800,
+      "max_sessions_per_principal": 4
     }
   }
 }

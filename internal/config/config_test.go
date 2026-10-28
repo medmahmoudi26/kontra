@@ -916,6 +916,9 @@ func TestTeamFixtureLoads(t *testing.T) {
 	if team.Services["recon"].Sealed.Mode != SealedRequired || team.Services["fs"].Sealed.Mode != SealedOptional {
 		t.Errorf("the fixture's sealed services load as %q and %q", team.Services["recon"].Sealed.Mode, team.Services["fs"].Sealed.Mode)
 	}
+	if n := team.Services["fs"].SessionsPerPrincipal(); n != 4 {
+		t.Errorf("the fixture's fs service caps a principal's sessions at %d, want 4 (D213)", n)
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
