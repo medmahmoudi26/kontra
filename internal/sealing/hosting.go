@@ -129,6 +129,9 @@ type Hosting struct {
 	nflight  map[string]flightRef
 	nReplyTo map[string]string // replyTo -> the service that recorded it
 	nCalls   map[string]string // "<session>/<messageId>" -> the service that forwarded it
+	// beforeClaim, when a test sets it, runs as an exchange is about to make a node-wide claim (claimNode), after its
+	// own checks: a test holds two services' exchanges there to race their claims.
+	beforeClaim func(kind string)
 
 	// paths are the hosted services as the gate's URL path names them (SetServicePaths): what a sealed header's
 	// service must be (D221).
@@ -347,6 +350,10 @@ func (h *Hosting) inFlight(key string) (string, bool) {
 // in flight; otherwise owner holds key. Checked and reserved at once, so that two services' exchanges of one request
 // cannot both pass.
 func (h *Hosting) claimNode(key, owner string, index map[string]string, id, service string) bool {
+	if h.beforeClaim != nil {
+		kind, _, _ := strings.Cut(key, "\x00")
+		h.beforeClaim(kind)
+	}
 	h.nmu.Lock()
 	defer h.nmu.Unlock()
 	if s, ok := index[id]; ok && s != service {

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,6 +231,78 @@ func TestHostingServicesLockedApart(t *testing.T) {
 		t.Fatal("the node-wide replay check waits for echo's lock")
 	}
 	hs.mu.Unlock()
+}
+
+// The MCP half of the node-wide claim (D221, rule 5): of two plain sealed tools/calls with one (session, messageId),
+// sealed for two services of the node, whose exchanges both passed their own checks before either claimed the pair,
+// one is forwarded and the other replayed, never both. A plain call carries no gate task, so the claim's owner names
+// the service (M3 review D225-5: an owner of the task alone was "" for both, and both claims passed). The test holds
+// both exchanges just before their claims, so the race is run every round.
+func TestHostingNodeWideMCPCallIsClaimedOnce(t *testing.T) {
+	f := newFixture(t)
+	for i := 0; i < 5; i++ {
+		b := newBuyer(t)
+		s := sessionHash(fmt.Sprintf("gate-session-race-%d", i))
+		var arrived atomic.Int32
+		both := make(chan struct{})
+		f.h.beforeClaim = func(kind string) {
+			if kind != "m" {
+				return
+			}
+			if arrived.Add(1) == 2 {
+				close(both)
+			}
+			select {
+			case <-both:
+			case <-time.After(5 * time.Second):
+			}
+		}
+		results := make(chan sealed.Reject, 2)
+		var xs [2]*MCPExchange
+		var wg sync.WaitGroup
+		for k, service := range []string{"fs", "other"} {
+			hd := f.mcpHeader(b, s, "echo", "7")
+			hd.Service = service
+			call := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"echo","arguments":{},"_meta":{"sh.kontra/sealed":` +
+				envelope(f.seal(hd, `{"text":"x"}`)) + `}}}`)
+			m := parse(t, call)
+			p := mcpPre(s, "7", "")
+			p.Service = service
+			x := f.h.MCP(p)
+			xs[k] = x
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, err := x.FromClient(call, m)
+				reason, _ := sealed.ReasonOf(err)
+				if err != nil && reason == "" {
+					t.Errorf("FromClient: %v", err)
+				}
+				results <- reason
+			}()
+		}
+		wg.Wait()
+		close(results)
+		if arrived.Load() != 2 {
+			t.Fatalf("round %d: %d exchanges reached the claim, want both", i, arrived.Load())
+		}
+		var ok, replayed int
+		for r := range results {
+			switch r {
+			case "":
+				ok++
+			case sealed.RejectReplayed:
+				replayed++
+			}
+		}
+		if ok != 1 || replayed != 1 {
+			t.Fatalf("round %d: %d forwarded, %d replayed; want one of each", i, ok, replayed)
+		}
+		for _, x := range xs {
+			x.Release()
+		}
+	}
+	f.h.beforeClaim = nil
 }
 
 // The node-wide replay check and its reservation are one step (D221): of two first messages with one replyTo, sealed

@@ -291,8 +291,10 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 		return nil, reject(sealed.RejectBadHeader, err.Error())
 	}
 	x.call = &sealedCall{tool: name, messageID: hd.MessageID, replyTo: hd.ReplyTo, rk: hd.RK}
-	// Rule 5's node-wide check, checked again and reserved in one step under the node-wide lock (D221).
-	if !x.h.claimNode(flight, x.pre.Task, x.h.nCalls, callKey, x.service) {
+	// Rule 5's node-wide check, checked again and reserved in one step under the node-wide lock (D221). The owner
+	// names the service, as the A2A replyTo's does: a plain call carries no gate task, and two services' exchanges of
+	// one (session, messageId) must not hold it as one owner.
+	if !x.h.claimNode(flight, x.service+"\x00"+x.pre.Task, x.h.nCalls, callKey, x.service) {
 		x.call = nil
 		return nil, reject(sealed.RejectReplayed, "a (session, messageId) another service of this node forwarded, or is forwarding")
 	}

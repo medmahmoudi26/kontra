@@ -2891,7 +2891,8 @@ the named seller key set (`card` `SellerJWKSHandler`, `sealing` `SellerKeySet`; 
 proposal for robustness-4: each hosted service's state has a lock of its own, and the node-wide replay checks of
 D221 a lock of their own over an index of what each service recorded, filled at start, checked and reserved in one
 step (`sealing` hosting.go `hostedService`, `claimNode`; `TestHostingServicesLockedApart`,
-`TestHostingNodeWideReplyToIsClaimedOnce`). The specs no longer state those residuals. What remains for M4 of this
+`TestHostingNodeWideReplyToIsClaimedOnce`, `TestHostingNodeWideMCPCallIsClaimedOnce`; an MCP call's claim names its
+service as the A2A `replyTo`'s does, since a plain call has no gate task, M3 review D225-5). The specs no longer state those residuals. What remains for M4 of this
 list is mcp-spec-5's gate-level two-replica test of D199's notice; D170's list is otherwise unchanged.
 
 ### D226. A sealed MCP job holds its upstream session, and its requests' ids — **decided under the owner's standing instruction, 28 Oct** (amends D217)
