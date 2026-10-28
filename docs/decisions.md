@@ -2348,16 +2348,16 @@ origin: both connected, the modern one in the modern era.
 
 ## From M3's spec conflicts and its review (28 Oct)
 
-Building M3 met the spec conflicts D189 lists, and the review after its pentest (the eleven `M3 review:` commits of
-28 Oct) met more; each is marked `SPEC-CONFLICT` where the code departs from the text, with the closest faithful
+Building M3 met the spec conflicts D189 lists, and the review after its pentest (the eleven `M3 review:` commits of 28
+Oct) met more; each is marked `SPEC-CONFLICT` where the code departs from the text, with the closest faithful
 behaviour built. The owner's standing instruction ("Don't ask me anything", 26 Oct) covers them: each is **decided
-under the owner's standing instruction, 28 Oct** below, with the option its builder or reviewer recommended, and
-each code marker names its entry. Where that option is what the code does, the specs now say it and cite the entry
+under the owner's standing instruction, 28 Oct** below, with the option its builder or reviewer recommended, and each
+code marker names its entry. Where that option is what the code does, the specs now say it and cite the entry
 ([`relay.md`](../spec/relay.md) revision 7, [`tunnel.md`](../spec/tunnel.md) revision 5,
-[`ext-sealed.md`](../spec/ext-sealed.md) revision 3); where it was not built yet, the specs stated the built
-behaviour and its residual, and D225 listed what was left to build, since built in M3 too. As in M2, a proposal that would only add a value to what
-both binaries already speak (a blob refusal, a `Kontra-Node` reason) is not taken where the built behaviour holds;
-the envelope's `service` member (D221) is taken, because it closes a residual nothing else closes.
+[`ext-sealed.md`](../spec/ext-sealed.md) revision 3); where it was not built yet, the specs stated the built behaviour
+and its residual, and D225 listed what was left to build, since built in M3 too. As in M2, a proposal that would only
+add a value to what both binaries already speak (a blob refusal, a `Kontra-Node` reason) is not taken where the built
+behaviour holds; the envelope's `service` member (D221) is taken, because it closes a residual nothing else closes.
 
 ### D191. A lone case variant of a member the gate reads is refused like a pair — **decided under the owner's standing instruction, 28 Oct** (amends D172)
 
