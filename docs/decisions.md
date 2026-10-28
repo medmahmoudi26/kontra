@@ -2791,12 +2791,19 @@ replay sets per service, so a gate could deliver a buyer's sealed request to ano
 the one hired, which opens it and answers with a valid `auth`; the hiring node checks no service either (M3 review
 security-5). Decision: the reviewer's proposal. Built: rule 2's `replyTo` set and rule 5's `(session, messageId)`
 set are checked across every service of the node, so a request one service accepted is refused by every other
-(`replayed`). To build: a `service` member in request and reply headers, the hired service as the gate's URL path
-names it (`<tenant>/<name>`), checked by the hosting node against the preamble's `service` and by the hiring node
-against the service it hired. Envelope v1 is not released, so the member joins v1 and both nodes change together
-(D225). Until then §7 states the residual: a first delivery to the wrong service of the same node is not detected,
-and its reply still goes to the buyer's key ([`ext-sealed.md`](../spec/ext-sealed.md) §3, §5, §7; `sealing`
-hosting.go `replyToElsewhere`).
+(`replayed`). And built since (D225): a `service` member in every request and reply header, the hired service as
+the gate's URL path names it (`<name>`, or `<tenant>/<name>` on a multi-tenant gate), checked by the hosting node
+against the preamble's `service` and by the hiring node against the service it hired. Envelope v1 is not released, so
+the member joins v1 and both nodes, and `kontra seal`, change together; the recorded age CLI vector is made again
+with it. The hosting node reads its services' paths from its `welcome` (each service's `url` and the `tenant`: only
+the tenant is the gate's to say, the name being the node's own service), and a header naming another service, or
+none, is `wrong_job`, the reason for a request that is another job's, in rule 1 so that it holds for a message, a
+`tools/call` and an answer alike; no new §6 reason is added, which would change what both binaries speak. The hiring
+node and `kontra seal --open` refuse a reply naming another service as they refuse any reply that fails rule 4. The
+node-wide replay sets stay, so §7's row holds both ways ([`ext-sealed.md`](../spec/ext-sealed.md) §3, §5, §6, §7;
+`sealed` envelope.go `Header.Service`; `sealing` hosting.go `checkService`, hiring.go `openContainer`, seal.go
+`openParts`; `node` run.go `servicePaths`; `TestHostingChecksTheService`, `TestHiringChecksTheService`,
+`TestReviewCrossServiceSplice`, `TestServicePaths`, `TestAgeInterop`, `TestSealedThroughTheGate`).
 
 ### D222. `kontra seal` takes `--api-key`, and `--open` binds a job for `--task` — **decided under the owner's standing instruction, 28 Oct**
 

@@ -28,8 +28,9 @@ func mcpPre(session, reqID, task string) tunnel.Preamble {
 
 // mcpHeader is an MCP request header of b (a tools/call, or an answer to an input request).
 func (f *fixture) mcpHeader(b buyer, session, tool, msgID string) sealed.Header {
-	return sealed.Header{V: 1, Dir: sealed.DirRequest, IAT: f.now.Unix(), Session: session, Tool: tool, MessageID: msgID,
-		Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{f.kid()}, ReplyTo: b.replyTo(), RK: sealed.EncodeRK(b.rk)}
+	return sealed.Header{V: 1, Dir: sealed.DirRequest, Service: "fs", IAT: f.now.Unix(), Session: session, Tool: tool,
+		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{f.kid()}, ReplyTo: b.replyTo(),
+		RK: sealed.EncodeRK(b.rk)}
 }
 
 func envelope(ct []byte) string {

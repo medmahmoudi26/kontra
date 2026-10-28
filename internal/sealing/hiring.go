@@ -924,8 +924,9 @@ func (h *Hiring) sealSend(j *Job, body []byte) ([]byte, error) {
 		}
 		j.job = job
 		rk, _ := sealed.DecodeRK(job.RK)
-		base := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: h.cfg.Now().Unix(), TaskID: taskID,
-			ContextID: ctxID, MessageID: msgID, Kids: j.info.kids, ReplyTo: job.key.Recipient().String(), RK: sealed.EncodeRK(rk)}
+		base := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: pinName(j.service), IAT: h.cfg.Now().Unix(),
+			TaskID: taskID, ContextID: ctxID, MessageID: msgID, Kids: j.info.kids, ReplyTo: job.key.Recipient().String(),
+			RK: sealed.EncodeRK(rk)}
 		out := make([]a2awire.Part, len(c.Parts))
 		for i, p := range c.Parts {
 			if _, claims, _ := sealed.ParseDeliveredPart(a2awire.Encode(p)); claims {
@@ -1326,6 +1327,11 @@ func (h *Hiring) openContainer(j *hireJob, task string, c *a2awire.Container) ([
 			switch {
 			case hd.Dir != sealed.DirReply:
 				fail(sealed.RejectBadHeader)
+				ok = false
+			case hd.Service != pinName(j.Service):
+				// D221: a reply names the service the job hired; one sealed by another service of the hosting node (the
+				// gate delivered the request there) is that service's, not the hired one's answer.
+				fail(sealed.RejectWrongJob)
 				ok = false
 			case !slices.Contains(hd.Kids, own):
 				fail(sealed.RejectNotRecipient)
@@ -1825,8 +1831,8 @@ func (h *Hiring) sealCall(j *Job, b []byte, m *mcpwire.Message) ([]byte, error) 
 		return nil, local(http.StatusInternalServerError, "kontra connect: a per-job key could not be minted: %v", err)
 	}
 	msgID := mcpID(m.ID)
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: h.cfg.Now().Unix(), Session: j.session, Tool: name,
-		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: j.info.kids,
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: pinName(j.service), IAT: h.cfg.Now().Unix(),
+		Session: j.session, Tool: name, MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: j.info.kids,
 		ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
 	ct, err := sealed.Seal(j.info.recipients, hd, body)
 	if err != nil {
@@ -1899,9 +1905,9 @@ func (h *Hiring) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, error
 	}
 	// The answer names the input request's gate task as its header did (sealing's mcpRule1 SPEC-CONFLICT), so that
 	// it cannot be delivered as another task's answer.
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: h.cfg.Now().Unix(), Session: j.session,
-		Tool: in.Tool, MessageID: in.MessageID, TaskID: in.TaskID, Part: 0, Parts: 1, Kind: sealed.KindData,
-		Kids: j.info.kids, ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: pinName(j.service), IAT: h.cfg.Now().Unix(),
+		Session: j.session, Tool: in.Tool, MessageID: in.MessageID, TaskID: in.TaskID, Part: 0, Parts: 1,
+		Kind: sealed.KindData, Kids: j.info.kids, ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
 	ct, err := sealed.Seal(j.info.recipients, hd, body)
 	if err != nil {
 		return nil, local(http.StatusInternalServerError, "kontra connect: sealing failed: %v", err)
@@ -2160,6 +2166,7 @@ func (h *Hiring) openResult(j *Job, hj *hireJob, data []byte, m *mcpwire.Message
 	own := tunnel.KeyID(hj.key.Recipient().String())
 	switch {
 	case hd.Dir != sealed.DirReply, !slices.Contains(hd.Kids, own), sealed.VerifyAuth(rk, hd, plain) != nil,
+		hd.Service != pinName(hj.Service), // D221: the service the session hired
 		hd.Session != j.session, hd.Tool != tool, hd.MessageID != msgID, hd.TaskID != task, hd.Kind != sealed.KindData:
 		return h.mcpFail(m)
 	}
@@ -2223,6 +2230,7 @@ func (h *Hiring) openInput(j *Job, hj *hireJob, data []byte, m *mcpwire.Message)
 	own := tunnel.KeyID(hj.key.Recipient().String())
 	switch {
 	case hd.Dir != sealed.DirReply, !slices.Contains(hd.Kids, own), sealed.VerifyAuth(rk, hd, plain) != nil,
+		hd.Service != pinName(hj.Service), // D221: the service the session hired
 		hd.Session != j.session, hd.Tool != tool, hd.Kind != sealed.KindData,
 		related && hd.TaskID != "" && hd.TaskID != task, !related && hd.TaskID != "":
 		h.log.Warn("sealing: an input request whose header does not match its task or call: dropped", "task", task)

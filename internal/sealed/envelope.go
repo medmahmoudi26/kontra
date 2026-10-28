@@ -82,15 +82,17 @@ const (
 )
 
 // Header is the envelope header (spec/ext-sealed.md §3's table). Its JCS form is what is sealed and compared:
-// optional members are absent, not empty, and part and parts are always present. A2A requests carry iat,
-// contextId, messageId, replyTo and rk (and taskId on a follow-up); replies carry taskId, auth and the reply's
-// ids; MCP carries session (the hex SHA-256 of the gate Mcp-Session-Id), tool and messageId: the client's
-// JSON-RPC id as a string for a tools/call and its result, and for an input request (an upstream
+// optional members are absent, not empty, and part and parts are always present. Every header names the hired
+// service as the gate's URL path names it (service: "<name>", or "<tenant>/<name>" on a multi-tenant gate, D221).
+// A2A requests carry iat, contextId, messageId, replyTo and rk (and taskId on a follow-up); replies carry taskId,
+// auth and the reply's ids; MCP carries session (the hex SHA-256 of the gate Mcp-Session-Id), tool and messageId:
+// the client's JSON-RPC id as a string for a tools/call and its result, and for an input request (an upstream
 // elicitation/create or sampling/createMessage, sealed like a reply) and the hiring node's answer to it (sealed
 // like a request), the upstream server's JSON-RPC id of that request as a string (D175).
 type Header struct {
 	V          int    `json:"v"`
 	Dir        Dir    `json:"dir"`
+	Service    string `json:"service,omitempty"`
 	IAT        int64  `json:"iat,omitempty"`
 	TaskID     string `json:"taskId,omitempty"`
 	ContextID  string `json:"contextId,omitempty"`
@@ -113,7 +115,7 @@ type Header struct {
 
 // headerMembers are the members Header knows, by their exact names.
 var headerMembers = map[string]bool{
-	"v": true, "dir": true, "iat": true, "taskId": true, "contextId": true, "session": true, "tool": true,
+	"v": true, "dir": true, "service": true, "iat": true, "taskId": true, "contextId": true, "session": true, "tool": true,
 	"messageId": true, "artifactId": true, "chunk": true, "part": true, "parts": true, "kind": true,
 	"mediaType": true, "kids": true, "replyTo": true, "rk": true, "auth": true,
 }
@@ -189,7 +191,7 @@ func (h Header) validate() error {
 			return bad("%v", err)
 		}
 	}
-	for _, s := range append([]string{string(h.Dir), h.TaskID, h.ContextID, h.Session, h.Tool, h.MessageID,
+	for _, s := range append([]string{string(h.Dir), h.Service, h.TaskID, h.ContextID, h.Session, h.Tool, h.MessageID,
 		h.ArtifactID, string(h.Kind), h.MediaType, h.ReplyTo, h.RK, h.Auth}, h.Kids...) {
 		for i := 0; i < len(s); i++ {
 			if s[i] >= 0x80 {

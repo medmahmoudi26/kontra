@@ -125,6 +125,46 @@ type Hosting struct {
 	// openingDone is closed, and replaced, whenever one ends.
 	opening     map[string]int
 	openingDone chan struct{}
+
+	// paths are the hosted services as the gate's URL path names them (SetServicePaths): what a sealed header's
+	// service must be (D221).
+	paths atomic.Pointer[map[string]string]
+}
+
+// SetServicePaths records how the gate's URL paths name the hosted services (spec/relay.md §1: "<name>" on a
+// single-tenant gate, "<tenant>/<name>" on a multi-tenant one), read by the node from its welcome: a sealed header's
+// service must be the path of the service the preamble names (D221). A service it does not name is "<name>".
+func (h *Hosting) SetServicePaths(paths map[string]string) {
+	m := make(map[string]string, len(paths))
+	if cur := h.paths.Load(); cur != nil {
+		for k, v := range *cur {
+			m[k] = v
+		}
+	}
+	for k, v := range paths {
+		m[k] = v
+	}
+	h.paths.Store(&m)
+}
+
+// servicePath is the hosted service name as the gate's URL path names it (D221).
+func (h *Hosting) servicePath(name string) string {
+	if m := h.paths.Load(); m != nil {
+		if p, ok := (*m)[name]; ok {
+			return p
+		}
+	}
+	return name
+}
+
+// checkService is D221's check of a request header: its service is the one the preamble names, as the gate's URL
+// path names it. A sealed request the buyer sealed for another service of this node is that service's job's, never
+// this one's (wrong_job).
+func (h *Hosting) checkService(hd sealed.Header, service string) error {
+	if hd.Service == "" || hd.Service != h.servicePath(service) {
+		return reject(sealed.RejectWrongJob, "the header names another service than the preamble's")
+	}
+	return nil
 }
 
 // flightRef is one in-flight key: who holds it (for "r" the service and gate task, for "j" the replyTo and rk the
@@ -696,6 +736,9 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+	if err := x.h.checkService(h, x.service); err != nil {
+		return nil, err
+	}
 	if rt, ok := replyToMeta(msg); !ok || rt != h.ReplyTo {
 		return nil, reject(sealed.RejectBadHeader, "metadata[\"kontra.sealed.replyTo\"] is not the header's replyTo")
 	}
@@ -823,18 +866,10 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 	return out, nil
 }
 
-// replyToElsewhere reports a replyTo that opened a job of another service this node hosts: the envelope names no
-// service, and one identity key opens every service's requests, so a gate could otherwise send a buyer's first
-// message to every service of the node in turn (security review). h.mu is held.
-//
-// SPEC-CONFLICT (D221; ext-sealed.md §3, §5 rule 2, §7): the header binds the gate's task, context, session, tool
-// and messageId, never the service, and §5 keeps the replay sets per service. A gate can therefore deliver a buyer's
-// sealed request to another service of the same node instead of the one hired, which opens it and answers with valid
-// auth (the hiring node checks no service either). The closest faithful behaviour: rule 2's replyTo set and rule 5's
-// (session, messageId) set are checked node-wide, so a request a service of the node accepted is refused by every
-// other; a first delivery to the wrong service is not detected, and stays a residual until the header names the
-// service (a `service` member in request and reply headers, checked by both nodes, decided in D221 and not built
-// yet).
+// replyToElsewhere reports a replyTo that opened a job of another service this node hosts: one identity key opens
+// every service's requests, so rule 2's replyTo set and rule 5's (session, messageId) set are checked across every
+// service of the node (D221, ext-sealed.md §5), beside the header's service member, which binds a sealed request to
+// the service the buyer hired (checkService). h.mu is held.
 func (h *Hosting) replyToElsewhere(service, replyTo string) bool {
 	for _, name := range h.knownServices() {
 		if name == service {
@@ -925,7 +960,8 @@ func (h *Hosting) rule1(ps []opened) (sealed.Header, error) {
 		case hd.ReplyTo == "" || hd.RK == "":
 			return sealed.Header{}, reject(sealed.RejectBadHeader, "a request header without replyTo or rk")
 		case hd.ReplyTo != first.ReplyTo || hd.RK != first.RK || hd.IAT != first.IAT || hd.TaskID != first.TaskID ||
-			hd.ContextID != first.ContextID || hd.MessageID != first.MessageID || !slices.Equal(hd.Kids, first.Kids):
+			hd.ContextID != first.ContextID || hd.MessageID != first.MessageID || hd.Service != first.Service ||
+			!slices.Equal(hd.Kids, first.Kids):
 			return sealed.Header{}, reject(sealed.RejectBadHeader, "the sealed parts of one message disagree")
 		case hd.Session != "" || hd.Tool != "" || hd.ArtifactID != "" || hd.Chunk != nil:
 			return sealed.Header{}, reject(sealed.RejectBadHeader, "an A2A request header with members of another kind")
@@ -1366,7 +1402,8 @@ func (x *Exchange) sealContainer(j *jobState, c *a2awire.Container) error {
 	if len(c.Parts) == 0 {
 		return nil
 	}
-	base := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, TaskID: x.pre.Task, ContextID: j.GateContext}
+	base := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.service), TaskID: x.pre.Task,
+		ContextID: j.GateContext}
 	if base.TaskID == "" {
 		base.TaskID = j.ID
 	}

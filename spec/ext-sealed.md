@@ -2,7 +2,7 @@
 
 Status: **draft** (M0, revision 2 after the adversarial review). Revision 3 (26–28 Oct) includes the M3 decisions:
 those of the M3 planning and its audit (D162, D164, D165, D172, D174, D175, D187), and those that bring the text in
-line with the M3 code and its review (D195, D202, D214–D223, D226–D228), decided under the owner's standing
+line with the M3 code and its review (D195, D202, D214–D224, D226–D228), decided under the owner's standing
 instruction. Open source. Normative. RFC 2119 key words.
 
 Sealing is end to end between two nodes. The hiring node seals what it sends to the hosting node's identity
@@ -84,6 +84,7 @@ it parsed and compares bytes: a header that is not canonical, has a duplicate ke
 |---|---|---|---|---|
 | `v` | `1` | `1` | `1` | `1` |
 | `dir` | `"req"` | `"res"` | `"req"` | `"res"` |
+| `service` | the hired service as the gate's URL path names it ([`relay.md`](relay.md) §1's `{svc}` without `/agents/` or `/mcp/`): `"<name>"`, or `"<tenant>/<name>"` on a multi-tenant gate (D221) | same | same | same |
 | `iat` | Unix seconds when sealed | — | Unix seconds when sealed | — |
 | `taskId` | the gate task id when known (a follow-up turn); absent on a new task's first message | the gate task id | for an answer to an input request, that request's `taskId` (absent when it had none); absent on a `tools/call` (D218) | the gate task id, for a durable task's result and its input requests; absent for a plain call's input requests (D218, D219) |
 | `contextId` | the message's `contextId` (always set: the hiring node mints one for a new sealed task) | the task's context id | — | — |
@@ -161,21 +162,22 @@ carries the extension):
    nothing: the request is refused `502`; with no pin, or an unsealed one, the request goes as it came (trust on
    first use, §7), and that unknown is kept 5 s only (D214).
 2. Mints a per-job key and `rk`, and a `contextId` when the client gave none.
-3. Seals every part of the outgoing message (MCP: `arguments`) to all `recipients`, with the request header of §3.
-4. Opens every sealed part it receives for the job: checks `dir: "res"`, the ids (`taskId`/`contextId`, or MCP
-   `session`/`tool`/`messageId`), its own key id in `kids`, `auth`, that each message's parts are exactly
-   `0..parts-1` once, and, per `artifactId`, that each `(chunk, part)` arrives at most once except as a
-   byte-identical repeat (the hosting node reuses ciphertext), that each chunk's parts are exactly `0..parts-1`,
+3. Seals every part of the outgoing message (MCP: `arguments`) to all `recipients`, with the request header of §3,
+   whose `service` is the service it hires, as the request's path names it (D221).
+4. Opens every sealed part it receives for the job: checks `dir: "res"`, the `service` it hired (D221), the ids
+   (`taskId`/`contextId`, or MCP `session`/`tool`/`messageId`), its own key id in `kids`, `auth`, that each message's
+   parts are exactly `0..parts-1` once, and, per `artifactId`, that each `(chunk, part)` arrives at most once except
+   as a byte-identical repeat (the hosting node reuses ciphertext), that each chunk's parts are exactly `0..parts-1`,
    and that chunks arrive in order; an `append: false` artifact replaces everything the node held for that
    `artifactId`. A part that fails is dropped and the local client receives a failed status (`kontra.failure:
    sealed_rejected`). The first sight of an artifact in a Task (a client that polls) may start at any chunk, its
-   chunks consecutive, and every later chunk is next in order or a byte-identical repeat; the client's own message
-   in a Task's history, sealed `dir: "req"` to the recipients, is restored from what the node sealed for the job,
-   or else left out, never refused (D215). An MCP input request must carry the job's `session`, the call's `tool`
-   and, for a durable task, the task's gate `taskId` (D218), and a `messageId` it has not opened before in that
-   task (`replayed` otherwise, and dropped); the node keeps which gate request id carried it, so that it seals the
-   local client's answer to that id with that `messageId` (§3). It opens the input requests of a sealed plain call
-   as well, and drops any other input request on a sealed session (D219).
+   chunks consecutive, and every later chunk is next in order or a byte-identical repeat; the client's own message in
+   a Task's history, sealed `dir: "req"` to the recipients, is restored from what the node sealed for the job, or else
+   left out, never refused (D215). An MCP input request must carry the job's `session`, the call's `tool` and, for a
+   durable task, the task's gate `taskId` (D218), and a `messageId` it has not opened before in that task (`replayed`
+   otherwise, and dropped); the node keeps which gate request id carried it, so that it seals the local client's
+   answer to that id with that `messageId` (§3). It opens the input requests of a sealed plain call as well, and drops
+   any other input request on a sealed session (D219).
 4a. In a job whose request was sealed, it refuses every unsealed part of a message, artifact or result, except the
    single text part of a terminal status message the gate wrote (it carries `metadata["kontra.failure"]`, or names
    an upstream terminal state that came without a message, [`relay.md`](relay.md) §6.3–§6.4), which it hands to
@@ -214,13 +216,17 @@ For each sealed part of an inbound message it decrypts with its identity keys, t
 1. `dir: "req"` and the message's parts exactly `0..parts-1`, each once (`bad_header`); its own key id in `kids`
    (`not_a_recipient`); `iat ≤ now + 300 s` and `now − iat ≤ max_age` (`replayed`), where `max_age` is
    `--sealed-max-age`, default 25 h, which must cover the operator's longest quote expiry plus `task.timeout` (a
-   paid task waits for a person before it is dispatched).
+   paid task waits for a person before it is dispatched); and `service` is the hosted service the preamble names,
+   as the gate's URL path names it, which the node reads from its `welcome` (the service's `url`, and `tenant`,
+   [`tunnel.md`](tunnel.md) §4): a header that names another service, or none, was sealed for another service's
+   job (`wrong_job`, D221). This holds for every sealed request: a message's parts, a `tools/call`, an answer.
 2. **A2A, no `taskId` in the header** (a new task's first message): the forwarded message carries no `taskId`, and
    either no `contextId` or the upstream context id this node recorded for the preamble's gate context
    (`wrong_context`); the header's `contextId` equals the preamble's `context`; `messageId` equals the message's;
    and the header's `replyTo` has not opened a job for a **different** gate task on this node, for any of its
-   services (`replayed`, D221; a first message whose preamble task equals the job it opened is the gate's own
-   retry, and is accepted again subject to rule 5).
+   services (`replayed`; the `service` member of rule 1 binds a request to one service, and the set is kept
+   node-wide besides, D221; a first message whose preamble task equals the job it opened is the gate's own retry,
+   and is accepted again subject to rule 5).
 3. **A2A, `taskId` T in the header**: T equals the preamble's `task`, job T exists, and the header's `replyTo` and
    `rk` equal the job's (`wrong_job` otherwise); the forwarded body's `taskId`/`contextId` are T's recorded
    upstream ids.
@@ -288,35 +294,38 @@ TypeScript SDK's rule), on both nodes. On a sealed job's exchange, a response th
 request nor one the node holds a record of is not relayed: the record of an answered request goes once it is older
 than `--sealed-max-age`, and a late copy of its answer is dropped so.
 
-Then it replaces each sealed part with the plaintext part (original `kind`, `mediaType`, `filename`) and forwards
-to the service, and seals every part of every reply (status messages, artifacts, artifact updates; for MCP the
-result) to the job's `replyTo`, with the reply header and `auth`; an artifact's `name` and `description` are
-dropped (§2, D220), and an error keeps its code only (§2, D195). A job whose request was not sealed gets unsealed
-replies, unless the node was started with `--sealed-required <service>`, in which case it refuses the unsealed
-request itself (`bad_header`). It reuses the ciphertext of a part it already sealed with the same header and body
-during the job's life, so that the gate's polling of an upstream task sees identical bytes for unchanged parts.
+Then it replaces each sealed part with the plaintext part (original `kind`, `mediaType`, `filename`) and forwards to
+the service, and seals every part of every reply (status messages, artifacts, artifact updates; for MCP the result) to
+the job's `replyTo`, with the reply header (its `service` the hosted service's, D221) and `auth`; an artifact's `name`
+and `description` are dropped (§2, D220), and an error keeps its code only (§2, D195). A job whose request was not
+sealed gets unsealed replies, unless the node was started with `--sealed-required <service>`, in which case it refuses
+the unsealed request itself (`bad_header`). It reuses the ciphertext of a part it already sealed with the same header
+and body during the job's life, so that the gate's polling of an upstream task sees identical bytes for unchanged
+parts.
 
 ## 5.1 Without a node: `kontra seal`
 
 The escape hatch for scripting (PRD §8), not the path. `kontra seal --service <service URL> [--context <id>] [--task
-<id>] [file | -]` fetches and verifies the service's card, mints a per-job key and `rk` for a new task, and prints
-one A2A `Message` JSON (role user, a fresh `messageId`, the `contextId` given or minted, `taskId` when given) whose
-single part is the sealed file, with `metadata["kontra.sealed.replyTo"]` set. The per-job key is written under
-`~/.kontra/jobs/<gate host>/` so `kontra seal --open <part.json>` can open replies. `--open` binds the job to the
-gate task its reply names, and `--task <id>` then seals a follow-up with that job's key, `rk` and `contextId`, as
-rule 3 requires; a task with no job is refused, saying to `--open` one of its replies first. A service that is
-neither listed nor open to `anonymous` answers its card `404` to a caller with no credential ([`relay.md`](relay.md)
-§2.1): `--api-key <key>` (or `@<file>`) is then sent as a bearer credential, to the `--service`'s origin only, on
-the service's card and its upstream card, never on the key set; no key is read from the environment, since the gate
-a `--service` names is untrusted (§7) (D222). Sealing in-process without the CLI means reproducing §3 exactly; the
-age calls (Go `filippo.io/age`, Python `pyrage`) are documented in the example, not offered as an SDK.
+<id>] [file | -]` fetches and verifies the service's card, mints a per-job key and `rk` for a new task, and prints one
+A2A `Message` JSON (role user, a fresh `messageId`, the `contextId` given or minted, `taskId` when given) whose single
+part is the sealed file, its header's `service` the one `--service` names, with `metadata["kontra.sealed.replyTo"]`
+set. The per-job key is written under `~/.kontra/jobs/<gate host>/` so `kontra seal --open <part.json>` can open
+replies, refusing one whose `service` is not its job's (D221). `--open` binds the job to the gate task its reply
+names, and `--task <id>` then seals a follow-up with that job's key, `rk` and `contextId`, as rule 3 requires; a task
+with no job is refused, saying to `--open` one of its replies first. A service that is neither listed nor open to
+`anonymous` answers its card `404` to a caller with no credential ([`relay.md`](relay.md) §2.1): `--api-key <key>` (or
+`@<file>`) is then sent as a bearer credential, to the `--service`'s origin only, on the service's card and its
+upstream card, never on the key set; no key is read from the environment, since the gate a `--service` names is
+untrusted (§7) (D222). Sealing in-process without the CLI means reproducing §3 exactly; the age calls (Go
+`filippo.io/age`, Python `pyrage`) are documented in the example, not offered as an SDK.
 
 ## 6. Rejections
 
 A hosting node that refuses a sealed request answers the exchange itself with HTTP `400`, headers
 `Kontra-Node: sealed_rejected` and `Kontra-Sealed-Reject: <reason>`, and a JSON-RPC error body (`-32602`, message
 `sealed part rejected: <reason>`). Reasons: `undecryptable`, `bad_header`, `wrong_task`, `wrong_context`,
-`wrong_message`, `wrong_job`, `replayed`, `not_a_recipient`. The gate records the rejection (an `audit` row and
+`wrong_message`, `wrong_job` (another job's request: its `replyTo` and `rk`, its task, or its `service`, D221),
+`replayed`, `not_a_recipient`. The gate records the rejection (an `audit` row and
 the task's failure) and does not retry it (`sealed_replay`). A plain MCP call has no task: its client gets the
 node's JSON-RPC error with HTTP `200`, the request's id and the session header, and its `calls` row is
 `is_error` true ([`relay.md`](relay.md) §11.4, D202).
@@ -342,7 +351,7 @@ service's other nodes ([`tunnel.md`](tunnel.md) §5).
 | A gate replaying a first message to **another** hosting node of the same service within `max_age` | **No**: that node has not seen the `replyTo`. The service re-executes the request; the reply still goes to the original buyer's key |
 | A gate forging a reply | **Yes** for service content: it does not know `rk`. The gate can still write its own failure text, which the hiring node marks unsealed (§5, rule 4a) |
 | A gate answering a sealed task's input request itself: in plaintext, with an answer replayed, or for a request never sealed or sealed more than `max_age` ago | **Yes**: the hosting node forwards only a sealed answer that passes rule 4b; an unsealed one is refused `bad_header`, and the service never sees it (§5, D175) |
-| A gate delivering a buyer's sealed request to **another service** of the same node than the one hired | **No**, for a first delivery: the header names no service (D221). A request one service accepted is refused by every other (`replayed`, §5 rules 2 and 5), and the reply still goes to the buyer's key |
+| A gate delivering a buyer's sealed request to **another service** of the same node than the one hired | **Yes**: the header names the hired service, which the hosting node checks against the preamble's (`wrong_job`, §5 rule 1) and the hiring node against the service it hired (rule 4), and the replay sets are node-wide besides (rules 2 and 5) (D221) |
 | A gate forging a request of its own | Not prevented (age does not authenticate senders), but it gains nothing it could not get as a buyer: the reply goes to its own key, and it cannot continue another buyer's job (`wrong_job`) |
 | A gate that **substitutes recipients**, drops the extension, or strips the seller's signature | **Only with pins**: the buyer learns recipients from what the gate serves. Pins refuse a downgrade always (a card whose seller signatures verify nothing is unsigned, D228), and a new recipient, or a new or removed seller key, when `--pin-recipients` is set. `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log when it first sees a service and on every change, for out-of-band comparison (D164, D187). A seller signature that names its key by `kid` only is pinned unverified, so a forged one naming the pinned `kid` is not detected (D223) |
 | An MCP task's input requests, answers and status messages | **Yes**, for a task a sealed call created, and the input requests and answers of a sealed plain call (§2, D219) |

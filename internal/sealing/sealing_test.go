@@ -94,8 +94,9 @@ func (b buyer) replyTo() string { return b.key.Recipient().String() }
 
 // reqHeader is an A2A request header of b for part i of n.
 func (f *fixture) reqHeader(b buyer, task, ctx, msg string, i, n int) sealed.Header {
-	return sealed.Header{V: 1, Dir: sealed.DirRequest, IAT: f.now.Unix(), TaskID: task, ContextID: ctx, MessageID: msg,
-		Part: i, Parts: n, Kind: sealed.KindText, Kids: []string{f.kid()}, ReplyTo: b.replyTo(), RK: sealed.EncodeRK(b.rk)}
+	return sealed.Header{V: 1, Dir: sealed.DirRequest, Service: "echo", IAT: f.now.Unix(), TaskID: task, ContextID: ctx,
+		MessageID: msg, Part: i, Parts: n, Kind: sealed.KindText, Kids: []string{f.kid()}, ReplyTo: b.replyTo(),
+		RK: sealed.EncodeRK(b.rk)}
 }
 
 // seal seals body under hd to the node.

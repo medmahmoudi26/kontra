@@ -254,8 +254,8 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		}
 	}
 	msgID := uuid.NewString()
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: now().Unix(), TaskID: *task, ContextID: *ctxID,
-		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindRaw, MediaType: *mediaType, Kids: kids,
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: name, IAT: now().Unix(), TaskID: *task,
+		ContextID: *ctxID, MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindRaw, MediaType: *mediaType, Kids: kids,
 		ReplyTo: jobKey.Recipient().String(), RK: sealed.EncodeRK(rk)}
 	ct, err := sealed.Seal(recipients, hd, data)
 	if err != nil {
@@ -457,7 +457,8 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 }
 
 // openParts is kontra seal --open: every sealed part of the file that a per-job key under ~/.kontra/jobs opens is
-// checked (dir res, the key's id in kids, auth with the job's rk) and its plaintext written to out: text, url and
+// checked (dir res, the key's id in kids, auth with the job's rk, the service its job hired, D221) and its plaintext
+// written to out: text, url and
 // data as they are, raw as its bytes, one after another. A sealed part none of the job keys opens is an error, except
 // in the client's own message in a Task's history (a ROLE_USER entry), which is left out.
 func openParts(path, home string, out io.Writer) error {
@@ -525,6 +526,11 @@ func openParts(path, home string, out io.Writer) error {
 		if err := sealed.VerifyAuth(rk, hd, plain); err != nil {
 			return errors.New("the reply's auth does not verify: refused")
 		}
+		if loc, ok := where[hd.Kids[0]]; !ok || hd.Service != pinName(loc.service) {
+			// D221: a reply names the service its job was sealed for; another service of the hosting node sealed this one
+			// (the gate delivered the request there).
+			return errors.New("the reply names another service than its job's (ext-sealed.md §3): refused")
+		}
 		if _, err := out.Write(plain); err != nil {
 			return err
 		}
@@ -544,10 +550,11 @@ func openParts(path, home string, out io.Writer) error {
 	return nil
 }
 
-// jobLocation is where a per-job key is kept: its gate's directory and its job id.
+// jobLocation is where a per-job key is kept: its gate's directory and its job id, and the service its job hired.
 type jobLocation struct {
-	jobs *nodekey.JobKeys
-	id   string
+	jobs    *nodekey.JobKeys
+	id      string
+	service string
 }
 
 // bindJob renames a kontra seal job (seal-…) to the gate task id its replies name: its key, then its state, whose
@@ -622,7 +629,7 @@ func allJobKeys(home string) ([]age.Identity, map[string][]byte, map[string]*job
 			ids = append(ids, key)
 			kid := tunnel.KeyID(key.Recipient().String())
 			rks[kid] = rk
-			where[kid] = &jobLocation{jobs: jobs, id: id}
+			where[kid] = &jobLocation{jobs: jobs, id: id, service: st.Service}
 		}
 	}
 	return ids, rks, where, nil

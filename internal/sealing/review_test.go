@@ -352,44 +352,71 @@ func TestReviewUnsealedCallOnSealedSession(t *testing.T) {
 	}
 }
 
-// Finding security-5: the envelope does not bind the service, and the replay sets were per service, so a request a
-// service of the node accepted was accepted again by another service of the node. They are checked node-wide now
-// (the first delivery to the wrong service stays a residual: replyToElsewhere's SPEC-CONFLICT).
+// Finding security-5: the envelope did not bind the service, and the replay sets were per service, so a request a
+// service of the node accepted was accepted again by another service of the node, and a first delivery to the wrong
+// service went undetected. The header names its service now (D221): a request sealed for one service is refused by
+// every other (wrong_job), first delivery or not, and the replay sets are checked node-wide besides, so a request
+// sealed for another service that reuses a replyTo or a (session, messageId) one service accepted is replayed.
 func TestReviewCrossServiceSplice(t *testing.T) {
 	f := newFixture(t)
 	b := newBuyer(t)
 	const task, ctx = "0193c0de-0000-7000-8000-0000000000b1", "ctx-b1"
 	body := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "for service echo only")))
+	p := pre(task, ctx)
+	p.Service = "other"
+	// A first delivery to another service than the one the buyer sealed for (D221).
+	if fwd, _, r := f.request(p, body); r != sealed.RejectWrongJob {
+		t.Fatalf("a first message sealed for echo, delivered first to another service of the node: %q, forwarded %s", r, fwd)
+	}
 	_, x, r := f.request(pre(task, ctx), body)
 	if r != "" {
 		t.Fatal(r)
 	}
 	readAll(t, f.answer(x, 200, taskAnswer("up-1", "upctx-1", "TASK_STATE_COMPLETED", "echo's answer", "")))
-	p := pre(task, ctx)
-	p.Service = "other"
-	if fwd, _, r := f.request(p, body); r != sealed.RejectReplayed {
+	if fwd, _, r := f.request(p, body); r != sealed.RejectWrongJob {
 		t.Fatalf("the same first message to another service of the node: %q, forwarded %s", r, fwd)
+	}
+	// Sealed for the other service, with the replyTo echo's job opened with: the node-wide replay set (rule 2).
+	other := f.reqHeader(b, "", ctx, "m2", 0, 1)
+	other.Service = "other"
+	reuse := send("m2", "", "", b.replyTo(), sealedPartJSON(f.seal(other, "for service other")))
+	if fwd, _, r := f.request(p, reuse); r != sealed.RejectReplayed {
+		t.Fatalf("a replyTo that opened echo's job, sealed for another service: %q, forwarded %s", r, fwd)
 	}
 	// After a restart too (from the other service's state on disk).
 	f.open()
-	if _, _, r := f.request(p, body); r != sealed.RejectReplayed {
+	if _, _, r := f.request(p, body); r != sealed.RejectWrongJob {
 		t.Fatalf("after a restart: %q", r)
+	}
+	if _, _, r := f.request(p, reuse); r != sealed.RejectReplayed {
+		t.Fatalf("after a restart, sealed for the other service: %q", r)
 	}
 
 	s1 := sessionHash("gate-session-x")
 	call := f.sealedCallBody(b, s1, "read_file", "3", `{"path":"/secret"}`, false)
+	mp := mcpPre(s1, "3", "")
+	mp.Service = "fs2"
+	if _, r := fromClient(t, f.h.MCP(mp), call); r != sealed.RejectWrongJob {
+		t.Fatalf("a sealed call for service fs, first delivered to fs2: %q", r)
+	}
 	x1 := f.h.MCP(mcpPre(s1, "3", ""))
 	if _, r := fromClient(t, x1, call); r != "" {
 		t.Fatal(r)
 	}
-	mp := mcpPre(s1, "3", "")
-	mp.Service = "fs2"
-	if _, r := fromClient(t, f.h.MCP(mp), call); r != sealed.RejectReplayed {
-		t.Fatalf("a sealed call in flight for service fs, to fs2: %q", r)
+	// Sealed for fs2 with the (session, messageId) of the call fs has in flight, and has forwarded: rule 5, node-wide.
+	hd := f.mcpHeader(b, s1, "read_file", "3")
+	hd.Service = "fs2"
+	call2 := []byte(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{},"_meta":{"sh.kontra/sealed":` +
+		envelope(f.seal(hd, `{"path":"/secret"}`)) + `}}}`)
+	if _, r := fromClient(t, f.h.MCP(mp), call2); r != sealed.RejectReplayed {
+		t.Fatalf("a sealed call in flight for service fs, sealed again for fs2: %q", r)
+	}
+	if _, r := fromClient(t, f.h.MCP(mp), call); r != sealed.RejectWrongJob {
+		t.Fatalf("a sealed call for service fs, to fs2: %q", r)
 	}
 	x1.Accepted()
-	if out, r := fromClient(t, f.h.MCP(mp), call); r != sealed.RejectReplayed {
-		t.Fatalf("a sealed call service fs forwarded, to fs2: %q %s", r, out)
+	if out, r := fromClient(t, f.h.MCP(mp), call2); r != sealed.RejectReplayed {
+		t.Fatalf("a sealed call service fs forwarded, sealed again for fs2: %q %s", r, out)
 	}
 }
 
@@ -450,8 +477,8 @@ func TestReviewHiringPlainCallInputs(t *testing.T) {
 	}
 	callHdr := openCall(t, f, sent)
 	// The hosting node seals the call's sampling request to the call's replyTo with its rk.
-	hd := sealed.Header{V: 1, Dir: sealed.DirReply, Session: session, Tool: "sampleLLM", MessageID: "0", Part: 0, Parts: 1,
-		Kind: sealed.KindData}
+	hd := sealed.Header{V: 1, Dir: sealed.DirReply, Service: "fs", Session: session, Tool: "sampleLLM", MessageID: "0", Part: 0,
+		Parts: 1, Kind: sealed.KindData}
 	rcpt, err := age.ParseX25519Recipient(callHdr.ReplyTo)
 	if err != nil {
 		t.Fatal(err)

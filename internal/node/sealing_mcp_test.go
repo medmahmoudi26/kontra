@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -49,12 +50,13 @@ func hostingFor(t *testing.T) (*sealing.Hosting, *age.X25519Identity) {
 	return h, id
 }
 
-// sealedCall is a sealed tools/call as a hiring node sends it, for session (its hash) and the JSON-RPC id id.
-func sealedCall(t *testing.T, node *age.X25519Identity, session, tool, id, args string) (string, *age.X25519Identity, []byte) {
+// sealedCall is a sealed tools/call as a hiring node sends it to service, for session (its hash) and the JSON-RPC id
+// id.
+func sealedCall(t *testing.T, node *age.X25519Identity, service, session, tool, id, args string) (string, *age.X25519Identity, []byte) {
 	t.Helper()
 	job, _ := age.GenerateX25519Identity()
 	rk, _ := sealed.NewRK()
-	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, IAT: time.Now().Unix(), Session: session, Tool: tool, MessageID: id,
+	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, Service: service, IAT: time.Now().Unix(), Session: session, Tool: tool, MessageID: id,
 		Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{tunnel.KeyID(node.Recipient().String())},
 		ReplyTo: job.Recipient().String(), RK: sealed.EncodeRK(rk)}
 	ct, err := sealed.Seal([]age.Recipient{node.Recipient()}, hd, []byte(args))
@@ -99,7 +101,7 @@ func TestMCPURLSealing(t *testing.T) {
 	sum := sha256.Sum256([]byte("the gate's session id"))
 	session := hex.EncodeToString(sum[:])
 
-	call, job, rk := sealedCall(t, node, session, "echo", "1", `{"text":"MARKER-arg"}`)
+	call, job, rk := sealedCall(t, node, "web", session, "echo", "1", `{"text":"MARKER-arg"}`)
 	resp, body, _ := pp.raw(t, mcpSealedPreamble("web", session, "1"), mcpPost(call, sid, mcpwire.V20251125))
 	if resp.StatusCode != http.StatusOK || strings.Contains(body, "MARKER") {
 		t.Fatalf("a sealed call: %d %s", resp.StatusCode, body)
@@ -132,7 +134,7 @@ func TestMCPURLSealing(t *testing.T) {
 
 	// "name" and "NAME": bad_header, the server sees nothing.
 	before := len(up.Requests())
-	twin, _, _ := sealedCall(t, node, session, "echo", "2", `{"text":"x"}`)
+	twin, _, _ := sealedCall(t, node, "web", session, "echo", "2", `{"text":"x"}`)
 	twin = strings.Replace(twin, `"name":"echo"`, `"name":"echo","NAME":"add"`, 1)
 	resp, _, _ = pp.raw(t, mcpSealedPreamble("web", session, "2"), mcpPost(twin, sid, mcpwire.V20251125))
 	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != "bad_header" {
@@ -172,7 +174,7 @@ func TestMCPStdioSealing(t *testing.T) {
 	sum := sha256.Sum256([]byte("the gate's stdio session"))
 	session := hex.EncodeToString(sum[:])
 
-	call, job, rk := sealedCall(t, node, session, "echo", "1", `{"text":"MARKER-stdio"}`)
+	call, job, rk := sealedCall(t, node, "fs", session, "echo", "1", `{"text":"MARKER-stdio"}`)
 	resp, body, _ := pp.raw(t, mcpSealedPreamble("fs", session, "1"), mcpPost(call, sid, mcpwire.V20251125))
 	if resp.StatusCode != http.StatusOK || strings.Contains(body, "MARKER") {
 		t.Fatalf("a sealed call: %d %s", resp.StatusCode, body)
@@ -210,7 +212,7 @@ func TestMCPStdioSealing(t *testing.T) {
 	}
 
 	// "name" and "NAME": bad_header, the child reads nothing of it.
-	twin, _, _ := sealedCall(t, node, session, "echo", "2", `{"text":"MARKER-twin"}`)
+	twin, _, _ := sealedCall(t, node, "fs", session, "echo", "2", `{"text":"MARKER-twin"}`)
 	twin = strings.Replace(twin, `"name":"echo"`, `"name":"echo","NAME":"pid"`, 1)
 	resp, _, _ = pp.raw(t, mcpSealedPreamble("fs", session, "2"), mcpPost(twin, sid, mcpwire.V20251125))
 	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != "bad_header" {
@@ -221,13 +223,13 @@ func TestMCPStdioSealing(t *testing.T) {
 	}
 }
 
-// sealedSend is a JSON-RPC SendMessage of a new task whose one part is body sealed to node, as a hiring node sends it
-// (the gate's copy: no contextId upstream), with the job's key and rk.
-func sealedSend(t *testing.T, node *age.X25519Identity, ctx, msgID, body string) (string, *age.X25519Identity, []byte) {
+// sealedSend is a JSON-RPC SendMessage of a new task whose one part is body sealed to node for service, as a hiring
+// node sends it (the gate's copy: no contextId upstream), with the job's key and rk.
+func sealedSend(t *testing.T, node *age.X25519Identity, service, ctx, msgID, body string) (string, *age.X25519Identity, []byte) {
 	t.Helper()
 	job, _ := age.GenerateX25519Identity()
 	rk, _ := sealed.NewRK()
-	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, IAT: time.Now().Unix(), ContextID: ctx, MessageID: msgID,
+	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, Service: service, IAT: time.Now().Unix(), ContextID: ctx, MessageID: msgID,
 		Part: 0, Parts: 1, Kind: sealed.KindText, Kids: []string{tunnel.KeyID(node.Recipient().String())},
 		ReplyTo: job.Recipient().String(), RK: sealed.EncodeRK(rk)}
 	ct, err := sealed.Seal([]age.Recipient{node.Recipient()}, hd, []byte(body))
@@ -260,7 +262,7 @@ func TestSealedNodeAnswerIsRetried(t *testing.T) {
 	hosting, node := hostingFor(t)
 	pp.p.seal = hosting
 	pre := hostedPreamble("hello")
-	body, _, _ := sealedSend(t, node, pre.Context, "m-1", "MARKER")
+	body, _, _ := sealedSend(t, node, "hello", pre.Context, "m-1", "MARKER")
 	resp, _, _ := pp.raw(t, pre, a2aPost(body))
 	if resp.StatusCode != http.StatusBadGateway || resp.Header.Get(tunnel.HeaderNode) != string(tunnel.NodeTargetUnreachable) {
 		t.Fatalf("an unreachable service: %d %v", resp.StatusCode, resp.Header)
@@ -314,7 +316,7 @@ func TestSealedBlobPart(t *testing.T) {
 	big := strings.Repeat("MARKER-big ", 300<<10/11)
 	job, _ := age.GenerateX25519Identity()
 	rk, _ := sealed.NewRK()
-	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, IAT: time.Now().Unix(), ContextID: pre.Context, MessageID: "m-big",
+	hd := sealed.Header{V: 1, Dir: sealed.DirRequest, Service: "hello", IAT: time.Now().Unix(), ContextID: pre.Context, MessageID: "m-big",
 		Part: 0, Parts: 1, Kind: sealed.KindText, Kids: []string{id.KeyID()},
 		ReplyTo: job.Recipient().String(), RK: sealed.EncodeRK(rk)}
 	ct, err := sealed.Seal([]age.Recipient{id.Active.Recipient()}, hd, []byte(big))
@@ -375,5 +377,27 @@ func TestSealedBlobPart(t *testing.T) {
 	}
 	if err := json.Unmarshal(got, &req); err != nil || len(req.Params.Message.Parts) != 1 || req.Params.Message.Parts[0].Text != big {
 		t.Fatalf("the service got %.200s", got)
+	}
+}
+
+// D221: the hosting node names its services as the gate's URL paths do, from the welcome: "<tenant>/<name>" when the
+// service's URL ends with the tenant and the name (a multi-tenant gate, /agents/ or /mcp/), "<name>" otherwise. The
+// name is always the service's own.
+func TestServicePaths(t *testing.T) {
+	w := &tunnel.Welcome{Tenant: "acme", Services: []tunnel.WelcomeService{
+		{Kind: tunnel.KindA2A, Name: "hello", URL: "https://gate.example/agents/acme/hello"},
+		{Kind: tunnel.KindMCP, Name: "fs", URL: "https://gate.example/mcp/acme/fs"},
+		{Kind: tunnel.KindA2A, Name: "single", URL: "https://gate.example/agents/single"},
+		{Kind: tunnel.KindMCP, Name: "web", URL: "https://gate.example/agents/acme/web"}, // an MCP service under /agents/: not the gate's path
+		{Kind: tunnel.KindA2A, Name: "odd", URL: "https://gate.example/agents/other/odd"},
+		{Kind: tunnel.KindA2A, Name: "bad", URL: "::not a url"},
+	}}
+	want := map[string]string{"hello": "acme/hello", "fs": "acme/fs", "single": "single", "web": "web", "odd": "odd", "bad": "bad"}
+	if got := servicePaths(w); !maps.Equal(got, want) {
+		t.Fatalf("servicePaths = %v, want %v", got, want)
+	}
+	team := &tunnel.Welcome{Tenant: "default", Services: []tunnel.WelcomeService{{Kind: tunnel.KindA2A, Name: "hello", URL: "http://localhost:8080/agents/hello"}}}
+	if got := servicePaths(team); got["hello"] != "hello" {
+		t.Fatalf("a single-tenant gate's service: %v", got)
 	}
 }

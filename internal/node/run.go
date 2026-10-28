@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -402,6 +404,25 @@ func (n *Node) welcomed(kid string, h *tunnel.Hello, w *tunnel.Welcome, probe bo
 	return err
 }
 
+// servicePaths are the welcome's services as the gate's URL paths name them (spec/relay.md §1, D221): "<tenant>/<name>"
+// when the service's URL ends with /agents/<tenant>/<name> (or /mcp/…), a multi-tenant gate's, else "<name>". Only the
+// tenant is the gate's to say: the name is the service's own, which the node serves.
+func servicePaths(w *tunnel.Welcome) map[string]string {
+	out := make(map[string]string, len(w.Services))
+	for _, ws := range w.Services {
+		root := "/agents/"
+		if ws.Kind == tunnel.KindMCP {
+			root = "/mcp/"
+		}
+		out[ws.Name] = ws.Name
+		if u, err := url.Parse(ws.URL); err == nil && w.Tenant != "" &&
+			strings.HasSuffix(strings.TrimRight(u.Path, "/"), root+w.Tenant+"/"+ws.Name) {
+			out[ws.Name] = w.Tenant + "/" + ws.Name
+		}
+	}
+	return out
+}
+
 // servesAll reports whether the welcome lists every declared service.
 func servesAll(w *tunnel.Welcome, declared []tunnel.Service) bool {
 	for _, d := range declared {
@@ -551,6 +572,10 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	var served []string
 	for _, ws := range w.Services {
 		served = append(served, ws.Name)
+	}
+	if n.hosting != nil {
+		// A sealed header names its service as the gate's URL path does (D221): the hosting node's own, from the welcome.
+		n.hosting.SetServicePaths(servicePaths(w))
 	}
 	// The gate's cap of node-opened streams in flight (§14, §6.2): the node keeps under it (session.open).
 	limit := tunnel.GateMaxInflight

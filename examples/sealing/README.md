@@ -102,13 +102,17 @@ public), never on the key set. A key exported for one gate therefore never reach
 ## Sealing in-process
 
 There is no SDK: reproduce §3 exactly. A request part is an [age](https://age-encryption.org/v1) file (binary, X25519
-recipients) of `JCS(header) || 0x00 || body`. The header for one text part of a new task's first message:
+recipients) of `JCS(header) || 0x00 || body`. The header for one text part of a new task's first message to
+`/agents/hello`:
 
 ```json
 {"contextId":"<the message's contextId>","dir":"req","iat":<unix seconds>,"kids":["k1_…","k1_…"],"kind":"text",
  "mediaType":"","messageId":"<the message's messageId>","part":0,"parts":1,"replyTo":"age1<your per-job key>",
- "rk":"<32 random bytes, base64url without padding>","v":1}
+ "rk":"<32 random bytes, base64url without padding>","service":"hello","v":1}
 ```
+
+`service` is the service you hire as the gate's URL path names it: `hello` for `/agents/hello`, `acme/hello` for
+`/agents/acme/hello` on a multi-tenant gate; the hosting node refuses a request sealed for another service (D221).
 
 `kids` are the recipients' key ids, sorted: `"k1_" + lowercase(base32_nopad(SHA-256(utf8(recipient))))[0:26]`
 ([`spec/tunnel.md`](../../spec/tunnel.md) §2.2). A follow-up adds `taskId`. The header must be RFC 8785 JCS (its
@@ -146,7 +150,7 @@ from pyrage import encrypt, decrypt, x25519
 recipients = [x25519.Recipient.from_str(r) for r in card_recipients]
 job = x25519.Identity.generate()            # keep it; job.to_public() is the replyTo
 rk = os.urandom(32)
-header = {"v": 1, "dir": "req", "iat": int(time.time()), "contextId": ctx, "messageId": msg_id,
+header = {"v": 1, "dir": "req", "service": "hello", "iat": int(time.time()), "contextId": ctx, "messageId": msg_id,
           "part": 0, "parts": 1, "kind": "text", "mediaType": "", "kids": sorted(kids),
           "replyTo": str(job.to_public()), "rk": base64.urlsafe_b64encode(rk).rstrip(b"=").decode()}
 hdr = json.dumps(header, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()  # JCS for these values
@@ -158,8 +162,8 @@ part = {"raw": base64.b64encode(encrypt(hdr + b"\x00" + body, recipients)).decod
 floats or non-ASCII strings, which a header never holds.)
 
 A reply part opens with the per-job key: decrypt the whole file, split at the first `0x00`, check that the header is
-canonical, `dir` is `"res"`, its `kids` hold your key's id and its `taskId`, `contextId` and `messageId` (or
-`artifactId`) are the reply's; then check `auth`, `base64url(HMAC-SHA256(rk, JCS(header without auth) || 0x00 ||
+canonical, `dir` is `"res"`, its `service` is the one you hired, its `kids` hold your key's id and its `taskId`,
+`contextId` and `messageId` (or `artifactId`) are the reply's; then check `auth`, `base64url(HMAC-SHA256(rk, JCS(header without auth) || 0x00 ||
 body))`, which only the holder of `rk` (you and the hosting node) can compute:
 
 ```python

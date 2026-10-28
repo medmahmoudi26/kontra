@@ -50,7 +50,7 @@ func TestReviewSealedResultLabelledTextPlain(t *testing.T) {
 		sid := resp.Header.Get(mcpwire.HeaderSessionID)
 		sum := sha256.Sum256([]byte("the gate's session id"))
 		session := hex.EncodeToString(sum[:])
-		call, _, _ := sealedCall(t, node, session, "echo", "1", `{"text":"x"}`)
+		call, _, _ := sealedCall(t, node, "web", session, "echo", "1", `{"text":"x"}`)
 		resp, body, _ := pp.raw(t, mcpSealedPreamble("web", session, "1"), mcpPost(call, sid, mcpwire.V20251125))
 		if strings.Contains(body, "PLAINTEXT-RESULT") {
 			t.Fatalf("labelled %q: a sealed call's result reaches the gate unsealed: %d %s", ct, resp.StatusCode, body)

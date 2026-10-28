@@ -242,6 +242,9 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	if err := x.h.mcpRule1(hd, false); err != nil {
 		return nil, err
 	}
+	if err := x.h.checkService(hd, x.service); err != nil {
+		return nil, err
+	}
 	name, _ := a2awire.String(params, "name")
 	idStr := mcpID(m.ID)
 	switch {
@@ -420,6 +423,9 @@ func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *m
 		return nil, err
 	}
 	if err := x.h.mcpRule1(hd, true); err != nil {
+		return nil, err
+	}
+	if err := x.h.checkService(hd, x.service); err != nil {
 		return nil, err
 	}
 	now := x.h.cfg.Now()
@@ -903,8 +909,8 @@ func (x *MCPExchange) sealResult(job *jobState, result json.RawMessage, tool, me
 			return nil, reject(sealed.RejectBadHeader, "isError is not a boolean")
 		}
 	}
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, TaskID: gateTask, Session: job.Session, Tool: tool,
-		MessageID: messageID, Part: 0, Parts: 1}
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.service), TaskID: gateTask,
+		Session: job.Session, Tool: tool, MessageID: messageID, Part: 0, Parts: 1}
 	ct, err := x.h.sealFor(x.service, job, hd, plainOf{kind: sealed.KindData, body: body})
 	if err != nil {
 		return nil, err
@@ -954,8 +960,8 @@ func (x *MCPExchange) sealInput(svc *serviceState, job *jobState, in *InputReque
 	// header: a durable task's input request carries its gate task id too (as its result does), so that the hiring
 	// node can tell an input request replayed from another task of the same session and tool (rule 4, which it then
 	// checks), and its answer names it back (mcpRule1); a passthrough task's, or a plain call's, carries none.
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, TaskID: in.Gate, Session: job.Session, Tool: in.Tool,
-		MessageID: msgID, Part: 0, Parts: 1}
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.service), TaskID: in.Gate,
+		Session: job.Session, Tool: in.Tool, MessageID: msgID, Part: 0, Parts: 1}
 	ct, err := x.h.sealFor(x.service, job, hd, plainOf{kind: sealed.KindData, body: body})
 	if err != nil {
 		return nil, err
