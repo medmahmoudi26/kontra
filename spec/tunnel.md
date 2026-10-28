@@ -3,8 +3,8 @@
 Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning). Revision 4 brings the text in line
 with the M2 code (D123–D157), decided under the owner's standing instruction on 26 Oct. Revision 5 (26–28 Oct)
 includes the M3 decisions: those of the M3 planning and its audit (D161, D162, D164, D172, D173, D179–D182, D184),
-and those that bring the text in line with the M3 code and its review (D199, D206–D213, D224), decided under the
-owner's standing instruction. Normative. RFC 2119 key words.
+and those that bring the text in line with the M3 code and its review (D199, D206–D213, D224, D229), decided under
+the owner's standing instruction. Normative. RFC 2119 key words.
 
 The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
 node, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the node sends
@@ -75,7 +75,9 @@ metadata carries the operator's `kontra.keyRetainUntil` (a review window, [`rela
 time has passed; an MCP session's key when the session closes and every task created in it is done. The node
 learns that the gate closed a session from a `404` for it, and deletes the key of a session that has had no
 exchange for a day once its tasks are done (the gate closes an idle session on its own, [`relay.md`](relay.md)
-§11.2; D224).
+§11.2; D224). A gate whose `session_idle_s` exceeds a day therefore keeps a sealed session the node no longer
+knows: the node answers `404` for it, on a `GET` as on a `POST`, without forwarding anything, and the client
+initializes again (D224). The same holds for every sealed session after the node restarts.
 
 ### 2.4 Credentials
 
@@ -403,10 +405,12 @@ its path unchanged: `/agents/…`, `/mcp/…`, `/mcp`, `/.well-known/…`. Anyth
 - `--listen` on a non-loopback address requires `--local-token <file>`; every request must then carry
   `Authorization: Bearer <local token>`, which the node strips before forwarding.
 - On a loopback `--listen` without `--local-token`, the node serves only its own user: on Linux it reads the
-  owner of each connection's client socket from the kernel's socket table (`/proc/net/tcp`, `/proc/net/tcp6`) and
-  closes a connection of another user, or one it cannot attribute. Where that table does not exist the check is not
-  made: on a machine shared with other users, set `--local-token`, which then serves any user that presents it
-  (D207).
+  owner of each connection's client socket from the kernel's socket table (`/proc/self/net/tcp`, `tcp6`), for
+  every connection whatever its source address (a local process may bind any address of the machine), and closes
+  a connection of another user, or one it cannot attribute: a socket no process holds any more (inode 0, which the
+  kernel lists as uid 0), the overflow uid of a user namespace, or a table it cannot read, about which it warns at
+  start. Only where that table does not exist (not Linux) is the check not made: on a machine shared with other
+  users, set `--local-token`, which then serves any user that presents it (D207, D229).
 - The node serves no other local port: there is no local console (D164).
 
 On the gate the forwarded request is served by the same handler as a request from the network, with three

@@ -2848,3 +2848,91 @@ the hosting node's sealing state still takes one node-wide lock, so a commit's a
 writes happen under it (per-service locks, with D221's node-wide checks under a lock of their own, are the review's
 proposal; M3 review robustness-4); and D199's notice has no gate-level test across two replicas (M3 review
 mcp-spec-5).
+
+### D226. A sealed MCP job holds its upstream session, and its requests' ids — **decided under the owner's standing instruction, 28 Oct** (amends D217)
+
+D217 lets an exchange reach a sealed job's upstream task or context only if it is that job's, "for MCP its
+session", and the hosting node bound a job to the preamble's `mcp_session`. The upstream session it forwards on is
+the request's `Mcp-Session-Id`, which the gate chooses as it does the preamble: with a preamble naming another gate
+session, or none, and the header naming the buyer's upstream session, the gate could send an unsealed `tools/call`
+into the session the buyer's sealed calls set up (a login, an opened document) and read its result, or a sealed one
+of its own and open the result with its own key (M3 review round 2, sealing-fixes-2). And 6ba105f dropped a sealed
+call's record whenever a later request reused its JSON-RPC id, before anything refused that request: a `ping` with
+the id, then a `GET` with `Last-Event-ID`, had the server replay the sealed result into no record, and the node
+relayed it in plaintext (sealing-fixes-1). Rule 4a and rule 4b also matched a response by the id's exact spelling,
+where the TypeScript SDK takes `"8"` for `8` (`Number(id)`), so a gate could answer a sealed call in plaintext with a
+string id (other-fixes-2). Decision, as built, the reviewers' first proposals: the upstream session a sealed call of
+a job went on is indexed to the job in the service's state (in flight from the node's checks on, as the job's
+binding is), and any message on it from an exchange of another session, or of none, is refused (`wrong_job` for a
+sealed `tools/call`, `bad_header` otherwise), and nothing the server sends on it reaches such an exchange; a request
+that reuses the id of a sealed request the node recorded on the session is `replayed` (MCP never reuses an id in a
+session), and the record stays; both nodes match a response to a request as the gate does
+(`mcpwire.SameID`, `AnswerKeys`); the gate's durable dispatch draws its own ids per run, so a re-attach on the same
+upstream session (D42) reuses none. On a sealed job's exchange, a response that answers neither the exchange's
+request nor one the node holds is not relayed, so that Sweep can drop an answered request's index entry once its
+record is older than `--sealed-max-age` (the indexes no longer grow with a long-lived session, sealing-fixes-9). The
+other proposal, scoping the reuse to the reusing exchange, would still relay a sealed result a server routes by id
+to that exchange ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` mcp.go `sessionOwner`, `recorded`,
+`FromServer`; `TestReviewReusedIDAfterSealedCall`, `TestReview2SealedJobOwnsItsUpstreamSession`,
+`TestReview2StringSpelledIDsAreSealed`, `TestReview2SweepPrunesAnsweredIndexEntries`).
+
+### D227. A sealed A2A job is guarded before its first reply, and a request the service had is recorded — **decided under the owner's standing instruction, 28 Oct** (amends D217)
+
+D217's guard held only once a job's first reply had named its upstream task. Before that, the gate could list the
+service's tasks (`ListTasks` with `historyLength`) on any exchange, the job's own included, and read the buyer's
+message in plaintext, holding the window open with a blocking send (`returnImmediately` is the gate's to set); and a
+gate that ended the tunnel stream before the answer released the job, although the service had the message, and
+could then open the gate task with a binding of its own (M3 review round 2, sealing-fixes-3). An unsealed first
+message of another gate task naming the sealed job's upstream context passed, and its reply too, so an agent keeping
+a conversation per context could repeat the buyer's (sealing-fixes-6). And a job went 7 days after its last exchange
+whatever `--sealed-max-age` was, so with a longer one the first message resent under its own task found no pairs
+(sealing-fixes-8). Decision, as built, the reviewers' proposals: a service with sealed state (or a job being opened,
+or `--sealed-required`) refuses a task list `bad_header` (the gate never lists the upstream's tasks, relay.md §6); a
+request of a gate task whose first sealed message the service has not answered is `wrong_task`; a reply on an
+exchange of no sealed job that names an upstream task or context the node has not indexed waits while a job of the
+service is being opened (at most 30 s, then `wrong_task`) and is read again; a request the node handed whole to the
+service whose exchange ends before the answer is recorded as an accepted one (a node-written answer, or a non-2xx,
+records nothing, as before); an unsealed message into any sealed job's upstream context is `bad_header`, and a reply
+of an unsealed exchange naming one is refused; a job is kept for 7 days or `--sealed-max-age` and the clock skew,
+whichever is longer. The residual: a first message whose exchange ended before its reply leaves its upstream task
+unindexed, readable on another exchange by an id the gate already knows (not by a list). The other proposal for the
+window, a provisional job other exchanges seal to, would write a job before the service accepted its request
+([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hosting.go `replyHeld`, `End`, `other`, `unsealedSend`,
+`Sweep`; `TestReview2NoTaskListWhileAJobOpens`, `TestReview2ReplyHeldWhileAJobOpens`,
+`TestReview2AbandonedFirstMessageIsRecorded`, `TestReview2UnsealedMessageIntoSealedContext`,
+`TestReview2JobKeptForMaxAge`).
+
+### D228. A card whose seller signatures verify nothing is unsigned, and a lost seller key needs acceptance — **decided under the owner's standing instruction, 28 Oct** (amends D187, D223)
+
+D223 verifies a seller signature that carries its key, but a signature that did not verify was only dropped from the
+seller keys, the card still counted as signed, and losing a pinned key (`removed_seller_key`) was accepted silently,
+even under `--pin-recipients`: a gate could replace the upstream card, keep a signature that verifies nothing, and
+the pin was rewritten with no seller key (M3 review round 2, sealing-fixes-5). Decision, as built, both halves of the
+reviewer's proposal: a card is signed only when a seller signature verified, or names its key by `kid` only
+(unverifiable, D223), so a pinned signed card replaced so is `unsigned`, always refused; and a removed seller key is
+refused under `--pin-recipients`, and otherwise until `--accept-change <service>`, as a new one is
+([`ext-sealed.md`](../spec/ext-sealed.md) §7; `sealing` seal.go `VerifyCard`, `hiring` hiring.go `verified`, `pins`
+`needsAccept`; `TestReview2SellerSignatureThatVerifiesNothingIsUnsigned`, `TestAcceptedChanges`).
+
+### D229. The hiring endpoint checks every connection's owner, and attributes only sockets a process holds — **decided under the owner's standing instruction, 28 Oct** (amends D207)
+
+The same-user check of [`tunnel.md`](../spec/tunnel.md) §9 ran only for a connection from a loopback address, while
+Linux accepts a connection to 127.0.0.1 from any of the machine's addresses (`curl --interface`); it read the uid of
+the first matching socket table entry, which the kernel lists as 0 for a socket its owner closed (orphaned,
+TIME_WAIT), so a request sent and closed at once reached a node running as root; and it read `/proc/net`, hidden by
+`ProcSubset=pid`, letting every connection through with no word (M3 review round 2, other-fixes-1, -3, -4).
+Decision, as built: every connection to a loopback `--listen` without `--local-token` is checked, whatever its source
+address; only an entry with a non-zero inode (a socket a process holds) is attributed, and the overflow uid (a user a
+user namespace does not map) attributes nothing; the tables are read from `/proc/self/net`, and on Linux a table
+that cannot be read closes the connection, with a warning at start (as does a node running as the overflow uid).
+Off Linux the check is still not made ([`tunnel.md`](../spec/tunnel.md) §9; `hiring` peer.go; `TestFindPeer`,
+`TestPeerListenerAccept`, `TestPeerUIDTables`, `TestHiringRefusesOtherLocalUsers`).
+
+### D230. A LISTEN reconnect drops the drained tool lists too — **decided under the owner's standing instruction, 28 Oct** (amends D199)
+
+D199 has the replica that relays an upstream's `tools/list_changed` tell the others by `NOTIFY kontra_tunnel
+'tools:…'`, and a LISTEN reconnect drop every era "for a lost notice"; a `tools:` notice lost while a replica's
+connection was down was never made up for, and the replica kept the old list, and the `Unknown tool` decisions on
+it, for up to the 10-minute refresh (M3 review round 2, other-fixes-5, records-6). Decision, as built: the reconnect
+drops every cached list as well as every era ([`relay.md`](../spec/relay.md) §11.3; `mcprelay` era.go
+`Reconnected`, `gate` gate.go; `TestToolsCacheReconnected`).

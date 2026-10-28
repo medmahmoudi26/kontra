@@ -7,10 +7,14 @@ relays ciphertext it cannot open: Postgres, its logs and its bucket hold envelop
 (`sealed_no_plaintext`). Neither the service nor the client handles a key: both are unmodified.
 
 What is sealed (§2): the content of every A2A part (`text`, `raw`, `url` or `data`), both directions; for MCP the
-`tools/call` arguments, the result's `content` and `structuredContent`, and, for a task a sealed call created, its
-upstream elicitation and sampling requests, the client's answers, and its `statusMessage` (which becomes
-`"sealed"`). What is not: task states and ids, message and artifact ids, metadata, a part's `filename` (do not put
-secrets in it), tool names, `isError`.
+`tools/call` arguments, the result's `content` and `structuredContent` (on the call's response, or a task's
+`tasks/result`), the upstream's elicitation and sampling requests made for a sealed call or for a task it created,
+and the client's answers to them (D219), and a sealed task's `statusMessage` (which becomes `"sealed"`). Not relayed
+at all on a sealed job: an artifact's `name` and `description` (D220). Errors are not sealed and keep their code
+only: on a sealed job the hosting node replaces an error's message and data with fixed text, so the service's
+message (which may quote the input) stays on the hosting node and the local client never sees it (D195). What is
+not sealed: task states and ids, message and artifact ids, metadata, a part's `filename` (do not put secrets in it),
+tool names, `isError`, `tools/list` and every other MCP method.
 
 ## Run it on one machine
 
@@ -50,10 +54,13 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "
 ```
 
 The hiring node keeps a **pin** per (gate, service) in `~/.kontra/pins` (§7): whether the service is sealed, its
-recipients' key ids, and the seller keys that verified its upstream card. A downgrade (sealed to unsealed, signed
-to unsigned) is always refused. A new recipient (a second hosting node enrolled for `hello`) is refused until the
-operator accepts it: `kontra connect … --accept-change hello`; `--pin-recipients` refuses every new one. Both print
-the key ids and thumbprints on stderr and in the log, for comparison out of band (D164, D187).
+recipients' key ids, and the seller keys of its upstream card: the RFC 7638 thumbprint of a key a seller signature
+carries and verifies with, and, for a signature that names its key by `kid` only (which the node cannot verify), the
+unverified `kid:<kid>` (D223). A card whose seller signatures verify nothing counts as unsigned (D228). A downgrade
+(sealed to unsealed, signed to unsigned) is always refused. A new recipient (a second hosting node enrolled for
+`hello`), or a new or removed seller key, is refused until the operator accepts it: `kontra connect …
+--accept-change hello`; `--pin-recipients` refuses every such change. Both print the recipient key ids and the seller
+keys (thumbprints, or `kid:<kid>`) on stderr and in the log, for comparison out of band (D164, D187, D223).
 
 The hosting node keeps its job state under `~/.kontra/hosted/<gate host>/<service>/` (0600): which reply key opened
 which job, the pairs it forwarded, the input requests it sealed. It refuses a replayed or reordered part itself

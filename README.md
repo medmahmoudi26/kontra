@@ -174,8 +174,9 @@ kontra connect --gate https://<public_url host> --enroll <token> --serve a2a:hel
 docker compose down            # -v also drops the databases
 ```
 
-PRD §12's pentest list ran against it, with M3's own surface; [`docs/pentest-m3.md`](docs/pentest-m3.md) records
-every probe and the four findings, each fixed.
+PRD §12's pentest list ran against it at `f65760a`, with M3's own surface; [`docs/pentest-m3.md`](docs/pentest-m3.md)
+records every probe and the four findings, each fixed, and what the review fixes and the compose change made after that
+run change for its targets (the run was not repeated since).
 
 ## Five minutes (the M4 target)
 

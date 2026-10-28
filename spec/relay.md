@@ -6,8 +6,8 @@ brings it in line with the M2 code (D141–D143, D145–D150, D154), decided und
 26 Oct. Revision 6 (26 Oct, before M3 builds the MCP relay) writes the 2026-07-28 revision into §11.12 as D24
 requires, with the peer hop of §11.2 and §10.4's blob refs (D158–D163, D167), and was amended the same day after the
 M3 plan's audit (D172–D188). Revision 7 (28 Oct) includes the M3 decisions: it brings the text in line with the M3
-code and its review (D191–D205, D223), decided under the owner's standing instruction. Normative. The key words
-MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+code and its review (D191–D205, D213, D223, D224, D230), decided under the owner's standing instruction.
+Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
@@ -893,7 +893,15 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
 - **`DELETE`** with the session id is forwarded upstream and closes the row; when the upstream's tunnel is gone
   the gate still closes the row and answers `200` (D196). A session idle for the service's
   `session_idle_s` (default 3600) is closed by the gate (`idle`; upstream `DELETE` best effort).
-  `last_seen_at` is written at most once a minute.
+  `last_seen_at` is written at most once a minute. A hiring node keeps a sealed session's key a day idle
+  ([`tunnel.md`](tunnel.md) §2.3, D224): with a `session_idle_s` over a day, a sealed session's client initializes
+  again after a day idle.
+- **No cap per principal (yet).** The gate caps no principal's sessions of a service, and a stdio service's
+  children (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every principal admitted to it and every
+  durable task's own upstream session: one principal holding the children idle has every other `initialize`
+  answered `full` until they idle out. D213 decides a cap per principal and service
+  (`max_sessions_per_principal`) and the bridge's eviction of a long-idle child; until they are built, this is the
+  residual.
 - **The peer hop (D163).** Only the replica holding a tunnel session can open a stream on it
   ([`tunnel.md`](tunnel.md) §11), and a plain MCP request has no Temporal activity to carry it there. A request
   for a tunnel session held by another replica (a pinned session's later request, or a session chosen for an
@@ -934,7 +942,8 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   It never forwards a cursor it did not mint, so denied tools never shape page boundaries. The drained list is
   cached per service and refreshed on upstream `notifications/tools/list_changed` (which is forwarded; the
   replica that sees it tells the others with `NOTIFY kontra_tunnel, 'tools:<tenant_id>/<service>'`, D199) and
-  every 10 minutes.
+  every 10 minutes. A replica whose `LISTEN` connection comes back drops every cached list, since such a notice may
+  have been lost while it was down (D230).
 - **`tools/call` of a denied or unknown tool** is answered by the gate, before dispatch, with `-32602` and
   message `Unknown tool: <name>`, exactly as for a tool that does not exist (`mcp_tool_denied`).
 
