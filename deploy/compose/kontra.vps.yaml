@@ -1,0 +1,43 @@
+# The compose team gate on a fresh VPS, with built-in ACME (DM4-14): compose.yaml with KONTRA_CONFIG naming this
+# file. Use it on a host that has a public DNS name and no certificate yet; deploy/compose/kontra.yaml is the same gate
+# with a certificate you provide. A test keeps the two in step: edit both.
+#
+# Before `docker compose up`, with KONTRA_CONFIG=./deploy/compose/kontra.vps.yaml and KONTRA_PORT=443 in the .env
+# beside compose.yaml:
+#   - point a DNS name (A, and AAAA if the host has IPv6) at the host, and wait until it resolves;
+#   - replace gate.example.com below, in public_url and tls.acme.domains, with that name;
+#   - publish the gate on port 443 (KONTRA_PORT=443): the CA validates with TLS-ALPN-01 on port 443 and nowhere else
+#     (D82). The container still listens on 8443, so the gate needs no privilege. Nothing else needs a port: the
+#     metrics stay on 127.0.0.1, and port 80 is never asked;
+#   - put the card-signing key in deploy/compose/signing/kontra.key (an ECDSA P-256 key in PEM, D166), owned by uid
+#     65532, mode 0400:
+#       mkdir -p deploy/compose/signing
+#       openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt \
+#         > deploy/compose/signing/kontra.key
+#       chown 65532:65532 deploy/compose/signing/kontra.key && chmod 0400 deploy/compose/signing/kontra.key
+#   - keep the database password below in step with compose's KONTRA_DB_PASSWORD (Postgres is on the compose network
+#     only: no port of it is published).
+#
+# The first start orders the certificate (a few seconds once the name resolves); the certificate and the ACME account
+# key are kept in compose.yaml's named volume acme, at /var/lib/kontra-gate, so a restart or a rebuild does not order
+# another (Let's Encrypt allows 5 duplicate certificates a week). `docker compose down -v` drops it. Built-in ACME
+# serves one replica (D70). The healthcheck sends public_url's host as the TLS server name (kontra-gate health -f).
+#
+# The service below is hosted by the nodes enrolled for it (`docker compose exec gate kontra-gate enroll -f
+# /etc/kontra/kontra.yaml hello`): `kontra connect --gate https://<the name> --enroll <token> --serve
+# a2a:hello=http://127.0.0.1:9999` on any machine, examples/sellers/hello-exec behind it.
+listen: ":8443"
+public_url: https://gate.example.com
+signing_key: file:/etc/kontra/signing/kontra.key
+tls: { acme: { domains: [gate.example.com], cache_dir: /var/lib/kontra-gate/acme } }
+postgres: postgres://kontra:kontra@postgres:5432/kontra
+temporal: { address: "temporal:7233", namespace: kontra }
+metrics: { listen: ":9090" }
+auth: { api_keys: true }
+
+services:
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }          # hosted by the nodes enrolled for it
+    allow: ["org:default"]           # every API key of this gate's one tenant
+    task: { timeout: 10m, retries: 2 }
