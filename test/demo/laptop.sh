@@ -14,8 +14,8 @@
 #   inspector … --method tools/list read_file
 #   inspector … --tool-name hire    Hello World
 #   curl … agent-card.json          the card, naming the slug
-# Then it prints the slug and "ready" for the host's checks, and holds the node connected until it is stopped (TERM,
-# docker stop): it then stops what it started and exits 0.
+# Then it prints the slug and "ready" for the host's checks, and holds the node connected until the host copies a file
+# named stop into /opt/kontra-demo (or sends TERM): it then stops what it started and exits 0.
 #
 # Lines for the host, on stdout: "kontra-demo: slug <slug>", "kontra-demo: ready", "kontra-demo: FAIL <why>".
 # KONTRA_DEMO_EXTRA_CA (a rehearsal against a local gate, test/demo): a CA certificate to trust besides the system's,
@@ -172,5 +172,10 @@ done
 [ -n "$slug" ] || fail "the block never named the slug"
 say "slug $slug"
 say "ready"
-sleep infinity &
-wait $!
+# Held until the host's checks are done: the host copies a file named stop here (docker cp). A file, not only a signal:
+# on some hosts runc cannot signal a container's init ("unable to signal init: permission denied"), and docker stop
+# then kills it after its timeout.
+until [ -e "$here/stop" ]; do sleep 1; done
+say "stopped"
+stop_all
+exit 0

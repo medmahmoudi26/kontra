@@ -14,8 +14,8 @@
 # stdout and holds the node connected. This host then checks, with no credential, while the node is still connected:
 # the public card (GET …/agents/<slug>/<public service>/.well-known/agent-card.json names that URL) and a JSON-RPC
 # SendMessage "hi" to the public URL, which must answer Hello World (and `a2a send` to the public card, when a2a is on
-# this host's PATH). Then it stops the container. Everything is written to a transcript (--transcript; default
-# ./kontra-demo-<UTC time>.log).
+# this host's PATH). Then it stops the laptop (a stop file copied in: laptop.sh stops its node and exits 0) and checks
+# that it exited 0. Everything is written to a transcript (--transcript; default ./kontra-demo-<UTC time>.log).
 #
 # Teardown, in a trap on EXIT, INT and TERM (printed before anything starts):
 #   docker rm -f kontra-demo-<sha>; docker image rm kontra-demo:<sha> (unless --keep-image); rm -rf <its temporary dir>.
@@ -264,7 +264,12 @@ if command -v a2a > /dev/null 2>&1 && [ -z "$resolve" ]; then
 fi
 
 echo "demo-clean-laptop: host checks passed; stopping the laptop"
-docker stop -t 20 "$name" > /dev/null
+: > "$tmp/stop"
+docker cp "$tmp/stop" "$name:/opt/kontra-demo/stop" > /dev/null
+if ! timeout 60 docker wait "$name" > /dev/null; then
+  echo "demo-clean-laptop: the laptop did not stop within 60 s of its stop file; docker stop"
+  docker stop -t 10 "$name" > /dev/null
+fi
 code=$(docker container inspect -f '{{.State.ExitCode}}' "$name")
 sleep 1
 sed -n "$((shown + 1)),\$p" "$tmp/laptop.log" | sed 's/^/  laptop | /'

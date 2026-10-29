@@ -27,7 +27,8 @@ MCP servers beside them, over Streamable HTTP or stdio, with end-to-end sealing 
   for two hours (`anon-` and 16 hex digits), and `--public <name>` lets anyone call that service
   ([`spec/tunnel.md`](spec/tunnel.md) §6);
 - is an MCP OAuth resource server, and `kontra login` gets an API key from a gate's authorization server; asks a
-  remote Admission hook before a task or a session; and passes the pinned A2A TCK in CI (`make tck`);
+  remote Admission hook before a task or a session; and is held to the pinned A2A TCK with its listed expected
+  failures (`make tck`, and the `tck` workflow);
 - comes up on a fresh VPS from `compose.yaml` with built-in ACME ([below](#a-team-gate-on-your-own-vps)).
 
 The demo below runs against the staging gate, `gateway.kontra.run`: the production gate, `gateway.kontra.sh`, opens no

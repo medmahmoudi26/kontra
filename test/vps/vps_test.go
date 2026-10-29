@@ -371,7 +371,7 @@ func TestACMEVariantWritesItsCache(t *testing.T) {
 		t.Fatalf("the gate is healthy with no certificate in its cache")
 	}
 	certPEM, keyPEM := (*kit.CA)(nil).Leaf(t, domain)
-	if err := s.Put(ctx, "gate", "/var/lib/kontra-gate/acme", domain, append(keyPEM, certPEM...), kit.GateUID, kit.GateUID, 0o600); err != nil {
+	if err := s.PutVolume(ctx, "acme", "acme/"+domain, append(keyPEM, certPEM...), kit.GateUID, kit.GateUID, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// autocert keeps a failed order a minute before it reads the cache again.

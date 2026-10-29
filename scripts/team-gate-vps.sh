@@ -178,8 +178,9 @@ if [ -z "$do_fp" ] || [ "$do_fp" != "$local_fp" ]; then
   exit 2
 fi
 sizes=$(doctl compute size list --format Slug,PriceHourly --no-header)
-if ! awk '{print $1}' <<< "$sizes" | grep -qx "$size"; then
-  if awk '{print $1}' <<< "$sizes" | grep -qx "$size-amd"; then
+has_size() { awk -v s="$1" '$1 == s {f = 1} END {exit !f}' <<< "$sizes"; }
+if ! has_size "$size"; then
+  if has_size "$size-amd"; then
     size="$size-amd"
   else
     echo "team-gate-vps: DigitalOcean has no size $size (nor $size-amd)" >&2
@@ -270,7 +271,10 @@ for i in $(seq 60); do
   [ "$i" = 60 ] && { echo "team-gate-vps: no ssh to $ip within 10 minutes"; exit 1; }
   sleep 10
 done
-sshx cloud-init status --wait | tail -1
+# cloud-init exits 2 for "done with recoverable errors" (deprecation notices on 24.04): read its status instead.
+ci=$(sshx cloud-init status --wait 2>&1 || true)
+echo "cloud-init: $(tail -1 <<< "$ci")"
+grep -q 'status: done' <<< "$ci" || { echo "team-gate-vps: cloud-init did not finish: $ci"; exit 1; }
 sshx 'docker compose version && docker buildx version' | sed 's/^/  vps | /'
 
 step "3. DNS: A $name -> $ip"
@@ -311,8 +315,12 @@ sshx 'cd /opt/kontra && timeout 1200 docker compose up -d --build --wait' 2>&1 |
 echo "compose up --build --wait: $((SECONDS - t0)) s"
 
 step "5. verify from this host"
-curl -fsS --max-time 20 "https://$name/healthz" > /dev/null && echo "GET https://$name/healthz: 200"
-issuer=$(openssl s_client -connect "$name:443" -servername "$name" < /dev/null 2> /dev/null | openssl x509 -noout -issuer -subject)
+if ! curl -fsS --max-time 20 "https://$name/healthz" > /dev/null; then
+  echo "team-gate-vps: GET https://$name/healthz failed"
+  exit 1
+fi
+echo "GET https://$name/healthz: 200"
+issuer=$(openssl s_client -connect "$name:443" -servername "$name" < /dev/null 2> /dev/null | openssl x509 -noout -issuer -subject || true)
 echo "$issuer"
 grep -q "Let's Encrypt" <<< "$issuer" || { echo "team-gate-vps: the certificate is not Let's Encrypt's"; exit 1; }
 for p in 22 80 443 5432 7233 8443 9090; do
@@ -356,12 +364,13 @@ docker create --name "$teammate" --init "kontra-demo:$sha" bash /opt/kontra-team
 docker cp "$tmp/teammate/." "$teammate:/opt/kontra-teammate" > /dev/null
 docker start "$teammate" > /dev/null
 for i in $(seq 240); do
-  docker logs "$teammate" 2>&1 | grep -q "connected to https://$name" && break
+  logs=$(docker logs "$teammate" 2>&1 || true)
+  grep -q "connected to https://$name" <<< "$logs" && break
   [ "$(docker container inspect -f '{{.State.Running}}' "$teammate")" = true ] || { docker logs "$teammate" 2>&1 | tail -20; exit 1; }
   [ "$i" = 240 ] && { echo "team-gate-vps: the team member's node did not connect within 20 minutes"; exit 1; }
   sleep 5
 done
-docker logs "$teammate" 2>&1 | grep -v -e '^go: downloading' | tail -8 | sed 's/^/  teammate | /'
+{ docker logs "$teammate" 2>&1 | grep -v -e '^go: downloading' | tail -8 | sed 's/^/  teammate | /'; } || true
 
 auth=(-H "Authorization: Bearer $key")
 body='{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m4-vps-'"$epoch"'","role":"ROLE_USER","parts":[{"text":"hi"}]}}}'

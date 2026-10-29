@@ -305,29 +305,17 @@ func (s *Stack) List(ctx context.Context, service, path string) (map[string]Entr
 	}
 }
 
-// Put writes a file into service's container at dir/name, owned by uid:gid with mode, through `docker cp -a` (a
-// read-only root filesystem takes it into a writable volume).
-func (s *Stack) Put(ctx context.Context, service, dir, name string, data []byte, uid, gid int, mode int64) error {
-	id, err := s.Container(ctx, service)
-	if err != nil {
-		return err
-	}
-	var b bytes.Buffer
-	tw := tar.NewWriter(&b)
-	if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(data)), Uid: uid, Gid: gid,
-		ModTime: time.Now(), Typeflag: tar.TypeReg}); err != nil {
-		return err
-	}
-	if _, err := tw.Write(data); err != nil {
-		return err
-	}
-	if err := tw.Close(); err != nil {
-		return err
-	}
-	cmd := exec.CommandContext(ctx, "docker", "cp", "-a", "-", id+":"+dir)
-	cmd.Stdin = &b
+// HelperImage is the small image a test writes into a volume with (pinned; this host and Docker Hub have it).
+const HelperImage = "busybox:1.36"
+
+// PutVolume writes a file into the project's named volume at rel, owned by uid:gid with mode, from a helper container
+// that runs as uid:gid (docker cp -a needs getent in the target container, which distroless lacks).
+func (s *Stack) PutVolume(ctx context.Context, volume, rel string, data []byte, uid, gid int, mode os.FileMode) error {
+	cmd := exec.CommandContext(ctx, "docker", "run", "--rm", "-i", "--network", "none", "--user", fmt.Sprintf("%d:%d", uid, gid),
+		"-v", s.Project+"_"+volume+":/v", HelperImage, "sh", "-c", fmt.Sprintf(`cat > "/v/%s" && chmod %o "/v/%s"`, rel, mode, rel))
+	cmd.Stdin = bytes.NewReader(data)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("docker cp -a - %s:%s: %w: %s", id, dir, err, out)
+		return fmt.Errorf("writing %s into volume %s: %w: %s", rel, volume, err, out)
 	}
 	return nil
 }

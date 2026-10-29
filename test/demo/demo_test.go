@@ -298,15 +298,16 @@ func TestDemoImage(t *testing.T) {
 	img := "kontra-demo:" + sha
 	t.Cleanup(func() { _, _ = kit.Run(context.Background(), "", nil, "docker", "image", "rm", img) })
 	probe := `set -u
+echo "HOME $(ls -A "$HOME" | tr '\n' ' ')"
 for b in kontra a2a a2a-cli; do command -v "$b" && echo "FOUND $b"; done
 ls "$(go env GOPATH)/bin" 2>/dev/null | sed 's/^/GOPATHBIN /'
-echo "HOME $(ls -A "$HOME" | tr '\n' ' ')"
 echo "USER $(id -un) $(id -u)"
 echo "GOPATH $(go env GOPATH)"
 echo "PATH $PATH"
 echo "GO $(go version)"
 echo "NODE $(node --version) NPX $(npx --version)"
-if [ -e /src ]; then echo "SRC $(ls /src | tr '\n' ' ')"; touch /src/x 2>/dev/null && echo "SRC WRITABLE"; else echo "NOSRC"; fi`
+if [ -e /src ]; then echo "SRC $(ls /src | tr '\n' ' ')"; touch /src/x 2>/dev/null && echo "SRC WRITABLE"; else echo "NOSRC"; fi
+exit 0`
 	for _, tc := range []struct {
 		args []string
 		src  bool
@@ -319,10 +320,14 @@ if [ -e /src ]; then echo "SRC $(ls /src | tr '\n' ' ')"; touch /src/x 2>/dev/nu
 			t.Fatalf("%v: %v\n%s", tc.args, err, out)
 		}
 		t.Logf("%v:\n%s", tc.args, out)
-		for _, bad := range []string{"FOUND", "GOPATHBIN", "SRC WRITABLE", "/go/bin"} {
+		for _, bad := range []string{"FOUND", "GOPATHBIN", "SRC WRITABLE"} {
 			if strings.Contains(out, bad) {
 				t.Errorf("%v: the laptop holds %q before the install step:\n%s", tc.args, bad, out)
 			}
+		}
+		if m := regexp.MustCompile(`(?m)^PATH (.*)$`).FindStringSubmatch(out); m == nil ||
+			slices.ContainsFunc(strings.Split(m[1], ":"), func(e string) bool { return e == "/go/bin" || strings.HasPrefix(e, "/home/laptop") }) {
+			t.Errorf("%v: GOPATH's bin is on PATH before the README's export line:\n%s", tc.args, out)
 		}
 		for _, want := range []string{"HOME .bash_logout .bashrc .profile \n", "USER laptop 1000", "GOPATH /home/laptop/go",
 			"GO go version go1.26.10 linux/", "NODE v22.23.4 NPX "} {
@@ -330,10 +335,11 @@ if [ -e /src ]; then echo "SRC $(ls /src | tr '\n' ' ')"; touch /src/x 2>/dev/nu
 				t.Errorf("%v: no %q in:\n%s", tc.args, want, out)
 			}
 		}
-		if tc.src != strings.Contains(out, "SRC README.md ") || tc.src == strings.Contains(out, "NOSRC") {
+		src := regexp.MustCompile(`(?m)^SRC .* README\.md .*$`).FindString(out)
+		if tc.src != (src != "") || tc.src == strings.Contains(out, "NOSRC") {
 			t.Errorf("%v: /src %v:\n%s", tc.args, tc.src, out)
 		}
-		if tc.src && (!strings.Contains(out, " go.mod ") || !strings.Contains(out, " test ") || !strings.Contains(out, " cmd ")) {
+		if tc.src && (!strings.Contains(src, " go.mod ") || !strings.Contains(src, " test ") || !strings.Contains(src, " cmd ")) {
 			t.Errorf("/src is not the whole archive:\n%s", out)
 		}
 	}
