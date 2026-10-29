@@ -2531,7 +2531,8 @@ http://localhost:7777/agents/anon-…/hello`, a stock MCP client on the node's `
 `/mcp` (`hire`), and a call of the public URL without a credential. The staging gate is `gateway.kontra.run`, a
 multi-tenant gate with `tunnel.anonymous` in the cluster's `kontra-staging` namespace; until M5 opens anonymous
 sessions on `gateway.kontra.sh`, the demo names `--gate https://gateway.kontra.run`, and the README says so. The
-README block between its `demo` markers is what the clean-laptop run executes, so the two cannot drift.
+README block between its `demo` markers is what the clean-laptop run executes, so the two cannot drift. Amended by
+DM4-31 (`@latest`, the slug placeholder, the run's two substitutions, the pinned MCP client).
 
 ### DM4-14. The compose team gate gets an ACME variant, and runs on a throwaway VPS — **decided under the owner's standing instruction, 28 Oct** (completes D168)
 
@@ -2541,6 +2542,7 @@ D168 made the compose file terminate TLS from a provided certificate, as on a VP
 ACME cache and `deploy/compose/kontra.yaml` documents the ACME variant beside the provided certificate; the gate run
 brings the file up on a new DigitalOcean droplet under a throwaway `kontra.run` name, connects a node and hires through
 it from another machine, and destroys the droplet and the name afterwards (the run's record says how long it lived).
+Completed by DM4-31 (the healthcheck's server name, the image's `/var/lib/kontra-gate`, `kontra.vps.yaml`).
 
 ### DM4-15. The named tests M4 runs, and the gate runs — **decided under the owner's standing instruction, 28 Oct**
 
@@ -3092,3 +3094,77 @@ mutated copy: `ListHired`, `LoadHired` and `LoadHiredAsked` without `hired`; sea
 anonymous-tenant rule; the quoted refusal as `-32602`; `tasks/update` taking any `k.<task>.*` key; `all > max_tenants`;
 the client's address appended to `tunnels.cli_version`; the purge without its `enrollment_tokens` delete. `hostOn` was
 checked with a node redialling to replica A after `StartNode`: the old check passed, and the new one fails.
+
+## From M4 WP-08, the gate-run kits (29 Oct)
+
+M4's two gate runs that are not tests in CI, the README demo from a clean laptop against staging and the team gate on a
+clean VPS (DM4-13 to DM4-15), are kits in this repository that M4 WP-09 runs after the merge. Building them settled what
+the plan and its audit left open.
+
+### DM4-31. What the README demo runs, how the clean laptop runs it, and what the compose ACME variant needs — **decided under the owner's standing instruction, 29 Oct** (amends DM4-13; completes DM4-14, DM4-15)
+
+**The ACME variant's two defects (the plan's audit, gaps 17).** Built-in ACME (autocert) refuses a TLS handshake without
+a server name, and compose's healthcheck dialled `https://127.0.0.1:8443/healthz` with none; and a new named volume
+mounted on a path the image does not have is root's, while the gate runs as 65532. Decision: `kontra-gate health` sends
+`--server-name`, else the host of `public_url` in the configuration `-f` names, else the URL's host, and still skips
+verification on a loopback dial; compose's healthcheck passes `-f /etc/kontra/kontra.yaml`, which works for both
+configurations (a provided certificate is served whatever the name). The image creates `/var/lib/kontra-gate`, empty
+and owned by 65532:65532 (`COPY --chown` from the build stage, no `--chmod`, so the classic builder builds it too), and
+Docker initialises a new named volume from it. `compose.yaml` mounts the volume `acme` there in both gate services;
+`deploy/compose/kontra.vps.yaml` is `kontra.yaml` with `tls.acme` (cache `/var/lib/kontra-gate/acme`), `public_url`
+`https://gate.example.com` to edit, and one tunnel service, `hello`; a test keeps the two in step. The container keeps
+listening on 8443 (no privilege) and `KONTRA_PORT=443` publishes it where TLS-ALPN-01 is validated (D82).
+
+**The README's block** (amends DM4-13's `@<version>`, as the audit asks): `go install kontra.sh/kontra/cmd/kontra@latest`
+(proxy.golang.org already resolves `kontra.sh/kontra` through the vanity import), a2a-cli v0.3.1 by `go install` renamed
+to `a2a`, `export PATH="$PATH:$(go env GOPATH)/bin"` (a fresh Go install does not put it on PATH), a directory for the
+filesystem server, `a2a server --exec`, `kontra connect --gate https://gateway.kontra.run … --public hello`, then the
+clients naming the slug as the placeholder `anon-<…>` (the README says what it stands for): `a2a send -a
+…/.well-known/agent-card.json`, `@modelcontextprotocol/inspector@2.13.0 --cli` on the node's `/mcp/anon-<…>/fs`
+(`tools/list`) and on `/mcp` (`tools/call hire`), and `curl` of the public card. The inspector is pinned to 2.13.0, not
+the 1.x line the plan had in mind: 1.x prints that it is deprecated and receives security fixes only, and 2.x's CLI keeps
+`--cli <url> --transport http --method … --tool-name … --tool-arg k=v` and negotiates the 2025-11-25 era by default, which
+the node's stdio bridge needs (D161). `test/demo` checks the block: the markers, the commands, the pins, the placeholder,
+and no Homebrew, `:7778` console, `a2a serve`, short slug or production gate.
+
+**The clean-laptop run** (`scripts/demo-clean-laptop.sh`; the plan's gate run B2 and the audit's gaps 12 and 13). The
+laptop is `test/demo/Dockerfile`: `golang:1.26.10-bookworm` pinned by its index digest (the one this host pulled on 21 Oct;
+the tag has moved since, and both stay pullable), Node 22.23.4 from nodejs.org's tarball with its sha256, a user `laptop`
+with an empty home, GOPATH the default and off PATH; target `laptop-src` adds `git archive HEAD` at `/src` for the run
+before the merge, `laptop` has none. `test/demo/laptop.sh` runs the block's commands one at a time in one shell, with
+exactly two substitutions, both printed: (a) before the merge, the kontra install runs as `(cd /src && go install
+./cmd/kontra)`; after it (`--published --expect <merge commit>`), as written, again a minute apart for up to 30 minutes
+until `kontra version` names the commit; (b) `anon-<…>` is the slug kontra connect printed. A client command is tried
+three times, 15 s apart, because the first `npx` of each package downloads it and the node starts server-filesystem
+through `npx` on the first session; every attempt is in the transcript. The laptop then prints the slug and holds the
+node connected while the host checks the public URL with no credential (the card, and a JSON-RPC `SendMessage` "hi"
+answering Hello World; `a2a send` too when a2a is on the host's PATH, which the plan assumed and this host lacks), then
+`docker stop`s it. The script prints its teardown first and runs it in a trap. Options `--network`, `--ca-file` and
+`--resolve` exist for a rehearsal against a local gate only.
+
+**`kontra version` names the commit of a `go install`ed binary.** A module-mode build has no VCS stamp, so it printed
+`dev`; the post-merge check could not read the commit. `internal/version` now reports the main module's version when
+there is no stamp (a pseudo-version ends with the commit's 12-digit prefix).
+
+**The VPS run** (`scripts/team-gate-vps.sh`; the plan's gate run C and the corrections' WP-09 pre-flight). The script
+does the corrections' pre-flight itself (the DigitalOcean key's MD5 fingerprint against this host's key, the size, no
+droplet tagged `kontra-m4-gaterun`, no record for the name), waits until 1.1.1.1 resolves the name (DNS over HTTPS)
+before compose asks Let's Encrypt, publishes on 443, checks the ports with bash's `/dev/tcp` (no nc), and hires through
+the gate with `curl` (A2A JSON-RPC and an MCP `search` on `/mcp`) from this host while a `kontra-demo` container is the
+team member's node. Droplets are only ever listed by the run's tag, `--teardown-only` reaps by tag and by the record's
+comment, and a droplet named `main-droplet` is refused even if tagged. The droplet's user data adds `docker-buildx` to
+the plan's `docker.io` and `docker-compose-v2`: Ubuntu packages buildx separately, and without it Docker builds with its
+deprecated legacy builder.
+
+**Staging.** The manifests are private (`~/.kontra-secrets/gateway-staging/`), named `gate-v4` and `gate-v4-*` with the
+labels the corrections give, the signing key mounted at `/etc/kontra-signing` as in production; `config.staging.json`
+names the same hosts and path.
+
+**Tested here, nothing run against staging, DigitalOcean or Cloudflare** (O2). `make test-kits` (`KONTRA_KIT_TESTS=1`)
+runs compose's ACME variant on this host (the gate writes its account key into a fresh volume as 65532; once the cache
+holds a certificate for the name, compose's own healthcheck turns the gate healthy, and health without a server name
+fails), checks the laptop image, and rehearses the whole demo run against a local multi-tenant gate with anonymous
+sessions that answers for `gateway.kontra.run` on a docker network (`--network`, `--ca-file`, `--resolve`). Without
+Docker, `test/demo` and `test/vps` check the README block, the scripts (bash -n, shellcheck, the prerequisites each
+refuses without, the teardown each prints, `--dry-run` and `--teardown-only` against stubs of docker, doctl, ssh and
+Cloudflare's API) and the user data's ASCII.
