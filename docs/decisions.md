@@ -3558,7 +3558,7 @@ owner said "Don't ask me anything": the entries below are **decided under the ow
 They were built under provisional labels while M3's review added D entries on `main`, and were renumbered D268 to
 D298, after M3's last (D267), in every file of the repository when M4 was merged onto M3's final tree (29 Oct).
 
-### D268. What M4 builds, and what it leaves to M5 — **decided under the owner's standing instruction, 28 Oct** (amends D170)
+### D268. What M4 builds, and what it leaves to M5 — **decided under the owner's standing instruction, 28 Oct** (amends D170, D225)
 
 D170 left [`relay.md`](../spec/relay.md) §12, `kontra login`, `--public` and anonymous sessions to M4, and the MCP
 OAuth resource server (§12.1) to M5 with the OIDC principals; the remote Admission hook has been refused at load since
@@ -3573,6 +3573,8 @@ accounts and the page on which a person accepts a quote (Cloud's control plane),
 doubles (an Admission server, an authorization server), and the gate code M5 needs from this repository (the
 resource server, the Admission client) is open-source code M5 would otherwise write here while its own work is in
 kontra-cloud. The open-source gate still contains no money code: Admission decides and never moves money (D45).
+Amended by D299 (what M3's review rounds, D225 and D231, left to M4: the two-replica test of D199's notice is built,
+the cap of a principal's durable tasks is not).
 
 ### D269. The gate's own `/mcp` serves both eras, with the gate as the only server — **decided under the owner's standing instruction, 28 Oct** (carries out D24)
 
@@ -3774,8 +3776,7 @@ READMEs until a milestone needs them.
 The audit of the M4 plan (seven blockers, all accepted by the orchestrator) found that §10.3 still sent every operator
 URL through the SSRF dialer, that the anonymous rules broke the lost-welcome probe, that `elicitation/complete` was
 broadcast across streams, and several holes in the anonymous limits. These entries settle them before the code that
-depends on them. Like D268 to D283 they are **decided under the owner's standing instruction, 28 Oct**, and are
-renumbered into the D sequence when M3 has merged.
+depends on them. Like D268 to D283 they are **decided under the owner's standing instruction, 28 Oct**.
 
 ### D284. The operator-configured endpoints, and what the gate accepts from the Admission hook — **decided under the owner's standing instruction, 28 Oct** (amends D67, D192; corrects D276)
 
@@ -3876,7 +3877,7 @@ A2A task.
 
 The first measured runs of the pinned TCK through the gate (`make tck`, four variants, two bindings each) found one
 gate defect and corrected the predicted expected failures. Like the entries above they are **decided under the
-owner's standing instruction, 28 Oct**, and are renumbered into the D sequence when M3 has merged.
+owner's standing instruction, 28 Oct**.
 
 ### D290. A blocking resend of a task at `input-required` or `quoted` is answered at once — **decided under the owner's standing instruction, 28 Oct** (completes D108)
 
@@ -4007,7 +4008,7 @@ Tests: `internal/anon` (`TestOpenCountsNetworks`, `TestOpenServicesPerTenant`, `
 ## From M4 WP-04, the gate's own `/mcp` (28 Oct)
 
 Building [`relay.md`](../spec/relay.md) §12's legacy era settled what §12 left open. Like the entries above it is
-**decided under the owner's standing instruction, 28 Oct**, and is renumbered into the D sequence when M3 has merged.
+**decided under the owner's standing instruction, 28 Oct**.
 
 ### D293. How `/mcp` hires, cancels and answers — **decided under the owner's standing instruction, 28 Oct** (completes D272, D288, D289)
 
@@ -4413,3 +4414,38 @@ from `/src` and a2a-cli), then SendMessage answered Hello World and `search` lis
 `TestDemoRehearsal` took 346 s, also under umask 077. Checked red against the scripts as they were: the fail-open reap
 and pre-flight (exit 0, "nothing of a run is left"), the droplet deleted before its record, the staging records deleted
 with `KONTRA_VPS_NAME=gateway.kontra.run`, the token in curl's argv, and the payload copied 0700/0600 under umask 077.
+
+## The merge onto M3's final tree (29 Oct)
+
+### D299. M4 merges onto M3's final tree, and what M3's review left to M4 — **decided under the owner's standing instruction, 29 Oct** (amends D268; carries out D225)
+
+M4's branch was cut from M3's at `25faac5`, before M3's review rounds 2 to 4 (D191–D267); M3 then merged to `main` as
+`98a9f25`, the tree of `m3-sealing-mcp` at `6a2dba2`. Merging that tree into M4 met eleven conflicting files, the
+interfaces the rounds changed under M4's code, and two items M3's decisions leave to M4 that M4's plan predates: D225's
+gate-level test of D199's notice across two replicas, and D231's cap of a principal's durable tasks per service.
+Decision:
+
+- **Both sides are kept.** M3's revisions of the specs stand ([`relay.md`](../spec/relay.md) revision 7,
+  [`tunnel.md`](../spec/tunnel.md) revision 5) and M4's follow them (8 and 6). tunnel.md §5's `unknown_key` rule
+  names both of its exceptions, a node that only hires (D206) and a node that asks for an anonymous session (D285);
+  relay.md §10.3's operator-configured endpoints (D284) take in the bucket that D192 dials as configured. The MCP
+  relay's dependencies carry M3's `ToolsChanged` beside M4's anonymous `Calls` and `Tenants`; the CLI keeps M3's
+  `kontra seal` usage and help beside `kontra login` and `--public`; the README keeps M3's sealing, MCP and
+  second-pentest text beside M4's demo and team-gate sections. M4's provisional labels are D268 to D298.
+- **What the rounds changed under M4's code holds.** An anonymous tenant's `calls` slot (D287) is taken after
+  Admission and before a call is metered, in both eras, where D196 and D265 leave metering. The sessions of `/mcp`
+  itself (service `NULL`, no tunnel) are neither counted nor evicted by `max_sessions_per_principal` (D213, D231,
+  D249), and have their own idle sweep. The streams `/mcp` writes keep D265's rule: a plain `hire`'s answer and a
+  `GET` stream carry no event id, a `tasks/result` stream its `k.` ids (§11.7). A hiring node's `/mcp` is no service
+  path, so its sealing of MCP sessions (D219, D260, D263) leaves it alone, and D260's removal of `Mcp-Session-Id` from
+  every answer but an `initialize`'s takes nothing from a client of `/mcp`, whose answers name the session they
+  answer on.
+- **D225's test is built.** `TestToolsListChangedAcrossReplicas` (`internal/gate`) has replica B drain a direct
+  service's `tools/list`, replica A relay the upstream's `notifications/tools/list_changed` on the `POST` stream of a
+  call, and B relay a call of the tool the upstream added within 5 seconds, where B's drained list would answer it
+  `Unknown tool` for up to 10 minutes ([`relay.md`](../spec/relay.md) §11.3).
+- **D231's cap of a principal's durable tasks per service is not built in M4**, and is follow-up work beside D267's.
+  The owner's M4 goal does not name it, and it needs a service setting with its schema, spec text in relay.md §11.2 and
+  §11.5 and a refusal for a task-augmented call over it, which a merge does not decide alone. Until it is built, a
+  principal's durable tasks on a service are bounded by `limits.dispatch_slots` gate-wide and, on an anonymous
+  tenant's service, by `tunnel.anonymous.tasks` (D287).
