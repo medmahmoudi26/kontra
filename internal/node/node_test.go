@@ -400,6 +400,30 @@ func eventually(t *testing.T, within time.Duration, what string, cond func() boo
 	}
 }
 
+// revokeKey writes {"t": "revoked"} on s's control stream, as the gate does when an operator revokes s's key
+// (§12), and wants the node's reaction, the log line reaction on session s. The node closes the session on that
+// line, and the close can beat the write's own result: hashicorp/yamux's Stream.Write hands the frame to its
+// send loop, then waits on the send's result and on the session's shutdown in one select, which takes either
+// when both are ready. So a line the node read and acted on can come back yamux.ErrSessionShutdown (CI's go
+// job on e0a5abb: "tunnel: control: session shutdown", with the node's log showing it had closed the session
+// on the revocation). That error passes only with the node's log of the reaction; any other error fails.
+func revokeKey(t *testing.T, tn *testNode, s *tunnelgate.Session, reaction string) {
+	t.Helper()
+	err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked})
+	if err != nil && !errors.Is(err, yamux.ErrSessionShutdown) {
+		t.Fatal(err)
+	}
+	what := fmt.Sprintf("the node logging %q on session %s (the write returned %v)", reaction, s.ID, err)
+	eventually(t, 5*time.Second, what, func() bool {
+		for _, line := range strings.Split(tn.logs.String(), "\n") {
+			if strings.Contains(line, reaction) && strings.Contains(line, "tunnel_session="+s.ID.String()) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func startAgent(t *testing.T, cfg slowagent.Config) *slowagent.Agent {
 	t.Helper()
 	a := slowagent.New(cfg)
@@ -587,9 +611,7 @@ func TestRunRevokedStops(t *testing.T) {
 	rec := newRecorder(t)
 	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url()))).run(t)
 	s := g.session(t)
-	if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil {
-		t.Fatal(err)
-	}
+	revokeKey(t, tn, s, "the gate revoked this node's key")
 	if err := tn.result(t, 10*time.Second); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("Run = %v, want ErrRevoked", err)
 	}
@@ -1169,9 +1191,7 @@ func TestRotationByAnotherProcess(t *testing.T) {
 	if resp, _ := exchange(t, s1, "hello", "/old"); resp.StatusCode != 200 {
 		t.Fatalf("the old session no longer serves: %d", resp.StatusCode)
 	}
-	if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil {
-		t.Fatal(err)
-	}
+	revokeKey(t, tn, s1, "the gate revoked the session's rotated key")
 	eventually(t, 5*time.Second, "the old key's session closed", s1.Mux().IsClosed)
 	time.Sleep(200 * time.Millisecond)
 	if !tn.running() || s2.Mux().IsClosed() {
@@ -1252,9 +1272,7 @@ func TestRevokedRotatedKeyBeforeTheMaintainTick(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil { // the operator revokes the old key
-		t.Fatal(err)
-	}
+	revokeKey(t, tn, s1, "the gate revoked the session's rotated key") // the operator revokes the old key
 	eventually(t, 5*time.Second, "the old key's session closed", s1.Mux().IsClosed)
 	start := time.Now()
 	r := g.adm.next(t)
