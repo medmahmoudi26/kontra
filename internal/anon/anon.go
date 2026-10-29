@@ -11,8 +11,9 @@
 //
 // Ten minutes before the end the gate sends {"t": "expiring"} (internal/tunnelgate's per-session timer); at the end
 // the session's replica sends {"t": "revoked"} and closes it, and Sweeper.Expire (End) revokes the key's bindings and
-// disables the services (404; tasks in flight fail service_unavailable at their next dispatch, D117) without revoking
-// the key. Sweeper.Purge deletes what the tenant still holds purge_after later, bucket objects first, and keeps the
+// disables the services (404; a dispatch in flight is aborted as a revoked binding's is, tunnel.md §12: its task fails
+// tunnel_lost once an upstream task exists, else service_unavailable at its next dispatch, relay.md §6.4, §13.5;
+// tunnel.md §6.1, DM4-30) without revoking the key. Sweeper.Purge deletes what the tenant still holds purge_after later, bucket objects first, and keeps the
 // tenant row as a tombstone (tenants.deleted_at), so a slug is never reused.
 //
 // The runtime limits (§6.2) are checked where the work is created: Caps.Task when a task is created (as host and as
@@ -1141,7 +1142,8 @@ type ConvertRequest struct {
 // transaction, which holds the key's row and then the anonymous tenant's, in that order, and has already moved the key
 // with MoveKey and bound it in To as §5 binds a key: the services the anonymous session served created in the account
 // where missing, with allow [org:<account>], another kind kind_mismatch with nothing moved; internal/enroll). The tenant ends at once (End,
-// reason "converted": its services disabled and 404, their tasks in flight failing service_unavailable, its session
+// reason "converted": its services disabled and 404, a dispatch in flight aborted as at the tenant's end, tunnel.md
+// §6.1, DM4-30: tunnel_lost once an upstream task exists, else service_unavailable at its next dispatch; its session
 // told revoked), and an EventConverted row names both tenants. Nothing of another anonymous tenant is locked.
 func Convert(ctx context.Context, tx pgx.Tx, req ConvertRequest) error {
 	var in uuid.UUID

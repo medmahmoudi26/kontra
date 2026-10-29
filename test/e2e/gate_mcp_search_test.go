@@ -18,7 +18,8 @@ import (
 // acme/pub (a2a, another tenant's, listed, annotations.search {price, price_model per_call}, §13.4), default/team (a2a, allow org:default), default/open
 // (a2a, allow anonymous only, not listed), default/fs (mcp, its tools cached on replica A by a client's tools/list
 // through the relay), default/cold (mcp, nothing cached), 60 default/page-NN (mcp) for paging, an anonymous tenant's
-// service (allow anonymous and its own org), and the harness's default/slow. Asserted:
+// service that every rule but the anonymous-tenant one would show (listed, allow anonymous, its own org and
+// org:default), and the harness's default/slow. Asserted:
 //
 //   - search with no arguments returns, in ref order and 50 a page, every service but open and the anonymous tenant's;
 //     the cursor continues with no duplicate and no gap;
@@ -48,7 +49,8 @@ func TestGateMCPSearch(t *testing.T) {
 		{Tenant: TeamTenant, Name: "open", URL: sellers["open"].URL, Allow: []string{"anonymous"}},
 		{Tenant: TeamTenant, Name: "fs", Kind: "mcp", URL: doubleURL(t, fsUp)},
 		{Tenant: TeamTenant, Name: "cold", Kind: "mcp", URL: doubleURL(t, coldUp)},
-		{Tenant: anonSlug, Name: "shown", URL: sellers["anon"].URL, Allow: []string{"anonymous", "org:" + anonSlug}},
+		// Visible by every other rule (listed, and its allow names buyer A's org): only the anonymous-tenant rule hides it.
+		{Tenant: anonSlug, Name: "shown", URL: sellers["anon"].URL, Allow: []string{"anonymous", "org:" + anonSlug, "org:" + TeamTenant}, Listed: true},
 	}
 	pageURL := doubleURL(t, pageUp)
 	for i := range 60 {
@@ -56,6 +58,10 @@ func TestGateMCPSearch(t *testing.T) {
 	}
 	if err := h.SeedServices(ctx, svcs...); err != nil {
 		t.Fatal(err)
+	}
+	if !scalar[bool](t, h, `select s.listed and 'org:default' = any(s.allow) and t.kind = 'anonymous' and s.disabled_at is null
+		from kontra.services s join kontra.tenants t on t.id = s.tenant_id where t.slug = $1 and s.name = 'shown'`, anonSlug) {
+		t.Fatal("the anonymous tenant's service is not listed, enabled and admitting org:default: the anonymous-tenant rule would go untested")
 	}
 	for _, ref := range []string{"acme/pub", "default/team"} {
 		if err := h.WaitA2A(ctx, ref, h.APIKey, 60*time.Second); err != nil {

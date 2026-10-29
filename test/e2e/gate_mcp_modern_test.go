@@ -27,8 +27,9 @@ import (
 //     client that declares URL elicitation; tasks/update on it, with the quoted event's gate key or any other, is the
 //     empty acknowledgement, forwards nothing and leaves it quoted;
 //   - booking's question, to a client declaring form elicitation, is input_required with exactly one inputRequests
-//     entry, keyed k.<task>.<seq>; tasks/update answers it once: a second answer to the same key is acknowledged and
-//     ignored, and the task completes with the first;
+//     entry, keyed k.<task>.<seq>; tasks/update with keys that are not that one (a later seq, seq 0, a key that is no
+//     gate id) is the empty acknowledgement, forwards nothing and leaves the question outstanding; tasks/update answers
+//     it once: a second answer to the same key is acknowledged and ignored, and the task completes with the first;
 //   - tasks/result and tasks/list are 404 with -32601; a _meta protocolVersion that differs from the header is 400 with
 //     -32020; a legacy request without a session is 400 with -32000; a hire without the tasks extension is a plain
 //     call (a CallToolResult, never a CreateTaskResult);
@@ -145,6 +146,23 @@ func TestGateMCPModern(t *testing.T) {
 		!strings.Contains(string(g.InputRequests[key]), `"mode":"form"`) {
 		t.Fatalf("tasks/get of the question: %s / %s (want one request under %s)", ga.Text(), gb.Text(), key)
 	}
+	// Keys that are not the outstanding gate key, while the question is outstanding (the corrections' WP-05 rule): a
+	// later seq, seq 0 and a key that is no gate id. The empty acknowledgement; nothing forwarded; still the question.
+	stale := fmt.Sprintf(`{"k.%s.%d":{"action":"accept","content":{"reply":"2026-12-21"}},`, ask.TaskID, seq+7) +
+		fmt.Sprintf(`"k.%s.0":{"action":"accept","content":{"reply":"2026-12-22"}},`, ask.TaskID) +
+		`"reply":{"action":"accept","content":{"reply":"2026-12-23"}}}`
+	if u := cf.On(b).Rpc("tasks/update", ask.TaskID, `"taskId":"`+ask.TaskID+`","inputResponses":`+stale); u.Status != http.StatusOK ||
+		string(Answer(t, u).Result) != `{"resultType":"complete"}` {
+		t.Fatalf("tasks/update with keys that are not the outstanding one: %d %s", u.Status, u.Text())
+	}
+	time.Sleep(time.Second)
+	if st := taskState(t, h, ask.TaskID); st != "input-required" {
+		t.Fatalf("after tasks/update with keys that are not the outstanding one the task is %s, want input-required", st)
+	}
+	if g := Task(t, cf.Rpc("tasks/get", ask.TaskID, `"taskId":"`+ask.TaskID+`"`)); g.Status != "input_required" || len(g.InputRequests) != 1 ||
+		g.InputRequests[key] == nil {
+		t.Fatalf("tasks/get after tasks/update with keys that are not the outstanding one: %+v (want the same request under %s)", g, key)
+	}
 	for i, date := range []string{"2026-11-02", "2026-11-05"} {
 		c := cf
 		if i == 1 {
@@ -157,8 +175,9 @@ func TestGateMCPModern(t *testing.T) {
 	}
 	eventually(t, 30*time.Second, "the question's task completes", func() bool { return taskState(t, h, ask.TaskID) == "completed" })
 	done := Task(t, cb.With(CapsTasksForm).Rpc("tasks/get", ask.TaskID, `"taskId":"`+ask.TaskID+`"`))
-	if done.Status != "completed" || !strings.Contains(string(done.Result), "2026-11-02") || strings.Contains(string(done.Result), "2026-11-05") {
-		t.Errorf("the answered task: %+v, want completed with the first answer only", done)
+	if done.Status != "completed" || !strings.Contains(string(done.Result), "2026-11-02") || strings.Contains(string(done.Result), "2026-11-05") ||
+		strings.Contains(string(done.Result), "2026-12-2") {
+		t.Errorf("the answered task: %+v, want completed with the first answer only (none of the ignored keys' 2026-12-2x)", done)
 	}
 
 	// What the extension removes, the header checks, and rule 3.

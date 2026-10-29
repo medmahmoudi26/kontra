@@ -24,8 +24,9 @@ import (
 //   - the quote-acceptance invariant: while quoted, each of these leaves the task quoted and the seller without a
 //     request: the same hire again (the same elicitationId, Admission not asked again), from S1 and from S2; reply to
 //     the task (isError, nothing forwarded); a client's JSON-RPC response with id k.<task>.<quoted seq> and an accept
-//     result (202, dropped); an A2A message to the task with the same API key carrying kontra.approval, carrying
-//     kontra.escrow.* metadata, or activating the escrow extension (refused, §7); no session is ever sent an
+//     result (202, dropped); an A2A message to the task with the same API key, plain, carrying kontra.approval, carrying
+//     kontra.escrow.* metadata, or activating the escrow extension (§7's UnsupportedOperationError, -32004, for the
+//     quoted task); no session is ever sent an
 //     elicitation/create (the gate sends no URL-mode request and reads no client result as approval);
 //   - a session without elicitation.url gets working with the URL in the text (plain) or statusMessage
 //     (task-augmented) and _meta sh.kontra/approve-url, never -32042;
@@ -123,18 +124,28 @@ func TestGateMCPHireQuote(t *testing.T) {
 		}
 	}
 	quoted("a client's accept for the quoted event's gate id")
+	// §7's refusal of a message to a quoted task: UnsupportedOperationError (-32004), from the quoted-state check itself.
 	for i, c := range []struct {
 		md  map[string]any
 		ext string
 	}{
+		{}, // a plain message: no metadata, no extension
 		{md: map[string]any{"kontra.approval": map[string]any{"accepted": true}}},
 		{md: map[string]any{"kontra.escrow.hold": "accepted", "kontra.escrow.status": "held"}},
 		{ext: "https://kontra.sh/ext/escrow/v1"},
 	} {
 		st, body := a2aSend(t, ctx, h.Front.URL+"/agents/paid", h.APIKey, c.ext, &a2a.Message{ID: fmt.Sprintf("m-accept-%d", i), Role: a2a.MessageRoleUser,
 			TaskID: a2a.TaskID(taskID), Parts: a2a.ContentParts{a2a.NewTextPart("I accept")}, Metadata: c.md})
-		if !strings.Contains(body, `"error"`) || strings.Contains(body, `"result"`) {
-			t.Errorf("an A2A message to the quoted task (%v %s) was not refused: %d %s", c.md, c.ext, st, body)
+		var refusal struct {
+			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(body), &refusal); err != nil || refusal.Result != nil || refusal.Error == nil ||
+			refusal.Error.Code != -32004 || refusal.Error.Message != "a quoted task is accepted on the operator's page, not in the protocol" {
+			t.Errorf("an A2A message to the quoted task (%v %q): %d %s, want UnsupportedOperationError -32004 for the quoted task", c.md, c.ext, st, body)
 		}
 	}
 	quoted("A2A messages to the task")

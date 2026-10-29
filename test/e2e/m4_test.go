@@ -43,7 +43,13 @@ func hostOn(t *testing.T, ctx context.Context, h *Harness, g *Gate, serves map[s
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, replica, err := n.WaitSession(ctx, h, 0); err == nil && replica != g.ReplicaID {
+	// The tunnel on the requested replica is what the caller's "tunnel on the other replica" rests on: checked, never
+	// skipped (StartNode has already waited for the row, so this returns at once unless the session moved or is gone).
+	_, replica, err := n.WaitSession(ctx, h, 30*time.Second)
+	if err != nil {
+		t.Fatalf("the node's session on %s: %v", g.Name, err)
+	}
+	if replica != g.ReplicaID {
 		t.Fatalf("the node's session is on %s, want %s", replica, g.ReplicaID)
 	}
 	for name := range serves {

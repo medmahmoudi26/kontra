@@ -2478,8 +2478,9 @@ live anonymous tenants created from it; tasks as host count the non-terminal tas
 those whose principal is one of its keys, under a per-tenant lock at creation; over a cap A2A answers `429` as §2.2
 does, MCP `429` with `-32600`, and `hire` an `isError` result. `public` names must be declared services. Services of an
 anonymous tenant are never `listed` and never in `search`. Amended by DM4-18 (only a hello carrying `anonymous: true`
-opens one), DM4-19 (what a key of an anonymous tenant may present) and DM4-20 (the limits per tenant and gate-wide,
-the purge, the reserved slug).
+opens one), DM4-19 (what a key of an anonymous tenant may present), DM4-20 (the limits per tenant and gate-wide,
+the purge, the reserved slug) and DM4-30 (at the end a dispatch in flight is aborted as a revoked binding's is: its
+task fails `tunnel_lost` once an upstream task exists, else `service_unavailable` at its next dispatch).
 
 ### DM4-11. `kontra login` gets an API key through the gate's authorization server, and a handshake with it converts the anonymous tenant — **decided under the owner's standing instruction, 28 Oct**
 
@@ -3055,8 +3056,9 @@ through the harness's Temporal client; `internal/oidc/oidctest` over HTTPS as th
   kinds come from the in-test seller.
 - **"The booking seller logs one task id."** booking logs nothing at its level; the test reads it from the gate:
   the task's attempts carry one `upstream_task_id`.
-- **`max_tenants`.** The gate is filled with live anonymous tenant rows (12 of them) rather than nodes; one more node is
-  then `anonymous_unavailable`.
+- **`max_tenants`.** The gate is filled with live anonymous tenant rows rather than nodes, and tested at its boundary:
+  the network checks' tenants are ended first (their 60 s `ttl` would otherwise move the count while the gate fills),
+  11 rows go in, a node then takes the 12th place, and the next node is `anonymous_unavailable`.
 - **The probe.** An enrollment that did not commit is reproduced by the node's own state (its credentials hold the token
   unconfirmed, as after a connection lost after the proof): splitting the WebSocket frames at the Front to lose a proof
   would test the Front. The probe gets `unknown_key` on the anonymous gate, opens no tenant, and the token is sent again.
@@ -3075,3 +3077,18 @@ relay.md §13.5). Decision: the gate is right; §6.1 and the row now say so. The
 (66 s, the key set's minute); the leftover check found nothing. Mutations checked red: the `elicitation/complete` claim
 without its `is null` guard (`TestGateMCPHireQuote`: both of S1's streams notified), and a 4th tenant per network let in
 (`TestAnonLimits`).
+
+**Review fixes (29 Oct).** Seven assertions passed without testing their clause; each now has an input only the rule
+under test decides. `gate_mcp_hire`: the buyer also sends an ordinary A2A `SendMessage` with the same API key, and that
+task is neither in `tasks/list` nor answered by `tasks/get` (`-32602`). `gate_mcp_search`: the anonymous tenant's service
+is `listed` and admits `org:default`, so only the anonymous-tenant rule hides it from search and describe.
+`gate_mcp_hire_quote`: each A2A message to the quoted task, a plain one included, must be §7's
+`UnsupportedOperationError` (`-32004`). `gate_mcp_modern`: the input-required task gets keys that are not the outstanding
+one, and they are ignored. `anon_limits`: `max_tenants` is tested at its boundary (above). `anon_lifecycle`: the address
+scan also runs while both sessions are live, with a plain call held in flight, and an operator's service and tenant
+enrollment tokens make the purge's enrollments clause real. The harness's `hostOn` fails when it cannot read the node's
+replica, where it skipped the check before. Each assertion was checked red against a mutation of the gate, in one run of a
+mutated copy: `ListHired`, `LoadHired` and `LoadHiredAsked` without `hired`; search and describe without the
+anonymous-tenant rule; the quoted refusal as `-32602`; `tasks/update` taking any `k.<task>.*` key; `all > max_tenants`;
+the client's address appended to `tunnels.cli_version`; the purge without its `enrollment_tokens` delete. `hostOn` was
+checked with a node redialling to replica A after `StartNode`: the old check passed, and the new one fails.

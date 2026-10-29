@@ -28,13 +28,14 @@ import (
 //     text and in structuredContent.data, a raw file part as an embedded resource and a URL part as a resource_link;
 //     structuredContent is {taskId, state, data};
 //   - a failed upstream is a CallToolResult with isError and _meta sh.kontra/failure, never a JSON-RPC error;
-//   - tasks/list lists only this buyer's hire tasks, newest first; another buyer's tasks/list is empty and its tasks/get
-//     of this buyer's task is -32602;
+//   - tasks/list lists only this buyer's hire tasks, newest first: not the buyer's ordinary A2A task (SendMessage with
+//     the same API key), whose tasks/get is -32602 as an unknown task's; another buyer's tasks/list is empty and its
+//     tasks/get of this buyer's task is -32602;
 //   - tasks/cancel ends a working task cancelled within 10 s and the seller receives CancelTask; an A2A SubscribeToTask
 //     of the same task with the same key shows exactly the log's carried seqs, up to the cancel;
 //   - a kind: mcp ref, a required-sealed ref, a ref whose served card requires an extension and a null data part are
 //     isError with no task row;
-//   - /mcp's tools write no calls rows, and every task hire created is marked hired;
+//   - /mcp's tools write no calls rows, and every task hire created is marked hired (the A2A task is the only one not);
 //   - a request without a credential is 401 (Bearer) and opens no session; an API key with only enroll: scopes is 403.
 func TestGateMCPHire(t *testing.T) {
 	seller, esc := StartSeller(t), StartSeller(t)
@@ -194,6 +195,27 @@ func TestGateMCPHire(t *testing.T) {
 		t.Errorf("tasks/get of the cancelled task: %+v", g)
 	}
 
+	// An ordinary A2A task of the same buyer, with the same API key: not a hire task, so /mcp's MCP Tasks never see it.
+	st, body := a2aSend(t, ctx, h.Front.URL+"/agents/kinds", h.APIKey, "", &a2a.Message{ID: "m-unhired", Role: a2a.MessageRoleUser,
+		Parts: a2a.ContentParts{a2a.NewTextPart("hi")}})
+	var sent struct {
+		Result struct {
+			Task struct {
+				ID string `json:"id"`
+			} `json:"task"`
+		} `json:"result"`
+	}
+	if st != http.StatusOK || json.Unmarshal([]byte(body), &sent) != nil || sent.Result.Task.ID == "" {
+		t.Fatalf("buyer A's A2A SendMessage to kinds: %d %.300s", st, body)
+	}
+	unhired := sent.Result.Task.ID
+	if got := texts(t, h, `select id::text from kontra.tasks where not hired`); !slices.Equal(got, []string{unhired}) {
+		t.Fatalf("the tasks not marked hired: %v, want only the A2A task %s", got, unhired)
+	}
+	if code := ErrCode(t, s.Rpc("tasks/get", `{"taskId":"`+unhired+`"}`)); code != -32602 {
+		t.Errorf("tasks/get of the buyer's own A2A task that hire did not create: %d, want -32602", code)
+	}
+
 	// tasks/list: this buyer's hire tasks only, newest first (status_at desc); another buyer sees none.
 	lr := Answer(t, s.Rpc("tasks/list", `{}`))
 	var list struct {
@@ -210,6 +232,9 @@ func TestGateMCPHire(t *testing.T) {
 	if !slices.Equal(listed, want) || len(listed) != 5 || !slices.Contains(listed, fast) || !slices.Contains(listed, slowPlain) ||
 		!slices.Contains(listed, failed) || !slices.Contains(listed, kinds) {
 		t.Errorf("tasks/list %v, want the buyer's five hire tasks newest first %v", listed, want)
+	}
+	if slices.Contains(listed, unhired) {
+		t.Errorf("tasks/list lists the buyer's A2A task %s that hire did not create", unhired)
 	}
 	other := OpenGateSession(t, ctx, b, h.APIKeyB, `{}`)
 	if lo := Answer(t, other.Rpc("tasks/list", `{}`)); string(lo.Result) != `{"tasks":[]}` {
@@ -245,8 +270,8 @@ func TestGateMCPHire(t *testing.T) {
 	if n := count(t, h, `select count(*) from kontra.calls`); n != 0 {
 		t.Errorf("/mcp wrote %d calls rows", n)
 	}
-	if n := count(t, h, `select count(*) from kontra.tasks where not hired`); n != 0 {
-		t.Errorf("%d tasks hire created are not marked hired", n)
+	if got := texts(t, h, `select id::text from kontra.tasks where not hired`); !slices.Equal(got, []string{unhired}) {
+		t.Errorf("tasks hire created are not marked hired: the unhired tasks are %v, want only the A2A task %s", got, unhired)
 	}
 	if n := count(t, h, `select count(*) from kontra.mcp_sessions where service is null`); n != 2 {
 		t.Errorf("/mcp sessions: %d rows, want 2 (buyer A's and B's)", n)

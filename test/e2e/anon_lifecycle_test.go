@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,17 +41,28 @@ import (
 //     this anonymous gate, opens no anonymous tenant, and its token is sent again and enrolls the key (DM4-18);
 //   - enroll tokens from a key of a live anonymous tenant convert it: the key moves to the tokens' tenant, the anonymous
 //     tenant ends at once, and an audit row records the conversion (DM4-19);
-//   - after purge_after the old tenant's keys (another node's key still in its tenant), services, bindings, enrollments,
-//     tasks with their events, calls, MCP sessions (the gate's own /mcp's, service NULL, included) and bucket objects
-//     are gone; its tenants row is a tombstone (deleted_at, created_from 198.51.100.0/24), so the slug is never reused;
+//   - after purge_after the old tenant's keys (another node's key still in its tenant), services, bindings, enrollments
+//     (a service and a tenant token an operator minted for it while it was live), tasks with their events, calls, MCP
+//     sessions (the gate's own /mcp's, service NULL, included) and bucket objects are gone; its tenants row is a
+//     tombstone (deleted_at, created_from 198.51.100.0/24), so the slug is never reused;
 //   - no column of any kontra table holds a client's address in any form (dotted, IPv4-mapped, compressed or expanded
-//     IPv6, raw bytes), with a positive control showing the scan reads each type;
+//     IPv6, raw bytes): while both sessions are live (their tunnels rows, open MCP sessions, a plain call in flight with
+//     its anon_calls row), and at the end after the purge; with a positive control showing the scan reads each type;
 //   - an anon-<16 hex> slug is refused for an account tenant.
 func TestAnonLifecycle(t *testing.T) {
 	seller := StartSeller(t)
 	calc := mcptest.New()
 	calc.Tools = []json.RawMessage{mcptest.Tool("add", "")}
+	release := make(chan struct{}) // a tools/call asking to "hold" waits for it: a plain call in flight
+	calc.Hold = func(r mcptest.Request) {
+		if r.Method == "tools/call" && strings.Contains(string(r.Params), `"hold"`) {
+			<-release
+		}
+	}
 	calcURL := doubleURL(t, calc)
+	var releaseOnce sync.Once
+	releaseHeld := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseHeld) // runs before doubleURL's Close, which would wait on a held request
 	h := start(t, Options{Multi: true, Anonymous: anonConfig(40*time.Second, 1000), ProxyProtocol: true, Blobs: true, Peer: true})
 	ctx := ctxFor(t, 12*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
@@ -122,6 +134,43 @@ func TestAnonLifecycle(t *testing.T) {
 	if _, err := gm.Initialize(ctx); err != nil {
 		t.Fatalf("/mcp through the anonymous node: %v", err)
 	}
+
+	// While both sessions are live: the rows that exist only then hold no client's address either (their tunnels rows,
+	// the open MCP sessions, the anon_calls row of a plain call in flight, held upstream), nor do the enrollment tokens
+	// an operator mints for the tenant, which the purge must delete later: a service token (its service's delete would
+	// cascade it) and a tenant token (only the purge's own delete removes it).
+	tokens := enroll.NewStore(h.Pool, enroll.Options{})
+	if _, err := tokens.MintServiceToken(ctx, t1, "hello", "e2e"); err != nil {
+		t.Fatalf("an operator's service token for %s/hello: %v", s1, err)
+	}
+	if _, err := tokens.MintTenantToken(ctx, t1, []string{"hello"}, "e2e"); err != nil {
+		t.Fatalf("an operator's tenant token for %s: %v", s1, err)
+	}
+	heldDone := make(chan struct{})
+	go func() {
+		defer close(heldDone)
+		_, _ = mc.Call(ctx, 2, "add", map[string]any{"text": "hold"})
+	}()
+	eventually(t, 30*time.Second, "a plain call to calc held upstream", func() bool {
+		return count(t, h, `select count(*) from kontra.anon_calls where tenant_id = $1`, t1) == 1
+	})
+	liveRows := func() (tunnels, open int64) {
+		return count(t, h, `select count(*) from kontra.tunnels where tenant_id = any($1)`, []uuid.UUID{t1, t2}),
+			count(t, h, `select count(*) from kontra.mcp_sessions where tenant_id = $1 and closed_at is null`, t1)
+	}
+	if tunnels, open := liveRows(); tunnels != 2 || open < 2 {
+		t.Fatalf("before the live scan: %d tunnels rows of the two sessions (want 2), %d open MCP sessions of the tenant (want calc's and /mcp's)", tunnels, open)
+	}
+	if hits := scanAddresses(t, ctx, h, v4, v6); len(hits) != 0 {
+		t.Errorf("while the sessions are live, a client's address is stored in %v", hits)
+	}
+	if tunnels, open := liveRows(); tunnels != 2 || open < 2 || count(t, h, `select count(*) from kontra.anon_calls where tenant_id = $1`, t1) != 1 {
+		t.Fatalf("a session or the held call ended during the live scan (%d tunnels rows, %d open MCP sessions): it read less than it says", tunnels, open)
+	}
+	t.Logf("the live scan ended %.0f s before the session's end", scalar[float64](t, h, `select extract(epoch from expires_at - now())::float8 from kontra.tenants where id = $1`, t1))
+	releaseHeld()
+	<-heldDone
+
 	st, _, body = rawJSONRPC(t, ctx, b.URL+"/agents/"+s1+"/hello", "", "SendMessage", map[string]any{
 		"message": map[string]any{"messageId": uuid.NewString(), "role": "ROLE_USER", "parts": []any{map[string]any{"text": "big:2"}}}}, nil)
 	if st != http.StatusOK || !strings.Contains(body, "TASK_STATE_COMPLETED") {
@@ -158,14 +207,15 @@ func TestAnonLifecycle(t *testing.T) {
 	noUpstream := created.Result.Task.ID
 	eventually(t, 30*time.Second, "the late task's dispatch reaches its seller", func() bool { return late.Sends() >= 1 })
 	for what, n := range map[string]int64{
-		"calls":                          count(t, h, `select count(*) from kontra.calls where tenant_id = $1`, t1),
-		"mcp_sessions of calc":           count(t, h, `select count(*) from kontra.mcp_sessions where tenant_id = $1 and service = 'calc'`, t1),
-		"mcp_sessions of /mcp":           count(t, h, `select count(*) from kontra.mcp_sessions where tenant_id = $1 and service is null`, t1),
-		"key_services":                   count(t, h, `select count(*) from kontra.key_services where tenant_id = $1`, t1),
-		"tasks":                          count(t, h, `select count(*) from kontra.tasks where tenant_id = $1`, t1),
-		"tunnel_keys of node 2's":        count(t, h, `select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, key2, t2),
-		"task_events of its tasks":       count(t, h, `select count(*) from kontra.task_events e join kontra.tasks k on k.id = e.task_id where k.tenant_id = $1`, t1),
-		"services (hello, secret, calc)": count(t, h, `select count(*) from kontra.services where tenant_id = $1`, t1),
+		"calls":                             count(t, h, `select count(*) from kontra.calls where tenant_id = $1`, t1),
+		"mcp_sessions of calc":              count(t, h, `select count(*) from kontra.mcp_sessions where tenant_id = $1 and service = 'calc'`, t1),
+		"mcp_sessions of /mcp":              count(t, h, `select count(*) from kontra.mcp_sessions where tenant_id = $1 and service is null`, t1),
+		"key_services":                      count(t, h, `select count(*) from kontra.key_services where tenant_id = $1`, t1),
+		"tasks":                             count(t, h, `select count(*) from kontra.tasks where tenant_id = $1`, t1),
+		"tunnel_keys of node 2's":           count(t, h, `select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, key2, t2),
+		"task_events of its tasks":          count(t, h, `select count(*) from kontra.task_events e join kontra.tasks k on k.id = e.task_id where k.tenant_id = $1`, t1),
+		"services (hello, secret, calc)":    count(t, h, `select count(*) from kontra.services where tenant_id = $1`, t1),
+		"enrollment_tokens of tenant scope": count(t, h, `select count(*) from kontra.enrollment_tokens where tenant_id = $1 and scope = 'tenant'`, t1),
 	} {
 		if n == 0 {
 			t.Fatalf("before the end the tenant holds no %s: the purge check below would prove nothing", what)
@@ -221,7 +271,6 @@ func TestAnonLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	probeCo := h.TenantOf(ctx, "probe-co")
-	tokens := enroll.NewStore(h.Pool, enroll.Options{})
 	tok, err := tokens.MintServiceToken(ctx, probeCo, "hello", "e2e")
 	if err != nil {
 		t.Fatal(err)

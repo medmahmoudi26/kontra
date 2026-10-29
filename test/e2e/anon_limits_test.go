@@ -107,13 +107,17 @@ func rateLimited(st int, hdr http.Header, body string) bool {
 		rpc.Error.Message == "rate limited"
 }
 
+// anonLimitsMaxTenants is TestAnonLimits' max_tenants.
+const anonLimitsMaxTenants = 12
+
 // anon_limits (spec/tunnel.md §16; §6.2; DM4-10, DM4-18, DM4-20, DM4-25). Multi-tenant, tunnel.anonymous compressed
 // (ttl 60 s, the caps 3/4/4/8/8, parts 1 MiB, max_tenants 12), the Front a PROXY v2 forwarder (nodes come from the
 // networks the test names). Asserted:
 //
 //   - a 4th anonymous tenant from one IPv4 /24 is rate_limited, and a 4th from one IPv6 /48 (four different /64s); the
 //     refused node backs off and does not exit; the tenants' created_from are the /24 and the /48;
-//   - one past max_tenants is anonymous_unavailable;
+//   - at max_tenants' boundary: with max_tenants - 1 live anonymous tenants a node is welcomed, and the next, one past
+//     max_tenants, is anonymous_unavailable;
 //   - a hello declaring 5 services is service_denied, with no tenant, key or binding written; a tenant's services that
 //     are not disabled are at most 4 across a reconnect with 4 new names (the old ones disabled, 404);
 //   - with 4 tasks of the tenant's public service working, a 5th from an anonymous caller is 429 (-32600 "rate limited",
@@ -140,12 +144,13 @@ func TestAnonLimits(t *testing.T) {
 		}
 	}
 	calcURL := doubleURL(t, calc)
-	h := start(t, Options{Multi: true, Anonymous: anonConfig(60*time.Second, 12), ProxyProtocol: true, Peer: true})
+	h := start(t, Options{Multi: true, Anonymous: anonConfig(60*time.Second, anonLimitsMaxTenants), ProxyProtocol: true, Peer: true})
 	ctx := ctxFor(t, 12*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
 	echo := map[string]string{"echo": seller.URL}
 
 	// Networks: three tenants from 198.51.100.0/24, a 4th rate_limited; the same for 2001:db8:1::/48 (four /64s).
+	var networkNodes []*Node
 	for _, set := range []struct{ net, fourth string }{
 		{"198.51.100.0/24", "198.51.100.4"},
 		{"2001:db8:1::/48", "2001:db8:1:4::1"},
@@ -155,7 +160,7 @@ func TestAnonLimits(t *testing.T) {
 			if strings.Contains(set.net, ":") {
 				src = fmt.Sprintf("2001:db8:1:%d::1", i)
 			}
-			anonNode(t, ctx, h, src, echo, nil)
+			networkNodes = append(networkNodes, anonNode(t, ctx, h, src, echo, nil))
 		}
 		if n := count(t, h, `select count(*) from kontra.tenants where kind = 'anonymous' and created_from = $1::cidr`, set.net); n != 3 {
 			t.Fatalf("%d anonymous tenants created from %s, want 3", n, set.net)
@@ -180,15 +185,37 @@ func TestAnonLimits(t *testing.T) {
 		}
 	}
 
-	// max_tenants (12): with the gate full, a new network's node is anonymous_unavailable.
+	// max_tenants (12), at its boundary: with 11 live anonymous tenants a node is welcomed (the 12th), and the next node
+	// is anonymous_unavailable. The network checks' six tenants would reach their 60 s ttl while the gate fills, moving
+	// the count under the test, so their nodes stop and their tenants end now (expires_at, as their end sets it); then
+	// live anonymous tenant rows fill the gate to one below max_tenants.
+	for _, n := range networkNodes {
+		if err := n.Kill(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.Pool.Exec(ctx, `update kontra.tenants set expires_at = now()
+		where kind = 'anonymous' and deleted_at is null and expires_at > now()`); err != nil {
+		t.Fatal(err)
+	}
+	liveTenants := func() int64 {
+		return count(t, h, `select count(*) from kontra.tenants where kind = 'anonymous' and deleted_at is null and expires_at > now()`)
+	}
+	if n := liveTenants(); n != 0 {
+		t.Fatalf("%d anonymous tenants still live after the network checks' tenants ended", n)
+	}
 	var fillers []uuid.UUID
-	for i := range 12 {
+	for i := range anonLimitsMaxTenants - 1 {
 		id := uuid.Must(uuid.NewV7())
 		if _, err := h.Pool.Exec(ctx, `insert into kontra.tenants (id, slug, kind, expires_at, created_from)
 			values ($1, $2, 'anonymous', now() + interval '1 hour', $3::cidr)`, id, "anon-"+randomHex(8), fmt.Sprintf("192.0.2.%d/32", i)); err != nil {
 			t.Fatal(err)
 		}
 		fillers = append(fillers, id)
+	}
+	lastPlace := anonNode(t, ctx, h, "2001:db8:2::1", echo, nil)
+	if n := liveTenants(); n != anonLimitsMaxTenants {
+		t.Fatalf("after the node that took the last place: %d live anonymous tenants, want max_tenants %d", n, anonLimitsMaxTenants)
 	}
 	h.Front.SetSource(netip.MustParseAddr("203.0.113.50"))
 	nf, err := h.LaunchNode(NodeOptions{Serves: echo})
@@ -199,8 +226,13 @@ func TestAnonLimits(t *testing.T) {
 	if nf.Exited() || len(nf.Welcomes()) != 0 {
 		t.Fatal("the node past max_tenants was welcomed, or exited")
 	}
-	if err := nf.Kill(); err != nil {
-		t.Fatal(err)
+	if n := liveTenants(); n != anonLimitsMaxTenants {
+		t.Errorf("the refused node changed the live anonymous tenants to %d", n)
+	}
+	for _, n := range []*Node{nf, lastPlace} {
+		if err := n.Kill(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := h.Pool.Exec(ctx, `delete from kontra.tenants where id = any($1)`, fillers); err != nil {
 		t.Fatal(err)
