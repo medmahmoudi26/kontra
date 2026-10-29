@@ -18,7 +18,8 @@ that deploys and configures this one; nothing here imports from it.
 ## Status
 
 M4. `kontra-gate` relays A2A tasks durably (M1) to agents on a node's localhost through `kontra connect` (M2), hosts
-MCP servers beside them, over Streamable HTTP or stdio, with end-to-end sealing (M3), and since M4:
+MCP servers beside them, over Streamable HTTP or stdio, with end-to-end sealing (M3; [below](#sealed-end-to-end-m3)),
+and since M4:
 
 - serves its own MCP endpoint, `/mcp`: `search`, `describe`, `hire`, `reply` and the MCP Tasks of what was hired, in
   both MCP eras (2025-11-25 and 2026-07-28), so a stock MCP client hires an A2A agent
@@ -129,6 +130,11 @@ Upgrading a gate to M4: `kontra-gate migrate` (compose runs it in `gate-migrate`
 the `tasks` table's lock for one sequential read of it (its header says why); run it before the new replicas start, or
 when that pause is acceptable. A team or account slug may no longer be `anon-` and 16 hex digits.
 
+PRD §12's pentest list ran against this compose team gate with M3's own surface at `f65760a` (four findings, each
+fixed) and again after the M3 review rounds at `33f06a8` (no finding, D266);
+[`docs/pentest-m3.md`](docs/pentest-m3.md) records the second run's every probe, what changed since the first, and
+the findings and their fixes.
+
 ## A team gate from source
 
 For working on the gate: Postgres and Temporal from `compose.dev.yaml`, the gate and the node built from this
@@ -156,10 +162,92 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "
 #  → completed, with the artifact "Hello, World! I have received your request (hi)"
 ```
 
-The gate never dials the seller, and the seller imports nothing from Kontra. `--serve` names the agent's root
+The gate never dials the seller, and the seller imports nothing from Kontra. `--serve a2a:` names the agent's root
 URL: a target with a path is refused (D123 in [`docs/decisions.md`](docs/decisions.md)). What a lost node or a
 seller that is down does to a task, and how to restart the node, is in the
 [helloworld README](examples/sellers/helloworld/README.md#restarts-order-and-failures).
+
+## Sealed, end to end (M3)
+
+A service with `sealed: true` is sealed between two nodes. The hiring node, `kontra connect` serving its local
+clients on `127.0.0.1:7777`, seals every part a client sends to the keys enrolled for the service; the hosting node
+opens them before the service sees anything, and seals what the service answers to a key only the hiring node
+holds. The gate stores and relays ciphertext it cannot open, and neither the client nor the service changes or
+holds a key ([`spec/ext-sealed.md`](spec/ext-sealed.md)). Two `kontra connect` on one machine, each with its own
+`HOME` and so its own identity key, from [`examples/sealing`](examples/sealing/README.md):
+
+```sh
+docker compose -f compose.dev.yaml up -d --wait
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+CFG=examples/sellers/hello-exec/kontra-sealed.yaml
+./kontra-gate migrate -f $CFG
+export KONTRA_API_KEY="$(./kontra-gate enroll -f $CFG --api-key demo)"
+./kontra-gate serve -f $CFG &
+
+examples/sellers/hello-exec/run.sh &                        # the seller on 127.0.0.1:9999
+
+# The hosting node: enrolled for hello, so its key is one of the service's recipients; it only hosts (--listen off).
+HOME=/tmp/seller ./kontra connect --gate http://localhost:8080 --listen off \
+  --enroll "$(./kontra-gate enroll -f $CFG hello)" --serve a2a:hello=http://127.0.0.1:9999 &
+
+# The hiring node: it hires with the API key, and seals for its local clients on 127.0.0.1:7777.
+HOME=/tmp/buyer ./kontra connect --gate http://localhost:8080 --api-key "$KONTRA_API_KEY" &
+
+a2a send -a http://localhost:7777/agents/hello "a secret"
+#  → completed, "Hello World": the client never sees an envelope, and Postgres holds only ciphertext
+```
+
+The hiring node pins each sealed service it hires in `~/.kontra/pins`: a downgrade to unsealed is always refused,
+and a new recipient or seller key waits for `--accept-change <name>`, the key ids printed on stderr for comparison
+out of band. MCP calls are sealed the same way between two `kontra connect`. Without a node, `kontra seal --service
+<service URL> --api-key <key> <file>` prints a sealed A2A message and `kontra seal --open <answer.json>` opens the
+reply: the escape hatch for scripts, not the path. A part over 256 KiB, sealed or not, goes to the gate's
+S3-compatible bucket when it has one (`blobs:`), and a node fetches it through its own tunnel.
+
+## MCP servers (M3)
+
+`kontra connect` hosts MCP servers next to agents, and the gate serves each as `/mcp/<name>`, with each client
+session pinned to one node's tunnel and reached from any gate replica through the peer hop, per-tool policy and
+metering; a task-augmented `tools/call` becomes a durable gate task, as an A2A task is, and 2026-07-28 clients are
+served on the same endpoint ([`spec/relay.md`](spec/relay.md) §11). Stock servers run unmodified.
+[`examples/mcp/everything`](examples/mcp/everything/README.md) hosts `server-everything@1.0.0` over Streamable HTTP,
+with Postgres and Temporal up and the binaries built as above (one example gate at a time: each listens on
+`127.0.0.1:8080`):
+
+```sh
+PORT=3001 examples/mcp/everything/run.sh &       # npm ci on first use; then http://127.0.0.1:3001/mcp
+
+./kontra-gate migrate -f examples/mcp/everything/kontra.yaml
+export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/mcp/everything/kontra.yaml --api-key demo)"
+./kontra-gate serve -f examples/mcp/everything/kontra.yaml &
+
+./kontra connect --gate http://localhost:8080 --serve mcp:everything=http://127.0.0.1:3001/mcp \
+  --enroll "$(./kontra-gate enroll -f examples/mcp/everything/kontra.yaml everything)" &
+#    mcp everything  http://localhost:8080/mcp/everything
+```
+
+`--serve mcp:<name>=<url>` names the server's endpoint, path included. Any MCP client with a bearer token reaches
+the service at `http://localhost:8080/mcp/everything`, and a local one through a node at
+`http://localhost:7777/mcp/everything`. [`examples/mcp/fs-stdio`](examples/mcp/fs-stdio/README.md) hosts
+`server-filesystem@1.0.0` over stdio: the node runs the server itself, one process per MCP session and without a
+shell, from `--serve "mcp:fs=stdio:<command line>" --roots fs=/srv/kontra-fs`. For every MCP server it hosts, the
+node answers the server's `roots/list` itself, from `--roots <name>=<dir>` (none by default), so a client's roots
+never reach the server.
+
+Per-tool policy is the service's `tools:` in the gate's configuration:
+
+```yaml
+services:
+  everything:
+    kind: mcp
+    backend: { tunnel: {} }
+    allow: ["org:default"]
+    tools: { deny: ["get-env", "gzip-file-as-resource"] }
+```
+
+A denied tool is missing from `tools/list`, and a call to it is answered `Unknown tool`, as for one that does not
+exist; `allow:` narrows the rest (absent, every tool; empty, none). The gate meters each call by tool name, bytes,
+duration and the result's top-level `isError`, and never reads arguments or content, which may be sealed.
 
 ## Layout
 

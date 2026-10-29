@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -83,9 +84,22 @@ type Hiring struct {
 	log *slog.Logger
 
 	mu       sync.Mutex
-	services map[string]*serviceInfo  // by {svc} path (A2A) or the gate's Mcp-Session-Id (MCP)
-	reading  map[string]chan struct{} // a card read in flight, by {svc}
-	jobs     map[string]*hireJob      // loaded jobs by id
+	services map[string]*serviceInfo // A2A services by {svc} path
+	// sessions are the MCP sessions by the gate's Mcp-Session-Id, a map of their own: the gate chooses the id, and an
+	// id that spelled an A2A service's path must never stand for that service's sealing (D240).
+	sessions map[string]*serviceInfo
+	// open counts each MCP session's exchanges in flight, by session hash: a session's job (its key, and the records
+	// of its sealed requests) is never dropped while one is open (Job.Done, D241).
+	open    map[string]int
+	reading map[string]*cardRead // a card read in flight, by {svc}
+	jobs    map[string]*hireJob  // loaded jobs by id
+}
+
+// cardRead is one shared read of a service's card: done closes when si and err are set.
+type cardRead struct {
+	done chan struct{}
+	si   *serviceInfo
+	err  error
 }
 
 // infoTTL is how long a service's card (its recipients) is reused before it is read again.
@@ -106,7 +120,7 @@ func NewHiring(cfg HiringConfig, log *slog.Logger) (*Hiring, error) {
 		cfg.Now = time.Now
 	}
 	h := &Hiring{cfg: cfg, log: log.With("component", "sealing-hiring"), services: map[string]*serviceInfo{},
-		reading: map[string]chan struct{}{}, jobs: map[string]*hireJob{}}
+		sessions: map[string]*serviceInfo{}, open: map[string]int{}, reading: map[string]*cardRead{}, jobs: map[string]*hireJob{}}
 	h.sweepJobs()
 	return h, nil
 }
@@ -119,8 +133,22 @@ type serviceInfo struct {
 	recipients []age.Recipient
 	kids       []string
 	at         time.Time
-	unknown    bool // the card could not be read: not known to be sealed (noCardTTL)
+	unknown    bool   // the card could not be read: not known to be sealed (noCardTTL)
+	session    string // an MCP session's (its hash): the entry goes with the session's job
+	// idle is the session_idle_s the gate stated in an MCP session's initialize result (D224), 0 when it stated none.
+	idle time.Duration
+	// used is when an MCP session's entry was last used: Sweep drops an entry with no job idle past its bound (D242).
+	used time.Time
+	// path is the service path an MCP session was initialized for: a request for another path on it is refused (D260).
+	path string
+	// relayed are the gate request ids of the server requests relayed unopened on a sealed MCP session (ping,
+	// roots/list): the local client's response to any other id that is no opened input request is refused (D260).
+	relayed map[string]bool
 }
+
+// maxRelayed bounds a sealed session's relayed ids: past it one goes for each new one, so a server that leaves that
+// many of its requests unanswered may find a later answer refused.
+const maxRelayed = 1024
 
 // ErrNoKey is a request for a sealed task whose per-job key this node does not hold (another node hired it, or the
 // key was deleted at the task's end): the node cannot open its answers.
@@ -168,7 +196,9 @@ type Job struct {
 	taskOf    string // the gate task a tasks/* request names
 	call      *sealedCall
 	init      bool
+	initDone  bool // the initialize exchange's result was read: the rest of the exchange is the session's (D263)
 	delete    bool
+	counted   bool // counted in Hiring.open until Done
 }
 
 // hireJob is a job's persisted state: ~/.kontra/jobs/<gate host>/<job>.json beside its key.
@@ -181,22 +211,64 @@ type hireJob struct {
 	Created   time.Time `json:"created"`
 	DeleteAt  time.Time `json:"delete_at,omitempty"` // the key goes then (terminal + kontra.keyRetainUntil)
 	Closed    bool      `json:"closed,omitempty"`    // an MCP session the client closed
-	// Tasks are an MCP session's tasks (by gate task id): tool and messageId of the call that created each, the
-	// input requests opened (messageId) and the gate request id that carried each.
+	// IdleS is an MCP session's idle bound, the session_idle_s its gate stated at initialize (D224): its key goes once
+	// the session has had no exchange that long and its tasks are done. 0: sessionJobIdle.
+	IdleS int64 `json:"idle_s,omitempty"`
+	// Tasks are an MCP session's tasks (by gate task id): tool and messageId of the call that created each.
 	Tasks map[string]*hireTask `json:"tasks,omitempty"`
+	// Inputs are the MCP input requests opened, by the gate request id that carried each: what the local client's
+	// answer to that id is sealed with (D175).
+	Inputs map[string]*hireInput `json:"inputs,omitempty"`
 	// Artifacts are per artifactId the chunks opened (A2A rule 4).
 	Artifacts map[string]*hireArtifact `json:"artifacts,omitempty"`
+	// Opened are the MCP input requests opened, "<key>\x00<messageId>" (key "session" for one without a taskId, whose
+	// messageId is of the session's upstream session; the gate task for a durable task's): rule 4's "a messageId it has
+	// not opened before", kept once its answer is sealed (D243). Answered are the gate request ids the local client
+	// answered: a second answer to one is refused here (D243).
+	Opened   map[string]bool `json:"opened,omitempty"`
+	Answered map[string]bool `json:"answered,omitempty"`
 
 	key  *age.X25519Identity
 	sent map[string]a2awire.Part // the plaintext of the parts this node sealed for the job, by ciphertext hash
+	// calls are an MCP session's requests whose answer must be sealed (a sealed tools/call, a sealed task's
+	// tasks/result), by the request's id (mcpwire.IDKey): their answer is opened, or refused, on any stream of the
+	// session (rule 4, 4a), not on the exchange that sent them only (a GET resumed with Last-Event-ID).
+	calls map[string]*hireCall
+	// seen is when the job was last used (in memory): the hiring side's caches drop a job idle for jobCacheIdle.
+	seen time.Time
 }
 
 type hireTask struct {
-	Tool      string            `json:"tool"`
-	MessageID string            `json:"message_id"`
-	Inputs    map[string]string `json:"inputs,omitempty"` // gate request id -> messageId
-	Done      bool              `json:"done,omitempty"`
+	Tool      string `json:"tool"`
+	MessageID string `json:"message_id"`
+	Done      bool   `json:"done,omitempty"`
+	// Durable is set once an input request of the task named it (its taskId): a durable task's input requests
+	// always do (D218), so one that does not is not the task's (D243).
+	Durable bool `json:"durable,omitempty"`
 }
+
+// hireInput is an input request the node opened: the task it is of ("" for a plain call's; the key the replay check
+// counts in), the header's tool, messageId and taskId, which the answer carries back.
+type hireInput struct {
+	Task      string `json:"task,omitempty"`
+	Tool      string `json:"tool"`
+	MessageID string `json:"message_id"`
+	TaskID    string `json:"task_id,omitempty"`
+}
+
+// hireCall is an MCP request of the session whose answer is sealed: a sealed tools/call (Task "") or a sealed task's
+// tasks/result.
+type hireCall struct {
+	Tool, MessageID string
+	Task            string // a tasks/result's gate task
+	// task is a sealed tools/call that asked for a task (params.task): only its answer may be a CreateTaskResult
+	// (D244).
+	task bool
+	done bool
+}
+
+// maxSessionCalls bounds the requests a session keeps (hireJob.calls); the answered ones go first.
+const maxSessionCalls = 4096
 
 type hireArtifact struct {
 	Next int               `json:"next"`
@@ -209,40 +281,51 @@ type hireArtifact struct {
 // 1). A refused change is a *LocalError wrapping the *pins.ChangeError. Concurrent requests for one service share one
 // read of its card.
 //
-// SPEC-CONFLICT (ext-sealed.md §5 "Hiring node", rule 1, and §7): the node seals for a service "whose verified card
-// carries the extension" and checks the pin first, but nothing says what a request does when the card cannot be read
-// at all (the gate unreachable for it, a 503 card route, a card that does not verify). The closest faithful
+// SPEC-CONFLICT (D214; ext-sealed.md §5 "Hiring node", rule 1, and §7): the node seals for a service "whose verified
+// card carries the extension" and checks the pin first, but nothing says what a request does when the card cannot be
+// read at all (the gate unreachable for it, a 503 card route, a card that does not verify). The closest faithful
 // behaviour: when the service's pin says it is sealed, the request is refused (502: nothing is sent in plaintext to a
 // service known to be sealed); with no pin, or an unsealed one, it goes as it came, which is what a first sight of
 // the service would record anyway (trust on first use, §7); that unknown is kept for noCardTTL only.
+//
+// The shared read runs on its own context, bounded by cardReadTimeout, never on the context of the request that
+// started it: a first request that leaves would otherwise end the read for every request waiting on it, and its
+// cancellation would be taken for an unreadable card, so that a sealed service with no pin yet looked unsealed and
+// every request in the next noCardTTL went to the gate in plaintext. A request that leaves stops waiting; the read
+// goes on for the others.
 func (h *Hiring) info(ctx context.Context, svc string) (*serviceInfo, error) {
-	for {
-		h.mu.Lock()
-		si := h.services[svc]
-		if si != nil && h.cfg.Now().Sub(si.at) < si.ttl() {
-			h.mu.Unlock()
-			return si, nil
-		}
-		wait := h.reading[svc]
-		if wait == nil {
-			wait = make(chan struct{})
-			h.reading[svc] = wait
-			h.mu.Unlock()
-			si, err := h.readCard(ctx, svc)
-			h.mu.Lock()
-			delete(h.reading, svc)
-			close(wait)
-			h.mu.Unlock()
-			return si, err
-		}
+	h.mu.Lock()
+	si := h.services[svc]
+	if si != nil && h.cfg.Now().Sub(si.at) < si.ttl() {
 		h.mu.Unlock()
-		select {
-		case <-wait:
-		case <-ctx.Done():
-			return nil, local(http.StatusServiceUnavailable, "kontra connect: the request ended while the service's card was read")
-		}
+		return si, nil
+	}
+	rd := h.reading[svc]
+	if rd == nil {
+		rd = &cardRead{done: make(chan struct{})}
+		h.reading[svc] = rd
+		go func() {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cardReadTimeout)
+			defer cancel()
+			si, err := h.readCard(rctx, svc)
+			h.mu.Lock()
+			rd.si, rd.err = si, err
+			delete(h.reading, svc)
+			close(rd.done)
+			h.mu.Unlock()
+		}()
+	}
+	h.mu.Unlock()
+	select {
+	case <-rd.done:
+		return rd.si, rd.err
+	case <-ctx.Done():
+		return nil, local(http.StatusServiceUnavailable, "kontra connect: the request ended while the service's card was read")
 	}
 }
+
+// cardReadTimeout bounds one read of a service's card (through the tunnel, and its key set's).
+const cardReadTimeout = 30 * time.Second
 
 // noCardTTL is how long a service whose card could not be read is taken as not sealed before it is read again.
 const noCardTTL = 5 * time.Second
@@ -264,6 +347,10 @@ func (h *Hiring) readCard(ctx context.Context, svc string) (*serviceInfo, error)
 		return h.CardSeen(svc, c)
 	}
 	name := pinName(svc)
+	if errors.Is(err, context.Canceled) {
+		// Not the card's doing: nothing is recorded, and the next request reads it again.
+		return nil, local(http.StatusServiceUnavailable, "kontra connect: the service's card read was canceled")
+	}
 	if pin, known, perr := h.cfg.Pins.Get(h.cfg.Gate, name); perr != nil || known && pin.Sealed {
 		return nil, local(http.StatusBadGateway, "kontra connect: the sealed service's card could not be read or verified: %v", err)
 	}
@@ -455,8 +542,8 @@ func (h *Hiring) newJob(id, service string) (*hireJob, error) {
 	if err != nil {
 		return nil, err
 	}
-	j := &hireJob{ID: id, Service: service, RK: sealed.EncodeRK(rk), Created: h.cfg.Now(), key: key,
-		Tasks: map[string]*hireTask{}, Artifacts: map[string]*hireArtifact{}, sent: map[string]a2awire.Part{}}
+	j := &hireJob{ID: id, Service: service, RK: sealed.EncodeRK(rk), Created: h.cfg.Now(), key: key}
+	j.init(h.cfg.Now())
 	if err := h.saveJob(j); err != nil {
 		_ = h.cfg.Jobs.Delete(id)
 		return nil, err
@@ -468,6 +555,7 @@ func (h *Hiring) newJob(id, service string) (*hireJob, error) {
 // loadJob returns a job of this node, nil when it holds no key for it; h.mu is held.
 func (h *Hiring) loadJob(id string) (*hireJob, error) {
 	if j := h.jobs[id]; j != nil {
+		j.seen = h.cfg.Now()
 		return j, nil
 	}
 	if element("job", id) != nil {
@@ -486,15 +574,68 @@ func (h *Hiring) loadJob(id string) (*hireJob, error) {
 		return nil, err
 	}
 	j.key = key
+	j.init(h.cfg.Now())
+	h.jobs[id] = j
+	return j, nil
+}
+
+// init makes a job's maps, and marks it used at now.
+func (j *hireJob) init(now time.Time) {
 	if j.Tasks == nil {
 		j.Tasks = map[string]*hireTask{}
+	}
+	if j.Inputs == nil {
+		j.Inputs = map[string]*hireInput{}
 	}
 	if j.Artifacts == nil {
 		j.Artifacts = map[string]*hireArtifact{}
 	}
-	j.sent = map[string]a2awire.Part{}
-	h.jobs[id] = j
-	return j, nil
+	if j.sent == nil {
+		j.sent = map[string]a2awire.Part{}
+	}
+	if j.calls == nil {
+		j.calls = map[string]*hireCall{}
+	}
+	if j.Opened == nil {
+		j.Opened = map[string]bool{}
+	}
+	if j.Answered == nil {
+		j.Answered = map[string]bool{}
+	}
+	j.seen = now
+}
+
+// track records a request of the session whose answer must be sealed, by its id; the oldest answered ones go when
+// the session holds maxSessionCalls.
+func (j *hireJob) track(id json.RawMessage, c *hireCall) {
+	k, ok := mcpwire.IDKey(id)
+	if !ok {
+		return
+	}
+	if len(j.calls) >= maxSessionCalls {
+		for ck, cc := range j.calls {
+			if cc.done {
+				delete(j.calls, ck)
+			}
+		}
+	}
+	j.calls[k] = c
+}
+
+// call is the session's request whose answer m is, nil when m answers none the node tracks. A response answers a
+// tracked request when the local client would take it for that request's answer (mcpwire.AnswerKeys: "8" answers
+// request 8 for the TypeScript SDK), so that a gate cannot pass its own plaintext result as a sealed call's by
+// spelling the id otherwise (rule 4a; round 2 other-fixes-2).
+func (j *hireJob) call(m *mcpwire.Message) *hireCall {
+	if j == nil || m.Method != "" || len(m.ID) == 0 {
+		return nil
+	}
+	for _, k := range mcpwire.AnswerKeys(m.ID) {
+		if c := j.calls[k]; c != nil {
+			return c
+		}
+	}
+	return nil
 }
 
 func (h *Hiring) saveJob(j *hireJob) error {
@@ -549,8 +690,53 @@ func (h *Hiring) dropJob(j *hireJob) {
 	h.log.Info("sealing: the job ended: its per-job key is deleted", "job", j.ID)
 }
 
-// Sweep deletes the keys whose retention (kontra.keyRetainUntil) has passed.
+// Sweep deletes the keys whose retention (kontra.keyRetainUntil) has passed, the provisional keys of first messages
+// that never got a gate task (provisionalMaxAge), and the keys of MCP sessions whose tasks are done and that have
+// been idle for the session_idle_s their gate stated, or sessionJobIdle (the gate closes an idle session on its own,
+// relay.md §11.2, and a client may leave without DELETE; D224).
 func (h *Hiring) Sweep() { h.sweepJobs() }
+
+// Bounds of the hiring side's job keys and caches.
+const (
+	// provisionalMaxAge is how long a new task's provisional key is kept without a gate task id: a first message
+	// whose exchange the hiring server saw end releases it at once (Job.Release); this is the backstop.
+	provisionalMaxAge = DefaultMaxAge
+	// sessionJobIdle is how long an MCP session's key is kept with no exchange once its tasks are done when its gate
+	// stated no session_idle_s in the initialize result (D224): past the gate's default session_idle_s (an hour), so
+	// that only sessions the gate has closed lose theirs; a session the gate keeps longer is initialized again (the
+	// node answers 404 for a session it no longer knows).
+	sessionJobIdle = 24 * time.Hour
+	// maxSessionIdle bounds the session_idle_s a gate states (D224): a key is the node's to delete, and a gate cannot
+	// have the node keep an abandoned session's key for longer than this.
+	maxSessionIdle = 30 * 24 * time.Hour
+)
+
+// idleBound is how long a session job is kept with no exchange once its tasks are done: the session_idle_s its gate
+// stated (D224), or sessionJobIdle.
+func (j *hireJob) idleBound() time.Duration {
+	if j.IdleS > 0 {
+		return time.Duration(j.IdleS) * time.Second
+	}
+	return sessionJobIdle
+}
+
+// sessionIdleOf reads _meta["sh.kontra/session_idle_s"] of an initialize result (D224): a positive whole number of
+// seconds, at most maxSessionIdle; 0 when the gate stated none, or stated one the node does not take.
+func sessionIdleOf(result json.RawMessage) time.Duration {
+	meta, ok := mcpwire.Member(result, "_meta")
+	if !ok {
+		return 0
+	}
+	raw, ok := mcpwire.Member(meta, mcpwire.MetaSessionIdle)
+	if !ok {
+		return 0
+	}
+	n, err := strconv.ParseInt(string(bytes.TrimSpace(raw)), 10, 64)
+	if err != nil || n <= 0 || n > int64(maxSessionIdle/time.Second) {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
 
 func (h *Hiring) sweepJobs() {
 	ents, err := os.ReadDir(h.cfg.Jobs.Dir())
@@ -565,16 +751,126 @@ func (h *Hiring) sweepJobs() {
 		if !ok || e.IsDir() || element("job", id) != nil {
 			continue
 		}
+		if lj := h.jobs[id]; lj != nil {
+			switch {
+			case strings.HasPrefix(id, "mcp-"):
+				if h.open[lj.Session] > 0 {
+					lj.seen = now // in use: an exchange of the session is open (D241)
+				} else if now.Sub(lj.seen) >= lj.idleBound() && lj.tasksDone() {
+					h.endSession(lj)
+				}
+			case !lj.DeleteAt.IsZero() && !now.Before(lj.DeleteAt), provisional(id) && now.Sub(lj.Created) >= provisionalMaxAge:
+				h.dropJob(lj)
+			case now.Sub(lj.seen) >= jobCacheIdle: // as the hosting side's
+				delete(h.jobs, id) // read again from its file when an answer names it
+			}
+			continue
+		}
 		var j hireJob
 		if readJSON(filepath.Join(h.cfg.Jobs.Dir(), e.Name()), &j) != nil {
 			continue
 		}
-		if !j.DeleteAt.IsZero() && !now.Before(j.DeleteAt) {
-			j.ID = id
+		j.ID = id
+		switch {
+		case !j.DeleteAt.IsZero() && !now.Before(j.DeleteAt):
 			h.dropJob(&j)
+		case provisional(id) && now.Sub(j.Created) >= provisionalMaxAge:
+			h.dropJob(&j)
+		case strings.HasPrefix(id, "mcp-") && j.tasksDone() && h.open[j.Session] == 0:
+			// A session job not loaded: no exchange of it since this node started (its sessions are 404 here).
+			if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) >= j.idleBound() {
+				h.dropJob(&j)
+			}
+		}
+	}
+	// An MCP session's entry with no job (no sealed call made in it, an unsealed service's) goes once it has not been
+	// used for its idle bound: a client that leaves without a DELETE leaves it otherwise (D242).
+	for sid, si := range h.sessions {
+		if h.open[si.session] > 0 || h.jobs["mcp-"+si.session] != nil {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(h.cfg.Jobs.Dir(), "mcp-"+si.session+".json")); err == nil {
+			continue
+		}
+		bound := si.idle
+		if bound <= 0 {
+			bound = sessionJobIdle
+		}
+		if now.Sub(si.used) >= bound {
+			delete(h.sessions, sid)
 		}
 	}
 }
+
+// tasksDone reports a session job whose tasks are all done.
+func (j *hireJob) tasksDone() bool {
+	for _, t := range j.Tasks {
+		if !t.Done {
+			return false
+		}
+	}
+	return true
+}
+
+// endSession drops an MCP session's key and the session's entries; h.mu is held.
+func (h *Hiring) endSession(hj *hireJob) {
+	for sid, si := range h.sessions {
+		if si.session != "" && "mcp-"+si.session == hj.ID {
+			delete(h.sessions, sid)
+		}
+	}
+	h.dropJob(hj)
+}
+
+// Done ends a request's exchange (the hiring server calls it once the local client has the whole answer, or went): an
+// MCP session's exchange in flight is no longer counted, and a session closed meanwhile goes once its last exchange
+// ended (D241).
+func (j *Job) Done() {
+	if j == nil || !j.mcp || !j.counted {
+		return
+	}
+	h := j.h
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	j.counted = false
+	if h.open[j.session]--; h.open[j.session] <= 0 {
+		delete(h.open, j.session)
+	}
+	if hj := h.jobs["mcp-"+j.session]; hj != nil {
+		hj.seen = h.cfg.Now()
+		if hj.Closed {
+			h.maybeEndSession(hj)
+		}
+	}
+}
+
+// count counts the exchange as one of its session's in flight until Done; h.mu is held.
+func (j *Job) count() {
+	if j.session != "" && !j.counted {
+		j.h.open[j.session]++
+		j.counted = true
+	}
+}
+
+// Release drops a new task's provisional per-job key when the exchange of its first message ended without an answer
+// naming its gate task: the gate refused it (a non-2xx), the exchange failed before an answer, or the answer named no
+// task. Nothing will ever be sealed to that key, and nothing would end it. A job that has its gate task id is kept.
+// The hiring server calls it on every path where the exchange ends; Response does on a refusal and once a whole
+// answer was read.
+func (j *Job) Release() {
+	if j == nil || j.mcp || !j.newTask || j.job == nil {
+		return
+	}
+	h := j.h
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if hj := h.jobs[j.job.ID]; hj == j.job && provisional(hj.ID) {
+		h.dropJob(hj)
+	}
+}
+
+// Initialize reports an MCP initialize's exchange: the only one whose answer may name the session (D260).
+func (j *Job) Initialize() bool { return j != nil && j.mcp && j.init }
 
 // --- requests ---
 
@@ -585,8 +881,8 @@ func (h *Hiring) Request(ctx context.Context, service string, req *http.Request)
 	if strings.HasPrefix(service, "/mcp/") {
 		return h.mcpRequest(ctx, service, req)
 	}
-	if strings.HasSuffix(req.URL.Path, "/.well-known/agent-card.json") || strings.Contains(req.URL.Path, "/.well-known/") {
-		return req, nil, nil // cards: verified and recorded by the hiring server (CardSeen)
+	if (req.Method == http.MethodGet || req.Method == http.MethodHead) && strings.Contains(req.URL.Path, "/.well-known/") {
+		return req, nil, nil // card reads: verified and recorded by the hiring server (CardSeen); any other method is sealed (D247)
 	}
 	si, err := h.info(ctx, service)
 	if err != nil {
@@ -695,6 +991,12 @@ func (h *Hiring) sealSend(j *Job, body []byte) ([]byte, error) {
 				lerr = &LocalError{Status: http.StatusBadRequest, Err: fmt.Errorf("kontra connect: %w (task %s)", ErrNoKey, taskID)}
 				return lerr
 			}
+			if job.Service != j.service {
+				// A follow-up of a task another service's job holds: sealed to this service's recipients it would carry
+				// that job's replyTo and rk to this service (D259).
+				lerr = local(http.StatusBadRequest, "kontra connect: a follow-up of a task of another service (%s)", job.Service)
+				return lerr
+			}
 			if ctxID == "" {
 				ctxID = job.ContextID
 			}
@@ -717,8 +1019,9 @@ func (h *Hiring) sealSend(j *Job, body []byte) ([]byte, error) {
 		}
 		j.job = job
 		rk, _ := sealed.DecodeRK(job.RK)
-		base := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: h.cfg.Now().Unix(), TaskID: taskID,
-			ContextID: ctxID, MessageID: msgID, Kids: j.info.kids, ReplyTo: job.key.Recipient().String(), RK: sealed.EncodeRK(rk)}
+		base := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: pinName(j.service), IAT: h.cfg.Now().Unix(),
+			TaskID: taskID, ContextID: ctxID, MessageID: msgID, Kids: j.info.kids, ReplyTo: job.key.Recipient().String(),
+			RK: sealed.EncodeRK(rk)}
 		out := make([]a2awire.Part, len(c.Parts))
 		for i, p := range c.Parts {
 			if _, claims, _ := sealed.ParseDeliveredPart(a2awire.Encode(p)); claims {
@@ -795,6 +1098,7 @@ func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*
 		return h.mcpResponse(ctx, job, resp)
 	}
 	if !job.info.sealed || resp.StatusCode/100 != 2 {
+		job.Release() // the gate refused the first message: no task, and nothing to open
 		return resp, nil
 	}
 	ct := resp.Header.Get("Content-Type")
@@ -823,6 +1127,7 @@ func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*
 				f := h.failureOf(job, &failure{reason: sealed.RejectBadHeader})
 				_, err = pw.Write([]byte("data: " + string(failedEvent(job, f)) + "\n\n"))
 			}
+			job.Release() // a stream that named no task: its provisional key goes
 			_ = pw.CloseWithError(err)
 		}()
 		resp.Body = pr
@@ -831,6 +1136,7 @@ func (h *Hiring) Response(ctx context.Context, job *Job, resp *http.Response) (*
 		resp.Header.Set("Content-Type", "text/event-stream")
 		return resp, nil
 	}
+	defer job.Release() // an answer that named no task: its provisional key goes
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	_ = resp.Body.Close()
 	if err != nil {
@@ -988,6 +1294,15 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 			return nil
 		},
 		Container: func(c *a2awire.Container) error {
+			if c.Where == a2awire.WhereArtifact || c.Where == a2awire.WhereArtifactUpdate {
+				// The hosting node drops an artifact's name and description on a sealed job (D220): any here are the
+				// gate's own words, which the local client would take for the service's (D264).
+				for k := range c.Members {
+					if strings.EqualFold(k, "name") || strings.EqualFold(k, "description") {
+						c.Set(k, nil)
+					}
+				}
+			}
 			if len(c.Parts) == 0 {
 				return nil
 			}
@@ -1086,11 +1401,11 @@ func (h *Hiring) openContainer(j *hireJob, task string, c *a2awire.Container) ([
 			continue
 		}
 		if role == "ROLE_USER" && c.Where == a2awire.WhereHistory {
-			// SPEC-CONFLICT (ext-sealed.md §5 rule 4: every sealed part the node receives for the job is opened with
-			// dir res): a Task's history holds the client's own message as the gate stored it, sealed dir req to the
-			// service's recipients, which the per-job key cannot open. The closest faithful behaviour: such a part is
-			// restored from what this node sealed for the job (its plaintext, kept in memory), and otherwise left out
-			// of what the local client gets (it is the client's own content), never refused.
+			// SPEC-CONFLICT (D215; ext-sealed.md §5 rule 4: every sealed part the node receives for the job is opened
+			// with dir res): a Task's history holds the client's own message as the gate stored it, sealed dir req to
+			// the service's recipients, which the per-job key cannot open. The closest faithful behaviour: such a
+			// part is restored from what this node sealed for the job (its plaintext, kept in memory), and otherwise
+			// left out of what the local client gets (it is the client's own content), never refused.
 			if orig, ok := j.sent[ctHash(sp.Ciphertext)]; ok {
 				out = append(out, orig)
 			}
@@ -1116,6 +1431,11 @@ func (h *Hiring) openContainer(j *hireJob, task string, c *a2awire.Container) ([
 			switch {
 			case hd.Dir != sealed.DirReply:
 				fail(sealed.RejectBadHeader)
+				ok = false
+			case hd.Service != pinName(j.Service):
+				// D221: a reply names the service the job hired; one sealed by another service of the hosting node (the
+				// gate delivered the request there) is that service's, not the hired one's answer.
+				fail(sealed.RejectWrongJob)
 				ok = false
 			case !slices.Contains(hd.Kids, own):
 				fail(sealed.RejectNotRecipient)
@@ -1190,11 +1510,12 @@ type chunkPart struct {
 // before must come again byte for byte (the hosting node reuses ciphertext), a new one must be the next, and an
 // update is one chunk. h.mu is held.
 //
-// SPEC-CONFLICT (ext-sealed.md §5 rule 4: "chunks arrive in order"; §3: chunk counts the updates the hosting node
-// sealed for the artifactId): a Task's artifact holds the chunks the gate merged, and after an append: false only the
-// chunks since; a hiring node that sees the artifact first in a snapshot (a client that polls) cannot tell that from
-// a gate that dropped the first chunks. The closest faithful behaviour: a first sight of an artifact in a Task may
-// start at any chunk, its chunks then consecutive; from then on every chunk is in order or a byte-identical repeat.
+// SPEC-CONFLICT (D215; ext-sealed.md §5 rule 4: "chunks arrive in order"; §3: chunk counts the updates the hosting
+// node sealed for the artifactId): a Task's artifact holds the chunks the gate merged, and after an append: false
+// only the chunks since; a hiring node that sees the artifact first in a snapshot (a client that polls) cannot tell
+// that from a gate that dropped the first chunks. The closest faithful behaviour: a first sight of an artifact in a
+// Task may start at any chunk, its chunks then consecutive; from then on every chunk is in order or a byte-identical
+// repeat.
 func (h *Hiring) checkChunks(j *hireJob, aid string, c *a2awire.Container, ps []chunkPart) sealed.Reject {
 	st := j.Artifacts[aid]
 	first := st == nil
@@ -1444,8 +1765,25 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		// A GET stream: the input requests of a sealed session's tasks may come on it (a passthrough task's), opened
 		// like those of a tasks/result stream.
 		h.mu.Lock()
-		j.info = h.services[j.sid]
+		j.info = h.sessions[j.sid]
+		if j.info != nil && h.otherService(j.info, service) {
+			h.mu.Unlock()
+			return nil, nil, &LocalError{Status: http.StatusNotFound,
+				Err: errors.New("kontra connect: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
+		}
+		if j.info != nil {
+			j.info.used = h.cfg.Now()
+			j.count() // the session's job stays while its GET is open (D241)
+		}
 		h.mu.Unlock()
+		if j.info == nil && j.sid != "" && h.sealedTarget(service, "") {
+			// A session this node does not know (it restarted, or dropped the session's key, D224) to a service whose
+			// pin says sealed (or cannot be read): what comes on its stream would reach the client unread, a result
+			// for a sealed call it still waits for included, so it is answered here as a POST is: 404, and the client
+			// initializes again (round 2 sealing-fixes-4).
+			return nil, nil, &LocalError{Status: http.StatusNotFound,
+				Err: errors.New("kontra connect: an MCP session this node does not know: initialize again")}
+		}
 		j.get = req.Method == http.MethodGet
 		return req, j, nil
 	}
@@ -1489,7 +1827,7 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	si := h.services[j.sid]
+	si := h.sessions[j.sid]
 	if si == nil {
 		if j.sid != "" {
 			// A session this node did not see initialized (it restarted): its sealing is unknown, so nothing is sent;
@@ -1499,7 +1837,14 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		restore(req, b)
 		return req, nil, nil
 	}
+	if h.otherService(si, service) {
+		// The gate chooses the session id a client uses (a stock client adopts the one an answer names): a session is
+		// the service's it was initialized for, and an unsealed one is never used for a service pinned sealed (D260).
+		return nil, nil, &LocalError{Status: http.StatusNotFound,
+			Err: errors.New("kontra connect: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
+	}
 	j.info = si
+	si.used = h.cfg.Now()
 	if !si.sealed {
 		restore(req, b)
 		return req, j, nil
@@ -1507,6 +1852,18 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 	for k := range req.Header {
 		if strings.HasPrefix(strings.ToLower(k), strings.ToLower(mcpwire.HeaderParamPrefix)) {
 			req.Header.Del(k) // §2: never for a sealed call
+		}
+	}
+	if m.Method != "" && len(m.ID) > 0 && j.session != "" {
+		// A request that reuses the id of one whose answer is sealed is refused here, as the hosting node refuses it
+		// (D226): MCP never reuses a request id in a session, and the record stays the sealed request's, so that
+		// whatever comes with that id is opened, or refused, as its answer (D245).
+		if hj, err := h.loadJob("mcp-" + j.session); err == nil && hj != nil {
+			for _, k := range mcpwire.AnswerKeys(m.ID) {
+				if hj.calls[k] != nil {
+					return nil, nil, local(http.StatusBadRequest, "kontra connect: a request that reuses the id of a sealed request of the session")
+				}
+			}
 		}
 	}
 	switch {
@@ -1524,9 +1881,30 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 		b = out
 	case strings.HasPrefix(m.Method, "tasks/"):
 		j.taskOf, _ = memberString(m.Params, "taskId")
+		if m.Method == "tasks/result" && j.session != "" && len(m.ID) > 0 {
+			// A sealed task's result is opened (or refused) on whichever stream of the session it comes.
+			if hj, err := h.loadJob("mcp-" + j.session); err == nil && hj != nil && hj.Tasks[j.taskOf] != nil {
+				t := hj.Tasks[j.taskOf]
+				hj.track(m.ID, &hireCall{Tool: t.Tool, MessageID: t.MessageID, Task: j.taskOf})
+			}
+		}
 	}
+	j.count() // the session's job stays while the exchange is open (D241)
 	restore(req, b)
 	return req, j, nil
+}
+
+// otherService reports a session entry that is not the service's: initialized for another service path, or unsealed
+// while the service's pin says sealed (or cannot be read) (D260). h.mu is held.
+func (h *Hiring) otherService(si *serviceInfo, service string) bool {
+	if si.path != service {
+		return true
+	}
+	if si.sealed {
+		return false
+	}
+	pin, known, err := h.cfg.Pins.Get(h.cfg.Gate, pinName(service))
+	return err != nil || known && pin.Sealed
 }
 
 // sealedTarget reports an MCP request the node must read before anything of it is sent: on a session the node saw
@@ -1535,7 +1913,7 @@ func (h *Hiring) mcpRequest(ctx context.Context, service string, req *http.Reque
 func (h *Hiring) sealedTarget(service, sid string) bool {
 	if sid != "" {
 		h.mu.Lock()
-		si := h.services[sid]
+		si := h.sessions[sid]
 		h.mu.Unlock()
 		if si != nil {
 			return si.sealed
@@ -1557,6 +1935,9 @@ func (h *Hiring) sessionJob(j *Job) (*hireJob, error) {
 		return nil, err
 	}
 	hj.Session = j.session
+	if j.info != nil && j.info.idle > 0 {
+		hj.IdleS = int64(j.info.idle / time.Second) // the gate's session_idle_s (D224)
+	}
 	return hj, h.saveJob(hj)
 }
 
@@ -1587,9 +1968,9 @@ func (h *Hiring) sealCall(j *Job, b []byte, m *mcpwire.Message) ([]byte, error) 
 		return nil, local(http.StatusInternalServerError, "kontra connect: a per-job key could not be minted: %v", err)
 	}
 	msgID := mcpID(m.ID)
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: h.cfg.Now().Unix(), Session: j.session, Tool: name,
-		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: j.info.kids,
-		ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: pinName(j.service), IAT: h.cfg.Now().Unix(),
+		Session: j.session, Tool: name, MessageID: msgID, Op: sealed.OpCall, Part: 0, Parts: 1, Kind: sealed.KindData,
+		Kids: j.info.kids, ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
 	ct, err := sealed.Seal(j.info.recipients, hd, body)
 	if err != nil {
 		return nil, local(http.StatusInternalServerError, "kontra connect: sealing failed: %v", err)
@@ -1599,6 +1980,11 @@ func (h *Hiring) sealCall(j *Job, b []byte, m *mcpwire.Message) ([]byte, error) 
 	}
 	params["arguments"] = json.RawMessage("{}")
 	j.call = &sealedCall{tool: name, messageID: msgID}
+	asks := false
+	if v, ok := params["task"]; ok && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		asks = true
+	}
+	hj.track(m.ID, &hireCall{Tool: name, MessageID: msgID, task: asks})
 	out, err := mcpwire.SetMember(b, "params", a2awire.Encode(params))
 	if err != nil {
 		return nil, local(http.StatusBadRequest, "kontra connect: %v", err)
@@ -1629,33 +2015,64 @@ func setEnvelope(obj map[string]json.RawMessage, ct []byte) error {
 // input request's session, tool and messageId, the job's replyTo and rk; result = {"_meta": {<related-task>,
 // "sh.kontra/sealed"}}.
 func (h *Hiring) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, error) {
-	if j.session == "" {
-		return b, nil
-	}
-	hj, err := h.loadJob("mcp-" + j.session)
-	if err != nil || hj == nil {
-		return b, nil
-	}
 	gid := mcpID(m.ID)
-	var (
-		task  *hireTask
-		msgID string
-	)
-	for _, t := range hj.Tasks {
-		if id, ok := t.Inputs[gid]; ok {
-			task, msgID = t, id
-			break
+	var hj *hireJob
+	if j.session != "" {
+		var err error
+		if hj, err = h.loadJob("mcp-" + j.session); err != nil {
+			return nil, local(http.StatusInternalServerError, "kontra connect: the session's job: %v", err)
 		}
 	}
-	if task == nil {
-		return b, nil // not an answer to a sealed input request
+	var in *hireInput
+	if hj != nil {
+		in = hj.Inputs[gid]
 	}
-	if m.Error != nil || m.Result == nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: the answer to a sealed input request must be a result (it is sealed)")
+	if in == nil {
+		if hj != nil && hj.Answered[gid] {
+			// The answer to an input request the client answered already: the request was answered once (D243).
+			return nil, local(http.StatusBadRequest, "kontra connect: a second answer to a sealed input request")
+		}
+		if j.info == nil || !j.info.relayed[gid] {
+			// A response to no request the node relayed on this session: an answer to a sealed input request of another
+			// session (a client moved onto this one), or to a request the gate wrote itself, which the node never relays
+			// on a sealed session (D260).
+			return nil, local(http.StatusBadRequest, "kontra connect: a response to no request relayed on this sealed session")
+		}
+		delete(j.info.relayed, gid)
+		return b, nil // the answer to a request the node relayed unopened (ping, roots/list)
+	}
+	answered := func() error {
+		delete(hj.Inputs, gid)
+		hj.Answered[gid] = true
+		return h.saveJob(hj)
+	}
+	if m.Error != nil {
+		// The client declined (a user who rejects a sampling request, a client with no handler: an error, MCP
+		// 2025-11-25): its code goes, with fixed text in place of its message and data (D195's rule for an error,
+		// D246), and the hosting node takes it for the answer.
+		nb, err := mcpwire.ErrorBody(m.ID, m.Error.Code, declinedText, nil)
+		if err != nil {
+			return nil, local(http.StatusBadRequest, "kontra connect: %v", err)
+		}
+		if err := answered(); err != nil {
+			return nil, local(http.StatusInternalServerError, "kontra connect: %v", err)
+		}
+		return nb, nil
+	}
+	if m.Result == nil {
+		return nil, local(http.StatusBadRequest, "kontra connect: an answer to a sealed input request with neither a result nor an error")
 	}
 	res, err := strictjson.Members(m.Result)
 	if err != nil {
 		return nil, local(http.StatusBadRequest, "kontra connect: an answer that is not one object with exact keys")
+	}
+	for k := range res {
+		if strings.EqualFold(k, "task") {
+			// A CreateTaskResult: the answer would come later as the client's answer to the server's tasks/result, which
+			// the node never relays on a sealed session; the node opens input requests without their task, so a stock
+			// client answers at once (D261).
+			return nil, local(http.StatusBadRequest, "kontra connect: a task as the answer to a sealed input request")
+		}
 	}
 	var related json.RawMessage
 	if raw, ok := res["_meta"]; ok {
@@ -1668,9 +2085,11 @@ func (h *Hiring) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, error
 	if err != nil {
 		return nil, local(http.StatusBadRequest, "kontra connect: an answer with no canonical form")
 	}
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: h.cfg.Now().Unix(), Session: j.session,
-		Tool: task.Tool, MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: j.info.kids,
-		ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
+	// The answer names the input request's gate task as its header did (sealing's mcpRule1 SPEC-CONFLICT), so that
+	// it cannot be delivered as another task's answer.
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: pinName(j.service), IAT: h.cfg.Now().Unix(),
+		Session: j.session, Tool: in.Tool, MessageID: in.MessageID, TaskID: in.TaskID, Op: sealed.OpAnswer, Part: 0, Parts: 1,
+		Kind: sealed.KindData, Kids: j.info.kids, ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
 	ct, err := sealed.Seal(j.info.recipients, hd, body)
 	if err != nil {
 		return nil, local(http.StatusInternalServerError, "kontra connect: sealing failed: %v", err)
@@ -1686,8 +2105,15 @@ func (h *Hiring) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, error
 	if err != nil {
 		return nil, local(http.StatusBadRequest, "kontra connect: %v", err)
 	}
+	if err := answered(); err != nil {
+		return nil, local(http.StatusInternalServerError, "kontra connect: %v", err)
+	}
 	return nb, nil
 }
+
+// declinedText replaces the text of a client's error answer to a sealed input request (sealAnswer): its code goes to
+// the service, its words stay here (D246).
+const declinedText = "the client declined the request (its text stays on the hiring node: the job is sealed)"
 
 // mcpResponse opens the gate's MCP answer (JSON or SSE), message by message.
 //
@@ -1700,6 +2126,12 @@ func (h *Hiring) mcpResponse(_ context.Context, j *Job, resp *http.Response) (*h
 		if resp.StatusCode/100 == 2 || resp.StatusCode == http.StatusNotFound {
 			h.closeSession(j)
 		}
+		return resp, nil
+	}
+	if !j.init && resp.StatusCode == http.StatusNotFound && j.sid != "" {
+		// The gate closed the session (idle, tunnel_lost, revoked, upstream_closed: relay.md §11.2 answers 404): its
+		// key goes once its tasks are done, as on the client's DELETE, and the client initializes again.
+		h.closeSession(j)
 		return resp, nil
 	}
 	if j.init {
@@ -1807,52 +2239,228 @@ var errUnreadable = errors.New("sealing: a message of a sealed session that is n
 // did not (D172).
 func (h *Hiring) mcpMessage(j *Job, data []byte) ([]byte, error) {
 	m, err := mcpwire.Parse(data, mcpwire.FromUpstream)
-	if err != nil {
-		if j.init {
+	if j.init && !j.initDone {
+		if err != nil {
 			return data, nil // the session's sealing is not known yet: not the node's to read
 		}
-		return nil, errUnreadable
+		if m.Method != "" && len(m.ID) > 0 {
+			// A request before the initialize result: a server sends none (MCP: no request but a ping even before the
+			// client's notifications/initialized), and no session is known that the client's answer would be checked on
+			// (D263).
+			h.log.Warn("sealing: a server request before the initialize result is dropped (D263)")
+			return nil, nil
+		}
+		if m.Method != "" || !mcpwire.SameID(m.ID, j.reqID) {
+			return data, nil
+		}
+		out, err := h.initResult(j, data, m)
+		j.initDone = true
+		h.mu.Lock()
+		if si := h.sessions[j.sid]; err == nil && si != nil && si.sealed && si.session == j.session {
+			// The rest of the exchange is the sealed session's, read as any of its exchanges is (D263).
+			j.info = si
+		}
+		h.mu.Unlock()
+		return out, err
 	}
-	if j.init {
-		return h.initResult(j, data, m)
+	if j.init && (j.info == nil || !j.info.sealed) {
+		return data, nil // the rest of an unsealed session's initialize exchange
+	}
+	if err != nil {
+		return nil, errUnreadable
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	isResp := m.Method == "" && len(m.ID) > 0 && bytes.Equal(bytes.TrimSpace(m.ID), bytes.TrimSpace(j.reqID))
+	isResp := m.Method == "" && len(m.ID) > 0 && mcpwire.SameID(m.ID, j.reqID)
 	hj, err := h.loadJob("mcp-" + j.session)
 	if err != nil {
 		return nil, err
 	}
+	if hj != nil {
+		hj.seen = h.cfg.Now()
+	}
+	if c := hj.call(m); c != nil {
+		return h.openAnswer(j, hj, c, data, m)
+	}
 	switch {
+	case m.Method == "" && len(m.ID) > 0 && m.Result != nil && (j.get || h.sessions[j.sid] != j.info):
+		// A result that answers no request the node tracks, on a GET stream (a resumed stream carries only what the
+		// session's requests were answered) or on a session the node no longer holds (closed, swept): it could be the
+		// gate's own for a sealed call whose record went, and it is not relayed (D241).
+		return h.mcpFail(m)
 	case isResp && m.Result != nil && j.call != nil:
-		if task, ok := mcpwire.Member(m.Result, "task"); ok && firstByte(task) == '{' {
-			if hj == nil {
+		return h.mcpFail(m) // a sealed call of a session with no job: nothing opens its result
+	case m.Method == mcpwire.MethodElicit || m.Method == mcpwire.MethodSample:
+		return h.openInput(j, hj, data, m)
+	case m.Method != "" && len(m.ID) > 0:
+		if m.Method != "ping" && m.Method != "roots/list" {
+			// Any other server request (tasks/result, tasks/get of a client task, a method of no version's): its answer
+			// could carry what the client answered a sealed input request, which goes sealed or not at all (D261).
+			h.log.Warn("sealing: a server request of a sealed session that is no ping, roots/list or input request is dropped (D261)",
+				"method", m.Method)
+			return nil, nil
+		}
+		if si := j.info; si != nil {
+			if len(si.relayed) >= maxRelayed {
+				for k := range si.relayed {
+					delete(si.relayed, k)
+					break
+				}
+			}
+			if si.relayed == nil {
+				si.relayed = map[string]bool{}
+			}
+			si.relayed[mcpID(m.ID)] = true
+		}
+	}
+	return sealStatusMessages(j, data, m)
+}
+
+// sealStatusMessages is a message of a sealed session with every task statusMessage it carries "sealed": the hosting
+// node writes "sealed" in place of a sealed task's (§2), and every task of a sealed session is a sealed call's, so
+// any other text is the gate's own, which the local client would take for the service's (D264). The member is read
+// in any case (a lenient client takes a case variant for it): a task's tasks/get, tasks/cancel or tasks/list answer,
+// and its notifications/tasks/status. h.mu is held.
+func sealStatusMessages(j *Job, data []byte, m *mcpwire.Message) ([]byte, error) {
+	switch {
+	case m.Method == "notifications/tasks/status" && m.Params != nil:
+		p, changed, err := sealedStatus(m.Params)
+		if err != nil || !changed {
+			return dataOr(data, err)
+		}
+		return mcpwire.SetMember(data, "params", p)
+	case m.Method == "" && m.Result != nil && mcpwire.SameID(m.ID, j.reqID) && (j.reqMethod == "tasks/get" || j.reqMethod == "tasks/cancel"):
+		r, changed, err := sealedStatus(m.Result)
+		if err != nil || !changed {
+			return dataOr(data, err)
+		}
+		return mcpwire.SetMember(data, "result", r)
+	case m.Method == "" && m.Result != nil && mcpwire.SameID(m.ID, j.reqID) && j.reqMethod == "tasks/list":
+		res, err := strictjson.Members(m.Result)
+		if err != nil {
+			return nil, errUnreadable
+		}
+		raw, ok := res["tasks"]
+		var elems []json.RawMessage
+		if !ok || firstByte(raw) != '[' || json.Unmarshal(raw, &elems) != nil {
+			return data, nil
+		}
+		some := false
+		for i, e := range elems {
+			ne, changed, err := sealedStatus(e)
+			if err != nil {
+				return nil, errUnreadable
+			}
+			if changed {
+				elems[i], some = ne, true
+			}
+		}
+		if !some {
+			return data, nil
+		}
+		res["tasks"] = a2awire.EncodeArray(elems)
+		return mcpwire.SetMember(data, "result", a2awire.Encode(res))
+	}
+	return data, nil
+}
+
+// dataOr is data, or nothing and errUnreadable when err is set.
+func dataOr(data []byte, err error) ([]byte, error) {
+	if err != nil {
+		return nil, errUnreadable
+	}
+	return data, nil
+}
+
+// sealedStatus is a task object with every member named statusMessage in any case replaced by one statusMessage
+// "sealed"; changed false when it had none, or only "sealed".
+func sealedStatus(obj json.RawMessage) (json.RawMessage, bool, error) {
+	if firstByte(obj) != '{' {
+		return obj, false, nil
+	}
+	m, err := strictjson.Members(obj)
+	if err != nil {
+		return nil, false, err
+	}
+	found := false
+	for k, v := range m {
+		if strings.EqualFold(k, "statusMessage") {
+			if k == "statusMessage" && string(bytes.TrimSpace(v)) == `"sealed"` {
+				continue
+			}
+			delete(m, k)
+			found = true
+		}
+	}
+	if !found {
+		return obj, false, nil
+	}
+	m["statusMessage"] = a2awire.Quote("sealed")
+	return a2awire.Encode(m), true, nil
+}
+
+// openAnswer opens the answer to a request of the session the node tracks (rule 4): a sealed call's result, or its
+// CreateTaskResult (the task is the session's); a sealed task's tasks/result. An error is the gate's or the hosting
+// node's own failure (relay.md §11.8): an error, never a part. h.mu is held.
+func (h *Hiring) openAnswer(j *Job, hj *hireJob, c *hireCall, data []byte, m *mcpwire.Message) ([]byte, error) {
+	if m.Error != nil || m.Result == nil {
+		if c.Task != "" {
+			if t := hj.Tasks[c.Task]; t != nil {
+				t.Done = true
+				h.maybeEndSession(hj)
+			}
+		}
+		c.done = true
+		return data, nil
+	}
+	if c.Task == "" {
+		if task, ok := mcpwire.Member(m.Result, "task"); ok {
+			// A CreateTaskResult answers only a call that asked for a task, and holds the task and nothing a client
+			// would read as the tool's result (content, structuredContent): a stock client ignores "task" and reads
+			// "content" (D244).
+			res, err := strictjson.Members(m.Result)
+			if !c.task || firstByte(task) != '{' || err != nil || !onlyMembers(res, "task", "_meta") {
+				c.done = true
 				return h.mcpFail(m)
 			}
 			id, _ := memberString(task, "taskId")
 			if id != "" && hj.Tasks[id] == nil {
-				hj.Tasks[id] = &hireTask{Tool: j.call.tool, MessageID: j.call.messageID, Inputs: map[string]string{}}
+				hj.Tasks[id] = &hireTask{Tool: c.Tool, MessageID: c.MessageID}
 				if err := h.saveJob(hj); err != nil {
 					return nil, err
 				}
 			}
+			c.done = true
+			nt, changed, err := sealedStatus(task)
+			if err != nil {
+				return h.mcpFail(m)
+			}
+			if changed {
+				res["task"] = nt // the gate's own words are not the task's (D264)
+				return mcpwire.SetMember(data, "result", a2awire.Encode(res))
+			}
 			return data, nil
 		}
-		return h.openResult(j, hj, data, m, j.call.tool, j.call.messageID, "")
-	case isResp && m.Result != nil && j.reqMethod == "tasks/result" && hj != nil && hj.Tasks[j.taskOf] != nil:
-		t := hj.Tasks[j.taskOf]
-		out, err := h.openResult(j, hj, data, m, t.Tool, t.MessageID, j.taskOf)
-		t.Done = true
-		h.maybeEndSession(hj)
-		return out, err
-	case isResp && m.Error != nil && j.reqMethod == "tasks/result" && hj != nil && hj.Tasks[j.taskOf] != nil:
-		hj.Tasks[j.taskOf].Done = true // the gate's own failure (§11.8): an error, never a part
-		h.maybeEndSession(hj)
-		return data, nil
-	case m.Method == mcpwire.MethodElicit || m.Method == mcpwire.MethodSample:
-		return h.openInput(j, hj, data, m)
+		c.done = true
+		return h.openResult(j, hj, data, m, c.Tool, c.MessageID, "")
 	}
-	return data, nil
+	out, err := h.openResult(j, hj, data, m, c.Tool, c.MessageID, c.Task)
+	if t := hj.Tasks[c.Task]; t != nil {
+		t.Done = true
+	}
+	c.done = true
+	h.maybeEndSession(hj)
+	return out, err
+}
+
+// onlyMembers reports an object whose members are all among names.
+func onlyMembers(obj map[string]json.RawMessage, names ...string) bool {
+	for k := range obj {
+		if !slices.Contains(names, k) {
+			return false
+		}
+	}
+	return true
 }
 
 // initResult records the sealing an initialize result declares (capabilities.experimental["sh.kontra/sealed"]) for
@@ -1860,6 +2468,24 @@ func (h *Hiring) mcpMessage(j *Job, data []byte) ([]byte, error) {
 func (h *Hiring) initResult(j *Job, data []byte, m *mcpwire.Message) ([]byte, error) {
 	if m.Result == nil || j.sid == "" {
 		return data, nil
+	}
+	refuse := func(msg string) ([]byte, error) {
+		h.log.Warn("sealing: an initialize result is refused", "reason", msg)
+		b, _ := mcpwire.ErrorBody(m.ID, mcpwire.CodeInternal, msg, nil)
+		return b, nil
+	}
+	if !sessionIDForm(j.sid) {
+		// MCP's form of a session id (visible ASCII), never one a path could be (D240).
+		return refuse("kontra connect refused the gate's session id: not an MCP session id")
+	}
+	h.mu.Lock()
+	_, held := h.sessions[j.sid]
+	hj, err := h.loadJob("mcp-" + j.session)
+	h.mu.Unlock()
+	if held || err != nil || hj != nil {
+		// A session id the node already holds: a second local client put into one sealed session would share its job,
+		// and its requests' ids would be the first client's (D245).
+		return refuse("kontra connect refused the gate's session id: a session it already holds")
 	}
 	var ext json.RawMessage
 	if caps, ok := mcpwire.Member(m.Result, "capabilities"); ok {
@@ -1879,10 +2505,28 @@ func (h *Hiring) initResult(j *Job, data []byte, m *mcpwire.Message) ([]byte, er
 		b, _ := mcpwire.ErrorBody(m.ID, mcpwire.CodeInternal, tunnel.Printable(msg), nil)
 		return b, nil
 	}
+	si.session = j.session
+	si.path = j.service
+	si.idle = sessionIdleOf(m.Result)
+	si.used = h.cfg.Now()
 	h.mu.Lock()
-	h.services[j.sid] = si
+	h.sessions[j.sid] = si
 	h.mu.Unlock()
 	return data, nil
+}
+
+// sessionIDForm reports MCP's form of a session id (2025-11-25: visible ASCII, 0x21 to 0x7E), one that does not start
+// with "/" (no path) (D240).
+func sessionIDForm(sid string) bool {
+	if sid == "" || sid[0] == '/' {
+		return false
+	}
+	for i := 0; i < len(sid); i++ {
+		if sid[i] < 0x21 || sid[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // openResult opens a sealed CallToolResult (rule 4): dir res, the session, tool and messageId of the call, the
@@ -1900,12 +2544,14 @@ func (h *Hiring) openResult(j *Job, hj *hireJob, data []byte, m *mcpwire.Message
 	own := tunnel.KeyID(hj.key.Recipient().String())
 	switch {
 	case hd.Dir != sealed.DirReply, !slices.Contains(hd.Kids, own), sealed.VerifyAuth(rk, hd, plain) != nil,
+		hd.Service != pinName(hj.Service), // D221: the service the session hired
+		hd.Op != sealed.OpResult,          // D239: an input request's envelope is never a result
 		hd.Session != j.session, hd.Tool != tool, hd.MessageID != msgID, hd.TaskID != task, hd.Kind != sealed.KindData:
 		return h.mcpFail(m)
 	}
 	inner, err := strictjson.Members(plain)
-	if err != nil {
-		return h.mcpFail(m)
+	if err != nil || inner["content"] == nil && inner["structuredContent"] == nil {
+		return h.mcpFail(m) // a result's sealed body holds what the service answered (D239)
 	}
 	res, err := strictjson.Members(m.Result)
 	if err != nil {
@@ -1921,17 +2567,38 @@ func (h *Hiring) openResult(j *Job, hj *hireJob, data []byte, m *mcpwire.Message
 	return mcpwire.SetMember(data, "result", a2awire.Encode(res))
 }
 
-// openInput opens a sealed input request of a sealed task (D175): the job's session, the task's tool, a messageId new
-// in the task; the gate request id that carried it is kept for the answer. A replayed one, or an unsealed one, is
-// dropped.
+// openInput opens a sealed input request (D175): of a task a sealed call of this session created (its related task),
+// or, without a related task, of a sealed plain call of the session: the exchange's own, or on another exchange (a GET
+// stream, D232) one the gate has not answered; the job's session, the task's or call's tool, and a messageId not
+// opened before: per durable task (whose input requests name it, D218), and per session for one with no taskId,
+// whose messageId is of the session's upstream session, shared by its plain calls and passthrough tasks (D243). The
+// gate request id that carried it is kept for the answer, and a second input request on an id the session holds for
+// an unanswered one is dropped (D243). On a sealed session every other input request is dropped, as an unsealed part
+// is (rule 4a): a gate could otherwise ask the local client a question of its own and read the answer in plaintext.
+// A replayed one, or one that does not open, is dropped too.
 func (h *Hiring) openInput(j *Job, hj *hireJob, data []byte, m *mcpwire.Message) ([]byte, error) {
-	if hj == nil {
-		return data, nil
+	task, related := relatedTask(m)
+	gid := mcpID(m.ID)
+	var tools []string
+	switch {
+	case hj == nil:
+	case hj.Inputs[gid] != nil:
+		h.log.Warn("sealing: an input request on a gate request id the session holds for an unanswered one: dropped (D243)")
+		return nil, nil
+	case related && hj.Tasks[task] != nil:
+		tools = []string{hj.Tasks[task].Tool}
+	case !related && j.call != nil:
+		tools = []string{j.call.tool}
+	case !related:
+		for _, c := range hj.calls {
+			if c.Task == "" && !c.done {
+				tools = append(tools, c.Tool)
+			}
+		}
 	}
-	task, _ := relatedTask(m)
-	t := hj.Tasks[task]
-	if t == nil {
-		return data, nil // not a task a sealed call of this session created
+	if len(tools) == 0 {
+		h.log.Warn("sealing: an input request of a sealed session that no sealed call of it made: dropped (rule 4a)")
+		return nil, nil
 	}
 	params, err := strictjson.Members(m.Params)
 	if err != nil {
@@ -1939,7 +2606,7 @@ func (h *Hiring) openInput(j *Job, hj *hireJob, data []byte, m *mcpwire.Message)
 	}
 	meta, env, ok, err := sealedMeta(params)
 	if err != nil || !ok {
-		h.log.Warn("sealing: an input request of a sealed task came unsealed: dropped (rule 4a)", "task", task)
+		h.log.Warn("sealing: an input request of a sealed call came unsealed: dropped (rule 4a)", "task", task)
 		return nil, nil
 	}
 	ct, err := sealed.ParseMCPEnvelope(env)
@@ -1955,15 +2622,25 @@ func (h *Hiring) openInput(j *Job, hj *hireJob, data []byte, m *mcpwire.Message)
 	own := tunnel.KeyID(hj.key.Recipient().String())
 	switch {
 	case hd.Dir != sealed.DirReply, !slices.Contains(hd.Kids, own), sealed.VerifyAuth(rk, hd, plain) != nil,
-		hd.Session != j.session, hd.Tool != t.Tool, hd.TaskID != "" && hd.TaskID != task, hd.Kind != sealed.KindData:
-		h.log.Warn("sealing: an input request whose header does not match its task: dropped", "task", task)
+		hd.Service != pinName(hj.Service), // D221: the service the session hired
+		hd.Op != sealed.OpInput,           // D239: a result's envelope is never an input request
+		hd.Session != j.session, !slices.Contains(tools, hd.Tool), hd.Kind != sealed.KindData,
+		related && hd.TaskID != "" && hd.TaskID != task, !related && hd.TaskID != "",
+		related && hd.TaskID == "" && hj.Tasks[task].Durable: // a durable task's names it (D218, D243)
+		h.log.Warn("sealing: an input request whose header does not match its task or call: dropped", "task", task)
 		return nil, nil
 	}
-	if t.Inputs == nil {
-		t.Inputs = map[string]string{}
+	key := "session"
+	if hd.TaskID != "" {
+		key = hd.TaskID
 	}
-	for _, seen := range t.Inputs {
-		if seen == hd.MessageID {
+	opened := key + "\x00" + hd.MessageID
+	if hj.Opened[opened] {
+		h.log.Info("sealing: an input request opened before: dropped (replayed)", "task", task)
+		return nil, nil
+	}
+	for _, seen := range hj.Inputs {
+		if seen.Task == key && seen.MessageID == hd.MessageID {
 			h.log.Info("sealing: an input request opened before: dropped (replayed)", "task", task)
 			return nil, nil
 		}
@@ -1972,11 +2649,23 @@ func (h *Hiring) openInput(j *Job, hj *hireJob, data []byte, m *mcpwire.Message)
 	if err != nil {
 		return nil, nil
 	}
+	for k := range np {
+		if strings.EqualFold(k, "task") {
+			// A task-augmented input request (MCP 2025-11-25): the client would answer it with a task and send its real
+			// answer as the answer to the server's tasks/result, which the node never relays on a sealed session. Opened
+			// without its task, a stock client answers it at once, and the answer goes sealed (D261).
+			delete(np, k)
+		}
+	}
 	delete(meta, mcpwire.MetaSealed)
 	if len(meta) > 0 {
 		np["_meta"] = a2awire.Encode(meta)
 	}
-	t.Inputs[mcpID(m.ID)] = hd.MessageID
+	if related && hd.TaskID != "" {
+		hj.Tasks[task].Durable = true
+	}
+	hj.Opened[opened] = true
+	hj.Inputs[gid] = &hireInput{Task: key, Tool: hd.Tool, MessageID: hd.MessageID, TaskID: hd.TaskID}
 	if err := h.saveJob(hj); err != nil {
 		return nil, err
 	}
@@ -1997,7 +2686,7 @@ func (h *Hiring) closeSession(j *Job) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.services, j.sid)
+	delete(h.sessions, j.sid)
 	hj, err := h.loadJob("mcp-" + j.session)
 	if err != nil || hj == nil {
 		return
@@ -2009,7 +2698,9 @@ func (h *Hiring) closeSession(j *Job) {
 
 // maybeEndSession deletes a closed session's key once every task created in it is done; h.mu is held.
 func (h *Hiring) maybeEndSession(hj *hireJob) {
-	if !hj.Closed {
+	if !hj.Closed || h.open[hj.Session] > 0 {
+		// Not closed, or an exchange of it is open: its key, and the records of its sealed requests, stay until the last
+		// one ends (Job.Done, D241).
 		_ = h.saveJob(hj)
 		return
 	}

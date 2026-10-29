@@ -73,6 +73,10 @@ type Service struct {
 	// capabilities.experimental["sh.kontra/sealed"] (D27); nil for a service that is not sealed.
 	SealedCapability json.RawMessage
 	SessionIdle      time.Duration
+	// MaxSessionsPerPrincipal is max_sessions_per_principal (§11.2, D213, D231): the open legacy sessions one
+	// principal other than anonymous may hold on a tunnel service; an initialize beyond it closes the principal's
+	// sessions idle for EvictIdle, the longest idle first, or is refused 429 when too few are. 0: no cap.
+	MaxSessionsPerPrincipal int
 	// ToolMeta and InitializeMeta are services.annotations' tool_meta and initialize_meta (§13.4).
 	ToolMeta       map[string]map[string]json.RawMessage
 	InitializeMeta map[string]json.RawMessage
@@ -122,7 +126,10 @@ type Deps struct {
 	// Calls bounds the tools/call requests relayed at once to an anonymous tenant's services (spec/tunnel.md §6.2,
 	// DM4-20: calls, gate-wide; *anon.Caps); nil bounds nothing.
 	Calls CallCaps
-	now   func() time.Time
+	// ToolsChanged, when set, tells the other replicas that a service's tools changed (an upstream's
+	// notifications/tools/list_changed this replica relayed; toolsnotify.go). Tools is invalidated here first.
+	ToolsChanged func(ToolsKey)
+	now          func() time.Time
 }
 
 // CallCaps takes one of an anonymous tenant's slots for a relayed tools/call (*anon.Caps.Call): an error wrapping
@@ -173,6 +180,7 @@ type Handler struct {
 	deps     Deps
 	log      *slog.Logger
 	virtuals virtuals // Admission session flights of modern principals (modern.go)
+	busy     inUse    // the legacy sessions with a request or a stream in flight here (D231, inuse.go)
 }
 
 // NewHandler checks deps.
@@ -196,7 +204,7 @@ func NewHandler(deps Deps) (*Handler, error) {
 	if deps.now == nil {
 		deps.now = time.Now
 	}
-	return &Handler{deps: deps, log: deps.Log.With("component", "mcp")}, nil
+	return &Handler{deps: deps, log: deps.Log.With("component", "mcp"), busy: inUse{m: map[[32]byte]*use{}}}, nil
 }
 
 // Register mounts the routes on the edge's closed router: POST as a JSON-RPC route (the edge's 413 and 429 carry a

@@ -3,6 +3,8 @@ package mcprelay
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -58,6 +60,31 @@ func (k *mcpLink) held() bool {
 	}
 	_, err := k.tunnels.MCPBackend(k.session, k.tenantID, k.service)
 	return err == nil
+}
+
+// heldGrace is how long a read that failed mid-answer on a tunnelled link waits for the registry to drop a session
+// that is going: its streams fail a moment before its end is noticed.
+const heldGrace = time.Second
+
+// cut classifies a read that failed mid-answer (a body or an event stream cut before the answer): on a tunnelled link
+// whose session this replica no longer holds, the tunnel was lost (§6.4: tunnel_lost, after the first upstream id
+// too, D178); otherwise the upstream ended it (unreachable).
+func (k *mcpLink) cut(ctx context.Context, msg string) *exchangeError {
+	if k.tunnelled {
+		for deadline := time.Now().Add(heldGrace); ; {
+			if !k.held() {
+				return &exchangeError{class: classTunnelLost, msg: msg + " (the tunnel session is gone)"}
+			}
+			if !time.Now().Before(deadline) || ctx.Err() != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+	}
+	return &exchangeError{class: classUnreachable, msg: msg}
 }
 
 // Classes of a dispatch exchange's failure (spec §6.4's rows).
@@ -249,7 +276,7 @@ func (k *mcpLink) call(ctx context.Context, body []byte, id json.RawMessage, onM
 				if errors.Is(err, errEventTooLarge) {
 					return nil, nil, nil, &exchangeError{class: classProtocol, msg: "an upstream event over the limit"}
 				}
-				return nil, nil, nil, &exchangeError{class: classUnreachable, msg: "the upstream's event stream ended before the answer"}
+				return nil, nil, nil, k.cut(ctx, "the upstream's event stream ended before the answer")
 			}
 			if !ev.message() || !ev.hasData || strings.TrimSpace(ev.data) == "" {
 				continue
@@ -264,7 +291,7 @@ func (k *mcpLink) call(ctx context.Context, body []byte, id json.RawMessage, onM
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, upstream.MaxBody+1))
 	switch {
 	case err != nil:
-		return nil, nil, nil, &exchangeError{class: classUnreachable, msg: "the upstream's body could not be read"}
+		return nil, nil, nil, k.cut(ctx, "the upstream's body could not be read")
 	case len(raw) > upstream.MaxBody:
 		return nil, nil, nil, &exchangeError{class: classProtocol, msg: "an upstream body over the limit"}
 	case mt != "application/json" || len(bytes.TrimSpace(raw)) == 0:
@@ -415,6 +442,7 @@ type legacyRun struct {
 	bytes      int64
 	limit      int64 // what bytes may reach: TaskBytes, or an anonymous tenant's parts_bytes budget (budget)
 	nextN      int
+	idTag      string // the run's own prefix of its ids (id)
 	msgs       chan streamMsg
 	resultOpen bool
 	failing    time.Time // when the polls started failing to reach the upstream
@@ -422,11 +450,19 @@ type legacyRun struct {
 }
 
 // id is a JSON-RPC id of the dispatch's own: a string in a space of its own, never the client's id, which the
-// tools/call reuses (§11.5 step 3).
+// tools/call reuses (§11.5 step 3), and never one an earlier dispatch of the attempt used: a re-attach (D42) works on
+// the same upstream session, where an MCP request id is never reused, and a sealed service's hosting node refuses a
+// request that reuses the id of a sealed one it recorded (spec/ext-sealed.md §5, D226). Each run draws a tag of its
+// own for its ids.
 func (r *legacyRun) id() string {
+	if r.idTag == "" {
+		var b [6]byte
+		_, _ = rand.Read(b[:])
+		r.idTag = hex.EncodeToString(b[:])
+	}
 	for {
 		r.nextN++
-		s := "kontra.dispatch." + strconv.Itoa(r.nextN)
+		s := "kontra.dispatch." + r.idTag + "." + strconv.Itoa(r.nextN)
 		if !sameID(json.RawMessage(strconv.Quote(s)), r.work.RequestID) {
 			return s
 		}
@@ -825,12 +861,12 @@ func (r *legacyRun) terminal(ctx context.Context, st store.State) (lifecycle.Dis
 // error (§11.8). After a cancel the gate forwarded, the run writes nothing of the kind: the workflow writes the
 // client's canceled (append's hold, D57).
 //
-// SPEC-CONFLICT (relay §11.8 case 3, §11.5 step 6): case 3's data names who cancelled ("client" | "declined" |
-// "quote_expired"), and step 6 fetches the upstream's tasks/result at any terminal status; an upstream that cancels
-// its own task fits neither (a 2025-11-25 receiver stores no result for a cancelled task: server-everything@1.0.0's
-// tasks/result then answers an error). The closest faithful behaviour (as §11.12 says for the modern dispatch,
-// "cancelled is canceled"): the task ends canceled with no kontra.canceled, whose tasks/result is -32603 "task
-// cancelled" without data.
+// SPEC-CONFLICT (D203; relay §11.8 case 3, §11.5 step 6): case 3's data names who cancelled ("client" | "declined"
+// | "quote_expired"), and step 6 fetches the upstream's tasks/result at any terminal status; an upstream that
+// cancels its own task fits neither (a 2025-11-25 receiver stores no result for a cancelled task:
+// server-everything@1.0.0's tasks/result then answers an error). The closest faithful behaviour (as §11.12 says for
+// the modern dispatch, "cancelled is canceled"): the task ends canceled with no kontra.canceled, whose tasks/result
+// is -32603 "task cancelled" without data.
 func (r *legacyRun) cancelledUpstream(ctx context.Context) (lifecycle.DispatchResult, bool) {
 	err := r.append(ctx, gateWrite, func(row *store.TaskRow) (store.Write, error) {
 		w, err := store.MCPStatusWrite(row, store.StateCanceled, "the service cancelled the task", nil)
@@ -854,9 +890,11 @@ func (r *legacyRun) finishResult(ctx context.Context, m *mcpwire.Message, raw []
 	if err != nil {
 		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
-	isErr := false
-	if v, ok := mcpwire.Member(res, "isError"); ok && bytes.Equal(bytes.TrimSpace(v), []byte("true")) {
-		isErr = true
+	isErr, ok := mcpwire.IsErrorFlag(res)
+	if !ok {
+		// A top-level isError that is not a JSON boolean: a malformed upstream message (exchange.go's process).
+		r.log.Warn("the upstream's result has an isError that is not a boolean: the task fails upstream_error")
+		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
 	state := store.StateCompleted
 	if isErr {
@@ -885,8 +923,14 @@ func (r *legacyRun) finishError(ctx context.Context, xe *exchangeError) (lifecyc
 		return r.fail(ctx, store.ReasonUpstreamError, "upstream task expired")
 	}
 	raw := xe.raw
-	if len(raw) == 0 {
-		b, err := json.Marshal(xe.rpc)
+	if len(raw) == 0 || r.sealed {
+		e := *xe.rpc
+		if r.sealed {
+			// A sealed service's error keeps its code only: its message and data may quote the sealed arguments,
+			// and the task's log is Postgres (ext-sealed.md §7; the hosting node replaces them too).
+			e = mcpwire.Error{Code: xe.rpc.Code, Message: "the service returned an error (its text is not kept for a sealed service)"}
+		}
+		b, err := json.Marshal(e)
 		if err != nil {
 			return r.fail(ctx, store.ReasonUpstreamError, "")
 		}
@@ -1056,6 +1100,10 @@ func (r *legacyRun) logStatus(ctx context.Context, st store.State, text string) 
 // dropped. A write the fence or the task's end refuses stops the dispatch.
 func (r *legacyRun) onMessage(ctx context.Context) func(*mcpwire.Message, []byte) {
 	return func(m *mcpwire.Message, raw []byte) {
+		if m.Method == "notifications/tools/list_changed" && len(m.ID) == 0 && r.d.ToolsChanged != nil && r.row != nil {
+			// The service's tools changed: its drained lists go on every replica (§11.3), as for a relayed one.
+			r.d.ToolsChanged(ToolsKey{TenantID: r.row.TenantID, Service: r.row.Service})
+		}
 		if m.Method == "" || len(m.ID) == 0 {
 			return
 		}

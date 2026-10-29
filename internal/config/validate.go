@@ -567,6 +567,12 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		if s.Tasks != "" {
 			v.add("%s.tasks: mcp services only (spec §11.5)", at)
 		}
+		if s.MaxSessionsPerPrincipal != nil {
+			v.add("%s.max_sessions_per_principal: mcp services only (spec §11.2)", at)
+		}
+	}
+	if n := s.SessionsPerPrincipal(); n < 1 || n > MaxSessionsPerPrincipal {
+		v.add("%s.max_sessions_per_principal %d: want 1 to %d (spec §11.2)", at, n, MaxSessionsPerPrincipal)
 	}
 	if s.Kind == KindMCP {
 		switch s.Tasks {

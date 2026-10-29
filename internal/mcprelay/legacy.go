@@ -39,7 +39,10 @@ const maxPicks = 3
 // InitializeResult that negotiated 2025-11-25 or 2025-06-18, the mcp_sessions row and the client's answer: the
 // result scrubbed (§2.5), its capabilities.tasks per §11.5, the operator's initialize_meta merged into _meta
 // (§13.4), and the gate's Mcp-Session-Id. Another negotiated version is -32602 naming the supported ones, and the
-// upstream session gets a best-effort DELETE.
+// upstream session gets a best-effort DELETE. Before the upstream initialize, and again as the row is written,
+// max_sessions_per_principal is applied (D213, D231: makeRoom, openSession): the principal's sessions idle for
+// EvictIdle make room, the longest idle first, and without enough of them the initialize is refused 429 (once the
+// upstream answered, its session gets a DELETE).
 func (h *Handler) initialize(rq *request) {
 	if ref := h.admit(rq, hooks.OpSession, ""); ref != nil {
 		writeRefusal(rq.w, ref)
@@ -68,6 +71,21 @@ func (h *Handler) initialize(rq *request) {
 		if ref != nil {
 			writeRefusal(rq.w, ref)
 			return
+		}
+		if attempt == 0 {
+			// D213, D231: a principal holds at most max_sessions_per_principal sessions of the service; the new one's
+			// room is made before the upstream initialize, which an upstream with a bounded number of sessions (a stdio
+			// service's children) would otherwise refuse full, and only once there is an upstream to initialize.
+			switch err := h.makeRoom(rq); {
+			case errors.Is(err, ErrTooManySessions):
+				h.log.Info("mcp: an initialize is refused: the principal's sessions are at max_sessions_per_principal and in use",
+					"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal)
+				writeRefusal(rq.w, tooManySessions(rq.w, rq, err))
+				return
+			case err != nil:
+				h.internal(rq, "apply max_sessions_per_principal", err)
+				return
+			}
 		}
 		resp, err = h.send(rq.ctx(), t, rq, http.MethodPost, body, hdr, "", x)
 		var g *goneError
@@ -118,7 +136,17 @@ func (h *Handler) initialize(rq *request) {
 		}
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
 		defer cancel()
-		if err := h.deps.Sessions.Open(ctx, clientID, *sess); err != nil {
+		if err := h.openSession(ctx, rq, clientID, *sess); errors.Is(err, ErrTooManySessions) {
+			tooMany := err
+			// A concurrent initialize of the principal took the room this one made (D231): its upstream session goes.
+			h.log.Info("mcp: an initialize is refused: the principal's sessions are at max_sessions_per_principal and in use",
+				"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal)
+			if sess.UpstreamSID != "" {
+				h.deleteUpstream(context.WithoutCancel(rq.ctx()), t, *sess)
+			}
+			o.sid = ""
+			return nil, tooManySessions(rq.w, rq, tooMany)
+		} else if err != nil {
 			h.log.Error("mcp: a session row was not written", "service", rq.svc.Ref.Name, "error", err)
 			if sess.UpstreamSID != "" {
 				h.deleteUpstream(context.WithoutCancel(rq.ctx()), t, *sess)
@@ -133,7 +161,8 @@ func (h *Handler) initialize(rq *request) {
 	h.relayResponse(rq, resp, o)
 }
 
-// initializeResult rewrites the InitializeResult the client gets (§11.2, §11.5, §2.5, §13.4).
+// initializeResult rewrites the InitializeResult the client gets (§11.2, §11.5, §2.5, §13.4): its _meta also states
+// the service's session_idle_s (D224).
 func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, version string) ([]byte, error) {
 	res, err := mcpwire.ScrubResult(mcpwire.FromUpstream, mcpwire.MethodInitialize, m.Result, false)
 	if err != nil {
@@ -167,6 +196,15 @@ func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, 
 	}
 	if len(rq.svc.InitializeMeta) > 0 {
 		if res, err = mcpwire.MergeMeta(res, rq.svc.InitializeMeta); err != nil {
+			return nil, err
+		}
+	}
+	if idle := int64(rq.svc.SessionIdle / time.Second); idle > 0 {
+		// §11.2 (D224): the gate states the service's session_idle_s, which closes the session idle, so that a hiring
+		// node keeps a sealed session's key as long as the gate keeps the session, and no longer. It is merged after the
+		// operator's initialize_meta: the value is the gate's, never an annotation's.
+		if res, err = mcpwire.MergeMeta(res, map[string]json.RawMessage{
+			mcpwire.MetaSessionIdle: json.RawMessage(strconv.FormatInt(idle, 10))}); err != nil {
 			return nil, err
 		}
 	}
@@ -282,11 +320,17 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 	rq.sess, rq.sid = sess, sid
+	seen := sess.LastSeenAt
 	if now := h.deps.now(); now.Sub(sess.LastSeenAt) >= IdleWrite {
 		if err := h.deps.Sessions.Touch(rq.ctx(), sess.Hash, now); err != nil {
 			h.log.Debug("mcp: last_seen_at not written", "error", err)
+		} else {
+			seen = now
 		}
 	}
+	// D231: the session is in use until this request, or its stream, ends: its last_seen_at is kept fresh, and no
+	// initialize beyond max_sessions_per_principal closes it meanwhile.
+	defer h.hold(sess, seen)()
 
 	if last := rq.r.Header.Get(mcpwire.HeaderLastEventID); rq.r.Method == http.MethodGet && strings.HasPrefix(last, "k.") {
 		// §11.7: a gate-written stream, served from task_events by any replica and never forwarded, for the
@@ -318,16 +362,28 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 	t, err := h.pinnedTarget(rq)
+	if rq.r.Method == http.MethodDelete {
+		// D196: a DELETE always closes the row deleted, and is 200 when the upstream's tunnel is gone or cannot be
+		// reached from here, whichever of §6.1's check, the holder's liveness or the peer hop found it so (D250); only
+		// a key the gate could not check is 503.
+		var g *goneError
+		switch {
+		case err == nil:
+			h.delete(rq, t)
+		case errors.As(err, &g) || errors.Is(err, errNoHop):
+			h.closeRow(rq, CloseDeleted)
+			writeEmpty(rq.w, http.StatusOK)
+		default:
+			h.upstreamFailed(rq, err)
+		}
+		return
+	}
 	if err != nil {
 		h.upstreamFailed(rq, err)
 		return
 	}
-	switch rq.r.Method {
-	case http.MethodGet:
+	if rq.r.Method == http.MethodGet {
 		h.forward(rq, t, nil)
-		return
-	case http.MethodDelete:
-		h.delete(rq, t)
 		return
 	}
 	switch m := rq.msg; m.Method {
@@ -377,8 +433,8 @@ func isGateRequestID(id json.RawMessage) bool {
 // pinnedTarget is where a pinned session's requests go (§11.2): its direct backend; its tunnel session on this
 // replica after §6.1's check; or, for a tunnel session another replica holds, that replica's peer listener. A
 // session §6.1's check refuses is closed (revoked or tunnel_lost); one whose holder is no longer live is closed
-// tunnel_lost. Without peer.listen, or when the holder advertises no peer address, it is 404 and the row stays open
-// until it is idle (§11.2).
+// tunnel_lost. Without peer.listen, or when the holder advertises no peer address, it is 404 and the row is closed
+// tunnel_lost, so that the client's new initialize does not count it (§11.2, D250).
 func (h *Handler) pinnedTarget(rq *request) (target, error) {
 	s, svc := rq.sess, rq.svc
 	switch {
@@ -413,7 +469,8 @@ func (h *Handler) pinnedTarget(rq *request) (target, error) {
 }
 
 // errNoHop is a pinned session held by another replica that this replica cannot reach: no peer.listen here, or no
-// peer address there. The client gets 404 (it re-initializes on this replica) and the row stays open (§11.2).
+// peer address there. The client gets 404 (it re-initializes on this replica) and the row is closed tunnel_lost: the
+// session the client was told is gone no longer counts against max_sessions_per_principal (§11.2, D250).
 var errNoHop = errors.New("mcprelay: the session's tunnel is held by another replica and there is no peer hop")
 
 // upstreamFailed answers a request whose exchange could not be made.
@@ -428,6 +485,7 @@ func (h *Handler) upstreamFailed(rq *request, err error) {
 	case errors.Is(err, errNoHop):
 		h.log.Info("mcp: a session pinned to another replica cannot be reached without the peer hop (§11.2)",
 			"service", rq.svc.Ref.Name, "holder", rq.sess.ReplicaID)
+		h.closeRow(rq, CloseTunnelLost)
 		h.noSession(rq)
 	case errors.Is(err, errUnchecked):
 		h.log.Warn("mcp: a tunnel session's key could not be checked", "service", rq.svc.Ref.Name, "error", err)
@@ -460,9 +518,9 @@ func (h *Handler) forward(rq *request, t target, meter *callMeter) {
 	x := upstream.MCPExchange{Session: rq.sess.HashHex()}
 	if m := rq.msg; m != nil {
 		var err error
-		// SPEC-CONFLICT (relay §2.5, D174: keep the envelope "in the result._meta of the caller's response to one of
-		// those [elicitation/create, sampling/createMessage]"): a JSON-RPC response does not name the request it
-		// answers, and on a pinned session the request may have reached the client through another replica's
+		// SPEC-CONFLICT (D200; relay §2.5, D174: keep the envelope "in the result._meta of the caller's response to
+		// one of those [elicitation/create, sampling/createMessage]"): a JSON-RPC response does not name the request
+		// it answers, and on a pinned session the request may have reached the client through another replica's
 		// stream. The closest faithful behaviour: on a sealed service an exact {v, envelope} is kept on every client
 		// response (method elicitation/create for the scrub's rule); every other sh.kontra/ key is removed, and the
 		// hosting node, which sealed the request, still checks the answer (ext-sealed.md §5 rule 4b).
@@ -500,7 +558,7 @@ func (h *Handler) delete(rq *request, t target) {
 	h.closeRow(rq, CloseDeleted)
 	if err != nil {
 		var g *goneError
-		if errors.As(err, &g) || errors.Is(err, errNoHop) {
+		if errors.As(err, &g) {
 			writeEmpty(rq.w, http.StatusOK) // the gate's session is ended; the upstream's dies with its tunnel
 			return
 		}

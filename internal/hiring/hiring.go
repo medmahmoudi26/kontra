@@ -44,6 +44,7 @@ import (
 
 	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/pins"
 	"kontra.sh/kontra/internal/sealing"
 	"kontra.sh/kontra/internal/tunnel"
@@ -51,6 +52,10 @@ import (
 
 // DefaultListen is --listen's default.
 const DefaultListen = "127.0.0.1:7777"
+
+// ListenOff is the --listen value that turns the hiring endpoint off, for a node that only hosts (D208): the node
+// binds no local port and hires for no one.
+const ListenOff = "off"
 
 // Local listener timeouts: a header read timeout and an idle timeout, never a write timeout (SSE answers last
 // as long as their task).
@@ -124,8 +129,9 @@ func (s *Server) sealing() *sealing.Hiring {
 }
 
 // Card fetches an A2A service's served card through the tunnel and verifies the gate's signature (VerifyCard); when the
-// gate says it verified the seller's signature, the upstream card is fetched too and its hash checked, for the seller
-// keys the pins record (ext-sealed.md §7). svc is the service's path ({svc}).
+// gate says it verified the seller's signature, the upstream card is fetched too and its hash checked, and the seller
+// key set the gate names (kontra.upstream.jwks, D223), for the seller keys the pins record (ext-sealed.md §7). svc is
+// the service's path ({svc}).
 func (s *Server) Card(ctx context.Context, svc string) (*sealing.Card, error) {
 	body, err := s.get(ctx, svc+"/.well-known/agent-card.json")
 	if err != nil {
@@ -155,10 +161,24 @@ func (s *Server) verified(ctx context.Context, body []byte) (*sealing.Card, erro
 		if err != nil {
 			return nil, err
 		}
-		if c.SellerKeys, err = sealing.SellerKeyIDs(ub, up.SHA256); err != nil {
+		g, _ := tunnel.CanonicalOrigin(s.cfg.Gate)
+		set, err := sealing.SellerKeySet(ctx, up, g, func(ctx context.Context, raw string) ([]byte, error) {
+			ju, err := url.Parse(raw)
+			if err != nil {
+				return nil, err
+			}
+			return s.get(ctx, ju.EscapedPath()) // through the tunnel, to the gate's origin only
+		})
+		if err != nil {
 			return nil, err
 		}
-		c.Signed = true
+		if c.SellerKeys, err = sealing.SellerKeyIDs(ub, up.SHA256, set); err != nil {
+			return nil, err
+		}
+		// Signed only when a seller signature verified, with its own key or the named set's (or names its key by kid
+		// only and no set is named, D223): a card whose signatures all fail to verify is unsigned, a downgrade a pin
+		// refuses (round 2 sealing-fixes-5).
+		c.Signed = len(c.SellerKeys) > 0
 	}
 	return c, nil
 }
@@ -239,6 +259,9 @@ func New(cfg Config, open Opener, log *slog.Logger) (*Server, error) {
 	if err := CheckListen(cfg.Listen, cfg.LocalToken); err != nil {
 		return nil, err
 	}
+	if cfg.Listen == ListenOff && len(cfg.AllowOrigins) > 0 {
+		return nil, fmt.Errorf("--allow-origin names an Origin allowed to call --listen, which is off (D208)")
+	}
 	s := &Server{cfg: cfg, open: open, log: log.With("component", "hiring"), origins: map[string]bool{}}
 	for _, o := range cfg.AllowOrigins {
 		c, err := canonicalOrigin(o)
@@ -259,7 +282,9 @@ func New(cfg Config, open Opener, log *slog.Logger) (*Server, error) {
 			return blob.Fetch(ctx, st, ref, w)
 		}}
 	}
-	s.listen, s.local = cfg.Listen, localBase(cfg.Listen)
+	if cfg.Listen != ListenOff {
+		s.listen, s.local = cfg.Listen, localBase(cfg.Listen)
+	}
 	gate := cfg.Gate
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -289,8 +314,15 @@ func New(cfg Config, open Opener, log *slog.Logger) (*Server, error) {
 	return s, nil
 }
 
-// CheckListen refuses a --listen that is not host:port, and one off loopback without a local token (§9).
+// CheckListen refuses a --listen that is not host:port or off, one off loopback without a local token (§9), and a
+// local token with --listen off (D208).
 func CheckListen(listen, token string) error {
+	if listen == ListenOff {
+		if token != "" {
+			return fmt.Errorf("--local-token guards --listen, which is off (D208)")
+		}
+		return nil
+	}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return fmt.Errorf("--listen %q: want host:port", listen)
@@ -338,12 +370,19 @@ func (s *Server) Handler() http.Handler {
 			_, _ = io.WriteString(w, "kontra connect forwards /agents/…, /mcp/…, /mcp and /.well-known/… only\n")
 			return
 		}
+		svc := ServicePath(r.URL.Path)
+		if read := r.Method == http.MethodGet || r.Method == http.MethodHead; !read && (isA2APath(r.URL.Path) && svc == "" ||
+			strings.HasPrefix(r.URL.Path, "/.well-known/")) {
+			// The gate has no such route (a /.well-known/ document is read, never posted; /agents/ needs a service): a
+			// message sent there would go unsealed, whatever service it was meant for (D247).
+			refuse(w, r, http.StatusNotFound, "kontra connect: no service at this path")
+			return
+		}
 		if seal := s.sealing(); seal != nil {
-			svc := ServicePath(r.URL.Path)
-			// A card read ({svc}/.well-known/…, or a GET on {svc} itself) carries no part: its card is verified and its
-			// pin checked when it is served (modify, CardSeen).
-			cardRead := isA2APath(r.URL.Path) && (isCardPath(r.URL.Path) ||
-				r.Method == http.MethodGet && strings.TrimRight(r.URL.Path, "/") == svc)
+			// A card read (a GET of {svc}/.well-known/…, or of {svc} itself) carries no part: its card is verified and
+			// its pin checked when it is served (modify, CardSeen). Any other method is the service's request (D247).
+			cardRead := (r.Method == http.MethodGet || r.Method == http.MethodHead) && isA2APath(r.URL.Path) &&
+				(isCardPath(r.URL.Path) || strings.TrimRight(r.URL.Path, "/") == svc)
 			if svc != "" && !cardRead {
 				// ext-sealed.md §5: the pin is checked and the request sealed before anything is forwarded; a refusal
 				// is answered here and opens no stream.
@@ -352,6 +391,7 @@ func (s *Server) Handler() http.Handler {
 					s.sealRefused(w, r, err)
 					return
 				}
+				defer job.Done() // the exchange ends with this handler: an MCP session's job stays until then (D241)
 				r = r2.WithContext(context.WithValue(r2.Context(), jobKey{}, job))
 			}
 		}
@@ -370,11 +410,26 @@ func (s *Server) config() Config {
 
 // Serve serves ln until ctx ends. The listener's address is --listen's (a port 0 bound to a free port): the Host
 // check and the card URLs take its port.
+//
+// On a loopback address without --local-token only the node's own user is served: a connection of another account
+// on the machine is closed (peerListener, spec/tunnel.md §9).
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 	s.mu.Lock()
 	s.listen = ln.Addr().String()
 	s.local = localBase(s.listen)
+	token := s.cfg.LocalToken
 	s.mu.Unlock()
+	if host, _, err := net.SplitHostPort(ln.Addr().String()); err == nil && loopbackHost(host) && token == "" {
+		if !peerCheckWorks() {
+			s.log.Warn("the socket table (/proc/self/net/tcp) cannot be read: every local connection will be closed; " +
+				"run with --local-token to serve this machine's users (spec/tunnel.md §9)")
+		}
+		if os.Getuid() == overflowUID {
+			s.log.Warn("kontra connect runs as the overflow uid, which the node attributes to no one: every local "+
+				"connection will be closed; run with --local-token (spec/tunnel.md §9)", "uid", overflowUID)
+		}
+		ln = &peerListener{Listener: ln, uid: os.Getuid(), log: s.log}
+	}
 	defer forgetKeySets(s.tunnel)
 	srv := &http.Server{
 		Handler:           s.Handler(),
@@ -409,10 +464,10 @@ func (s *Server) Local() *url.URL {
 // 403 for a Host that is not one of --listen's loopback names with its port, or an Origin not listed by
 // --allow-origin; 401 without the local token when one is set; 405 for OPTIONS (no CORS preflight is answered).
 //
-// SPEC-CONFLICT (spec/tunnel.md §9): §9 accepts only 127.0.0.1:<port>, localhost:<port> and [::1]:<port> as Host,
-// and also allows --listen on a non-loopback address with --local-token, whose clients reach it by that address.
-// The closest faithful behaviour: with a non-loopback --listen of a specific address (never 0.0.0.0 or ::), that
-// address with the port is accepted too; the local token, which a web page cannot know, guards it.
+// SPEC-CONFLICT (D207; spec/tunnel.md §9): §9 accepts only 127.0.0.1:<port>, localhost:<port> and [::1]:<port> as
+// Host, and also allows --listen on a non-loopback address with --local-token, whose clients reach it by that
+// address. The closest faithful behaviour: with a non-loopback --listen of a specific address (never 0.0.0.0 or
+// ::), that address with the port is accepted too; the local token, which a web page cannot know, guards it.
 func CheckLocal(r *http.Request, cfg Config) (status int, err error) {
 	host, port, err := net.SplitHostPort(cfg.Listen)
 	if err != nil {
@@ -546,9 +601,17 @@ func refuse(w http.ResponseWriter, r *http.Request, status int, msg string) {
 // errNoSession is the forwarding's error while the node has no session to open a stream on.
 var errNoSession = errors.New("hiring: no tunnel session to forward on")
 
+// errRedirect is a 3xx answer of the gate's: never relayed (D258). The gate has no hiring route that redirects, and a
+// stock client follows a 307 or 308 with its own plaintext body to whatever Location names (a2a-go's http.Client,
+// the Python MCP SDK's follow_redirects): the gate's origin, or another local path the node does not seal.
+var errRedirect = errors.New("hiring: the gate answered with a redirect, which the node never relays")
+
 // proxyError answers a forwarding that failed: 429 while the session has the gate's cap of node-opened streams in
 // flight, 503 while there is no session, 502 otherwise (a card that does not verify included).
 func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
+	if job, _ := r.Context().Value(jobKey{}).(*sealing.Job); job != nil {
+		job.Release() // no answer: a new task's provisional key goes (ext-sealed.md §5; tunnel.md §2.3)
+	}
 	status, msg := http.StatusBadGateway, "kontra connect: the gate's answer could not be forwarded"
 	switch {
 	case errors.Is(err, ErrBusy):
@@ -558,6 +621,11 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 		status, msg = http.StatusServiceUnavailable, "kontra connect: no tunnel session to the gate right now; try again"
 	case errors.Is(err, ErrCardNotVerified):
 		msg = "kontra connect: the gate's card signature does not verify; the card is not served"
+	case errors.Is(err, errRedirect):
+		// The node's own 502, an A2A or MCP error body, with no Location (D258).
+		s.log.Warn("the gate answered with a redirect: refused (D258)", "path", clip(r.URL.Path))
+		refuse(w, r, http.StatusBadGateway, "kontra connect: the gate answered with a redirect, which kontra connect never follows or relays")
+		return
 	case r.Context().Err() != nil:
 		s.log.Debug("local client left before the answer", "err", err)
 		return
@@ -569,7 +637,8 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // modify is the ReverseProxy's ModifyResponse: a card is verified and rewritten (relay.md §3, tunnel.md §9), and
-// the kontra-blob: parts of an A2A answer are inlined (relay.md §10.4), JSON and SSE.
+// the kontra-blob: parts of an A2A answer are inlined (relay.md §10.4), JSON and SSE. A 3xx is never relayed, on any
+// path: the client gets the node's 502 instead, with no Location (D258).
 //
 // Cards. Every GET answer in 2xx on a card route is read whatever its Content-Type: a2a-go's resolver decodes
 // any body with encoding/json, which ignores the Content-Type and matches member names without regard to case.
@@ -584,7 +653,16 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 func (s *Server) modify(res *http.Response) error {
 	req := res.Request
 	ctx := req.Context()
+	if res.StatusCode/100 == 3 {
+		return errRedirect // whatever the path and the sealing (D258)
+	}
 	job, _ := ctx.Value(jobKey{}).(*sealing.Job)
+	if isMCPPath(req.URL.Path) && (job != nil && !job.Initialize() || job == nil && req.Header.Get(mcpwire.HeaderSessionID) != "") {
+		// An MCP session is named by its initialize answer only (a request that carries a session id is none): a stock
+		// client (the TypeScript SDK) takes the Mcp-Session-Id of any answer for its session, and the gate would move
+		// it onto another session (D260).
+		res.Header.Del(mcpwire.HeaderSessionID)
+	}
 	ct := res.Header.Get("Content-Type")
 	must, may := false, false
 	if req.Method == http.MethodGet && res.StatusCode/100 == 2 {
@@ -647,7 +725,7 @@ func (s *Server) modify(res *http.Response) error {
 		}
 	}
 	if card {
-		out, err := RewriteCard(ctx, b, s.cfg.Gate, s.Local(), s.tunnel)
+		out, err := RewriteCard(ctx, b, s.cfg.Gate, s.Local(), ServicePath(req.URL.Path), s.tunnel)
 		if err != nil {
 			s.log.Error("a card whose gate signature does not verify is not served (spec/tunnel.md §9)", "path", clip(req.URL.Path), "err", err)
 			return err

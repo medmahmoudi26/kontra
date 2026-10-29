@@ -18,8 +18,8 @@
 //   - The client's notifications/roots/list_changed is dropped with 202, and so is every client response except one
 //     whose id is that of a server-to-client request the node relayed to the client on that session and has not
 //     seen answered; any result with a roots member is dropped whatever its id (Session.FromClient's
-//     SPEC-CONFLICT: §10's "whose id is that of a request it answered" let an answer sent ahead of the server's
-//     roots/list through).
+//     SPEC-CONFLICT, D212: §10's "whose id is that of a request it answered" let an answer sent ahead of the
+//     server's roots/list through).
 //   - On a 2026-07-28 exchange (URL services; the bridge is legacy only) roots is removed from the forwarded
 //     _meta["io.modelcontextprotocol/clientCapabilities"], every params.inputResponses entry that carries roots is
 //     removed, and every roots/list entry of an upstream inputRequests is removed. Configured roots are offered to
@@ -275,17 +275,17 @@ func (s *idSet) len() int { return len(s.m) }
 //     params.inputResponses entry whose value carries roots is removed (2026-07-28; harmless elsewhere);
 //   - everything else is forwarded as it came.
 //
-// SPEC-CONFLICT (spec/tunnel.md §10 with §15 and §16 stdio_roots; D173; M3 WP-05 review): §10 drops "any client
-// response whose id is that of a request it answered". That rule cannot keep a client's roots from the server: a
-// response that arrives before the node has seen the server's roots/list is not one, and is forwarded. Server ids
-// are predictable (the TypeScript SDK's first server-to-client request is id 0), so a client, or a gate forging
-// messages, that sends {"id":0,"result":{"roots":[{"uri":"file:///"}]}} right behind its notifications/initialized
-// has it in the child's stdin ahead of the node's answer, and server-filesystem@1.0.0 takes it (the review's probe:
-// 10 of 20 sessions sequentially, 20 of 20 racing; then a read outside --roots succeeded). The closest faithful
-// behaviour to §10's intent ("a client's roots never reach a hosted server", §15): forward a client response only
-// when it answers a request the node relayed and that is still outstanding, and drop any roots result. §10 should
-// say so. A 2026-07-28 exchange relays no server request (input requests travel inside results), so a client
-// response there is dropped too.
+// SPEC-CONFLICT (D212; spec/tunnel.md §10 with §15 and §16 stdio_roots; D173; M3 WP-05 review): §10 drops "any
+// client response whose id is that of a request it answered". That rule cannot keep a client's roots from the
+// server: a response that arrives before the node has seen the server's roots/list is not one, and is forwarded.
+// Server ids are predictable (the TypeScript SDK's first server-to-client request is id 0), so a client, or a gate
+// forging messages, that sends {"id":0,"result":{"roots":[{"uri":"file:///"}]}} right behind its
+// notifications/initialized has it in the child's stdin ahead of the node's answer, and server-filesystem@1.0.0
+// takes it (the review's probe: 10 of 20 sessions sequentially, 20 of 20 racing; then a read outside --roots
+// succeeded). The closest faithful behaviour to §10's intent ("a client's roots never reach a hosted server", §15):
+// forward a client response only when it answers a request the node relayed and that is still outstanding, and drop
+// any roots result. §10 now says so. A 2026-07-28 exchange relays no server request (input requests travel inside
+// results), so a client response there is dropped too.
 func (s *Session) FromClient(era mcpwire.Era, body []byte, m *mcpwire.Message) (Decision, error) {
 	if m == nil {
 		return Decision{}, errors.New("mcproots: no message")

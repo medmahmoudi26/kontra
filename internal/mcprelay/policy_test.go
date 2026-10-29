@@ -134,6 +134,36 @@ func TestToolsCache(t *testing.T) {
 	}
 }
 
+// Round 2 other-fixes-5: a tools/list_changed notice (NOTIFY 'tools:…') sent while a replica's LISTEN connection was
+// down is never repeated, so the reconnect drops every drained list as well as every era: the next tools/list, and
+// the next "Unknown tool" decision, drain the upstream again instead of using the old list for up to RefreshTools.
+func TestToolsCacheReconnected(t *testing.T) {
+	c := NewToolsCache()
+	var calls atomic.Int32
+	keys := []ToolsKey{{Service: "fs"}, {Service: "db"}}
+	for _, key := range keys {
+		if _, err := c.List(context.Background(), key, mcpwire.EraLegacy, ToolView{}, pages(1, 1, &calls)); err != nil {
+			t.Fatal(err)
+		}
+		c.LearnModern(key, json.RawMessage(`{"capabilities":{}}`))
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("drained %d", calls.Load())
+	}
+	c.Reconnected()
+	for _, key := range keys {
+		if _, err := c.List(context.Background(), key, mcpwire.EraLegacy, ToolView{}, pages(1, 1, &calls)); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := c.Capabilities(key); ok {
+			t.Errorf("%s: the era is kept across a reconnect", key.Service)
+		}
+	}
+	if calls.Load() != 4 {
+		t.Fatalf("after the reconnect the lists were drained %d times in all, want 4: a list was kept", calls.Load())
+	}
+}
+
 // §6.6: 100 pages or 4 MiB in all.
 func TestToolsCacheLimits(t *testing.T) {
 	var calls atomic.Int32
@@ -296,7 +326,9 @@ func TestIDs(t *testing.T) {
 	for _, tc := range []struct {
 		a, b string
 		same bool
-	}{{`1`, `1`, true}, {`"1"`, `1`, false}, {`"a"`, `"a"`, true}, {`1`, `2`, false}, {``, ``, false}} {
+	}{{`1`, `1`, true}, {`"1"`, `1`, true}, {`1`, `"1"`, false}, {`"a"`, `"a"`, true}, {`1`, `2`, false}, {``, ``, false}} {
+		// "1" answers request 1 as the TypeScript SDK reads it (Number("1")); a string request id only its string (M3
+		// review mcp-spec-2, TestReviewSameIDAsClients).
 		if got := sameID(json.RawMessage(tc.a), json.RawMessage(tc.b)); got != tc.same {
 			t.Errorf("sameID(%s, %s) = %v", tc.a, tc.b, got)
 		}

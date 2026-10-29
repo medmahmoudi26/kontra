@@ -77,8 +77,8 @@ type RegistryConfig struct {
 // across replicas they follow the replicas' clocks (NTP), so a skew larger than the time between two
 // handshakes of one key can order them wrongly: the wrongly refused session closes, and its node redials.
 //
-// SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to act
-// on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
+// SPEC-CONFLICT (D138, D199; M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to
+// act on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
 // bindings and API keys only. The closest faithful behaviour is a gate-internal NOTIFY channel between
 // replicas, pg.ChannelTunnel ('session:<id>', 'enrolled:<key_id>/<tenant_id>/<service>', and since M3
 // 'mcp:<tenant_id>/<service>/<replica_id>', a node of an MCP service connecting or disconnecting, which drops the
@@ -532,8 +532,6 @@ func (r *Registry) forget(s *Session) {
 func (r *Registry) remove(s *Session, reason string, logged bool) error {
 	r.forget(s)
 	s.mu.Lock()
-	del := !s.rowGone
-	s.rowGone = true
 	changed := s.hostsMCP && !s.mcpGone
 	s.mcpGone = s.mcpGone || s.hostsMCP
 	s.mu.Unlock()
@@ -549,18 +547,33 @@ func (r *Registry) remove(s *Session, reason string, logged bool) error {
 	if changed {
 		r.mcpChanged(s)
 	}
-	if !del {
+	return r.dropRow(s)
+}
+
+// dropRow deletes a removed session's tunnels row unless this replica already has (or knows it gone). A session is
+// removed more than once, at the same time: Close shuts its multiplexer, which wakes Add's watcher, and both remove
+// it. They take rowMu in turn, so neither returns while the other's delete is in flight: Close's promise that the
+// row is gone when it returns holds whichever of them ran the delete, and a delete that failed is tried again by the
+// next remove. (A flag claimed before the delete let the second return at once, the row still there: CI's race job
+// saw Close return with it, TestRegistryRowsAndLastPing.)
+func (r *Registry) dropRow(s *Session) error {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	s.mu.Lock()
+	gone := s.rowGone
+	s.mu.Unlock()
+	if gone {
 		return nil
 	}
 	if err := r.deleteRow(s.ID); err != nil {
 		// The session itself is closed; Run's row check deletes the row once it has gone two rounds without
 		// a last_ping_at.
 		r.log.Warn("tunnel session closed but its tunnels row was not deleted", obs.KeyTunnelSession, s.ID, "error", err)
-		s.mu.Lock()
-		s.rowGone = false
-		s.mu.Unlock()
 		return fmt.Errorf("tunnelgate: delete the tunnels row of session %s: %w", s.ID, err)
 	}
+	s.mu.Lock()
+	s.rowGone = true
+	s.mu.Unlock()
 	return nil
 }
 

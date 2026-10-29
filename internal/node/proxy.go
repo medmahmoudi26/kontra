@@ -22,6 +22,7 @@ import (
 	"kontra.sh/kontra/internal/a2awire"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/mcproots"
+	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/sealed"
 	"kontra.sh/kontra/internal/sealing"
@@ -392,22 +393,26 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			}
 			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
 			ctx := stdiobridge.WithOwner(r.Context(), p)
+			var sx *sealing.MCPExchange
 			if p.seal != nil {
-				sx := p.seal.MCP(pre)
+				sx = p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
 				defer sx.Release() // what a message the child never got holds in flight (ext-sealed.md §5)
 				ctx = stdiobridge.WithFilter(ctx, sx)
 			}
 			b.ServeHTTP(sw, r.WithContext(ctx))
+			if r.Method == http.MethodDelete && (sw.status/100 == 2 || sw.status == http.StatusNotFound) {
+				sx.SessionGone() // the child's session ended: a sealed job's hold on it goes (D255)
+			}
 			log.Debug("tunnel exchange (stdio)", "method", r.Method, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
 			return
 		}
 		out, ok := targetPath(basePath(sv.Target), r.URL.Path)
 		if sv.Kind == tunnel.KindMCP && (r.URL.Path == "/" || r.URL.Path == "") {
-			// SPEC-CONFLICT (spec/tunnel.md §8.2 with relay.md §11, M3 WP-05): the gate sends every MCP exchange of a
-			// tunnel service to "/" (upstream.Tunnel.Base), and §8.2 prefixes a path not under the base with it, which
-			// sends "/" to "<base>/": a server whose one endpoint is /mcp (a Go ServeMux pattern "/mcp") would answer
-			// 404 there. The closest faithful behaviour: the gate's root is the target itself, its endpoint exactly as
-			// --serve names it (ParseServe); every other path follows §8.2's rule.
+			// SPEC-CONFLICT (D210; spec/tunnel.md §8.2 with relay.md §11, M3 WP-05): the gate sends every MCP exchange
+			// of a tunnel service to "/" (upstream.Tunnel.Base), and §8.2 prefixes a path not under the base with it,
+			// which sends "/" to "<base>/": a server whose one endpoint is /mcp (a Go ServeMux pattern "/mcp") would
+			// answer 404 there. The closest faithful behaviour: the gate's root is the target itself, its endpoint
+			// exactly as --serve names it (ParseServe); every other path follows §8.2's rule.
 			out, ok = sv.Target.Path, true
 		}
 		if !ok {
@@ -424,9 +429,14 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		}
 		modify := stripResponse
 		release := func() {} // what the exchange holds in flight, dropped when the node answers it itself
+		// end is the exchange's end when the gate's context ended before the service answered: a sealed A2A request the
+		// node had handed whole to the service is recorded then, as an accepted one (ext-sealed.md §5, D227).
+		end := func() { release() }
 		if sv.Kind == tunnel.KindA2A && p.seal != nil {
 			// Sealing (ext-sealed.md §5): after the kontra-blob: parts were fetched, so a sealed part is opened once its
-			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service.
+			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service. It reads
+			// the route the service gets (out, cleaned), never the gate's spelling of it (D235).
+			r.URL.Path, r.URL.RawPath = out, ""
 			r2, sx, err := p.seal.Request(r.Context(), pre, r)
 			if err != nil {
 				reason, _ := sealed.ReasonOf(err)
@@ -436,6 +446,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			}
 			r = r2
 			release = sx.Release
+			end = sx.End
 			modify = func(res *http.Response) error {
 				if err := stripResponse(res); err != nil {
 					return err
@@ -451,9 +462,13 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		if f := p.mcp[sv.Name]; sv.Kind == tunnel.KindMCP && f != nil {
 			var sx *sealing.MCPExchange
 			if p.seal != nil {
-				sx = p.seal.MCP(pre)
+				sx = p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
 				defer sx.Release()
 				release = sx.Release
+				// A message the node handed whole to the server, whose exchange the gate ended before the server's answer
+				// (a URL server that answers JSON sends its headers with its result), is recorded as an accepted one, as
+				// an A2A request is (ext-sealed.md §5, D227, D233).
+				end = sx.End
 			}
 			x, ok := f.request(w, r, log, p.answerRoots(sv, out, log), sx)
 			if !ok {
@@ -492,7 +507,11 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			Transport:      p.transports[sv.Name],
 			ModifyResponse: modify,
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-				release() // the node answers: nothing the request holds in flight is recorded (ext-sealed.md §5)
+				if r.Context().Err() != nil {
+					end() // the gate went: a request the service had whole is recorded (D227)
+				} else {
+					release() // the node answers: nothing the request holds in flight is recorded (ext-sealed.md §5)
+				}
 				if sw, ok := w.(*stripWriter); ok {
 					w = sw.ResponseWriter // the node's own answer keeps its Kontra-Node header
 				}
@@ -523,13 +542,13 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 //     full, which the gate retries (on another session before the first upstream task id, with backoff after it,
 //     relay.md §6.4).
 //
-// SPEC-CONFLICT (spec/tunnel.md §8.2, §8.3, §14): §8.3 has the node refuse an announced size over 64 MiB and more
-// bytes than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the
+// SPEC-CONFLICT (D209; spec/tunnel.md §8.2, §8.3, §14): §8.3 has the node refuse an announced size over 64 MiB and
+// more bytes than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the
 // exchange whose part cannot be fetched answers. The closest faithful behaviour: a refusal that would come again is
 // D151's 400 without Kontra-Node, final, like the node's other 400s; a fetch that may succeed if asked again is
 // §8.2's full (503), the reason the gate already retries, since the node then had no room for the exchange's
 // stream: the node keeps its node-opened streams under the gate's cap (§14) and waits for a slot first. full
-// otherwise names the node's own in-flight cap (--max-inflight); the owner may want a reason of its own for it.
+// otherwise names the node's own in-flight cap (--max-inflight); D209 gives it no reason of its own.
 func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Logger) (done func(), ok bool) {
 	none := func() {}
 	if r.Body == nil || r.Body == http.NoBody {

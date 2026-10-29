@@ -64,7 +64,9 @@ services:
       - postgres:/var/lib/postgresql/data
       - ./deploy/compose/postgres-init.sh:/docker-entrypoint-initdb.d/kontra.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d kontra"]
+      # Over TCP, as the gate and Temporal connect: on a fresh volume the image runs the init scripts on a server that
+      # listens on its Unix socket only, and a check over the socket passes up to a second before TCP is served.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U kontra -d kontra"]
       interval: 2s
       timeout: 5s
       retries: 60
@@ -80,13 +82,20 @@ services:
       - |
         set -eu
         sql() { temporal-sql-tool --plugin postgres12 --ep postgres -p 5432 -u temporal --pw "$$POSTGRES_PWD" "$$@"; }
-        for db in temporal temporal_visibility; do
-          sql --db "$$db" create-database 2>/dev/null || true
+        schema() {
+          { sql --db temporal create-database 2>/dev/null || true; } &&
+          { sql --db temporal_visibility create-database 2>/dev/null || true; } &&
+          { sql --db temporal setup-schema -v 0.0 2>/dev/null || true; } &&
+          sql --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned &&
+          { sql --db temporal_visibility setup-schema -v 0.0 2>/dev/null || true; } &&
+          sql --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+        }
+        # A bounded retry (every step is idempotent): a database that refuses connections for a moment after its
+        # healthcheck passed does not fail the first start.
+        n=0
+        until schema; do
+          n=$$((n+1)); [ "$$n" -lt 30 ] || { echo "the Temporal schema could not be set up"; exit 1; }; sleep 2
         done
-        sql --db temporal setup-schema -v 0.0 2>/dev/null || true
-        sql --db temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned
-        sql --db temporal_visibility setup-schema -v 0.0 2>/dev/null || true
-        sql --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
     depends_on:
       postgres: { condition: service_healthy }
     restart: "no"
@@ -119,7 +128,8 @@ services:
       temporal: { condition: service_started }
     restart: "no"
 
-  # One-shot: the gate's own schema (kontra-gate migrate, D28), before any replica serves.
+  # One-shot: the gate's own schema (kontra-gate migrate, D28), before any replica serves. migrate waits up to a minute
+  # for a database that refuses connections (one still starting) before it gives up.
   gate-migrate:
     <<: *gate
     command: ["migrate", "-f", "/etc/kontra/kontra.yaml", "up"]

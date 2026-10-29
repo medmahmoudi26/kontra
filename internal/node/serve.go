@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -35,8 +36,8 @@ const stdioPrefix = "stdio:"
 // node does not retry.
 var serviceNameRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// ErrBasePath is an A2A --serve target with a path other than "/" (see ParseServe).
-var ErrBasePath = errors.New("a --serve target with a base path is refused in M2")
+// ErrBasePath is an A2A --serve target with a path other than "/" (see ParseServe; D123, D210).
+var ErrBasePath = errors.New("an A2A --serve target with a base path is refused (D123, D210)")
 
 // ParseServe parses one --serve value, a stdio command line split with HOME from the process's environment
 // (ParseArgs splits it with the HOME it was given). An A2A target whose path is not empty or "/" is refused (see
@@ -63,7 +64,7 @@ var ErrBasePath = errors.New("a --serve target with a base path is refused in M2
 // target cannot host the pinned server-everything@1.0.0 (examples/mcp/everything), whose endpoint is /mcp, and
 // tunnel.md §8.2 allows a target with a path once the node forwards by its rule ("a path already under the
 // target's base path as it is ... prefixes any other"), which targetPath now does. D123's refusal is kept for A2A
-// targets, as D123 decided for M2.
+// targets, as D123 decided for M2 (D210).
 func ParseServe(s string) (Serve, error) {
 	return parseServe(s, os.Getenv("HOME"))
 }
@@ -154,9 +155,8 @@ func checkTarget(raw, kind string) (*url.URL, error) {
 		return nil, fmt.Errorf("target %s: empty port", origin(u))
 	}
 	if kind != tunnel.KindMCP && u.Path != "" && u.Path != "/" {
-		return nil, fmt.Errorf("%w (target %s, base path %q): the gate calls the upstream card's interface path, "+
-			"which already holds the base, and the node would prefix it again (spec/tunnel.md §8.2 against relay.md §6.2 "+
-			"and D71; spec conflict C1 of the M2 plan, for the owner); serve the agent at its root", ErrBasePath, origin(u), clipValue(u.Path))
+		return nil, fmt.Errorf("%w (target %s, base path %q): serve the agent at its root; an MCP target may name "+
+			"its endpoint path (spec/tunnel.md §8.2)", ErrBasePath, origin(u), clipValue(u.Path))
 	}
 	if p := u.Path; kind == tunnel.KindMCP && p != "" {
 		c := path.Clean(p)
@@ -201,4 +201,75 @@ func clipValue(s string) string {
 		cut--
 	}
 	return s[:cut] + "…"
+}
+
+// upstreamGroups maps every URL service that shares its upstream with another service of the node to the key of
+// their group's one sealed state (sealing.HostingConfig.Shared, D236): two services share an upstream when their
+// targets have one origin (a loopback host by any of its names, a default port written or not) and the base path of
+// one is the other's or under it, the root covering every path, since the node forwards any path under a service's
+// base (spec/tunnel.md §8.2). The key is the group's first name in order. Stdio services each run children of their
+// own and share nothing.
+func upstreamGroups(serves []Serve) map[string]string {
+	var urls []Serve
+	for _, s := range serves {
+		if s.Target != nil && s.Command == nil {
+			urls = append(urls, s)
+		}
+	}
+	parent := map[string]string{}
+	var find func(string) string
+	find = func(n string) string {
+		if p, ok := parent[n]; ok && p != n {
+			r := find(p)
+			parent[n] = r
+			return r
+		}
+		return n
+	}
+	for i := range urls {
+		for j := i + 1; j < len(urls); j++ {
+			a, b := urls[i], urls[j]
+			if upstreamOrigin(a.Target) != upstreamOrigin(b.Target) || !basesOverlap(basePath(a.Target), basePath(b.Target)) {
+				continue
+			}
+			ra, rb := find(a.Name), find(b.Name)
+			if ra == rb {
+				continue
+			}
+			if rb < ra {
+				ra, rb = rb, ra
+			}
+			parent[ra], parent[rb] = ra, ra
+		}
+	}
+	out := map[string]string{}
+	for _, s := range urls {
+		if r := find(s.Name); r != s.Name || parent[s.Name] != "" {
+			out[s.Name] = r
+		}
+	}
+	return out
+}
+
+// upstreamOrigin is a target's origin as upstreamGroups compares it: scheme, host (a name without its trailing dot,
+// and every name of the local host as one) and port (the scheme's default when none is written).
+//
+// The local host's names are localhost (and a name under it, RFC 6761), a loopback address, and an unspecified one
+// (0.0.0.0, ::), which is what a server prints as its listen address and which Linux dials as the local host: two
+// targets that reach one server by two of them are one upstream (D236, D257).
+func upstreamOrigin(u *url.URL) string {
+	host, port := strings.TrimRight(strings.ToLower(u.Hostname()), "."), u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[strings.ToLower(u.Scheme)]
+	}
+	a, err := netip.ParseAddr(host)
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") || err == nil && (a.Unmap().IsLoopback() || a.Unmap().IsUnspecified()) {
+		host = "loopback"
+	}
+	return strings.ToLower(u.Scheme) + "://" + net.JoinHostPort(host, port)
+}
+
+// basesOverlap reports two base paths (without a trailing slash, "" the root) one of which is the other or under it.
+func basesOverlap(a, b string) bool {
+	return a == "" || b == "" || a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
 }

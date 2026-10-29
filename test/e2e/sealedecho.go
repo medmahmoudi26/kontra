@@ -17,8 +17,9 @@ import (
 // node that repeats its input in an artifact and in its status message. A first message whose first text part
 // starts with "ask" stops at input-required ("which one of <text>?"), and its follow-up completes ("done: <text>");
 // any other first message completes at once. Every text part comes back as "echo: <text>" in the artifact, and every
-// raw part as the same bytes with its mediaType and filename. Its card offers A2A 1.0 JSON-RPC at /rpc, which sealing
-// needs (D165).
+// raw part as the same bytes with its mediaType and filename. A first message whose first text part starts with
+// "fail" is refused with an InvalidParams error quoting that text. Its card offers A2A 1.0 JSON-RPC at /rpc, which
+// sealing needs (D165).
 type EchoSeller struct {
 	URL string
 
@@ -32,6 +33,10 @@ type EchoSeller struct {
 
 // AskPrefix starts a first message that asks one follow-up.
 const echoAskPrefix = "ask"
+
+// echoFailPrefix starts a first message the seller refuses with an error quoting it, as a validation error echoes
+// its input (M3 review security-1).
+const echoFailPrefix = "fail"
 
 const echoCard = `{"name":"sealedecho","description":"repeats its input","version":"1.0.0",
 "supportedInterfaces":[{"url":"http://127.0.0.1:9/rpc","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
@@ -104,6 +109,10 @@ func (s *EchoSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter
 				}
 				echo = append(echo, a2a.NewTextPart("echo: "+p.Text()))
 			}
+		}
+		if ec.StoredTask == nil && strings.HasPrefix(text, echoFailPrefix) {
+			yield(nil, &a2a.Error{Err: a2a.ErrInvalidParams, Message: "invalid input: " + text})
+			return
 		}
 		if ec.StoredTask == nil {
 			if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {

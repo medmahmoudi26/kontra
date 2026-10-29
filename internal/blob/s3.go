@@ -39,8 +39,8 @@ var _ Store = (*s3Store)(nil)
 // and checks that it exists and is writable (it writes and removes one small object under the prefix), so a
 // gate with a bucket it cannot use refuses to start instead of failing the first large part.
 //
-// SPEC-CONFLICT (spec/relay.md §10.3 "Every other operator URL follows this section", D67): read literally, the
-// bucket's endpoint would go through the SSRF dialer, https only and globally reachable addresses only, with no
+// SPEC-CONFLICT (D192; spec/relay.md §10.3 "Every other operator URL follows this section", D67): read literally,
+// the bucket's endpoint would go through the SSRF dialer, https only and globally reachable addresses only, with no
 // allow_private for blobs:. The bucket is the gate's own storage, like its Postgres and Temporal, and a team
 // gate's is usually on a private network (MinIO or SeaweedFS beside the gate, the e2e harness's gofakes3 on
 // 127.0.0.1); nothing a caller or a seller writes ever chooses the address. The closest faithful behaviour:

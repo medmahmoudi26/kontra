@@ -162,3 +162,43 @@ func TestHelloworldRunsInCI(t *testing.T) {
 		}
 	}
 }
+
+// Finding robustness-6: CI never ran the M3 tests against server-everything@2.0.0 (the e2e job installed Node 22 only,
+// and check.yml no Node at all), so TestMCPModernEverything2 and TestModernServerEverything always skipped. Every job
+// that runs them installs a pinned Node 24 first, records it as KONTRA_NODE24, then the pinned Node 22 for the 1.0.0
+// servers; KONTRA_REQUIRE_NODE24 makes a missing Node 24 fail them, and no job sets KONTRA_E2E_OFFLINE, so an npm
+// install that fails fails its test.
+func TestNode24InCI(t *testing.T) {
+	ws := workflows(t)
+	exact := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	for _, c := range []struct{ file, job string }{{"e2e.yml", "e2e"}, {"check.yml", "integration"}, {"check.yml", "race"}} {
+		j, ok := ws[c.file].Jobs[c.job]
+		if !ok {
+			t.Fatalf("%s has no job %s", c.file, c.job)
+		}
+		if fmt.Sprint(j.Env["KONTRA_REQUIRE_NODE24"]) != "1" {
+			t.Errorf("%s %s: KONTRA_REQUIRE_NODE24 is %v, want 1", c.file, c.job, j.Env["KONTRA_REQUIRE_NODE24"])
+		}
+		if _, ok := j.Env["KONTRA_E2E_OFFLINE"]; ok {
+			t.Errorf("%s %s: KONTRA_E2E_OFFLINE set: npm failures would skip", c.file, c.job)
+		}
+		var versions []string
+		recorded := -1
+		for i, s := range j.Steps {
+			if strings.HasPrefix(s.Uses, "actions/setup-node@") {
+				v := fmt.Sprint(s.With["node-version"])
+				if !exact.MatchString(v) {
+					t.Errorf("%s %s: setup-node %q is not an exact version", c.file, c.job, v)
+				}
+				versions = append(versions, v)
+			}
+			if strings.Contains(s.Run, "KONTRA_NODE24=") && strings.Contains(s.Run, "GITHUB_ENV") {
+				recorded = i
+			}
+		}
+		if len(versions) != 2 || !strings.HasPrefix(versions[0], "24.") || versions[1] != "22.22.2" || recorded < 0 {
+			t.Errorf("%s %s: setup-node versions %v, KONTRA_NODE24 recorded at step %d: want Node 24 recorded, then Node 22.22.2",
+				c.file, c.job, versions, recorded)
+		}
+	}
+}

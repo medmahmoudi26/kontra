@@ -9,11 +9,14 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/peer"
 	"kontra.sh/kontra/internal/tunnel"
@@ -187,7 +190,7 @@ func (c *callMeter) observe(m *mcpwire.Message) {
 		c.isError = nil
 	default:
 		c.isError = &f
-		if v, ok := mcpwire.Member(m.Result, "isError"); ok && bytes.Equal(bytes.TrimSpace(v), []byte("true")) {
+		if set, ok := mcpwire.IsErrorFlag(m.Result); set || !ok {
 			c.isError = &t
 		}
 	}
@@ -292,11 +295,11 @@ func (h *Handler) relayResponse(rq *request, resp *http.Response, o *relayOpts) 
 				// ext-sealed.md §6: the hosting node refused a sealed part of the call. The JSON-RPC error is relayed
 				// to the client, as the node wrote it (-32602 "sealed part rejected: <reason>", the reason only when
 				// it is one of §6's), the calls row says is_error, and the audit chain records the rejection.
-				// SPEC-CONFLICT (ext-sealed.md §6, tunnel.md §8.2, the M3 plan's "the JSON-RPC error is relayed"):
-				// §6's 400 is the node's answer to the gate, and nothing says which status the client gets; a
-				// Streamable HTTP client takes a 400 as a transport failure and may not read the body. The closest
-				// faithful behaviour: the error is relayed as a JSON-RPC error response with 200, the request's id
-				// and the session header, as the gate answers any other failed call.
+				// SPEC-CONFLICT (D202; ext-sealed.md §6, tunnel.md §8.2, the M3 plan's "the JSON-RPC error is
+				// relayed"): §6's 400 is the node's answer to the gate, and nothing says which status the client
+				// gets; a Streamable HTTP client takes a 400 as a transport failure and may not read the body. The
+				// closest faithful behaviour: the error is relayed as a JSON-RPC error response with 200, the
+				// request's id and the session header, as the gate answers any other failed call.
 				reason := upstream.SealedRejectReason(resp.Header.Get(tunnel.HeaderSealedReject))
 				msg := "sealed part rejected"
 				if reason != "" {
@@ -399,6 +402,11 @@ func (h *Handler) relayJSON(rq *request, resp *http.Response, o *relayOpts) int6
 	if o.hold && (m.Method != "" || !sameID(m.ID, o.reqID)) {
 		o.sid = "" // not the answer to the initialize: no session is opened, and the client gets no id
 	}
+	if rq.r.Method == http.MethodGet && m.Method == "" && len(m.ID) > 0 {
+		h.log.Warn("mcp: an upstream answered a GET with a response; it is not relayed (D265)", "service", rq.svc.Ref.Name)
+		writeError(w, http.StatusBadGateway, nil, mcpwire.CodeInternal, msgUpstreamError, nil)
+		return 0
+	}
 	out, ref := h.process(o, m, b)
 	if ref != nil {
 		writeRefusal(w, ref)
@@ -419,6 +427,17 @@ func (h *Handler) process(o *relayOpts, m *mcpwire.Message, raw []byte) ([]byte,
 	isResp := m.Method == "" && sameID(m.ID, o.reqID)
 	if isResp {
 		o.answered = true
+		if o.method == mcpwire.MethodToolsCall && m.Result != nil {
+			if _, ok := mcpwire.IsErrorFlag(m.Result); !ok {
+				// A top-level isError that is not a JSON boolean ("true", 1, null): clients disagree on it (pydantic
+				// reads "true" as true, the TypeScript SDK's schema refuses the result), so it is a malformed upstream
+				// message, not relayed and metered an error, the value-level twin of D172's key rule.
+				o.meter.fail()
+				h.log.Warn("mcp: an upstream result's isError is not a boolean; it is not relayed")
+				b, _ := mcpwire.ErrorBody(o.reqID, mcpwire.CodeInternal, msgUpstreamError, nil)
+				return nil, &mcpwire.Refusal{Status: http.StatusBadGateway, Body: b}
+			}
+		}
 		o.meter.observe(m)
 		if o.onResponse != nil {
 			return o.onResponse(m, raw)
@@ -426,6 +445,9 @@ func (h *Handler) process(o *relayOpts, m *mcpwire.Message, raw []byte) ([]byte,
 	}
 	if m.Method == "notifications/tools/list_changed" {
 		h.deps.Tools.Invalidate(o.tools)
+		if h.deps.ToolsChanged != nil {
+			h.deps.ToolsChanged(o.tools)
+		}
 	}
 	reqMethod := ""
 	if isResp {
@@ -447,15 +469,22 @@ const keepAliveEvery = 15 * time.Second
 // stream before it (§11.1). With o.hold the headers and the events wait for the response to the client's request
 // (onResponse decides it), within upstream.MaxBody.
 //
-// SPEC-CONFLICT (relay §11.1, §11.2, §11.4; D172): the spec says what happens to an event whose message fails strict
-// decoding, and that events otherwise pass unchanged, but not what happens to an event a client does not dispatch,
-// nor to a second response to one request, both of which let metering read another is_error than the client reads.
-// The closest faithful behaviour: the relay reads, meters and relays what a client reads, the events a client
-// dispatches as messages (type absent or "message", event.message). An event of another type is no MCP message to
-// any client; it is neither read nor relayed, so a seller cannot meter an answer in it that its client never sees,
-// nor carry Kontra's keys past the scrub in it. A second response to the client's request ends the stream before it,
-// as a refused message does, and the call stays metered as its first response says (a client takes the first
-// response for an id, and reports a later one as unknown).
+// SPEC-CONFLICT (D197; relay §11.1, §11.2, §11.4; D172): the spec says what happens to an event whose message fails
+// strict decoding, and that events otherwise pass unchanged, but not what happens to an event a client does not
+// dispatch, nor to a second response to one request, both of which let metering read another is_error than the
+// client reads. The closest faithful behaviour: the relay reads, meters and relays what a client reads, the events a
+// client dispatches as messages (type absent or "message", event.message). An event of another type is no MCP
+// message to any client; it is neither read nor relayed, so a seller cannot meter an answer in it that its client
+// never sees, nor carry Kontra's keys past the scrub in it. A second response to the client's request ends the
+// stream before it, as a refused message does, and the call stays metered as its first response says (a client takes
+// the first response for an id, and reports a later one as unknown).
+//
+// A POST's stream is relayed without its event ids, so that no client resumes it with a GET: the calls row is written
+// from what the POST's stream carried, and a response the client read on a GET instead would be one the gate never
+// metered (a buyer that drops every call's stream after its first event and resumes would have every successful call
+// metered an error, D196). A GET's stream carries no response for the same reason (MCP: a server sends none there
+// unless the client resumes a POST's stream, which the gate does not offer): the stream ends before one, so that a
+// seller cannot have the client take a response on it while the POST's stream is metered another (D265).
 func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64 {
 	type item struct {
 		ev  *event
@@ -534,6 +563,9 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 				continue
 			}
 			tick.Reset(keepAliveEvery)
+			if rq.r.Method == http.MethodPost {
+				ev.dropID() // a POST's stream is not resumable through the gate (D265)
+			}
 			b := ev.encode(false, "")
 			isResp := false
 			if ev.hasData && strings.TrimSpace(ev.data) != "" {
@@ -542,6 +574,11 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 					h.log.Warn("mcp: an upstream event was not relayed: strict decoding refused it; the stream ends",
 						"service", rq.svc.Ref.Name, "level", strictLevel(err))
 					return refuse()
+				}
+				if rq.r.Method == http.MethodGet && m.Method == "" && len(m.ID) > 0 {
+					h.log.Warn("mcp: an upstream sent a response on a GET stream; the stream ends before it (D265)",
+						"service", rq.svc.Ref.Name)
+					return cw.n
 				}
 				isResp = m.Method == "" && sameID(m.ID, o.reqID)
 				if isResp && o.answered {
@@ -584,18 +621,9 @@ func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64
 	}
 }
 
-// sameID reports whether two JSON-RPC ids are the same id: equal strings, or equal numbers as written.
-func sameID(a, b json.RawMessage) bool {
-	a, b = bytes.TrimSpace(a), bytes.TrimSpace(b)
-	if len(a) == 0 || len(b) == 0 {
-		return false
-	}
-	if a[0] == '"' || b[0] == '"' {
-		var sa, sb string
-		return a[0] == b[0] && json.Unmarshal(a, &sa) == nil && json.Unmarshal(b, &sb) == nil && sa == sb
-	}
-	return bytes.Equal(a, b)
-}
+// sameID reports whether a response's id a answers a request whose id is b, as stock clients match them
+// (mcpwire.SameID).
+func sameID(a, b json.RawMessage) bool { return mcpwire.SameID(a, b) }
 
 // idString is a JSON-RPC id as the tunnel preamble's mcp_request_id carries it (tunnel.md §8.1): a string's
 // value, a number as written.
@@ -752,21 +780,126 @@ func (h *Handler) SweepIdle(ctx context.Context) (int, error) {
 // deleteUpstream sends a best-effort DELETE for an upstream session the gate closed (idle, a refused negotiation),
 // within 10 s, on its own goroutine.
 func (h *Handler) deleteUpstream(ctx context.Context, t target, s Session) {
-	go func() {
-		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		rq := &request{r: (&http.Request{}).WithContext(ctx), svc: &Service{}, sess: &s}
-		rq.svc.Ref.TenantID, rq.svc.Ref.Name = s.TenantID, s.Service
-		hdr := http.Header{}
-		if s.ProtocolVersion != "" {
-			hdr.Set(mcpwire.HeaderProtocolVersion, s.ProtocolVersion)
+	go h.deleteUpstreamNow(ctx, t, s)
+}
+
+// deleteUpstreamNow is deleteUpstream's DELETE, made before it returns (within 10 s).
+func (h *Handler) deleteUpstreamNow(ctx context.Context, t target, s Session) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	// The session's own principal, which a peer hop's assertion names to the holding replica.
+	rq := &request{r: (&http.Request{}).WithContext(ctx), svc: &Service{}, sess: &s,
+		p: auth.Principal{ID: s.Principal, BuyerID: s.BuyerID, Via: auth.Via(s.Via)}}
+	rq.svc.Ref.TenantID, rq.svc.Ref.Name = s.TenantID, s.Service
+	hdr := http.Header{}
+	if s.ProtocolVersion != "" {
+		hdr.Set(mcpwire.HeaderProtocolVersion, s.ProtocolVersion)
+	}
+	resp, err := h.send(ctx, t, rq, http.MethodDelete, nil, hdr, s.UpstreamSID, upstream.MCPExchange{Session: s.HashHex()})
+	if err != nil {
+		h.log.Debug("mcp: the upstream DELETE of a closed session failed", "service", s.Service, "error", err)
+		return
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+}
+
+// capped reports whether max_sessions_per_principal applies to rq's new session (§11.2, D213, D231): a positive cap,
+// a tunnel service (a direct backend is an HTTP server the operator runs, with no stdio children to share), and a
+// principal other than anonymous (its callers are distinct clients the gate cannot tell apart: one budget for all of
+// them would let any of them crowd out, or close, the others' sessions).
+func capped(rq *request) bool {
+	return rq.svc.MaxSessionsPerPrincipal > 0 && rq.svc.Direct == nil && rq.p.Authenticated()
+}
+
+// capacity is max_sessions_per_principal's check of rq's new session, now.
+func (h *Handler) capacity(rq *request) Capacity {
+	return Capacity{Limit: rq.svc.MaxSessionsPerPrincipal, Busy: h.busyHashes(), Now: h.deps.now()}
+}
+
+// msgTooManySessions is the message of the 429 an initialize beyond max_sessions_per_principal gets (D231).
+const msgTooManySessions = "too many sessions"
+
+// tooManySessions is the refusal of an initialize beyond max_sessions_per_principal when too few of the principal's
+// sessions are idle to make room (D231): 429 with Retry-After and -32600, as the edge's in-flight caps (§2.2).
+func tooManySessions(w http.ResponseWriter, rq *request, err error) *mcpwire.Refusal {
+	retry := EvictIdle
+	var te *TooManySessionsError
+	if errors.As(err, &te) {
+		retry = te.RetryAfter
+	}
+	// When a retry may find room: once enough of the principal's sessions will have been idle for EvictIdle (D249).
+	w.Header().Set("Retry-After", strconv.Itoa(max(int((retry+time.Second-1)/time.Second), 1)))
+	b, err := mcpwire.ErrorBody(rq.id(), mcpwire.CodeInvalidRequest, msgTooManySessions,
+		map[string]any{"max_sessions_per_principal": rq.svc.MaxSessionsPerPrincipal})
+	if err != nil {
+		b, _ = mcpwire.ErrorBody(nil, mcpwire.CodeInvalidRequest, msgTooManySessions, nil)
+	}
+	return &mcpwire.Refusal{Status: http.StatusTooManyRequests, Body: b}
+}
+
+// makeRoom applies max_sessions_per_principal before the upstream initialize (§11.2, D213, D231): when the
+// principal's open sessions of the service leave no room for the new one, its sessions idle for EvictIdle (none in
+// flight on any replica) are closed, the longest idle first, each with a DELETE on its pinned target made before
+// makeRoom returns, so that an upstream with a bounded number of sessions (the stdio bridge's --max-sessions
+// children) has the room before the new initialize reaches it; with too few such sessions it closes none and is
+// ErrTooManySessions.
+func (h *Handler) makeRoom(rq *request) error {
+	if !capped(rq) {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
+	defer cancel()
+	rows, err := h.deps.Sessions.Evict(ctx, rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID, h.capacity(rq))
+	if err != nil {
+		return err
+	}
+	h.deleteEvicted(ctx, rq, rows)
+	return nil
+}
+
+// openSession writes the new session's row: under max_sessions_per_principal when it applies (OpenCapped, checked
+// again for concurrent initializes of the principal; a session it closes gets its DELETE on its own goroutine).
+func (h *Handler) openSession(ctx context.Context, rq *request, clientID string, sess Session) error {
+	if !capped(rq) {
+		return h.deps.Sessions.Open(ctx, clientID, sess)
+	}
+	rows, err := h.deps.Sessions.OpenCapped(ctx, clientID, sess, h.capacity(rq))
+	if err != nil {
+		return err
+	}
+	if len(rows) > 0 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(rq.ctx()), 10*time.Second)
+			defer cancel()
+			h.deleteEvicted(ctx, rq, rows)
+		}()
+	}
+	return nil
+}
+
+// deleteEvicted sends each session max_sessions_per_principal closed a DELETE on its pinned target (this replica's
+// tunnel session or the holder's peer listener) and waits for them. A session whose target is gone is closed all the
+// same: its upstream session dies with its tunnel.
+func (h *Handler) deleteEvicted(ctx context.Context, rq *request, rows []Session) {
+	var wg sync.WaitGroup
+	for _, s := range rows {
+		h.log.Info("mcp: a principal's session idle for EvictIdle is closed for its new one (max_sessions_per_principal)",
+			"service", rq.svc.Ref.Name, "principal", rq.p.ID, "max_sessions_per_principal", rq.svc.MaxSessionsPerPrincipal,
+			"holder", s.ReplicaID)
+		if s.UpstreamSID == "" {
+			continue
 		}
-		resp, err := h.send(ctx, t, rq, http.MethodDelete, nil, hdr, s.UpstreamSID, upstream.MCPExchange{Session: s.HashHex()})
+		erq := &request{r: (&http.Request{}).WithContext(ctx), svc: rq.svc, sess: &s}
+		t, err := h.pinnedTarget(erq)
 		if err != nil {
-			h.log.Debug("mcp: the upstream DELETE of a closed session failed", "service", s.Service, "error", err)
-			return
+			continue
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		_ = resp.Body.Close()
-	}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			h.deleteUpstreamNow(ctx, t, s)
+		}()
+	}
+	wg.Wait()
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -284,6 +285,24 @@ func TestCancelAnswer(t *testing.T) {
 		got := cancelAnswer(log, json.RawMessage(c.result))
 		if got.Outcome != c.want.Outcome || got.UpstreamState != c.want.UpstreamState || got.UpstreamError != nil {
 			t.Errorf("%.60s: %+v, want %+v", c.result, got, c.want)
+		}
+	}
+}
+
+// A dispatch's own JSON-RPC ids are never reused on its upstream session: a re-attach (a new run on the same session,
+// D42) draws ids of its own, since MCP never reuses a request id in a session and a sealed service's hosting node
+// refuses a request that reuses the id of a sealed one it recorded (round 2 sealing-fixes-1, D226).
+func TestDispatchIDsAreNotReusedAcrossRuns(t *testing.T) {
+	work := &store.MCPWork{RequestID: json.RawMessage(`"kontra.dispatch.1"`)}
+	seen := map[string]bool{}
+	for run := 0; run < 3; run++ {
+		r := &legacyRun{work: work}
+		for i := 0; i < 5; i++ {
+			id := r.id()
+			if seen[id] || sameID(json.RawMessage(strconv.Quote(id)), work.RequestID) {
+				t.Fatalf("run %d reuses the id %s", run, id)
+			}
+			seen[id] = true
 		}
 	}
 }

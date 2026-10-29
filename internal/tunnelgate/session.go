@@ -52,6 +52,9 @@ type Session struct {
 	nodeAccepted atomic.Int64
 	nodeInFlight atomic.Int64
 
+	// rowMu serializes the deletes of its tunnels row (Registry.dropRow); it is taken before mu, never under it.
+	rowMu sync.Mutex
+
 	mu         sync.Mutex
 	served     map[string]string // service name → kind
 	hostsMCP   bool              // an MCP service was in its served set when it was added (Add): MCP sessions may pin it

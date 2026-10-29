@@ -1393,6 +1393,7 @@ func TestMCPServicesInTheRegistry(t *testing.T) {
     tools: { allow: ["read_*", "list_*"], deny: ["read_secret"] }
     tasks: passthrough
     session_idle_s: 120
+    max_sessions_per_principal: 5
     annotations: { tool_meta: { "*": { "sh.kontra/price": "1 USD" } }, initialize_meta: { "sh.kontra/price": "per session" } }
   fs:
     kind: mcp
@@ -1411,7 +1412,7 @@ func TestMCPServicesInTheRegistry(t *testing.T) {
 	if err != nil || web == nil {
 		t.Fatalf("web: %+v %v", web, err)
 	}
-	if web.Tasks != config.TasksPassthrough || web.SessionIdle != 120*time.Second || web.Direct == nil ||
+	if web.Tasks != config.TasksPassthrough || web.SessionIdle != 120*time.Second || web.MaxSessionsPerPrincipal != 5 || web.Direct == nil ||
 		web.Direct.Base().String() != "http://127.0.0.1:9/mcp" || web.Ref.Kind != config.KindMCP {
 		t.Errorf("web: %+v", web)
 	}
@@ -1428,7 +1429,7 @@ func TestMCPServicesInTheRegistry(t *testing.T) {
 		t.Errorf("annotations %v %v", web.ToolMeta, web.InitializeMeta)
 	}
 	fs, _ := s.MCPService(ctx, TeamTenant, "fs")
-	if fs == nil || fs.Direct != nil || fs.Tasks != config.TasksDurable {
+	if fs == nil || fs.Direct != nil || fs.Tasks != config.TasksDurable || fs.MaxSessionsPerPrincipal != config.DefaultMaxSessionsPerPrincipal {
 		t.Errorf("fs: %+v", fs)
 	}
 	if ok, _ := fs.Tools.Allows("write_x"); ok {

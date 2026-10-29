@@ -22,7 +22,9 @@
 //     SIGTERM after TerminateAfter and SIGKILL KillAfter later, so an npx launcher leaves no node behind (D184);
 //     a child idle for --session-idle (default 1 h, at least the gate's session_idle_s) is stopped the same way
 //     and its session answers 404, as does a crashed child's, whose group is stopped too. At most
-//     --max-sessions (8) children per service; an initialize beyond is 503 Kontra-Node: full.
+//     --max-sessions (8) children per service; an initialize beyond stops the longest-idle child idle for at least
+//     5 minutes (EvictIdle, D213), or waits for one the gate's DELETE is stopping, and is otherwise 503
+//     Kontra-Node: full.
 //   - Legacy only in v4.0 (D161): a request without a session id that is not initialize, a 2026-07-28 request
 //     among them, is 400 with the legacy body of spec/relay.md §11.12 rule 3, so a dual-era client falls back.
 //
@@ -80,6 +82,11 @@ const (
 	maxStreamQueue = 16 << 20
 )
 
+// EvictIdle is how long a child must have had no exchange for a full bridge to stop it for a new session (D213): an
+// initialize beyond --max-sessions stops the longest-idle child idle at least that long rather than answer full. A
+// variable for tests; the node never changes it.
+var EvictIdle = 5 * time.Minute
+
 // Config is one stdio service.
 type Config struct {
 	Service string
@@ -119,6 +126,9 @@ type Bridge struct {
 	all      map[*child]struct{} // every child whose group is not stopped yet (counted against MaxSessions)
 	reserved int                 // children being spawned
 	closed   bool
+	// released is closed, and replaced, whenever a child's group is stopped and its place under MaxSessions freed:
+	// an initialize that waits for a place (reserve) wakes on it.
+	released chan struct{}
 }
 
 // New checks cfg; children are spawned by initialize requests. It starts nothing.
@@ -145,7 +155,7 @@ func New(cfg Config, log *slog.Logger) (*Bridge, error) {
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
-	b := &Bridge{cfg: cfg, sessions: map[string]*child{}, all: map[*child]struct{}{},
+	b := &Bridge{cfg: cfg, sessions: map[string]*child{}, all: map[*child]struct{}{}, released: make(chan struct{}),
 		log: log.With("component", "stdio-bridge", "service", cfg.Service)}
 	seen := map[string]bool{}
 	for _, k := range append([]string{"PATH", "HOME", "LANG"}, cfg.Env...) {
@@ -305,7 +315,7 @@ func (b *Bridge) post(w http.ResponseWriter, r *http.Request, owner any, sid str
 // until the gate gives up, is 502 target_unreachable; one that answers with an error is stopped and its error
 // relayed with no session.
 func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, body []byte, m *mcpwire.Message) {
-	if !b.reserve() {
+	if !b.reserve(r.Context()) {
 		b.log.Warn("an initialize is refused: the service is at --max-sessions", "max_sessions", b.cfg.MaxSessions)
 		nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, m.ID, "kontra connect: the stdio service is at its --max-sessions")
 		return
@@ -368,14 +378,93 @@ func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, b
 }
 
 // reserve counts a child about to be spawned against MaxSessions; false when the service is full or closed.
-func (b *Bridge) reserve() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.closed || len(b.all)+b.reserved >= b.cfg.MaxSessions {
-		return false
+//
+// A full bridge first makes room (D213; spec/tunnel.md §10): an initialize that finds a child stopping already (the
+// gate closed a principal's longest-idle session for this one with a DELETE, relay.md §11.2) waits for it rather than
+// answer full; otherwise it stops the longest-idle child, when that child has had no exchange (none open, none
+// started, a GET stream counting as open) for at least EvictIdle, and waits for its process group to be gone. Every
+// principal admitted to the service shares the children, and so does every durable task's own upstream session
+// (D22): the gate caps each principal's sessions, and the bridge, which sees tunnel sessions and never principals,
+// gives a busy service's idle children to new sessions. The wait is bounded by the group's stop (TerminateAfter
+// and KillAfter) and the request's context.
+func (b *Bridge) reserve(ctx context.Context) bool {
+	evicted := false
+	var deadline <-chan time.Time
+	for {
+		b.mu.Lock()
+		if b.closed {
+			b.mu.Unlock()
+			return false
+		}
+		if len(b.all)+b.reserved < b.cfg.MaxSessions {
+			b.reserved++
+			b.mu.Unlock()
+			return true
+		}
+		released := b.released
+		// A child stopping already frees a place soon: it is waited for, and no other child is stopped meanwhile.
+		stopping := b.stopping()
+		var victim *child
+		if !stopping && !evicted {
+			victim = b.longestIdle(time.Now())
+		}
+		b.mu.Unlock()
+		switch {
+		case stopping:
+		case victim != nil:
+			evicted = true
+			victim.log.Info("the stdio service is at --max-sessions: its longest-idle child is stopped for a new session (D213)",
+				"max_sessions", b.cfg.MaxSessions, "evict_idle", EvictIdle)
+			victim.shutdown("stopped for a new session: the service is at --max-sessions")
+		default:
+			return false // every child is busy, or idle for less than EvictIdle: full
+		}
+		if deadline == nil {
+			t := time.NewTimer(b.cfg.TerminateAfter + 2*b.cfg.KillAfter + time.Second)
+			defer t.Stop()
+			deadline = t.C
+		}
+		select {
+		case <-released:
+		case <-ctx.Done():
+			return false
+		case <-deadline:
+			return false
+		}
 	}
-	b.reserved++
-	return true
+}
+
+// longestIdle is the open session's child that has had no exchange for the longest, at least EvictIdle, none in
+// flight; nil when there is none. b.mu is held.
+func (b *Bridge) longestIdle(now time.Time) *child {
+	var (
+		victim *child
+		oldest time.Time
+	)
+	for _, c := range b.sessions {
+		c.mu.Lock()
+		idle := !c.gone && c.inflight == 0 && now.Sub(c.lastUsed) >= EvictIdle
+		last := c.lastUsed
+		c.mu.Unlock()
+		if idle && (victim == nil || last.Before(oldest)) {
+			victim, oldest = c, last
+		}
+	}
+	return victim
+}
+
+// stopping reports a child whose session ended and whose group is not stopped yet: its place under MaxSessions is
+// freed soon. b.mu is held.
+func (b *Bridge) stopping() bool {
+	for c := range b.all {
+		c.mu.Lock()
+		gone := c.gone
+		c.mu.Unlock()
+		if gone {
+			return true
+		}
+	}
+	return false
 }
 
 // open makes c's session reachable by its id; false when the bridge is closing or c is gone.
@@ -419,11 +508,14 @@ func (b *Bridge) forget(c *child) {
 	}
 }
 
-// release ends c's count against MaxSessions, once its process group is stopped.
+// release ends c's count against MaxSessions, once its process group is stopped, and wakes the initializes waiting
+// for a place.
 func (b *Bridge) release(c *child) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	delete(b.all, c)
+	close(b.released)
+	b.released = make(chan struct{})
 }
 
 // Sessions is the number of children counted against MaxSessions: live, starting and stopping.

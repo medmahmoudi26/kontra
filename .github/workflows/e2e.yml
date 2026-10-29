@@ -49,6 +49,7 @@ jobs:
     env:
       KONTRA_TEST_PG: postgres://kontra:kontra@localhost:5432/kontra?sslmode=disable
       KONTRA_REQUIRE_HELLOWORLD: "1"
+      KONTRA_REQUIRE_NODE24: "1"
       A2A_SAMPLES_PIN: 6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3
       TEMPORAL_CLI_VERSION: "1.9.1"
       TEMPORAL_CLI_ARCHIVE_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
@@ -65,8 +66,18 @@ jobs:
       # The a2a-samples checkout at the commit examples/sellers/helloworld/run.sh pins (D154). With
       # KONTRA_REQUIRE_HELLOWORLD the helloworld tests fail, instead of skipping, without it, uv or a free
       # 127.0.0.1:9999 (M2 review): hello-world unmodified behind the tunnel is a hard rule of M2.
-      # The M3 tests' stock MCP servers (D171): Node 22, as the 1.0.0 releases need; server-everything@2.0.0 needs
-      # Node 24, and its test is skipped, saying why, without it.
+      # The M3 tests' stock MCP servers (D171): Node 22, as the 1.0.0 releases need, and Node 24 for
+      # server-everything@2.0.0 (TestMCPModernEverything2).
+      # server-everything@2.0.0 needs Node 24 (D171): installed first, its binary recorded as KONTRA_NODE24; then
+      # Node 22, which stays on PATH for the 1.0.0 stock servers. KONTRA_REQUIRE_NODE24 fails, rather than skips,
+      # the tests that need Node 24 without it, and an npm install that fails fails its test (no KONTRA_E2E_OFFLINE).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Record Node 24 for server-everything@2.0.0
+        run: |
+          node --version | grep -q '^v24\.'
+          echo "KONTRA_NODE24=$(command -v node)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.22.2"

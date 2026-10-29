@@ -43,12 +43,13 @@ const SealUsage = `usage:
 // ErrUsage is a kontra seal command line that is not one of SealUsage's (the CLI exits 2).
 var ErrUsage = errors.New("usage")
 
-// usageErr is a usage error with the synopsis.
+// usageErr is a usage error: its reason only (the CLI prints SealUsage after it, as it is, so that a reason is
+// escaped for the terminal and the synopsis keeps its lines).
 func usageErr(why string) error {
 	if why != "" {
-		return fmt.Errorf("%w: %s\n%s", ErrUsage, why, SealUsage)
+		return fmt.Errorf("%w: %s", ErrUsage, why)
 	}
-	return fmt.Errorf("%w\n%s", ErrUsage, SealUsage)
+	return ErrUsage
 }
 
 // maxCardBytes bounds a card, a key set or an input file kontra seal reads.
@@ -70,21 +71,21 @@ const (
 // --open reads one sealed part (or a Message, a Task or an artifact holding sealed parts) and writes the plaintext
 // of each part a key of ~/.kontra/jobs opens, after checking dir res, the job key's id in kids and auth.
 //
-// SPEC-CONFLICT: §5.1 has kontra seal fetch the service's card with no word on a credential, but relay.md §2.1 answers
-// a card GET of a service that neither is listed nor admits anonymous with 404 when no credential admits the caller,
-// so kontra seal could seal for listed services only (and examples/sealing's flow, an allow: org:default service,
-// failed). It sends an API key given explicitly with --api-key (or @file), never one read from the environment: a
-// variable such as $KONTRA_API_KEY is tied to no gate, and the gate a --service names is not trusted (§7), so a key
-// exported for one gate would reach every other one sealed for. As kontra connect sends a key only to the --gate it
-// was given with, the key goes only to the --service's origin, and only where §2.1 needs a credential: the service's
-// card, after an unauthenticated GET of it was 404, and then its upstream card; never the gate's key set
+// SPEC-CONFLICT (D222): §5.1 has kontra seal fetch the service's card with no word on a credential, but relay.md §2.1
+// answers a card GET of a service that neither is listed nor admits anonymous with 404 when no credential admits the
+// caller, so kontra seal could seal for listed services only (and examples/sealing's flow, an allow: org:default
+// service, failed). It sends an API key given explicitly with --api-key (or @file), never one read from the
+// environment: a variable such as $KONTRA_API_KEY is tied to no gate, and the gate a --service names is not trusted
+// (§7), so a key exported for one gate would reach every other one sealed for. As kontra connect sends a key only to
+// the --gate it was given with, the key goes only to the --service's origin, and only where §2.1 needs a credential:
+// the service's card, after an unauthenticated GET of it was 404, and then its upstream card; never the gate's key set
 // (/.well-known/jwks.json is public), and never to a listed service, whose cards are public.
 //
-// SPEC-CONFLICT: §5.1 has kontra seal mint a per-job key and rk for every message it seals, --task included, but a
-// follow-up's header must carry the job's replyTo and rk (§5 rule 3: wrong_job otherwise), so a follow-up sealed
-// with a fresh key could never be accepted. --open binds a job to the gate task its replies name (renaming the job's
-// key and state to the task id, as the hiring node names its jobs), and --task <id> seals with that task's job key,
-// rk and contextId; a task with no job here is refused, saying to --open one of its replies first.
+// SPEC-CONFLICT (D222): §5.1 has kontra seal mint a per-job key and rk for every message it seals, --task included,
+// but a follow-up's header must carry the job's replyTo and rk (§5 rule 3: wrong_job otherwise), so a follow-up
+// sealed with a fresh key could never be accepted. --open binds a job to the gate task its replies name (renaming
+// the job's key and state to the task id, as the hiring node names its jobs), and --task <id> seals with that task's
+// job key, rk and contextId; a task with no job here is refused, saying to --open one of its replies first.
 func SealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	return sealCommand(ctx, args, stdin, stdout, stderr, os.Getenv("HOME"), http.DefaultClient, time.Now)
 }
@@ -100,6 +101,9 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	mediaType := fs.String("media-type", "application/octet-stream", "")
 	apiKey := fs.String("api-key", "", "")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return flag.ErrHelp // --help: the CLI prints SealUsage and exits 0
+		}
 		return usageErr(err.Error())
 	}
 	var key string // only --api-key's: never the environment's (SealCommand's SPEC-CONFLICT)
@@ -161,7 +165,8 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	svcPath := strings.TrimRight(svcURL.EscapedPath(), "/")
 	cardURL := origin + svcPath + "/.well-known/agent-card.json"
-	get := keyedGet(client, key, origin+svcPath+"/.well-known/agent-card.json", origin+svcPath+"/.well-known/agent-card.upstream.json")
+	get := keyedGet(client, key, origin+svcPath+"/.well-known/agent-card.json", origin+svcPath+"/.well-known/agent-card.upstream.json",
+		origin+svcPath+"/.well-known/seller-jwks.json")
 	cardBody, err := get(ctx, cardURL)
 	if err != nil {
 		return fmt.Errorf("the service's card: %w", err)
@@ -250,8 +255,8 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 		}
 	}
 	msgID := uuid.NewString()
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: now().Unix(), TaskID: *task, ContextID: *ctxID,
-		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindRaw, MediaType: *mediaType, Kids: kids,
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: name, IAT: now().Unix(), TaskID: *task,
+		ContextID: *ctxID, MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindRaw, MediaType: *mediaType, Kids: kids,
 		ReplyTo: jobKey.Recipient().String(), RK: sealed.EncodeRK(rk)}
 	ct, err := sealed.Seal(recipients, hd, data)
 	if err != nil {
@@ -288,7 +293,8 @@ var randReader = cryptoRand{}
 // key set at jku = origin + /.well-known/jwks.json, fetched from that origin only; a card none of whose signatures
 // does is refused. When the gate says it verified a seller signature (kontra.upstream.verified), the upstream card
 // is fetched from kontra.upstream.url (on the same origin), its JCS hash checked against kontra.upstream.sha256, and
-// its signatures' key ids are the seller keys the pins record (ext-sealed.md §7).
+// the seller key set the gate names in kontra.upstream.jwks (D223) fetched from the same origin; the keys that verify
+// its signatures are the seller keys the pins record (ext-sealed.md §7, SellerKeyIDs).
 func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx context.Context, u string) ([]byte, error)) (*Card, error) {
 	if len(card) > maxCardBytes {
 		return nil, errors.New("the card is over 1 MiB")
@@ -352,18 +358,37 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 		if err != nil {
 			return nil, fmt.Errorf("the upstream card: %w", err)
 		}
-		ids, err := SellerKeyIDs(ub, up.SHA256)
+		set, err := SellerKeySet(ctx, up, origin, get)
 		if err != nil {
 			return nil, err
 		}
-		out.SellerKeys, out.Signed = ids, true
+		ids, err := SellerKeyIDs(ub, up.SHA256, set)
+		if err != nil {
+			return nil, err
+		}
+		// Signed only when a seller signature verified, with its own key or the named set's, or names its key by kid
+		// only and no set is named (unverifiable, D223): a card whose signatures all fail to verify is unsigned, which a
+		// pin of a signed card refuses (round 2 sealing-fixes-5).
+		out.SellerKeys, out.Signed = ids, len(ids) > 0
 	}
 	return out, nil
 }
 
 // SellerKeyIDs checks an upstream card against the hex SHA-256 of its JCS that the gate signed (kontra.upstream.sha256)
-// and returns the key ids (kid) of its signatures, sorted: what the pins record of the seller (ext-sealed.md §7).
-func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
+// and returns what the pins record of the seller's keys (ext-sealed.md §7), sorted: for each seller signature that
+// carries its public key (a jwk in its protected header, EC P-256) and verifies with it over the JCS of the card
+// without signatures, the RFC 7638 thumbprint of that key; for each that names its key by kid only, the thumbprint of
+// the key of sellerKeys it verifies with, sellerKeys being the seller key set the gate names in kontra.upstream.jwks
+// and serves on its origin (D223), or, when the gate names none (nil), "kid:<kid>", unverified. A signature that does
+// not verify, with its own key or with the named set's, or is malformed, is no key of the seller's; a card with no key
+// at all is pinned unsigned (an empty result: Card.Signed is false).
+//
+// The set comes from the gate, like the card, and is trusted on first use like every pin (§7): a gate that replaces
+// the card and its kid-only signature must replace the key set too, and the pinned thumbprint changes, which the pins
+// refuse (with --pin-recipients) or report until accepted, and which kontra connect prints for comparison out of
+// band (D187). Only a gate that names no set leaves a kid-only signature pinned unverified, and a forged one naming
+// the pinned kid undetected; a pin that recorded kid:<kid> reports a seller-key change once its gate names the set.
+func SellerKeyIDs(upstream []byte, sha string, sellerKeys *jws.KeySetPublic) ([]string, error) {
 	c, err := jcs.Transform(upstream)
 	if err != nil {
 		return nil, fmt.Errorf("the upstream card has no canonical form: %w", err)
@@ -383,16 +408,22 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 		}
 	}
 	var ids []string
+	add := func(id string) {
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
 	for _, e := range elems {
 		sm, err := strictjson.Members(e)
 		if err != nil {
 			continue
 		}
-		var prot string
-		if json.Unmarshal(sm["protected"], &prot) != nil {
+		var sig jws.Signature
+		if json.Unmarshal(sm["protected"], &sig.Protected) != nil || json.Unmarshal(sm["signature"], &sig.Signature) != nil {
 			continue
 		}
-		b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(prot, "="))
+		sig.Header = sm["header"]
+		b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(sig.Protected, "="))
 		if err != nil {
 			continue
 		}
@@ -400,16 +431,78 @@ func SellerKeyIDs(upstream []byte, sha string) ([]string, error) {
 		if err != nil {
 			continue
 		}
-		if kid, ok := a2awire.String(pm, "kid"); ok && kid != "" && !slices.Contains(ids, kid) {
-			ids = append(ids, kid)
+		kid, ok := a2awire.String(pm, "kid")
+		if !ok || kid == "" {
+			continue
+		}
+		jwk, has := pm["jwk"]
+		if !has {
+			if sellerKeys == nil {
+				add("kid:" + kid)
+				continue
+			}
+			if _, err := jws.Verify(upstream, sig, sellerKeys); err != nil {
+				continue
+			}
+			if t, ok := sellerKeys.Thumbprint(kid); ok {
+				add(t)
+			}
+			continue
+		}
+		key, err := strictjson.Members(jwk)
+		if err != nil {
+			continue
+		}
+		key["kid"] = a2awire.Quote(kid)
+		set, err := jws.ParseJWKS(a2awire.Encode(map[string]json.RawMessage{"keys": a2awire.EncodeArray([]json.RawMessage{a2awire.Encode(key)})}))
+		if err != nil {
+			continue
+		}
+		if _, err := jws.Verify(upstream, sig, set); err != nil {
+			continue
+		}
+		if t, ok := set.Thumbprint(kid); ok {
+			add(t)
 		}
 	}
 	slices.Sort(ids)
 	return ids, nil
 }
 
+// SellerKeySet fetches the seller key set the gate names in kontra.upstream.jwks (D223), nil when it names none: a URL
+// on origin, the gate the card came from, fetched with get (through the tunnel for kontra connect), a JWK Set with an
+// EC P-256 signing key. A named set that cannot be read makes the card unreadable: nothing is pinned from it.
+func SellerKeySet(ctx context.Context, up *jws.Upstream, origin string, get func(ctx context.Context, u string) ([]byte, error)) (*jws.KeySetPublic, error) {
+	if up == nil || up.JWKS == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(up.JWKS)
+	if err != nil {
+		return nil, errors.New("kontra.upstream.jwks is not a URL")
+	}
+	if o, err := tunnel.CanonicalOrigin(u); err != nil || o != origin || u.RawQuery != "" || u.Fragment != "" {
+		return nil, errors.New("kontra.upstream.jwks is not on the gate's origin")
+	}
+	b, err := get(ctx, origin+u.EscapedPath())
+	if err != nil {
+		return nil, fmt.Errorf("the seller key set the gate names (kontra.upstream.jwks): %w", err)
+	}
+	if len(b) > maxSellerKeySet {
+		return nil, errors.New("the seller key set the gate names is over 256 KiB")
+	}
+	set, err := jws.ParseJWKS(b)
+	if err != nil {
+		return nil, fmt.Errorf("the seller key set the gate names: %w", err)
+	}
+	return set, nil
+}
+
+// maxSellerKeySet bounds the seller key set a node reads (the gate's own bound on a fetched set, card.SellerKeysMax).
+const maxSellerKeySet = 256 << 10
+
 // openParts is kontra seal --open: every sealed part of the file that a per-job key under ~/.kontra/jobs opens is
-// checked (dir res, the key's id in kids, auth with the job's rk) and its plaintext written to out: text, url and
+// checked (dir res, the key's id in kids, auth with the job's rk, the service its job hired, D221) and its plaintext
+// written to out: text, url and
 // data as they are, raw as its bytes, one after another. A sealed part none of the job keys opens is an error, except
 // in the client's own message in a Task's history (a ROLE_USER entry), which is left out.
 func openParts(path, home string, out io.Writer) error {
@@ -477,6 +570,11 @@ func openParts(path, home string, out io.Writer) error {
 		if err := sealed.VerifyAuth(rk, hd, plain); err != nil {
 			return errors.New("the reply's auth does not verify: refused")
 		}
+		if loc, ok := where[hd.Kids[0]]; !ok || hd.Service != pinName(loc.service) {
+			// D221: a reply names the service its job was sealed for; another service of the hosting node sealed this one
+			// (the gate delivered the request there).
+			return errors.New("the reply names another service than its job's (ext-sealed.md §3): refused")
+		}
 		if _, err := out.Write(plain); err != nil {
 			return err
 		}
@@ -496,10 +594,11 @@ func openParts(path, home string, out io.Writer) error {
 	return nil
 }
 
-// jobLocation is where a per-job key is kept: its gate's directory and its job id.
+// jobLocation is where a per-job key is kept: its gate's directory and its job id, and the service its job hired.
 type jobLocation struct {
-	jobs *nodekey.JobKeys
-	id   string
+	jobs    *nodekey.JobKeys
+	id      string
+	service string
 }
 
 // bindJob renames a kontra seal job (seal-…) to the gate task id its replies name: its key, then its state, whose
@@ -574,14 +673,15 @@ func allJobKeys(home string) ([]age.Identity, map[string][]byte, map[string]*job
 			ids = append(ids, key)
 			kid := tunnel.KeyID(key.Recipient().String())
 			rks[kid] = rk
-			where[kid] = &jobLocation{jobs: jobs, id: id}
+			where[kid] = &jobLocation{jobs: jobs, id: id, service: st.Service}
 		}
 	}
 	return ids, rks, where, nil
 }
 
 // keyedGet is kontra seal's GET (SealCommand's SPEC-CONFLICT on a credential): key, --api-key's or "", goes as a
-// bearer credential only to the URLs of keyed (the service's card and upstream card, on the --service's origin,
+// bearer credential only to the URLs of keyed (the service's card, upstream card and seller key set, D223, on the
+// --service's origin,
 // compared in canonical form), and only once a GET of one of them without it was 404, the unknown-service answer of
 // relay.md §2.1 to a caller no credential admits; the later GETs of keyed send it at once. Any other URL (the gate's
 // key set) never gets it.

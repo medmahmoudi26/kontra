@@ -479,6 +479,21 @@ func (r *run) sealedRejected(ctx context.Context, f upstream.Failure) {
 	r.fail(store.ReasonSealedRejected, f.Message)
 }
 
+// failureText is f's message as the gate logs it and stores it in the task's log: for a sealed service, never the
+// service's own words (an A2A error's message or details, a malformed body's text), which may quote the sealed input
+// it refused (a validation error echoing a card number), but the gate's: ext-sealed.md §7 promises that the gate's
+// database and logs hold ciphertext only, and Temporal's history already gets the code only (D59). The hosting node
+// replaces a sealed job's error text too (sealing.Hosting.errorResponse); this holds whatever the node does.
+func (r *run) failureText(f upstream.Failure) string {
+	if r.e.svc.Sealed == "" || f.Class != upstream.Protocol {
+		return f.Message
+	}
+	if status, _ := r.ex.Status(); status >= 300 {
+		return fmt.Sprintf("the service answered HTTP %d (its text is not kept for a sealed service)", status)
+	}
+	return "the service returned an error (its text is not kept for a sealed service)"
+}
+
 // retry ends the turn without a terminal event: the workflow starts a new attempt (§6.4).
 func (r *run) retry(reason store.FailureReason, wait time.Duration, cause error) {
 	r.d.running.SetOutcome(lifecycle.DispatchRetryable, reason)
@@ -491,6 +506,7 @@ func (r *run) retry(reason store.FailureReason, wait time.Duration, cause error)
 // upstreamFailed applies §6.4's table to a failed upstream call.
 func (r *run) upstreamFailed(ctx context.Context, err error) {
 	f := upstream.Classify(ctx, err, r.ex)
+	f.Message = r.failureText(f)
 	first := r.ids.UpstreamTaskID != ""
 	r.logger.Info("upstream call failed", "class", int(f.Class), "first_upstream_id", first, "error", f.Message)
 	switch f.Class {
@@ -868,6 +884,7 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 			Message: "the service did not answer GetTask within " + r.e.opts.GetTaskTimeout.String()}
 	} else {
 		f = upstream.Classify(ctx, err, r.ex)
+		f.Message = r.failureText(f)
 	}
 	switch f.Class {
 	case upstream.Unreachable, upstream.Throttled:
@@ -1390,9 +1407,9 @@ var errOverTaskBytes = errors.New("relay: the task's stored bytes would exceed l
 // storePart stores one part's content as an object of this task and returns its url part. The object counts
 // toward limits.task_bytes, checked before it is written: one that would cross it is errOverTaskBytes.
 //
-// SPEC-CONFLICT (§6.6 with §10.4): §6.6's table counts in limits.task_bytes "each logged event's whole encoding"
-// (D103), and the M3 plan counted a part moved to the bucket only as its logged url part. But §6.6's rule is that
-// "nothing an upstream sends is unbounded", and §10.4 says of the bucket "the gate stores bytes it does not
+// SPEC-CONFLICT (D194; §6.6 with §10.4): §6.6's table counts in limits.task_bytes "each logged event's whole
+// encoding" (D103), and the M3 plan counted a part moved to the bucket only as its logged url part. But §6.6's rule
+// is that "nothing an upstream sends is unbounded", and §10.4 says of the bucket "the gate stores bytes it does not
 // interpret; per-task totals are bounded (§6.6)". Counting the url part only bounded a task's objects in number
 // (task_bytes over a url part's few hundred bytes), each up to an SSE event's 4 MiB: thousands of times
 // task_bytes in bytes. The closest faithful behaviour: task_bytes bounds everything the gate stores

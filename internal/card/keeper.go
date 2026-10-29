@@ -73,6 +73,7 @@ type Keeper struct {
 	touch        func(ctx context.Context, s *Served)
 	signer       Signer
 	upstreamURL  string // {public_url}{svc}/.well-known/agent-card.upstream.json
+	jwksURL      string // {public_url}{svc}/.well-known/seller-jwks.json (kontra.upstream.jwks, D223)
 	seller       *SellerKeys
 
 	mu       sync.RWMutex
@@ -121,8 +122,12 @@ func WithSigner(s Signer) KeeperOption { return func(k *Keeper) { k.signer = s }
 // WithSellerKeys verifies every upstream card against keys (spec §3); nil configures none (verified: false).
 func WithSellerKeys(keys *SellerKeys) KeeperOption { return func(k *Keeper) { k.seller = keys } }
 
-// UpstreamPath is where the upstream card is served under {svc} (spec §2.1).
-const UpstreamPath = "/.well-known/agent-card.upstream.json"
+// UpstreamPath is where the upstream card is served under {svc} (spec §2.1), and SellerJWKSPath the seller key set
+// the gate verified it with (kontra.upstream.jwks, D223).
+const (
+	UpstreamPath   = "/.well-known/agent-card.upstream.json"
+	SellerJWKSPath = "/.well-known/seller-jwks.json"
+)
 
 // NewKeeper returns a keeper for backend b; in is the rewrite input (its Upstream is ignored).
 func NewKeeper(b upstream.Backend, in Input, opts ...KeeperOption) *Keeper {
@@ -131,6 +136,7 @@ func NewKeeper(b upstream.Backend, in Input, opts ...KeeperOption) *Keeper {
 		o(k)
 	}
 	k.upstreamURL = strings.TrimRight(in.PublicURL, "/") + in.ServicePath + UpstreamPath
+	k.jwksURL = strings.TrimRight(in.PublicURL, "/") + in.ServicePath + SellerJWKSPath
 	return k
 }
 
@@ -150,9 +156,10 @@ func (k *Keeper) Seed(raw []byte, fetchedAt time.Time) error {
 
 // verdict is what seller keys made of an upstream card.
 type verdict struct {
-	verified bool // a configured key verified one of its signatures
-	refused  bool // keys are configured and none verified any
-	pending  bool // keys are configured and not fetched yet
+	verified bool   // a configured key verified one of its signatures
+	refused  bool   // keys are configured and none verified any
+	pending  bool   // keys are configured and not fetched yet
+	jwks     []byte // the public set that verified it (verified only): kontra.upstream.jwks (D223)
 }
 
 // verify checks raw against the seller keys; without keys the card is neither verified nor refused.
@@ -160,11 +167,17 @@ func (k *Keeper) verify(ctx context.Context, raw []byte) (verdict, error) {
 	if k.seller == nil {
 		return verdict{}, nil
 	}
-	ok, _, err := k.seller.Verify(ctx, raw)
+	ok, _, set, err := k.seller.verify(ctx, raw)
 	if err != nil {
 		return verdict{}, err
 	}
-	return verdict{verified: ok, refused: !ok}, nil
+	v := verdict{verified: ok, refused: !ok}
+	if ok {
+		if v.jwks, err = set.JWKS(); err != nil {
+			return verdict{}, err
+		}
+	}
+	return v, nil
 }
 
 // Refresh fetches the card once, within FetchTimeout, and a {url} seller key set with it, at the same time and
@@ -311,9 +324,9 @@ func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v ve
 			return err
 		}
 	}
-	// SPEC-CONFLICT (spec §3 with D49): §3 keeps the upstream card verbatim and serves every seller member byte
-	// for byte, and signs the served card over its RFC 8785 JCS with the upstream card's JCS hash in the header;
-	// JCS is defined for valid Unicode only (I-JSON), so a card that is not valid UTF-8, or carries a lone
+	// SPEC-CONFLICT (D193; spec §3 with D49): §3 keeps the upstream card verbatim and serves every seller member
+	// byte for byte, and signs the served card over its RFC 8785 JCS with the upstream card's JCS hash in the
+	// header; JCS is defined for valid Unicode only (I-JSON), so a card that is not valid UTF-8, or carries a lone
 	// surrogate, can be neither hashed nor signed, though M1 served such bytes as they were. The closest faithful
 	// behaviour: such a card is not installed (ErrBadCard, as for any card the gate cannot serve), so the service
 	// has no card until the seller publishes one; it is never served unsigned or altered.
@@ -328,7 +341,7 @@ func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v ve
 		return err
 	}
 	if k.signer != nil {
-		sig, err := k.signer.Sign(ctx, body, hash, k.upstreamURL, v.verified)
+		sig, err := k.signer.Sign(ctx, body, hash, k.upstreamURL, k.jwksURL, v.verified)
 		if err != nil {
 			return err
 		}
@@ -345,7 +358,8 @@ func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v ve
 	if k.served != nil && bytes.Equal(k.served.Body, body) {
 		lastMod = k.served.LastModified // the same body keeps its Last-Modified, so caches stay valid
 	}
-	k.served = &Served{Body: body, Upstream: raw, ETag: ETag(body), LastModified: lastMod, Hash: hash, Verified: v.verified}
+	k.served = &Served{Body: body, Upstream: raw, ETag: ETag(body), LastModified: lastMod, Hash: hash, Verified: v.verified,
+		SellerJWKS: v.jwks}
 	k.servedAt = at
 	k.info = info
 	k.unverified, k.verifyPending = v.refused, v.pending

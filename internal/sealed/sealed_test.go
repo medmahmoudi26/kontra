@@ -64,7 +64,7 @@ func requestHeader(t *testing.T, kids []string) Header {
 		t.Fatal(err)
 	}
 	return Header{
-		V: Version, Dir: DirRequest, IAT: 1761490000, ContextID: "ctx-1", MessageID: "msg-1",
+		V: Version, Dir: DirRequest, Service: "acme/hello", IAT: 1761490000, ContextID: "ctx-1", MessageID: "msg-1",
 		Part: 0, Parts: 1, Kind: KindText, MediaType: "text/plain", Kids: kids,
 		ReplyTo: newID(t).Recipient().String(), RK: EncodeRK(rk),
 	}
@@ -192,6 +192,10 @@ func TestHeaderRefusals(t *testing.T) {
 		{"unsorted kids", strings.Replace(g, `"kids":["`+kid+`"]`, `"kids":["`+kid+`","k1_0"]`, 1)},
 		{"short rk", strings.Replace(g, `"rk":"`+good.RK+`"`, `"rk":"AAEC"`, 1)},
 		{"auth on a request", strings.Replace(g, `"v":1}`, `"auth":"x","v":1}`, 1)},
+		{"non-ASCII service", strings.Replace(g, `"service":"acme/hello"`, "\"service\":\"acme/h\u00e9llo\"", 1)},
+		{"service out of order", strings.Replace(strings.Replace(g, `"service":"acme/hello",`, ``, 1), `{"contextId"`, `{"service":"acme/hello","contextId"`, 1)},
+		{"case of service", strings.Replace(g, `"service"`, `"Service"`, 1)},
+		{"empty service", strings.Replace(g, `"service":"acme/hello"`, `"service":""`, 1)},
 		{"trailing data", g + " "},
 		{"array", "[" + g + "]"},
 	} {
@@ -221,7 +225,7 @@ func TestHeaderRefusals(t *testing.T) {
 func TestInputRequestHeaders(t *testing.T) {
 	hosting, perJob := newID(t), newID(t)
 	session := strings.Repeat("ab", 32)
-	in := Header{V: Version, Dir: DirReply, Session: session, Tool: "book", MessageID: "7", Part: 0, Parts: 1,
+	in := Header{V: Version, Dir: DirReply, Session: session, Tool: "book", MessageID: "7", Op: OpInput, Part: 0, Parts: 1,
 		Kind: KindData, MediaType: "", Kids: kidsOf(perJob)}
 	rk, _ := NewRK()
 	auth, err := Auth(rk, in, []byte(`{"message":"Which date?"}`))
@@ -230,14 +234,14 @@ func TestInputRequestHeaders(t *testing.T) {
 	}
 	in.Auth = auth
 	answer := Header{V: Version, Dir: DirRequest, IAT: 1761490100, Session: session, Tool: "book", MessageID: "7",
-		Part: 0, Parts: 1, Kind: KindData, MediaType: "", Kids: kidsOf(hosting),
+		Op: OpAnswer, Part: 0, Parts: 1, Kind: KindData, MediaType: "", Kids: kidsOf(hosting),
 		ReplyTo: perJob.Recipient().String(), RK: EncodeRK(rk)}
 	for _, c := range []struct {
 		h    Header
 		want string
 	}{
-		{in, `{"auth":"` + auth + `","dir":"res","kids":["` + in.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","part":0,"parts":1,"session":"` + session + `","tool":"book","v":1}`},
-		{answer, `{"dir":"req","iat":1761490100,"kids":["` + answer.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","part":0,"parts":1,"replyTo":"` + answer.ReplyTo + `","rk":"` + answer.RK + `","session":"` + session + `","tool":"book","v":1}`},
+		{in, `{"auth":"` + auth + `","dir":"res","kids":["` + in.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","op":"input","part":0,"parts":1,"session":"` + session + `","tool":"book","v":1}`},
+		{answer, `{"dir":"req","iat":1761490100,"kids":["` + answer.Kids[0] + `"],"kind":"data","mediaType":"","messageId":"7","op":"answer","part":0,"parts":1,"replyTo":"` + answer.ReplyTo + `","rk":"` + answer.RK + `","session":"` + session + `","tool":"book","v":1}`},
 	} {
 		b, err := c.h.Canonical()
 		if err != nil {
@@ -275,8 +279,8 @@ func TestInputRequestHeaders(t *testing.T) {
 
 // TestAgeInterop: Seal's output is a plain age file: filippo.io/age with an identity parsed from an identity file
 // (the format age-keygen writes, so `age -d -i identity.key` opens it) gives JCS(header) ‖ 0x00 ‖ body; and a
-// file the age CLI encrypted (testdata/cli-sealed.age, made with `printf '<header>\0<body>' | age -r <recipient>`)
-// opens with Open.
+// file the age CLI encrypted (testdata/cli-sealed.age, made with `printf '<header>\0<body>' | age -r <recipient>`,
+// age v1.3.2; made again with its header's service member, D221) opens with Open.
 func TestAgeInterop(t *testing.T) {
 	f, err := os.Open(filepath.Join("testdata", "identity.key"))
 	if err != nil {
@@ -316,7 +320,7 @@ func TestAgeInterop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(cbody) != "hello from the age CLI" || ch.Dir != DirRequest || ch.MessageID != "msg-1" ||
+	if string(cbody) != "hello from the age CLI" || ch.Dir != DirRequest || ch.MessageID != "msg-1" || ch.Service != "hello" ||
 		!slices.Equal(ch.Kids, kidsOf(x)) || ch.IAT != 1761490000 {
 		t.Fatalf("the CLI's file opened as %+v %q", ch, cbody)
 	}

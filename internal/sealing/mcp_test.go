@@ -28,8 +28,9 @@ func mcpPre(session, reqID, task string) tunnel.Preamble {
 
 // mcpHeader is an MCP request header of b (a tools/call, or an answer to an input request).
 func (f *fixture) mcpHeader(b buyer, session, tool, msgID string) sealed.Header {
-	return sealed.Header{V: 1, Dir: sealed.DirRequest, IAT: f.now.Unix(), Session: session, Tool: tool, MessageID: msgID,
-		Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{f.kid()}, ReplyTo: b.replyTo(), RK: sealed.EncodeRK(b.rk)}
+	return sealed.Header{V: 1, Dir: sealed.DirRequest, Service: "fs", IAT: f.now.Unix(), Session: session, Tool: tool,
+		MessageID: msgID, Op: sealed.OpCall, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{f.kid()}, ReplyTo: b.replyTo(),
+		RK: sealed.EncodeRK(b.rk)}
 }
 
 func envelope(ct []byte) string {
@@ -213,8 +214,12 @@ func (d *durable) answer(t *testing.T, upID string, hd sealed.Header, result str
 	return []byte(`{"jsonrpc":"2.0","id":` + upID + `,"result":{"_meta":{"io.modelcontextprotocol/related-task":{"taskId":"up-t"},"sh.kontra/sealed":` + envelope(ct) + `}}}`)
 }
 
+// hdr is the header of the client's answer to the input request msgID of the task: the input request's session, tool
+// and messageId, and its gate task (sealing's mcpRule1 SPEC-CONFLICT).
 func (d *durable) hdr(msgID string) sealed.Header {
-	return d.f.mcpHeader(d.b, d.session, d.tool, msgID)
+	hd := d.f.mcpHeader(d.b, d.session, d.tool, msgID)
+	hd.TaskID, hd.Op = d.task, sealed.OpAnswer
+	return hd
 }
 
 // A sealed durable task (D175): its elicitation is sealed with the upstream's id as messageId and the creating call's
@@ -309,7 +314,9 @@ func TestHostingMCPAnswerRules(t *testing.T) {
 		d := newDurable(t)
 		d.ask(t, "5")
 		other := newBuyer(t)
-		_, r := fromClient(t, d.f.h.MCP(mcpPre(d.session, "1", d.task)), d.answer(t, "5", d.f.mcpHeader(other, d.session, d.tool, "5"), `{}`))
+		hd := d.f.mcpHeader(other, d.session, d.tool, "5")
+		hd.TaskID, hd.Op = d.task, sealed.OpAnswer
+		_, r := fromClient(t, d.f.h.MCP(mcpPre(d.session, "1", d.task)), d.answer(t, "5", hd, `{}`))
 		if r != sealed.RejectWrongJob {
 			t.Fatalf("%q", r)
 		}
@@ -392,24 +399,29 @@ func TestHostingMCPRequired(t *testing.T) {
 // exchange whose session has no job, and sealed tasks/list entries of the exchange's own job only, so an upstream that
 // does not scope tasks/list per session listed another session's sealed task with its statusMessage, and its
 // notifications/tasks/status came on another session's stream. Every sealed task's statusMessage is "sealed" now
-// wherever the node reads one, and another session's status notification is dropped.
+// wherever the node reads one, and another session's status notification is dropped. Since D252 a tasks/list on an
+// exchange of no sealed job, to a service with sealed state, is refused, and one on the job's own session lists the
+// job's tasks only.
 func TestHostingMCPStatusOnOtherSessions(t *testing.T) {
 	d := newDurable(t) // binds upstream task up-t to the job of session client-session
 	list := `{"jsonrpc":"2.0","id":9,"result":{"tasks":[{"taskId":"up-t","status":"working","statusMessage":"looking for SECRET flights"},` +
 		`{"taskId":"plain","status":"working","statusMessage":"an unsealed task's message"}]}}`
-	for _, session := range []string{sessionHash("another-session"), d.session, ""} {
+	for _, session := range []string{sessionHash("another-session"), ""} {
 		x := d.f.h.MCP(mcpPre(session, "9", ""))
-		if _, r := fromClient(t, x, []byte(`{"jsonrpc":"2.0","id":9,"method":"tasks/list","params":{}}`)); r != "" {
-			t.Fatalf("tasks/list on session %q: %s", session, r)
+		if _, r := fromClient(t, x, []byte(`{"jsonrpc":"2.0","id":9,"method":"tasks/list","params":{}}`)); r != sealed.RejectBadHeader {
+			t.Fatalf("tasks/list on session %q: %q, want bad_header (D252)", session, r)
 		}
-		got := fromServer(t, x, list)
-		if strings.Contains(got, "SECRET") || !strings.Contains(got, `"statusMessage":"sealed"`) || !strings.Contains(got, "an unsealed task's message") {
-			t.Errorf("tasks/list on session %q: %s", session, got)
-		}
+	}
+	x := d.f.h.MCP(mcpPre(d.session, "9", ""))
+	if _, r := fromClient(t, x, []byte(`{"jsonrpc":"2.0","id":9,"method":"tasks/list","params":{}}`)); r != "" {
+		t.Fatalf("tasks/list on the job's session: %s", r)
+	}
+	if got := fromServer(t, x, list); strings.Contains(got, "SECRET") || !strings.Contains(got, `"statusMessage":"sealed"`) || strings.Contains(got, `"plain"`) {
+		t.Errorf("tasks/list on the job's session: %s", got)
 	}
 	// A status notification of the sealed task on another session's stream is dropped; on its own session it is sealed.
 	note := `{"jsonrpc":"2.0","method":"notifications/tasks/status","params":{"taskId":"up-t","status":"working","statusMessage":"SECRET progress"}}`
-	x := d.f.h.MCP(mcpPre(sessionHash("another-session"), "", ""))
+	x = d.f.h.MCP(mcpPre(sessionHash("another-session"), "", ""))
 	if out, keep, err := x.FromServer([]byte(note)); err != nil || keep {
 		t.Errorf("another session's status notification: %v %v %s", err, keep, out)
 	}

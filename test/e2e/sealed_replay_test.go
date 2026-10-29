@@ -145,13 +145,13 @@ func TestSealedReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ms := newMCPSealer(t, init)
+	ms := newMCPSealer(t, init, "dbl")
 	body := ms.call(t, mc.SID, 7, "echo", map[string]any{"text": "sealed hello"})
 	r, err := mc.Post(ctx, body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hd, plain := ms.open(t, r); hd.Tool != "echo" || hd.MessageID != "7" || !strings.Contains(string(plain), "sealed hello") {
+	if hd, plain := ms.open(t, r); hd.Tool != "echo" || hd.MessageID != "7" || hd.Service != "dbl" || !strings.Contains(string(plain), "sealed hello") {
 		t.Fatalf("the sealed call's answer: %+v %s", hd, plain)
 	}
 	calls := up.Calls("echo")
@@ -358,20 +358,21 @@ func auditRows(t *testing.T, h *Harness, substrs ...string) int {
 // sends sealed bodies straight to the gate: the recipients from the initialize result's
 // capabilities.experimental["sh.kontra/sealed"], one per-job key and rk.
 type mcpSealer struct {
+	service    string // the hired service, as the gate's URL path names it (D221)
 	recipients []age.Recipient
 	kids       []string
 	job        *age.X25519Identity
 	rk         []byte
 }
 
-func newMCPSealer(t *testing.T, init *MCPResponse) *mcpSealer {
+func newMCPSealer(t *testing.T, init *MCPResponse, service string) *mcpSealer {
 	t.Helper()
 	caps, _ := init.Result()["capabilities"].(map[string]any)
 	exp, _ := caps["experimental"].(map[string]any)
 	entry, _ := exp[mcpwire.MetaSealed].(map[string]any)
 	params, _ := entry["params"].(map[string]any)
 	list, _ := params["recipients"].([]any)
-	s := &mcpSealer{}
+	s := &mcpSealer{service: service}
 	for _, v := range list {
 		str, _ := v.(string)
 		r, err := age.ParseX25519Recipient(str)
@@ -404,9 +405,9 @@ func (s *mcpSealer) call(t *testing.T, sid string, id int, tool string, args any
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(sid))
-	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, IAT: time.Now().Unix(), Session: hex.EncodeToString(sum[:]),
-		Tool: tool, MessageID: strconv.Itoa(id), Part: 0, Parts: 1, Kind: sealed.KindData, Kids: s.kids,
-		ReplyTo: s.job.Recipient().String(), RK: sealed.EncodeRK(s.rk)}
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: s.service, IAT: time.Now().Unix(),
+		Session: hex.EncodeToString(sum[:]), Tool: tool, MessageID: strconv.Itoa(id), Op: sealed.OpCall, Part: 0, Parts: 1, Kind: sealed.KindData,
+		Kids: s.kids, ReplyTo: s.job.Recipient().String(), RK: sealed.EncodeRK(s.rk)}
 	ct, err := sealed.Seal(s.recipients, hd, body)
 	if err != nil {
 		t.Fatal(err)

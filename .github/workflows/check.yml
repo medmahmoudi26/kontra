@@ -57,6 +57,7 @@ jobs:
     env:
       KONTRA_TEST_PG: postgres://kontra:kontra@localhost:5432/kontra?sslmode=disable
       KONTRA_REQUIRE_HELLOWORLD: "1"
+      KONTRA_REQUIRE_NODE24: "1"
       A2A_SAMPLES_PIN: 6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3
       TEMPORAL_CLI_VERSION: "1.9.1"
       TEMPORAL_CLI_ARCHIVE_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
@@ -66,6 +67,21 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.10"
+      # The integration tests' stock MCP servers (D171): Node 22 for the 1.0.0 releases, Node 24 for
+      # server-everything@2.0.0 (TestModernServerEverything).
+      # server-everything@2.0.0 needs Node 24 (D171): installed first, its binary recorded as KONTRA_NODE24; then
+      # Node 22, which stays on PATH for the 1.0.0 stock servers. KONTRA_REQUIRE_NODE24 fails, rather than skips,
+      # the tests that need Node 24 without it, and an npm install that fails fails its test (no KONTRA_E2E_OFFLINE).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Record Node 24 for server-everything@2.0.0
+        run: |
+          node --version | grep -q '^v24\.'
+          echo "KONTRA_NODE24=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.2"
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           version: "0.11.7"
@@ -112,6 +128,7 @@ jobs:
           --health-cmd "pg_isready -U kontra" --health-interval 2s --health-timeout 2s --health-retries 30
     env:
       KONTRA_TEST_PG: postgres://kontra:kontra@localhost:5432/kontra?sslmode=disable
+      KONTRA_REQUIRE_NODE24: "1"
       TEMPORAL_CLI_VERSION: "1.9.1"
       TEMPORAL_CLI_ARCHIVE_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
       TEMPORAL_CLI_BINARY_SHA256: 712217694cac9f786a72d4b6c876cd15f3dcf1bf31434d9fed6af25242a327a0
@@ -120,6 +137,20 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.26.10"
+      # As the integration job: Node 22 and Node 24 for the stock MCP servers (D171).
+      # server-everything@2.0.0 needs Node 24 (D171): installed first, its binary recorded as KONTRA_NODE24; then
+      # Node 22, which stays on PATH for the 1.0.0 stock servers. KONTRA_REQUIRE_NODE24 fails, rather than skips,
+      # the tests that need Node 24 without it, and an npm install that fails fails its test (no KONTRA_E2E_OFFLINE).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.22.1"
+      - name: Record Node 24 for server-everything@2.0.0
+        run: |
+          node --version | grep -q '^v24\.'
+          echo "KONTRA_NODE24=$(command -v node)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.2"
       - name: Install the pinned Temporal CLI
         run: |
           archive="temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"

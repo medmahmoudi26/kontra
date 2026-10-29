@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -446,6 +447,10 @@ func TestVerifyRefusals(t *testing.T) {
 		{"case-variant alg", card, signRaw(t, key, []byte(`{"alg":"ES256","ALG":"none","kid":"`+kidA+`"}`), card), "repeated"},
 		{"upstream extra member", card, signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"sha256":"x","url":"y","verified":true,"z":1}}`), card), HeaderUpstream},
 		{"upstream verified string", card, signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"sha256":"x","url":"y","verified":"true"}}`), card), HeaderUpstream},
+		{"upstream jwks not a string", card, signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"jwks":1,"sha256":"x","url":"y","verified":true}}`), card), HeaderUpstream},
+		{"upstream jwks empty", card, signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"jwks":"","sha256":"x","url":"y","verified":true}}`), card), HeaderUpstream},
+		{"upstream jwks and an extra member", card, signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"jwks":"j","sha256":"x","url":"y","verified":true,"z":1}}`), card), HeaderUpstream},
+		{"upstream case-variant jwks", card, signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"JWKS":"j","sha256":"x","url":"y","verified":true}}`), card), HeaderUpstream},
 		{"unprotected kid", card, Signature{Protected: good.Protected, Signature: good.Signature, Header: json.RawMessage(`{"kid":"x"}`)}, "unprotected header repeats kid"},
 		{"unprotected crit", card, Signature{Protected: good.Protected, Signature: good.Signature, Header: json.RawMessage(`{"crit":["b64"]}`)}, "unprotected header repeats crit"},
 	} {
@@ -455,6 +460,11 @@ func TestVerifyRefusals(t *testing.T) {
 				t.Fatalf("Verify: %v, want ErrVerification containing %q", err, c.want)
 			}
 		})
+	}
+	// kontra.upstream with jwks (D223) verifies, and is read back.
+	withJWKS := signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"jwks":"https://g/agents/s/.well-known/seller-jwks.json","sha256":"x","url":"y","verified":true}}`), card)
+	if h, err := Verify([]byte(card), withJWKS, pub); err != nil || h.Upstream == nil || h.Upstream.JWKS != "https://g/agents/s/.well-known/seller-jwks.json" {
+		t.Fatalf("kontra.upstream with jwks: %+v %v", h.Upstream, err)
 	}
 	// A validly signed header with other, non-critical members still verifies; its unprotected header may hold
 	// other names.
@@ -548,6 +558,41 @@ func TestParseJWKS(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// KeySetPublic.JWKS (D223): the kept keys only, public members only, sorted by kid, and parsed back to the same keys
+// and thumbprints; a key the seller listed without kid is listed under its thumbprint.
+func TestPublicJWKS(t *testing.T) {
+	p256 := `{"kty":"EC","crv":"P-256","x":"` + rfc9449X + `","y":"` + rfc9449Y + `","kid":"seller-1","d":"private"}`
+	pub := `{"kty":"EC","crv":"P-256","x":"` + rfc9449X + `","y":"` + rfc9449Y + `"}`
+	set, err := ParseJWKS([]byte(`{"keys":[{"kty":"RSA","n":"AQAB","e":"AQAB","kid":"r"},` + p256 + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := set.JWKS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"d"`) || strings.Contains(string(b), "RSA") || !strings.Contains(string(b), `"kid":"seller-1"`) {
+		t.Fatalf("the public set: %s", b)
+	}
+	back, err := ParseJWKS(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t1, _ := set.Thumbprints()
+	t2, _ := back.Thumbprints()
+	if !slices.Equal(t1, t2) {
+		t.Fatalf("thumbprints %v, parsed back %v", t1, t2)
+	}
+	noKid, _ := ParseJWKS([]byte(`{"keys":[` + pub + `]}`))
+	b, _ = noKid.JWKS()
+	if tp, _ := noKid.Thumbprints(); !strings.Contains(string(b), `"kid":"`+tp[0]+`"`) {
+		t.Fatalf("a key without kid: %s", b)
+	}
+	if _, err := (*KeySetPublic)(nil).JWKS(); err == nil {
+		t.Fatal("an empty set rendered")
 	}
 }
 

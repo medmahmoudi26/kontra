@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,44 @@ func TestPeerHop(t *testing.T) {
 	})
 	if rep := c.call(a.url+"/mcp/tun", 9, "echo", "x"); rep.status != 404 {
 		t.Errorf("after B's tunnel closed: %d", rep.status)
+	}
+}
+
+// D213, D231 through the peer hop: a principal's sessions are pinned to a tunnel replica B holds, and the client
+// reaches replica A. Once its first session has been idle for EvictIdle, its third initialize closes that session on
+// A, and the session's upstream DELETE goes through B's peer listener before the new initialize does: the upstream
+// ends the session.
+func TestSessionsPerPrincipalThroughTheHop(t *testing.T) {
+	e := newEnv(t)
+	e.service("tun", "", func(s *Service) { s.MaxSessionsPerPrincipal = 2 })
+	a := e.replica("a", replicaOpts{peer: true})
+	b := e.replica("b", replicaOpts{peer: true})
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
+	e.node(b, up, "tun")
+	key, _ := e.apiKey("buyer")
+	c1, c2, c3 := newClient(t, key), newClient(t, key), newClient(t, key)
+	c1.initialize(a.url + "/mcp/tun")
+	first := e.row(c1.sid).upstreamSID
+	c2.initialize(a.url + "/mcp/tun")
+	if n := len(up.Sessions()); n != 2 {
+		t.Fatalf("%d upstream sessions, want 2", n)
+	}
+	e.backdate(c1.sid, EvictIdle+time.Minute)
+	c3.initialize(a.url + "/mcp/tun")
+	if row := e.row(c1.sid); !row.closed || *row.reason != string(CloseIdle) {
+		t.Fatalf("the longest-idle session over the cap: %+v", row)
+	}
+	if slices.Contains(up.Sessions(), first) || len(up.Sessions()) != 2 {
+		t.Fatalf("the evicted session's upstream DELETE did not go through the hop: %v (evicted %s)", up.Sessions(), first)
+	}
+	if rep := c1.call(a.url+"/mcp/tun", 1, "echo", "x"); rep.status != http.StatusNotFound {
+		t.Errorf("the evicted session: %d", rep.status)
+	}
+	for _, c := range []*client{c2, c3} {
+		if rep := c.call(a.url+"/mcp/tun", 2, "echo", "x"); rep.status != http.StatusOK {
+			t.Errorf("a session within the cap: %d %s", rep.status, rep.body)
+		}
 	}
 }
 
@@ -349,7 +388,7 @@ func TestPeerListenerRefusals(t *testing.T) {
 var b2url func(string) string
 
 // §11.2: without peer.listen a replica picks only its own sessions; a session pinned to a tunnel another replica
-// holds is 404 there, and its row stays open.
+// holds is 404 there, and its row is closed tunnel_lost (D250).
 func TestWithoutPeerOnlyLocal(t *testing.T) {
 	e := newEnv(t)
 	e.service("tun", "", nil)
@@ -368,8 +407,9 @@ func TestWithoutPeerOnlyLocal(t *testing.T) {
 	if rep := c.call(a.url+"/mcp/tun", 1, "echo", "x"); rep.status != 404 {
 		t.Errorf("a session held by B, on A: %d", rep.status)
 	}
-	if row := e.row(c.sid); row.closed {
-		t.Errorf("the row closed: %+v", row)
+	// The 404 ends the session: its row is closed, so that the client's new initialize does not count it (D250).
+	if row := e.row(c.sid); !row.closed || *row.reason != string(CloseTunnelLost) {
+		t.Errorf("the row of the session A answered 404 for: %+v", row)
 	}
 	// With a session of its own, A picks it.
 	up2 := mcptest.New()

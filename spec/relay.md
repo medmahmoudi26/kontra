@@ -1,16 +1,16 @@
 # Relay
 
 Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning; revision 2 was the adversarial
-review). Revision 4 brings the text in line with the M1 code (D82–D122), accepted by the owner on 26 Oct.
-Revision 5 brings it in line with the M2 code (D141–D143, D145–D150, D154), decided under the owner's
-standing instruction on 26 Oct. Revision 6 (26 Oct, before M3 builds the MCP relay) writes the 2026-07-28
-revision into §11.12 as D24 requires, with the peer hop of §11.2 and §10.4's blob refs (D158–D163, D167), and
-was amended the same day after the M3 plan's audit (D172–D188). Revision 7 (28 Oct, M4 planning) settles the gate's
-own `/mcp` in both eras (§12), its resource server and the M4 tests (DM4-1 to DM4-9, DM4-15), and was amended the
-same day after the M4 plan's audit: §10.3's operator-configured endpoints, one stream for `elicitation/complete`, the
-shape of a `hire` result and the anonymous limits (DM4-17, DM4-20 to DM4-22; all renumbered into the D sequence once
-M3 has merged). Normative. The key words MUST, MUST NOT, SHOULD
-and MAY are used as in RFC 2119.
+review). Revision 4 brings the text in line with the M1 code (D82–D122), accepted by the owner on 26 Oct. Revision 5
+brings it in line with the M2 code (D141–D143, D145–D150, D154), decided under the owner's standing instruction on
+26 Oct. Revision 6 (26 Oct, before M3 builds the MCP relay) writes the 2026-07-28 revision into §11.12 as D24
+requires, with the peer hop of §11.2 and §10.4's blob refs (D158–D163, D167), and was amended the same day after the
+M3 plan's audit (D172–D188). Revision 7 (28 Oct) includes the M3 decisions: it brings the text in line with the M3
+code and its review (D191–D205, D213, D223, D224, D230), decided under the owner's standing instruction. Revision 8
+(28 Oct, M4 planning) settles the gate's own `/mcp` in both eras (§12), its resource server and the M4 tests (DM4-1 to
+DM4-9, DM4-15), and was amended the same day after the M4 plan's audit: §10.3's operator-configured endpoints, one
+stream for `elicitation/complete`, the shape of a `hire` result and the anonymous limits (DM4-17, DM4-20 to DM4-22).
+Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
@@ -59,6 +59,7 @@ The gate's public listener serves these routes and nothing else (closed default 
 |---|---|
 | `GET  {svc}` and `GET {svc}/.well-known/agent-card.json` | The served A2A card (§3). The first form exists because a2a-go's resolver fetches a non-root URL as the card itself (D10). |
 | `GET {svc}/.well-known/agent-card.upstream.json` | The upstream card, verbatim (§3). |
+| `GET {svc}/.well-known/seller-jwks.json` | The public JWK Set of the seller keys the gate verified the upstream card with, which `kontra.upstream.jwks` names (§3, D223); `404` when the gate verified none, `503` when the card is unavailable. |
 | `POST {svc}` and `POST {svc}/` | A2A JSON-RPC 2.0, decoded strictly (§2.4). The trailing-slash form is what the TCK posts (D18). |
 | `{svc}/message:send`, `{svc}/message:stream`, `{svc}/tasks…`, `{svc}/extendedAgentCard` | A2A HTTP+JSON, every route of spec v1.0.1 §5.3 / `a2a.proto`. `:subscribe` accepts both `GET` and `POST` (spec prose says POST, the proto says GET; the TCK uses POST). The gate's path already names the service, so its interfaces carry no A2A `tenant`: the `/{tenant}/` additional bindings are not served, and a JSON-RPC request with a non-empty `tenant` is answered as an unknown service. |
 | `POST\|GET\|DELETE /mcp/{svc}` | MCP Streamable HTTP for a hosted MCP server (§11). |
@@ -144,7 +145,9 @@ multi-tenant gate, are one `buyer_id`. So for the `anonymous` principal `ListTas
 are refused (`UnsupportedOperationError` / `-32601`), push configs are refused, and a task is readable
 and cancellable by whoever holds its id: ids are not secrets (a UUIDv7 discloses its creation time and
 has 62 random bits), so this is a property of opting in to `anonymous`, recorded as such (D20). The TCK
-target is the case for it (D18).
+target is the case for it (D18). An MCP service's `max_sessions_per_principal` does not apply to `anonymous`: one
+budget for callers the gate cannot tell apart would let any of them crowd out, or close, the others' sessions
+(§11.2, D231).
 
 **API key scopes.** `hire` (the default: call services), `enroll:<service>` and `enroll:*` (enroll node
 keys, [`tunnel.md`](tunnel.md) §5). A key's scopes never grant an operator action.
@@ -215,11 +218,14 @@ the operator may assert: approve URLs, escrow state, failure reasons, prices, se
 - **The sealed envelope (D174).** On a service with `sealed` set, and on 2025-11-25 and 2025-06-18 messages only
   (D162), `_meta["sh.kontra/sealed"]` is kept exactly where [`ext-sealed.md`](ext-sealed.md) §3 puts it: in the
   `params._meta` of a caller's `tools/call`, in the `params._meta` of an upstream `elicitation/create` or
-  `sampling/createMessage`, and in the `result._meta` of the caller's response to one of those, and there only
-  when its value is exactly `{"v": 1, "envelope": "<base64>"}`. Every other `sh.kontra/` key in those objects,
-  and `sh.kontra/sealed` anywhere else or on any other service, is removed as above.
-- Then it writes its own (sealed capability, approve URL, failure reason) and the operator's (§13.4). An
-  operator key replaces a same-named key; it is never merged with it.
+  `sampling/createMessage`, and in the `result._meta` of every response from the caller (a JSON-RPC response does
+  not name the request it answers, which may have reached the client through another replica's stream; the hosting
+  node checks the answer, [`ext-sealed.md`](ext-sealed.md) §5 rule 4b, D200), and there only when its value is
+  exactly `{"v": 1, "envelope": "<base64>"}`. Every other `sh.kontra/` key in those objects, and
+  `sh.kontra/sealed` anywhere else or on any other service, is removed as above.
+- Then it writes its own (sealed capability, approve URL, failure reason, an `initialize` result's
+  `sh.kontra/session_idle_s`, §11.2) and the operator's (§13.4). An operator key replaces a same-named key; it is
+  never merged with it, except `sh.kontra/session_idle_s`, which is the gate's and replaces the operator's (D224).
 
 The gate itself names no escrow key: the escrow keys belong to the operator and its extension spec (D51).
 
@@ -264,13 +270,16 @@ five fields with the 1.0 names, plus two it must also own, D52):
 | `capabilities.extensions` | The seller's list, except that every entry whose URI the gate or the operator asserts — `https://kontra.sh/ext/sealed/v1` for a sealed service, `https://kontra.sh/ext/anonymous/v1` (`required: false`, `params.expiresAt`) for a service of an anonymous tenant ([`tunnel.md`](tunnel.md) §6.1, DM4-25), and every URI in the operator's `card_extensions` (§13.4) — replaces a seller entry with the same URI. A seller's `input-schema/v1` entry passes unchanged. |
 | `signatures` | Exactly one: the gate's JWS (below). |
 
-**The gate's signature.** ES256 over RFC 8785 JCS of the served card without `signatures`; protected header
-`{alg: "ES256", kid, typ: "JOSE", jku: {public_url}/.well-known/jwks.json, "kontra.upstream": {sha256, url,
-verified}}`, where `sha256` is the hex SHA-256 over the JCS of the upstream card, `url` is
-`{public_url}{svc}/.well-known/agent-card.upstream.json`, and `verified` says whether the gate verified the
-seller's signature (below). `kontra.upstream` is never listed in `crit`, so stock verifiers (a2a-go's
-included) accept the card. The gate signs with its own JWS code over a vetted JCS library, because a2a-go's
-signer cannot add a header parameter (D13).
+**The gate's signature.** ES256 over RFC 8785 JCS of the served card without `signatures`; protected header `{alg:
+"ES256", kid, typ: "JOSE", jku: {public_url}/.well-known/jwks.json, "kontra.upstream": {sha256, url, verified,
+jwks}}`, where `sha256` is the hex SHA-256 over the JCS of the upstream card, `url` is
+`{public_url}{svc}/.well-known/agent-card.upstream.json`, `verified` says whether the gate verified the seller's
+signature (below), and `jwks`, present only when it did, is `{public_url}{svc}/.well-known/seller-jwks.json`, where
+the gate serves the public keys of the `seller_keys` it verified with (D223). `kontra.upstream` is never listed in
+`crit`, so stock verifiers (a2a-go's included) accept the card. The gate signs with its own JWS code over a vetted JCS
+library, because a2a-go's signer cannot add a header parameter (D13). JCS is defined for valid Unicode only: an
+upstream card that is not valid UTF-8, or holds a lone surrogate, is not installed, and the service has no card until
+its seller publishes one; it is never served unsigned or altered (D193).
 
 **The seller's signature (D13).** A signature over the upstream card does not verify over the rewritten
 card (spec §8.4.3), so it is not copied into `signatures`; the upstream card is served verbatim instead.
@@ -286,7 +295,10 @@ card (spec §8.4.3), so it is not copied into `signatures`; the upstream card is
 - A verifier (`kontra connect` does this) checks the gate's signature with a `jku` equal to the origin it
   dialed, fetches the upstream card, checks the hash, and checks the seller's signatures against keys it
   trusts for the seller. A gate that strips the seller's signatures cannot hide it from a verifier that
-  pinned the seller's keys ([`ext-sealed.md`](ext-sealed.md) §7).
+  pinned the seller's keys ([`ext-sealed.md`](ext-sealed.md) §7). `kontra connect` holds no seller key set of its
+  own: it verifies a signature that carries its key (`jwk`) and pins that key's thumbprint, and verifies one that
+  names its key by `kid` only with the key set `kontra.upstream.jwks` names, fetched from the gate's origin (through
+  its tunnel), and pins that key's thumbprint; with no `jwks` named, such a signature is pinned unverified (D223).
 
 Caching: the card responses carry `Cache-Control: max-age=60`, an `ETag` (the hash of the served body) and
 `Last-Modified` (the TCK hard-fails without them).
@@ -564,9 +576,10 @@ dispatch runs, which routes `abort` and `forward_cancel` (§14.2).
 `failed: <reason>` means the terminal status message is an agent-role message with one text part saying what
 happened, and `metadata["kontra.failure"] = "<reason>"` (MCP: §11.8). The reasons are a closed set:
 `no_session`, `tunnel_lost`, `upstream_unreachable`, `upstream_error`, `service_unavailable`, `timeout`,
-`sealed_rejected`, `lifecycle_unavailable` (§14.5). A declined or expired quote is not a failure: it ends
-`canceled` with `metadata["kontra.canceled"] = "declined"` or `"quote_expired"` (§13.2). Retries never change
-the gate task id, and a caller sees no event for an attempt that left no upstream task.
+`sealed_rejected`, `lifecycle_unavailable` (§14.5). For a sealed service the text is the gate's own, never the
+upstream's message, which may quote the sealed input it refused (D195). A declined or expired quote is not a
+failure: it ends `canceled` with `metadata["kontra.canceled"] = "declined"` or `"quote_expired"` (§13.2).
+Retries never change the gate task id, and a caller sees no event for an attempt that left no upstream task.
 
 ### 6.5 Timeouts
 
@@ -587,8 +600,8 @@ is read through a byte limit:
 | A non-streaming upstream body | 8 MiB |
 | One SSE event | 4 MiB |
 | A card | 256 KiB |
-| `tools/list` | 100 pages or 4 MiB in all |
-| Bytes stored per task (each logged event's whole encoding, D103) | `limits.task_bytes`, default 256 MiB (an anonymous tenant: 64 MiB in all, [`tunnel.md`](tunnel.md) §6.2) |
+| `tools/list` | 100 pages or 4 MiB in all, and 30 s for the whole drain, which runs detached from the client that started it (D198) |
+| Bytes stored per task (each logged event's whole encoding, and each of the task's objects in the bucket, D103, D194) | `limits.task_bytes`, default 256 MiB (an anonymous tenant: 64 MiB in all, [`tunnel.md`](tunnel.md) §6.2) |
 
 Runs of artifact-append chunks may be coalesced into one event before they are logged; the bytes are the
 same. For a sealed service, events are never coalesced, and the polling path logs a changed artifact whole
@@ -786,7 +799,7 @@ metadata names, §12.1) and the bucket (the endpoint of `blobs:`, §10.4). A tea
 is often on a private network, so these skip the address check; the rest of this section still applies to them:
 
 - `https://` only, except `http://` on a loopback host (`localhost`, `127.0.0.0/8`, `::1`), which is then connected
-  to a loopback address only; the bucket's endpoint is dialed with the scheme the operator wrote (D189);
+  to a loopback address only; the bucket's endpoint is dialed with the scheme the operator wrote (D192);
 - redirects are never followed (a `3xx` is a failure) and the environment's proxy is always ignored;
 - the answers of the Admission hook and of the issuer are bounded (a decision at 64 KiB, the metadata and the key set
   at 256 KiB each; a longer one is a failure), and each of their requests has a timeout (5 s;
@@ -859,7 +872,16 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   `is_error` true, and a dispatch fails `upstream_error` (`mcp_case_smuggling`). The task objects are a 2025-11-25
   `CreateTaskResult`'s `result.task` and, in a 2026-07-28 task or `InputRequiredResult` (which is `result` itself),
   `result.inputRequests`, any of its entries, their `params` and `params._meta`, and a terminal task's
-  `result.result` and `result.error`.
+  `result.result` and `result.error`. A lone case variant of a member the gate reads at one of these levels
+  (`METHOD` without `method`, a lone `NAME` or `ISERROR`, `tasK` with a Kelvin sign) fails the same way, since a
+  decoder that folds case reads it as the member; a task object's members are checked where the gate reads them
+  (D191).
+- **What a client reads (D197).** The gate reads, meters, scrubs and relays an upstream's answer as a client
+  reads it: one leading UTF-8 byte order mark of an event stream is dropped; only events whose type is absent or
+  `message` are read and relayed, and others are dropped; the response to the client's request is matched as the
+  TypeScript SDK matches ids (`Number(id)`, so `"7"`, `7.0` and `7e0` answer `7`; a string id only itself), and
+  the stream ends before a second response to it; a top-level `isError` that is not a JSON boolean makes the
+  message malformed, as above.
 - **Versions.** `MCP-Protocol-Version` `2025-11-25` and `2025-06-18` are accepted on a session; an absent header
   means the session's negotiated version; `2026-07-28` makes the request a modern one (§11.12); anything else is
   `400` with `-32022` (§11.12). If an upstream's `initialize` negotiates another
@@ -886,17 +908,52 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   result's `_meta` (§13.4).
 - **Every later request** carrying `Mcp-Session-Id` is routed to the same tunnel session after the enrollment
   check of §6.1, with the upstream's id substituted. Requests and responses pass unchanged otherwise: JSON-RPC
-  ids, SSE event ids and `retry:` fields are the upstream's (they are scoped to the upstream session). A
-  client's `GET` stream and its `Last-Event-ID` resume go to the same pinned session, except gate-written
+  ids, SSE event ids and `retry:` fields are the upstream's (they are scoped to the upstream session), except that
+  a `POST`'s event stream reaches the client without its event ids, and a `GET`'s carries no response (§11.4,
+  D265). A client's `GET` stream and its `Last-Event-ID` resume go to the same pinned session, except gate-written
   streams (§11.7).
 - **404.** A client id that is unknown, closed, bound to another principal, or presented on another service's
   path is `404` (`mcp_session_cross_node`). A pinned tunnel session that is gone, or whose key or binding was
   revoked, closes the row (`tunnel_lost` or `revoked`) and answers `404`, as the transport requires; the client
   re-initializes and lands on any connected replica of the service (note 1 §8, default). An upstream `404` on
-  a pinned session whose tunnel is up closes the row `upstream_closed`.
-- **`DELETE`** with the session id is forwarded upstream and closes the row. A session idle for the service's
+  a pinned session whose tunnel is up closes the row `upstream_closed`. A node's `not_hosted` or `kind_mismatch`
+  on a pinned session closes it `tunnel_lost` and is `404`; its `full` is `503`, its `sealed_rejected` is §11.4's,
+  and any other answer it writes is `502` with `-32603`. The gate's unknown-session `404` and its `401` carry `-32001`, as MCP servers answer an
+  unknown session (D196).
+- **`DELETE`** with the session id is forwarded upstream and closes the row (`deleted`); when the upstream's tunnel
+  is gone, or cannot be reached from the replica the `DELETE` came to (the holder replica no longer live, no peer
+  hop), the gate still closes the row `deleted` and answers `200` (D196, D250). A session idle for the service's
   `session_idle_s` (default 3600) is closed by the gate (`idle`; upstream `DELETE` best effort).
-  `last_seen_at` is written at most once a minute.
+  `last_seen_at` is written at most once a minute. The `initialize` result states that bound: the gate sets
+  `_meta["sh.kontra/session_idle_s"]` to the service's `session_idle_s` (a JSON integer of seconds), after the
+  operator's `initialize_meta` and in place of any upstream's (§2.5), and a hiring node keeps a sealed session's key
+  that long idle ([`tunnel.md`](tunnel.md) §2.3, D224).
+- **A cap per principal (D213, D231).** A principal other than `anonymous` holds at most
+  `services.<name>.max_sessions_per_principal` (default 4) open sessions of a service whose backend is a tunnel;
+  2026-07-28 virtual sessions are not counted, and a direct backend is not capped (an HTTP server the operator runs
+  has no stdio children to share). The cap counts the principal, the credential a session is bound to: every client
+  of one API key shares it, and so do a hiring node's local clients, whose principal is the node session's
+  ([`tunnel.md`](tunnel.md) §9); a buyer's several keys each hold it, and a durable task's own upstream session
+  (D22) is not counted. `anonymous` is not capped: its callers are distinct clients the gate cannot tell apart, and
+  one budget for all of them would let any caller crowd out, or close, the others' sessions; a service open to
+  `anonymous` shares its upstream's sessions with everyone. An `initialize` beyond the cap closes as many of that
+  principal's sessions as it needs, never another principal's, and only sessions whose `last_seen_at` is at least
+  2 minutes old (D249: just above what a session in use shows, so that the sessions a stock client leaves without a
+  `DELETE`, as the TypeScript SDK's `close()` does, make room soon), the oldest first (`idle`), with an upstream `DELETE` the gate makes on each session's pinned target
+  (the peer hop for a tunnel another replica holds) before it forwards the `initialize`, once it has chosen an
+  upstream: a stdio service's children (`--max-sessions`, [`tunnel.md`](tunnel.md) §10) are shared by every
+  principal admitted to it, and the closed session's child is what the new one gets. When too few are that old, it
+  closes none and is refused `429` with JSON-RPC error `-32600` `too many sessions`
+  (`data.max_sessions_per_principal`), as the edge's in-flight caps are (§2.2), and a `Retry-After` that is the time
+  until enough of the principal's sessions not in use will be 2 minutes idle (D249). A session is in use while a request
+  or a `GET` stream of it is open on any replica: the replica serving it writes its `last_seen_at` at least every
+  minute and a half meanwhile, and once more as the last ends, so a session in use is never 2 minutes old, and is
+  never closed for a new one (nor by the idle sweep while a stream lasts, for a `session_idle_s` over 90 s). The
+  check runs under one lock per principal and service, before the upstream `initialize` and again as the new row is
+  written, so concurrent `initialize`s of one principal leave at most the cap open; one that finds no room then is
+  refused the same way, and its upstream session gets a `DELETE`. A closed session answers `404`. A full stdio
+  bridge also stops its own longest-idle child, idle for at least 5 minutes, for a principal that holds no session
+  there.
 - **The peer hop (D163).** Only the replica holding a tunnel session can open a stream on it
   ([`tunnel.md`](tunnel.md) §11), and a plain MCP request has no Temporal activity to carry it there. A request
   for a tunnel session held by another replica (a pinned session's later request, or a session chosen for an
@@ -911,13 +968,16 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   body's SHA-256. An assertion older than 30 s, or whose nonce the replica has seen, is refused, and so is a
   request whose headers do not hash to the assertion's. The holding replica builds the upstream request from
   signed data only: the upstream session id from the assertion, and only the headers it hashed. It runs §6.1's
-  check on its own registry, then the exchange on its own tunnel, and streams the response back unchanged; every
-  other rule of §11 (authentication, `allow:`, policy, the upstream id substitution, metering, rewrites) is
-  applied once, by the receiving replica (D179). The peer listener serves that one route, answers anything else
-  `404`, and is never the public listener. Its address must be reachable only from the gate's replicas (a
-  private network, a NetworkPolicy), or carry TLS: the HMAC authenticates a request and does not hide it.
+  check on its own registry (a session it refuses is answered `404` with the gate-internal `Kontra-Peer-Gone:
+  tunnel_lost | revoked`, and the receiving replica closes the row with that reason, D196), then the exchange on
+  its own tunnel, and streams the response back unchanged; every other rule of §11 (authentication, `allow:`,
+  policy, the upstream id substitution, metering, rewrites) is applied once, by the receiving replica (D179).
+  The peer listener serves that one route, answers anything else `404`, and is never the public listener. Its
+  address must be reachable only from the gate's replicas (a private network, a NetworkPolicy), or carry TLS: the
+  HMAC authenticates a request and does not hide it.
   Session choice prefers this replica's sessions. Without `peer.listen`, only this replica's sessions are
-  candidates and a pinned session held elsewhere is `404` (its row stays open until it is idle): a gate of one
+  candidates and a pinned session held elsewhere is `404`, its row closed `tunnel_lost`, so that the client's new
+  `initialize` does not count the session it was told is gone (D250): a gate of one
   replica needs no peer listener, and a gate of more than one SHOULD set it, since otherwise every later request
   that its balancer sends to another replica than the session's (about half of them with two) ends the session
   with a `404` and a new `initialize`. A direct `mcp: {url}` backend is reached from any replica and never
@@ -926,15 +986,17 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
 ### 11.3 Policy per tool
 
 `tools: { allow: [glob…], deny: [glob…] }` on the service narrows which tools a principal may call; globs use
-`*` only; deny wins; an absent `allow` allows all. It is applied on the **body's** `params.name`, never on a
-header.
+`*` only; deny wins; an absent `allow` allows all, and an empty one none (D198). It is applied on the **body's**
+`params.name`, never on a header.
 
 - **`tools/list`.** The gate drains every upstream page (following `nextCursor`, within the limits of §6.6),
   drops denied tools, removes Kontra's keys (§2.5), applies the operator's `tool_meta` annotation to each
   remaining tool's `_meta` (§13.4, e.g. Cloud's `sh.kontra/price`), and answers with one page and no cursor.
   It never forwards a cursor it did not mint, so denied tools never shape page boundaries. The drained list is
-  cached per service and refreshed on upstream `notifications/tools/list_changed` (which is forwarded) and
-  every 10 minutes.
+  cached per service and refreshed on upstream `notifications/tools/list_changed` (which is forwarded; the
+  replica that sees it tells the others with `NOTIFY kontra_tunnel, 'tools:<tenant_id>/<service>'`, D199) and
+  every 10 minutes. A replica whose `LISTEN` connection comes back drops every cached list, since such a notice may
+  have been lost while it was down (D230).
 - **`tools/call` of a denied or unknown tool** is answered by the gate, before dispatch, with `-32602` and
   message `Unknown tool: <name>`, exactly as for a tool that does not exist (`mcp_tool_denied`).
 
@@ -947,6 +1009,19 @@ bytes_out, duration_ms, is_error, at)`. `is_error` is true for a JSON-RPC error 
 never parses `arguments`, `content` or `structuredContent`, which may be sealed
 ([`ext-sealed.md`](ext-sealed.md)). The table holds no price. What a call costs is the operator's business
 (Cloud reads `calls` and prices it from its listings, §13.5).
+
+A call whose exchange was answered but whose JSON-RPC response never arrived (a cut stream, a refused event, a
+client that left) is metered `is_error` true; a call that got no answer at all (a §6.1 refusal, an unreachable
+upstream or peer, a client that left first) has no row (D196). The row is what the client reads, so the call's stream
+is its only one (D265): the gate relays a `POST`'s event stream without the upstream's event ids, so that no client
+resumes it with a `GET` (a stock client resumes any cut `POST` stream that carried one, and would read on the `GET`
+a response the row never saw: a buyer that dropped every call's stream after its first event would have every
+successful call metered an error), and a `GET`'s stream ends before a response, which MCP has a server send there
+only on such a resume (a seller cannot have the client take one there while the `POST`'s stream is metered
+another). A plain call whose stream is cut fails for the client as it is metered; gate-written streams keep their
+`k.` ids (§11.7). A hosting node's refusal of a sealed call
+([`ext-sealed.md`](ext-sealed.md) §6) reaches the client as a JSON-RPC error with HTTP `200` (`-32602`, `sealed
+part rejected: <reason>`, the request's id), metered `is_error` true and audited (D202).
 
 ### 11.5 Task-augmented calls
 
@@ -1007,7 +1082,7 @@ The client side reads only Postgres:
 | `tasks/get {taskId}` | the projection: `{taskId, status, statusMessage?, createdAt, lastUpdatedAt, ttl, pollInterval}`, plus the operator's `mcpMeta` (§13.3) |
 | `tasks/result {taskId}` | blocks (on `LISTEN`) until terminal, delivering any pending `input_request` events on its own SSE response stream first; then the stored result (§11.8), with `_meta["io.modelcontextprotocol/related-task"] = {taskId}` |
 | `tasks/list {cursor?}` | the principal's own MCP tasks for this service, newest first, gate-minted cursors; refused for `anonymous` (§2.3) |
-| `tasks/cancel {taskId}` | on a terminal task, `-32602`. Otherwise the `kontra.cancel` Update runs `abort` (no upstream task yet) or a `forward_cancel` that sends upstream `tasks/cancel` only if the upstream declared `tasks.cancel`; it waits at most 10 s, then writes `canceled` whatever the upstream answered, and returns the task with `status: "cancelled"`. MCP requires the receiver to move the task to `cancelled` before it responds; unlike A2A, an MCP task never "continues" after a cancel (D57). Later upstream events are refused by the store's terminal rule. This rule stands when the dispatching replica is gone: D79's wait for the heartbeat timeout is for A2A `CancelTask` only, and an old dispatch that may still be alive cannot write once `canceled` is logged (§5.1) and is aborted by its fence (D77); `abort` still runs when it can (§8) |
+| `tasks/cancel {taskId}` | on a terminal task, `-32602`. Otherwise the `kontra.cancel` Update runs `abort` (no upstream task yet) or a `forward_cancel` that sends upstream `tasks/cancel` only if the upstream declared `tasks.cancel` (as the replica running the dispatch knows it; where that is not known, it is sent, and an upstream that does not serve it answers `-32601`, which changes nothing, D203); it waits at most 10 s, then writes `canceled` whatever the upstream answered, and returns the task with `status: "cancelled"`. MCP requires the receiver to move the task to `cancelled` before it responds; unlike A2A, an MCP task never "continues" after a cancel (D57). Later upstream events are refused by the store's terminal rule. This rule stands when the dispatching replica is gone: D79's wait for the heartbeat timeout is for A2A `CancelTask` only, and an old dispatch that may still be alive cannot write once `canceled` is logged (§5.1) and is aborted by its fence (D77); `abort` still runs when it can (§8) |
 
 Tasks are bound to the principal's `buyer_id`, as A2A tasks are: a `tasks/*` call naming a task of another
 buyer is `-32602`, as for an unknown id. The `io.modelcontextprotocol/related-task` key is rewritten to the
@@ -1024,7 +1099,10 @@ spec).
 
 - Gate-served SSE events carry `id: k.<taskId>.<seq>`. A `GET` whose `Last-Event-ID` starts with `k.` is
   served by any replica from `task_events`, for the same principal only, and never forwarded; any other
-  `Last-Event-ID` goes to the pinned session.
+  `Last-Event-ID` goes to the pinned session. A resumed `tasks/result` stream carries the task's pending input
+  requests after that seq and each new one, and ends when the task is terminal, without the answer to the
+  `tasks/result` it resumed, which the event id does not name: the client asks `tasks/result` again and gets the
+  stored outcome at once (D203).
 - Gate-minted server-to-client request ids are the strings `k.<taskId>.<seq>`. A client response carrying
   such an id is consumed by the gate, accepted once and only from a session of the task's buyer (an unknown,
   already answered or foreign one is `202` and dropped); every other response is forwarded.
@@ -1035,7 +1113,8 @@ For tasks of `/mcp/{svc}` (`protocol = mcp`), a `tasks/result` on a terminal tas
 task-augmented call returned, as MCP requires (`hire` tasks: §12.2):
 
 1. The upstream's own result, or the upstream's JSON-RPC error answering the task-augmented `tools/call` or
-   `tasks/result`, stored as the terminal `result` and returned verbatim (code, message, data; ids rewritten).
+   `tasks/result`, stored as the terminal `result` and returned verbatim (code, message, data; ids rewritten),
+   except that a sealed service's error is stored with its code only (D195).
    For a JSON-RPC error the task ends `failed` (`upstream_error`) and `tasks/get` carries
    `_meta["sh.kontra/failure"] = "upstream_error"`.
 2. A failure the gate wrote (`no_session`, `tunnel_lost`, `timeout`, `upstream_unreachable`,
@@ -1044,7 +1123,9 @@ task-augmented call returned, as MCP requires (`hire` tasks: §12.2):
    `statusMessage` = the reason text and `_meta["sh.kontra/failure"] = "<reason>"`; `tasks/result` returns
    `{"code": -32603, "message": <reason text>, "data": {"sh.kontra/failure": "<reason>"}}`.
 3. `canceled` (by the client, or a declined or expired quote): `tasks/result` returns `{"code": -32603,
-   "message": "task cancelled", "data": {"sh.kontra/canceled": "client" | "declined" | "quote_expired"}}`.
+   "message": "task cancelled", "data": {"sh.kontra/canceled": "client" | "declined" | "quote_expired"}}`. A task
+   the upstream cancelled itself ends `canceled` too, and its `tasks/result` is `-32603` `task cancelled` without
+   `data` (D203).
 
 In cases 2 and 3 the task's `calls` row has `is_error = true`. A 2025-11-25 upstream reports `failed` for a
 result with `isError: true`; the gate logs the result and ends the task `failed`. Cloud's settlement keys on
@@ -1096,8 +1177,11 @@ anything is forwarded:
    error, so a dual-era client falls back to `initialize` (2026-07-28, Streamable HTTP, "Backward
    Compatibility").
 4. Any other header value is `400` with `-32022` (`UnsupportedProtocolVersionError`, `data: {"supported":
-   ["2026-07-28", "2025-11-25", "2025-06-18"], "requested": <the header>}`).
-5. `GET` and `DELETE` are legacy only: without `Mcp-Session-Id` they are `405`.
+   ["2026-07-28", "2025-11-25", "2025-06-18"], "requested": <the header>}`). The header is read once, as its
+   field value: one sent more than once is its lines joined with `, ` (RFC 9110 §5.3), which names no version
+   (D201).
+5. `GET` and `DELETE` are legacy only: without `Mcp-Session-Id`, or with `MCP-Protocol-Version: 2026-07-28`
+   (whose session id rule 2 never reads), they are `405` (D201).
 
 **Checks on a modern request.** `params._meta["io.modelcontextprotocol/protocolVersion"]` and
 `params._meta["io.modelcontextprotocol/clientCapabilities"]` must be present, else `400` with `-32602`; a
@@ -1111,32 +1195,35 @@ defines none on Streamable HTTP; a client cancels by closing its response stream
 upstream stream).
 
 **Where a modern request goes.** Nothing is pinned. Each request goes to a session chosen as for an `initialize`
-(§6.1; this replica's sessions first, else the peer hop of §11.2) or to the direct backend, with §6.1's check
-before every stream. The gate forwards `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and the `Mcp-Param-*`
-headers with the body, changed only by §2.5 and the rewrites below. It never translates between eras: an upstream
-that does not speak 2026-07-28 answers with its own `400`, `404` or `405`, which the gate relays to that client
-with its status and body (headers as §11.1), and a dual-era client falls back to `initialize` on that endpoint. The
-gate learns no era from it (below). A service is therefore modern exactly when its upstream is. A multi round-trip
+(§6.1; this replica's sessions first, else the peer hop of §11.2) or to the direct backend, with §6.1's check before
+every stream. The gate forwards `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and the `Mcp-Param-*` headers with
+the body, changed only by §2.5 and the rewrites below; an `Mcp-Name` on a method that names nothing in its body has
+nothing to check it against, and is not forwarded (D204). It never translates between eras: an upstream that does
+not speak 2026-07-28 answers with its own `400`, `404` or `405`, which the gate relays to that client with its
+status and body (headers as §11.1), and a dual-era client falls back to `initialize` on that endpoint. The gate
+learns no era from it (below). A service is therefore modern exactly when its upstream is. A multi round-trip
 request's `requestState` passes untouched; its retry may reach another node of the service, as behind any load
 balancer.
 
-**The service's era (D177).** The gate keeps, per service, whether its upstream speaks 2026-07-28, and learns that
-a service is legacy-only from its own probe only. A `server/discover` result from the upstream makes the service
+**The service's era (D177).** The gate keeps, per service, whether its upstream speaks 2026-07-28, and learns that a
+service is legacy-only from its own probe only. A `server/discover` result from the upstream makes the service
 modern: the one cached by the rewrite below, or, when there is none, the answer to a `server/discover` the gate
 sends itself (no session headers, one per service at a time), as it drains `tools/list` itself (§11.3). A modern
-request that finds the era unknown waits for that probe. An explicit legacy answer to the probe makes the service
-legacy-only: a `400` with rule 3's `-32000` body (no valid session), a `404` or `405`, or a `200` or `400` whose
-body is not a 2026-07-28 response (a `server/discover` result, or an error with code `-32020`, `-32021` or
+request that finds the era unknown waits for that probe; after a probe that left it unknown, requests are forwarded
+at once for 5 s, and the next one after that probes again (D204). An explicit legacy answer to the probe makes the
+service legacy-only: a `400` with rule 3's `-32000` body (no valid session), a `404` or `405`, or a `200` or `400`
+whose body is not a 2026-07-28 response (a `server/discover` result, or an error with code `-32020`, `-32021` or
 `-32022`). Any other outcome (a modern error, another status, a node-written answer, a timeout) leaves the era
-unknown, and the waiting request is forwarded. The gate never learns an era from the answer to a client's request:
-a `400`, `404` or `405` that an upstream returns to a client's modern request is relayed to that client and changes
+unknown, and the waiting request is forwarded. The gate never learns an era from the answer to a client's request: a
+`400`, `404` or `405` that an upstream returns to a client's modern request is relayed to that client and changes
 nothing for other principals, so no client can make a modern service legacy-only for everyone with a request its
 upstream refuses. The era is kept like the tools list (10 minutes) and dropped when a node of the service connects
-or disconnects. While a service is legacy-only, the gate answers every modern request to it as rule 3 says, without
-forwarding it: a legacy upstream such as `server-everything@1.0.0` hands each POST without a session to a new
-transport that it never closes, so every forwarded request would cost the seller's node a server, where the probe
-costs one per period. Sealed services are answered the same way without asking (D162); stdio services are learned
-like any other, from the bridge's answer to the probe (rule 3's body, [`tunnel.md`](tunnel.md) §10).
+or disconnects, on every replica (`NOTIFY kontra_tunnel, 'mcp:<tenant_id>/<service>/<replica_id>'`, D199). While a
+service is legacy-only, the gate answers every modern request to it as rule 3 says, without forwarding it: a legacy
+upstream such as `server-everything@1.0.0` hands each POST without a session to a new transport that it never
+closes, so every forwarded request would cost the seller's node a server, where the probe costs one per period.
+Sealed services are answered the same way without asking (D162); stdio services are learned like any other, from the
+bridge's answer to the probe (rule 3's body, [`tunnel.md`](tunnel.md) §10).
 
 **Rewrites.**
 
@@ -1196,7 +1283,14 @@ upstream's `requestState`. The first `InputRequiredResult` counts as the first u
 attempt records its first `inputRequests` key in its place), so the call is never sent afresh after it: a tunnel
 lost later fails the task `tunnel_lost`, as for an upstream task (D178). Answers to a task's requests go upstream
 as `tasks/update` under the upstream keys. A terminal upstream status ends the gate task: `completed` logs its
-`result`, `failed` its `error`, and `cancelled` is `canceled`.
+`result`, `failed` its `error`, and `cancelled` is `canceled`. A call sent again with its answers is never
+repeated after an exchange that may have reached the upstream (the task fails `upstream_unreachable`, or
+`tunnel_lost`); only a refusal given before it ran (`full`, `408`, `429`) is sent again. A re-attach that finds a
+multi round-trip first id and no logged round to answer (or a round that listed only a `requestState`) sends the
+upstream nothing and fails the task `upstream_error` (D205).
+
+A plain call answered by an `InputRequiredResult` has no outcome yet: its `calls` row has `is_error` NULL, as a
+passthrough `CreateTaskResult`'s has (§11.5), and the call sent again with its answers has its own row (D204).
 
 **The client side.** It reads only Postgres, on any replica. A request naming a task must declare the extension,
 else `400` with `-32021` (`MissingRequiredClientCapability`, `data.requiredCapabilities` naming the extension,
@@ -1213,16 +1307,17 @@ requests as server-to-client requests whose JSON-RPC id is the gate id (§11.7),
 `inputRequests`; for a result with `isError: true`, `failed` or `completed` follows §11.8 for a legacy reader
 and the table above for a modern one.
 
-**`per_session` (D160).** A modern client has no session, so the gate keeps one **virtual session** per service
-and principal: an `mcp_sessions` row with `protocol_version = '2026-07-28'`, a `client_sid_hash` over a random id
-the gate never sends, and no upstream or tunnel ids. Admission with operation `session` (§13.1) runs before a
+**`per_session` (D160).** A modern client has no session, so the gate keeps one **virtual session** per service and
+principal: an `mcp_sessions` row with `protocol_version = '2026-07-28'`, a `client_sid_hash` over a random id the
+gate never sends, and no upstream or tunnel ids. Admission with operation `session` (§13.1) runs before a
 principal's first modern request to a modern service is forwarded, and the row is opened once the upstream has
-answered that request with a modern result (D177), so a probe that ends in the legacy `400` opens nothing. A
-unique index allows one open virtual session per principal and service: of two first requests in flight at
-once, the one whose insert loses reads the winner's row and names it. It is closed `idle` after the service's
-`session_idle_s` without a request, and its `last_seen_at` is written at most once a minute. It pins nothing. It
-is the unit that `per_session` prices (`idleTimeoutSeconds` is the service's `session_idle_s`), that Admission's
-`session` operation decides, and the `mcp_session` of its `calls` rows.
+answered that request with a modern result (D177), or once the request was answered from the modern `tools/list`
+cache or became a gate-owned task, both of which follow the upstream's own modern answers (D204); a probe that ends
+in the legacy `400` opens nothing. A unique index allows one open virtual session per principal and service: of two
+first requests in flight at once, the one whose insert loses reads the winner's row and names it. It is closed
+`idle` after the service's `session_idle_s` without a request, and its `last_seen_at` is written at most once a
+minute. It pins nothing. It is the unit that `per_session` prices (`idleTimeoutSeconds` is the service's
+`session_idle_s`), that Admission's `session` operation decides, and the `mcp_session` of its `calls` rows.
 
 **Not offered to modern clients in v4.0 (D161, D162).** Tasks of `passthrough` services; `notifications/tasks`;
 resumable streams; `-32042`, never emitted on a modern request; **sealed** services, to which every modern
@@ -1819,6 +1914,7 @@ met, are DM4-30.
 | `services.<name>.sealed` | `false`; `true` or `{required: bool}` (`required` defaults to `true`); tunnel backends only (D91) | [`ext-sealed.md`](ext-sealed.md) §1 |
 | `services.<name>.seller_keys` | none (seller signatures not verified) | §3 |
 | `services.<name>.session_idle_s` | `3600` | §11.2 |
+| `services.<name>.max_sessions_per_principal` | `4` (mcp only, tunnel backends, not `anonymous`; 1 to 10000) | §11.2 |
 | `services.<name>.task.timeout`, `.retries`, `.retention` | `1h`, `2`, `7d` | §5.4, §6.4, §6.5 |
 | `services.<name>.listed` | `false` | §12.2 |
 | `tenancy` | `single` | §2.1 |

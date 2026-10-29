@@ -35,7 +35,7 @@ const usage = `usage:
   kontra connect [--gate <url>] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
                  [--roots <name>=<dir> …] [--env <name> …] [--session-idle <duration>] [--max-sessions <n>]
                  [--key <path>] [--enroll <token>|@file|-] [--api-key <key>|@file|-] [--name <name>] [--rotate]
-                 [--require-channel-binding] [--max-inflight <n>] [--listen <addr>] [--local-token <file>]
+                 [--require-channel-binding] [--max-inflight <n>] [--listen <addr>|off] [--local-token <file>]
                  [--allow-origin <origin> …] [--sealed-max-age <duration>] [--sealed-required <name> …]
                  [--pin-recipients] [--accept-change <name> …] [--public <name> …] [--log json]
   kontra seal --service <service URL> [--api-key <key>|@<file>] [--context <id>] [--task <id>]
@@ -58,7 +58,8 @@ through one outbound connection (spec/tunnel.md):
                              and these); repeatable
   --session-idle DURATION    stop a stdio server whose MCP session has been idle this long (default 1h; at least the
                              gate's session_idle_s)
-  --max-sessions N           stdio server processes per service at most, durable tasks included (default 8)
+  --max-sessions N           stdio server processes per service at most, durable tasks included (default 8); when
+                             full, a new session stops the one idle longest, if idle for 5 minutes or more
   --key PATH                 the identity key (default ~/.kontra/identity.key, or $KONTRA_KEY)
   --enroll TOKEN|@FILE|-     a one-time enrollment token from kontra-gate enroll <service>; repeatable
   --api-key KEY|@FILE|-      an API key for this gate: who this node hires as (else node:<key id>); a node that only
@@ -67,15 +68,17 @@ through one outbound connection (spec/tunnel.md):
   --rotate                   rotate the identity key (the old one stays decrypt-only for 24 h)
   --require-channel-binding  refuse a gate that offers no TLS channel binding
   --max-inflight N           requests in flight per session (default 64)
-  --listen ADDR              where local clients hire through the gate (default 127.0.0.1:7777): /agents/…, /mcp/…,
-                             /mcp and /.well-known/… are forwarded with this node's principal
+  --listen ADDR|off          where local clients hire through the gate (default 127.0.0.1:7777): /agents/…, /mcp/…,
+                             /mcp and /.well-known/… are forwarded with this node's principal; off: no hiring, for a
+                             node that only hosts
   --local-token FILE         a token every local request must carry (Authorization: Bearer); required off loopback
   --allow-origin ORIGIN      a browser Origin allowed to call --listen; repeatable (default none)
   --sealed-max-age DURATION  how old a sealed request may be when it reaches a hosted service (default 25h; at least
                              the gate's longest quote expiry plus task.timeout)
   --sealed-required NAME     refuse an unsealed request to the hosted service NAME; repeatable
   --pin-recipients           refuse any new recipient or seller key of a sealed service this node hires
-  --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME; repeatable
+  --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME, the one
+                             pending when this run first checks it (not a later one); repeatable
   --public NAME              on an anonymous session, let anyone call the hosted service NAME (no credential); repeatable
   --log json                 JSON logs on stderr (default text)
 Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. A node that holds none for
@@ -83,8 +86,8 @@ the gate and is given neither --enroll nor --api-key asks for an anonymous sessi
 (Cloud's public gate) gives under an anon-<…> tenant for a limited time (spec/tunnel.md §6): kontra connect prints its
 URLs and when it ends, and exits 1 saying the anonymous session expired when it does. Sealed services
 (spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a hired job's key under ~/.kontra/jobs,
-and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints are printed on stderr on a first sight
-and on every change.
+and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints (kid:<kid> for a seller signature that
+names its key only, D223) are printed on stderr on a first sight and on every change.
 
 kontra seal seals a file for a sealed service without a node (the escape hatch for scripting, ext-sealed.md §5.1):
 it prints one A2A Message JSON whose single part is the file sealed to the service's recipients; --open writes the
@@ -140,14 +143,22 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	case "seal":
-		if err := sealing.SealCommand(ctx, args[1:], os.Stdin, stdout, stderr); err != nil {
+		err := sealing.SealCommand(ctx, args[1:], os.Stdin, stdout, stderr)
+		switch {
+		case err == nil:
+			return 0
+		case errors.Is(err, flag.ErrHelp):
+			fmt.Fprint(stdout, sealing.SealUsage)
+			return 0
+		case errors.Is(err, sealing.ErrUsage):
+			// The reason may quote an argument: escaped for the terminal; the synopsis is the CLI's own.
 			fmt.Fprintln(stderr, "kontra seal:", tunnel.Printable(err.Error()))
-			if errors.Is(err, sealing.ErrUsage) {
-				return 2
-			}
+			fmt.Fprint(stderr, sealing.SealUsage)
+			return 2
+		default:
+			fmt.Fprintln(stderr, "kontra seal:", tunnel.Printable(err.Error()))
 			return 1
 		}
-		return 0
 	case "login":
 		// tunnel.md §6.3 (DM4-11): an API key from the gate's sign-in, kept for that gate only.
 		if err := login.Command(ctx, args[1:], stdout, stderr); err != nil {

@@ -161,6 +161,27 @@ func TestKeeperWithSellerKeys(t *testing.T) {
 	if err != nil || h.Upstream == nil || !h.Upstream.Verified {
 		t.Fatalf("the gate's header does not say verified: %+v %v", h, err)
 	}
+	// D223: the header names the seller key set it verified with, which the gate serves on its origin: the seller's
+	// public keys, with which a node verifies a kid-only seller signature and pins its key's thumbprint.
+	if h.Upstream.JWKS != "https://gate.example/agents/hello/.well-known/seller-jwks.json" {
+		t.Fatalf("kontra.upstream.jwks = %q", h.Upstream.JWKS)
+	}
+	served, err := jws.ParseJWKS(s.SellerJWKS)
+	if err != nil {
+		t.Fatalf("the served seller key set: %v %s", err, s.SellerJWKS)
+	}
+	want, _ := jws.ParseJWKS(mustJWKS(t, seller))
+	gotT, _ := served.Thumbprints()
+	wantT, _ := want.Thumbprints()
+	if strings.Join(gotT, ",") != strings.Join(wantT, ",") {
+		t.Fatalf("the served seller key set's thumbprints %v, the seller's %v", gotT, wantT)
+	}
+	rec := httptest.NewRecorder()
+	SellerJWKSHandler(func(*http.Request) (*Served, error) { return k.Current() }).ServeHTTP(rec, httptest.NewRequest("GET", "/agents/hello/.well-known/seller-jwks.json", nil))
+	if rec.Code != http.StatusOK || rec.Body.String() != string(s.SellerJWKS) || rec.Header().Get("Content-Type") != "application/jwk-set+json" ||
+		rec.Header().Get("ETag") == "" {
+		t.Fatalf("the seller key set route: %d %v %s", rec.Code, rec.Header(), rec.Body.String())
+	}
 	if _, _, err := k.Dispatch(); err != nil {
 		t.Fatal(err)
 	}
@@ -205,13 +226,18 @@ func TestKeeperWithSellerKeys(t *testing.T) {
 	if persisted.Load() != persistedBefore || touched.Load() != touchedBefore {
 		t.Error("an unverifiable card was recorded")
 	}
-	// A card handler answers 503 with an empty body for it (both card routes).
+	// A card handler answers 503 with an empty body for it (both card routes, and the seller key set's).
 	for _, up := range []bool{false, true} {
 		rec := httptest.NewRecorder()
 		Handler(func(*http.Request) (*Served, error) { return k.Current() }, up).ServeHTTP(rec, httptest.NewRequest("GET", "/agents/hello", nil))
 		if rec.Code != http.StatusServiceUnavailable || rec.Body.Len() != 0 {
 			t.Errorf("card route (upstream %v): %d %q", up, rec.Code, rec.Body.String())
 		}
+	}
+	rec = httptest.NewRecorder()
+	SellerJWKSHandler(func(*http.Request) (*Served, error) { return k.Current() }).ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil))
+	if rec.Code != http.StatusServiceUnavailable || rec.Body.Len() != 0 {
+		t.Errorf("the seller key set of an unavailable card: %d %q", rec.Code, rec.Body.String())
 	}
 
 	// A replica that starts with the stored (verified) card and a {url} key set it has not fetched: unavailable
@@ -245,6 +271,32 @@ func TestKeeperWithSellerKeys(t *testing.T) {
 	}
 	if _, err := k3.Current(); !errors.Is(err, ErrNotVerified) {
 		t.Errorf("an unverifiable seed: %v", err)
+	}
+}
+
+// Without seller keys the gate verifies nothing and names no seller key set (D223): kontra.upstream has no jwks, and
+// the route answers 404.
+func TestNoSellerKeySetWithoutSellerKeys(t *testing.T) {
+	gate, _ := jws.EphemeralKeySet()
+	cs := newCardServer(t, string(read(t, "a2a-cli-exec.json")))
+	k := NewKeeper(backend(t, cs), Input{PublicURL: "https://gate.example", ServicePath: "/agents/hello"},
+		WithSigner(&JWSSigner{Keys: gate, JWKSURL: "https://gate.example/.well-known/jwks.json"}))
+	if err := k.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s, err := k.Current()
+	if err != nil || s.Verified || s.SellerJWKS != nil {
+		t.Fatalf("a card without seller keys: %+v %v", s, err)
+	}
+	pub, _ := jws.ParseJWKS(mustJWKS(t, gate))
+	h, err := jws.Verify(s.Body, signatures(t, s.Body)[0], pub)
+	if err != nil || h.Upstream == nil || h.Upstream.Verified || h.Upstream.JWKS != "" {
+		t.Fatalf("kontra.upstream without seller keys: %+v %v", h.Upstream, err)
+	}
+	rec := httptest.NewRecorder()
+	SellerJWKSHandler(func(*http.Request) (*Served, error) { return k.Current() }).ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("the seller key set route without seller keys: %d", rec.Code)
 	}
 }
 

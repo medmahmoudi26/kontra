@@ -12,8 +12,13 @@
 //	progress {n}              n notifications/progress with the request's _meta.progressToken, then the answer
 //	notify {n}                n notifications/message (routed to the GET stream), then the answer
 //	sample {}                 a sampling/createMessage request to the client, answered at once
+//	ask {text}                a sampling/createMessage request whose prompt quotes text, answered once the client
+//	                          answers it (as server-everything's sampleLLM)
 //	related {taskId}          a notifications/message related to taskId, then the answer, then the answer to the
 //	                          tasks/result of that task it holds
+//	longrun {text, delayMs}   with params.task, a task (task-<n>, completed, statusMessage "status of <text>") whose
+//	                          CreateTaskResult comes delayMs later, and whose tasks/get, tasks/list and tasks/result
+//	                          answer at once ("result of <text>"); without, "result of <text>"
 //	stderr {bytes}            bytes written to stderr in lines of 1 KiB, then the answer
 //	env {}                    its environment, one variable per line
 //	pid {}                    its pid and process group
@@ -64,7 +69,34 @@ var (
 	pid   = os.Getpid()
 	// held is the id of the tasks/result request held for each task.
 	held = map[string]json.RawMessage{}
+	// asked is the id of the ask call waiting for each sampling request's answer.
+	asked = map[string]json.RawMessage{}
+	// tasks are the tasks longrun created, in order.
+	tasks []*task
 )
+
+// task is a task longrun created: completed at once, its CreateTaskResult sent later.
+type task struct {
+	id, text string
+}
+
+func (t *task) object() map[string]any {
+	return map[string]any{"taskId": t.id, "status": "completed", "statusMessage": "status of " + t.text,
+		"createdAt": "2026-10-28T00:00:00Z", "lastUpdatedAt": "2026-10-28T00:00:00Z", "ttl": 60000}
+}
+
+func taskOf(params json.RawMessage) *task {
+	var p struct {
+		TaskID string `json:"taskId"`
+	}
+	_ = json.Unmarshal(params, &p)
+	for _, t := range tasks {
+		if t.id == p.TaskID {
+			return t
+		}
+	}
+	return nil
+}
 
 func main() {
 	flag.Parse()
@@ -126,6 +158,10 @@ func handle(m message) {
 			writeRecord("roots", json.RawMessage(orNull(m.Result)))
 		case strings.HasPrefix(id, "sample-"):
 			writeRecord("sample", json.RawMessage(orNull(m.Result)))
+			if call, ok := asked[id]; ok {
+				delete(asked, id)
+				reply(call, map[string]any{"content": []any{map[string]any{"type": "text", "text": "answered"}}, "isError": false})
+			}
 		}
 	case m.Method == "initialize":
 		writeRecord("init", json.RawMessage(orNull(m.Params)))
@@ -138,18 +174,30 @@ func handle(m message) {
 		}
 	case m.Method == "tools/list":
 		var tools []map[string]any
-		for _, n := range []string{"echo", "progress", "notify", "sample", "related", "stderr", "env", "pid", "crash"} {
+		for _, n := range []string{"echo", "progress", "notify", "sample", "ask", "related", "longrun", "stderr", "env", "pid", "crash"} {
 			tools = append(tools, map[string]any{"name": n, "inputSchema": map[string]any{"type": "object"}})
 		}
 		reply(m.ID, map[string]any{"tools": tools})
 	case m.Method == "tools/call":
 		call(m)
+	case m.Method == "tasks/result" && taskOf(m.Params) != nil:
+		t := taskOf(m.Params)
+		reply(m.ID, map[string]any{"content": []any{map[string]any{"type": "text", "text": "result of " + t.text}}, "isError": false,
+			"_meta": map[string]any{"io.modelcontextprotocol/related-task": map[string]any{"taskId": t.id}}})
 	case m.Method == "tasks/result":
 		var p struct {
 			TaskID string `json:"taskId"`
 		}
 		_ = json.Unmarshal(m.Params, &p)
 		held[p.TaskID] = m.ID
+	case m.Method == "tasks/get" && taskOf(m.Params) != nil:
+		reply(m.ID, taskOf(m.Params).object())
+	case m.Method == "tasks/list":
+		list := []any{}
+		for _, t := range tasks {
+			list = append(list, t.object())
+		}
+		reply(m.ID, map[string]any{"tasks": list})
 	case m.Method == "ping":
 		reply(m.ID, map[string]any{})
 	case m.ID != nil:
@@ -159,20 +207,24 @@ func handle(m message) {
 
 var samples int
 
-func sample(id string) {
+func sample(id string) { samplePrompt(id, "hi") }
+
+func samplePrompt(id, prompt string) {
 	send(map[string]any{"jsonrpc": "2.0", "id": id, "method": "sampling/createMessage", "params": map[string]any{
-		"messages": []any{map[string]any{"role": "user", "content": map[string]any{"type": "text", "text": "hi"}}}, "maxTokens": 10}})
+		"messages": []any{map[string]any{"role": "user", "content": map[string]any{"type": "text", "text": prompt}}}, "maxTokens": 10}})
 }
 
 func call(m message) {
 	var p struct {
 		Name      string `json:"name"`
 		Arguments struct {
-			Text   string `json:"text"`
-			N      int    `json:"n"`
-			TaskID string `json:"taskId"`
-			Bytes  int    `json:"bytes"`
+			Text    string `json:"text"`
+			N       int    `json:"n"`
+			TaskID  string `json:"taskId"`
+			Bytes   int    `json:"bytes"`
+			DelayMs int    `json:"delayMs"`
 		} `json:"arguments"`
+		Task json.RawMessage `json:"task"`
 		Meta struct {
 			ProgressToken json.RawMessage `json:"progressToken"`
 		} `json:"_meta"`
@@ -200,6 +252,11 @@ func call(m message) {
 		samples++
 		sample(fmt.Sprintf("sample-%d", samples+1))
 		reply(m.ID, text("asked"))
+	case "ask":
+		samples++
+		id := fmt.Sprintf("sample-%d", samples+1)
+		asked[id] = m.ID
+		samplePrompt(id, "prompt built from the arguments: "+p.Arguments.Text)
 	case "related":
 		send(map[string]any{"jsonrpc": "2.0", "method": "notifications/message", "params": map[string]any{"level": "info",
 			"data": "about " + p.Arguments.TaskID, "_meta": map[string]any{"io.modelcontextprotocol/related-task": map[string]any{"taskId": p.Arguments.TaskID}}}})
@@ -208,6 +265,18 @@ func call(m message) {
 			delete(held, p.Arguments.TaskID)
 			reply(id, text("result of "+p.Arguments.TaskID))
 		}
+	case "longrun":
+		if len(p.Task) == 0 {
+			reply(m.ID, text("result of "+p.Arguments.Text))
+			break
+		}
+		t := &task{id: fmt.Sprintf("task-%d", len(tasks)+1), text: p.Arguments.Text}
+		tasks = append(tasks, t)
+		obj, delay := t.object(), time.Duration(p.Arguments.DelayMs)*time.Millisecond
+		go func() {
+			time.Sleep(delay)
+			reply(m.ID, map[string]any{"task": obj})
+		}()
 	case "stderr":
 		line := strings.Repeat("e", 1023) + "\n"
 		for written := 0; written < p.Arguments.Bytes; written += len(line) {

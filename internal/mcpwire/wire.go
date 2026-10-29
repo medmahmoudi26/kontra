@@ -74,6 +74,10 @@ const (
 	// MetaServerInfo is the _meta key of a 2026-07-28 server/discover result that names the server (DiscoverResult;
 	// the gate's own /mcp writes it, M4 WP-05).
 	MetaServerInfo = "io.modelcontextprotocol/serverInfo"
+	// MetaSessionIdle is the initialize result's _meta key in which the gate states the service's session_idle_s,
+	// the seconds an idle session is kept (spec/relay.md §11.2, D224): a hiring node keeps a sealed session's key
+	// that long.
+	MetaSessionIdle = KontraPrefix + "session_idle_s"
 )
 
 // ErrBatch is a POST body that is one JSON value but not an object: an array or a scalar (§11.1). From a client it
@@ -160,10 +164,10 @@ var UpstreamLevels = []strictjson.Path{
 // would let the message through as a response or past per-tool policy; and an upstream's {"ISERROR": true} would
 // be metered as a success while such a client reads a failure.
 //
-// SPEC-CONFLICT: relay §11.1 and D172 refuse a level in which "a key repeats, or two keys are equal under Unicode
-// case folding", which a lone variant is not, and would let it through. The review of M3 WP-01 (and the plan
-// audit's gaps[0] fix: "any key that equals a member it reads ... case-insensitively but not exactly") refuses it
-// too, with the same answer as a pair; §11.1 should say so. A reader that starts reading another member adds it
+// SPEC-CONFLICT (D191): relay §11.1 and D172 refuse a level in which "a key repeats, or two keys are equal under
+// Unicode case folding", which a lone variant is not, and would let it through. The review of M3 WP-01 (and the
+// plan audit's gaps[0] fix: "any key that equals a member it reads ... case-insensitively but not exactly") refuses
+// it too, with the same answer as a pair, as §11.1 now says. A reader that starts reading another member adds it
 // here, as a level is added to the spec first.
 //
 // The node's MCP filters (M3 WP-05) read: the client's capabilities.roots in an initialize and roots in its
@@ -418,6 +422,23 @@ func IDKey(id json.RawMessage) (string, bool) {
 	return "", false
 }
 
+// IsErrorFlag reads a CallToolResult's top-level isError (exact key): set when it is the JSON literal true; ok false
+// when it is present and not a JSON boolean ("true", 1, null), a malformed result, since clients do not agree on it
+// (the Python SDK's pydantic reads "true" and 1 as true, the TypeScript SDK's schema refuses the result).
+func IsErrorFlag(result json.RawMessage) (set, ok bool) {
+	v, has := Member(result, "isError")
+	if !has {
+		return false, true
+	}
+	switch string(bytes.TrimSpace(v)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	}
+	return false, false
+}
+
 // parseError decodes an error object with exact keys: code an integer, message a string, data any value. A null
 // error (some JSON-RPC 1.0 habits write one beside a result) is no error.
 func parseError(v json.RawMessage) (*Error, error) {
@@ -497,11 +518,11 @@ var LegacyNoSessionBody = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32
 // GET and DELETE with a session take §11.1's versions as a POST does: 2025-11-25, 2025-06-18 or none is legacy, and
 // anything else is 400 with -32022 (id null), not forwarded with the pinned request.
 //
-// SPEC-CONFLICT (relay §11.1, §11.12 rule 5): §11.1 makes a request with 2026-07-28 a modern one, and rule 5 makes
-// GET and DELETE legacy only; neither says what a GET or DELETE carrying 2026-07-28 and a session gets. The closest
-// faithful behaviour: it is modern, so its Mcp-Session-Id is never read (rule 2), and a modern request has no GET
-// stream and no session to delete: such a GET or DELETE is one without a session, 405 (rule 5), as a 2026-07-28
-// server answers a GET.
+// SPEC-CONFLICT (D201; relay §11.1, §11.12 rule 5): §11.1 makes a request with 2026-07-28 a modern one, and rule 5
+// makes GET and DELETE legacy only; neither says what a GET or DELETE carrying 2026-07-28 and a session gets. The
+// closest faithful behaviour: it is modern, so its Mcp-Session-Id is never read (rule 2), and a modern request has
+// no GET stream and no session to delete: such a GET or DELETE is one without a session, 405 (rule 5), as a
+// 2026-07-28 server answers a GET.
 //
 // MCP-Protocol-Version is read once, as its field value: a header sent more than once is its lines' values joined
 // with ", " (RFC 9110 §5.3), which names no version, so such a request is rule 4's -32022 (and a GET or DELETE

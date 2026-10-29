@@ -44,8 +44,8 @@ A team gate on one host is [`../compose.yaml`](../compose.yaml) (D43, D168): the
 no Temporal or Postgres port published. [`../deploy/compose/kontra.yaml`](../deploy/compose/kontra.yaml) is its
 configuration with a provided certificate and says what to edit; [`../deploy/compose/kontra.vps.yaml`](../deploy/compose/kontra.vps.yaml)
 is the same gate with built-in ACME, for a fresh VPS (DM4-14, DM4-31). PRD §12's pentest list and M3's own surface were
-run against it on 27 Oct (`make pentest`, D186): [`pentest-m3.md`](pentest-m3.md) records every probe, the findings and
-their fixes.
+run against it on 27 Oct and, after the M3 review rounds, again on 29 Oct (`make pentest`, D186, D266):
+[`pentest-m3.md`](pentest-m3.md) records every probe of the second run, the findings and their fixes.
 
 M4's two gate runs are kits in this repository, run by hand (DM4-15, DM4-31): `scripts/demo-clean-laptop.sh` runs the
 README's demo block, as written, in a fresh container against the staging gate, and `scripts/team-gate-vps.sh` brings

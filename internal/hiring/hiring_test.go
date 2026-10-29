@@ -243,17 +243,29 @@ type testServer struct {
 	tun    *fakeTunnel
 	gate   *fakeGate
 	url    string // http://127.0.0.1:<port>
+	host   string // 127.0.0.1:<port>
 	port   string
 	cancel context.CancelFunc
 }
 
 func startServer(t *testing.T, mod func(*Config)) *testServer {
 	t.Helper()
+	return startServerAt(t, "127.0.0.1:0", mod)
+}
+
+// startServerOn is startServer listening on addr ([::1]:0, say).
+func startServerOn(t *testing.T, addr string) *testServer {
+	t.Helper()
+	return startServerAt(t, addr, nil)
+}
+
+func startServerAt(t *testing.T, addr string, mod func(*Config)) *testServer {
+	t.Helper()
 	gateURL, _ := url.Parse("http://127.0.0.1:18443")
 	g := newFakeGate(t, "http://127.0.0.1:18443")
 	big := bytes.Repeat([]byte{7, 0, 'b'}, 300<<10/3)
 	tun := &fakeTunnel{gate: g.handler(t), blobs: map[blob.Ref][]byte{g.ref: big}}
-	cfg := Config{Listen: "127.0.0.1:0", Gate: gateURL}
+	cfg := Config{Listen: addr, Gate: gateURL}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -261,7 +273,7 @@ func startServer(t *testing.T, mod func(*Config)) *testServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +283,7 @@ func startServer(t *testing.T, mod func(*Config)) *testServer {
 	t.Cleanup(func() { cancel(); <-done })
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
 	eventually(t, func() bool { return s.Local().Port() == port })
-	return &testServer{s: s, tun: tun, gate: g, url: "http://" + ln.Addr().String(), port: port, cancel: cancel}
+	return &testServer{s: s, tun: tun, gate: g, url: "http://" + ln.Addr().String(), host: ln.Addr().String(), port: port, cancel: cancel}
 }
 
 func eventually(t *testing.T, cond func() bool) {
@@ -428,6 +440,16 @@ func TestNewChecksListen(t *testing.T) {
 	}
 	if _, err := New(Config{Gate: gate, AllowOrigins: []string{"http://x/path"}}, &fakeTunnel{}, nil); err == nil {
 		t.Error("an --allow-origin with a path accepted")
+	}
+	// --listen off (D208): accepted alone; a local token or an allowed Origin, which guard --listen, are refused.
+	if _, err := New(Config{Listen: ListenOff, Gate: gate}, &fakeTunnel{}, nil); err != nil {
+		t.Errorf("--listen off: %v", err)
+	}
+	if _, err := New(Config{Listen: ListenOff, Gate: gate, LocalToken: "0123456789abcdef"}, &fakeTunnel{}, nil); err == nil {
+		t.Error("--listen off with a local token accepted")
+	}
+	if _, err := New(Config{Listen: ListenOff, Gate: gate, AllowOrigins: []string{"http://app.local:3000"}}, &fakeTunnel{}, nil); err == nil {
+		t.Error("--listen off with an allowed Origin accepted")
 	}
 }
 
@@ -625,22 +647,22 @@ func TestRewriteCardRefusals(t *testing.T) {
 	g := newFakeGate(t, "http://127.0.0.1:18443")
 	other := newFakeGate(t, "http://127.0.0.1:18443") // same origin, another key
 	client := &http.Client{Transport: &streamTransport{open: &fakeTunnel{gate: g.handler(t)}}}
-	if _, err := RewriteCard(context.Background(), g.signedCard(t), gateURL, local, client); err != nil {
+	if _, err := RewriteCard(context.Background(), g.signedCard(t), gateURL, local, "/agents/hello", client); err != nil {
 		t.Fatalf("the gate's own card: %v", err)
 	}
 	before := g.jwksN.Load()
-	if _, err := RewriteCard(context.Background(), other.signedCard(t), gateURL, local, client); !errors.Is(err, ErrCardNotVerified) {
+	if _, err := RewriteCard(context.Background(), other.signedCard(t), gateURL, local, "/agents/hello", client); !errors.Is(err, ErrCardNotVerified) {
 		t.Fatalf("a card signed by another key: %v", err)
 	}
 	if g.jwksN.Load() != before+1 {
 		t.Fatalf("a card whose kid is unknown makes the node fetch the key set again once (rotation): %d fetches", g.jwksN.Load()-before)
 	}
 	unsigned := []byte(`{"name":"x","supportedInterfaces":[{"url":"http://127.0.0.1:18443/agents/x"}]}`)
-	if _, err := RewriteCard(context.Background(), unsigned, gateURL, local, client); !errors.Is(err, ErrCardNotVerified) {
+	if _, err := RewriteCard(context.Background(), unsigned, gateURL, local, "/agents/x", client); !errors.Is(err, ErrCardNotVerified) {
 		t.Fatalf("an unsigned card: %v", err)
 	}
 	dup := bytes.Replace(g.signedCard(t), []byte(`"name":"hello"`), []byte(`"name":"hello","NAME":"evil"`), 1)
-	if _, err := RewriteCard(context.Background(), dup, gateURL, local, client); !errors.Is(err, ErrCardNotVerified) {
+	if _, err := RewriteCard(context.Background(), dup, gateURL, local, "/agents/hello", client); !errors.Is(err, ErrCardNotVerified) {
 		t.Fatalf("a card with a case-variant member: %v", err)
 	}
 }

@@ -85,10 +85,10 @@ const (
 // is unbounded" holds in time too. Past it the drain fails upstream_error (ErrToolsLimit, a 502 with -32603 to the
 // request that started it).
 //
-// SPEC-CONFLICT (relay §6.6, §11.3): §6.6's table bounds a tools/list in pages and bytes only, while every request of
-// the service on a replica waits for the one drain in flight, so an upstream session that never answers would hold
-// them all for as long as the client that started it waits. The closest faithful behaviour: §6.6's own rule ("nothing
-// an upstream sends is unbounded") read as a time bound too, 30 s for a whole drain.
+// SPEC-CONFLICT (D198; relay §6.6, §11.3): §6.6's table bounds a tools/list in pages and bytes only, while every
+// request of the service on a replica waits for the one drain in flight, so an upstream session that never answers
+// would hold them all for as long as the client that started it waits. The closest faithful behaviour: §6.6's own
+// rule ("nothing an upstream sends is unbounded") read as a time bound too, 30 s for a whole drain.
 const DrainTimeout = 30 * time.Second
 
 // ErrToolsLimit is a tools/list over §6.6's limits, or one that is not a tools/list result.

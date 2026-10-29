@@ -28,6 +28,7 @@ import (
 
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/tunnel/tunneltest"
@@ -399,6 +400,30 @@ func eventually(t *testing.T, within time.Duration, what string, cond func() boo
 	}
 }
 
+// revokeKey writes {"t": "revoked"} on s's control stream, as the gate does when an operator revokes s's key
+// (§12), and wants the node's reaction, the log line reaction on session s. The node closes the session on that
+// line, and the close can beat the write's own result: hashicorp/yamux's Stream.Write hands the frame to its
+// send loop, then waits on the send's result and on the session's shutdown in one select, which takes either
+// when both are ready. So a line the node read and acted on can come back yamux.ErrSessionShutdown (CI's go
+// job on e0a5abb: "tunnel: control: session shutdown", with the node's log showing it had closed the session
+// on the revocation). That error passes only with the node's log of the reaction; any other error fails.
+func revokeKey(t *testing.T, tn *testNode, s *tunnelgate.Session, reaction string) {
+	t.Helper()
+	err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked})
+	if err != nil && !errors.Is(err, yamux.ErrSessionShutdown) {
+		t.Fatal(err)
+	}
+	what := fmt.Sprintf("the node logging %q on session %s (the write returned %v)", reaction, s.ID, err)
+	eventually(t, 5*time.Second, what, func() bool {
+		for _, line := range strings.Split(tn.logs.String(), "\n") {
+			if strings.Contains(line, reaction) && strings.Contains(line, "tunnel_session="+s.ID.String()) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func startAgent(t *testing.T, cfg slowagent.Config) *slowagent.Agent {
 	t.Helper()
 	a := slowagent.New(cfg)
@@ -481,6 +506,26 @@ func TestRunServesAnAgent(t *testing.T) {
 			t.Errorf("a forwarding header reached the agent: %v", r.Header)
 		}
 	}
+}
+
+// --listen off (D208): a node that only hosts serves its services and binds no hiring endpoint, so that a second
+// node on the host needs no port of its own, and no local process hires as this node.
+func TestRunListenOff(t *testing.T) {
+	g := newTestGate(t, nil)
+	agent := startAgent(t, slowagent.Config{Chunks: 1, Interval: time.Millisecond})
+	cfg := testConfig(t, g.url, "", agentServe(t, "hello", agent))
+	cfg.Listen = hiring.ListenOff
+	tn := mustNode(t, g, cfg).run(t)
+	g.session(t)
+	eventually(t, 5*time.Second, "hiring is off", func() bool {
+		return strings.Contains(tn.out.String(), "hiring is off (--listen off)")
+	})
+	if strings.Contains(tn.out.String(), "hiring at") || strings.Contains(tn.logs.String(), "serving local clients") {
+		t.Fatalf("a node with --listen off serves hiring: %s", tn.out.String())
+	}
+	eventually(t, 5*time.Second, "the welcome's service URLs printed", func() bool {
+		return strings.Contains(tn.out.String(), "a2a hello  https://gate.example/agents/hello")
+	})
 }
 
 // {"t": "drain"} makes the node dial a second session at once, while the first goes on serving its
@@ -566,9 +611,7 @@ func TestRunRevokedStops(t *testing.T) {
 	rec := newRecorder(t)
 	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url()))).run(t)
 	s := g.session(t)
-	if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil {
-		t.Fatal(err)
-	}
+	revokeKey(t, tn, s, "the gate revoked this node's key")
 	if err := tn.result(t, 10*time.Second); !errors.Is(err, ErrRevoked) {
 		t.Fatalf("Run = %v, want ErrRevoked", err)
 	}
@@ -1148,9 +1191,7 @@ func TestRotationByAnotherProcess(t *testing.T) {
 	if resp, _ := exchange(t, s1, "hello", "/old"); resp.StatusCode != 200 {
 		t.Fatalf("the old session no longer serves: %d", resp.StatusCode)
 	}
-	if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil {
-		t.Fatal(err)
-	}
+	revokeKey(t, tn, s1, "the gate revoked the session's rotated key")
 	eventually(t, 5*time.Second, "the old key's session closed", s1.Mux().IsClosed)
 	time.Sleep(200 * time.Millisecond)
 	if !tn.running() || s2.Mux().IsClosed() {
@@ -1231,9 +1272,7 @@ func TestRevokedRotatedKeyBeforeTheMaintainTick(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s1.WriteControl(tunnel.Control{T: tunnel.CtlRevoked}); err != nil { // the operator revokes the old key
-		t.Fatal(err)
-	}
+	revokeKey(t, tn, s1, "the gate revoked the session's rotated key") // the operator revokes the old key
 	eventually(t, 5*time.Second, "the old key's session closed", s1.Mux().IsClosed)
 	start := time.Now()
 	r := g.adm.next(t)
@@ -1362,6 +1401,11 @@ func TestParseArgs(t *testing.T) {
 	if cfg, err := parseArgs(nil, defaultEnv, nil); err != nil || len(cfg.Serves) != 0 {
 		t.Fatalf("no flags at all (hire only): %v", err)
 	}
+	// --listen off: a node that only hosts binds no hiring endpoint (D208).
+	if cfg, err := parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--listen", "off"}, defaultEnv, nil); err != nil ||
+		cfg.Listen != hiring.ListenOff {
+		t.Fatalf("--listen off: %+v %v", cfg, err)
+	}
 
 	// KONTRA_KEY, then --key over it.
 	cfg, _ = parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999"}, env(map[string]string{"HOME": home, "KONTRA_KEY": "/run/secrets/key"}), nil)
@@ -1411,6 +1455,10 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"--listen", "0.0.0.0:7777"}, "", "--local-token"},
 		{[]string{"--listen", "10.1.2.3:7777"}, "", "--local-token"},
 		{[]string{"--listen", "7777"}, "", "host:port"},
+		{[]string{"--listen", "off"}, "", "neither host nor hire"},
+		{[]string{"--serve", serve, "--listen", "off", "--local-token", tokenFile}, "", "--local-token guards --listen"},
+		{[]string{"--serve", serve, "--listen", "off", "--allow-origin", "http://app.local:3000"}, "", "--allow-origin"},
+		{[]string{"--serve", serve, "--listen", "OFF"}, "", "host:port"},
 		{[]string{"--local-token", "/nonexistent/token"}, "", "--local-token"},
 		{[]string{"--allow-origin", "http://app.local/path"}, "", "--allow-origin"},
 		{[]string{"--serve", "mcp:fs=stdio:"}, "", "empty"},

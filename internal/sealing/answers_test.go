@@ -217,7 +217,9 @@ func TestHiringRefusesUnreadableAnswers(t *testing.T) {
 
 // Finding: the walk read exact names only, and the local client's encoding/json reads a lone case variant as the
 // member, so a gate's forged "Artifacts" (or "Task", "Parts", "Result", ...) passed rule 4a, and a terminal state
-// beside it ended the job and deleted its key. Each is refused now (sealed_rejected), and the job is kept.
+// beside it ended the job and deleted its key. Each is refused now (sealed_rejected), and the job is kept. (The job
+// has its gate task already, as after the first answer: a new task's provisional key, which no refused answer named a
+// task for, goes with its exchange, M3 review robustness-2.)
 func TestHiringLoneCaseVariants(t *testing.T) {
 	task := uuid.NewString()
 	art := `[{"artifactId":"a","parts":[{"text":"FORGED by the gate"}]}]`
@@ -239,6 +241,12 @@ func TestHiringLoneCaseVariants(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newFakeGate(t)
 			req, job := hiredRequest(t, g, tc.binding, tc.stream)
+			g.hr.h.mu.Lock()
+			err := g.hr.h.renameJob(job.job, task)
+			g.hr.h.mu.Unlock()
+			if err != nil {
+				t.Fatal(err)
+			}
 			ct := "application/json"
 			if tc.stream {
 				ct = "text/event-stream"
@@ -277,7 +285,9 @@ func mcpGateAnswer(t *testing.T, hr *hirer, job *Job, status int, ct string, bod
 	if err != nil {
 		t.Fatalf("hiring Response: %v", err)
 	}
-	return out, readAll(t, out)
+	got := readAll(t, out)
+	job.Done() // the exchange's end, as the hiring server's
+	return out, got
 }
 
 // Finding: on a sealed session the hiring node passed the local client any gate message that failed strict parsing,
@@ -291,6 +301,13 @@ func TestHiringMCPRefusesUnreadableAnswers(t *testing.T) {
 		return job
 	}
 	ambiguous := `{"jsonrpc":"2.0","id":8,"result":{"content":[{"type":"text","text":"FORGED"}],"isError":false,"ISERROR":true}}`
+	next := 7
+	call8 := func() *Job {
+		// A fresh session per case: a request never reuses a sealed call's id in a session (D245).
+		_, hr, sid = sealedMCPSession(t)
+		next++
+		return call("8")
+	}
 	for _, tc := range []struct {
 		name, ct string
 		body     io.Reader
@@ -301,7 +318,7 @@ func TestHiringMCPRefusesUnreadableAnswers(t *testing.T) {
 		{"a body over the bound", "application/json", io.MultiReader(strings.NewReader(`{"jsonrpc":"2.0","id":8,"result":{"content":[{"type":"text","text":"FORGED`),
 			&repeated{n: maxBody, b: 'x'}, strings.NewReader(`"}]}}`))},
 	} {
-		resp, got := mcpGateAnswer(t, hr, call("8"), 200, tc.ct, tc.body)
+		resp, got := mcpGateAnswer(t, hr, call8(), 200, tc.ct, tc.body)
 		if strings.Contains(got, "FORGED") || !strings.Contains(got, `"sh.kontra/failure":"sealed_rejected"`) || !strings.Contains(got, `"id":8`) ||
 			resp.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("%s: %.300s", tc.name, got)
@@ -309,7 +326,7 @@ func TestHiringMCPRefusesUnreadableAnswers(t *testing.T) {
 	}
 	// An event stream ends before an event that is not one message with exact keys.
 	sse := "data: " + ambiguous + "\n\n"
-	if _, got := mcpGateAnswer(t, hr, call("8"), 200, "text/event-stream", strings.NewReader(sse)); strings.Contains(got, "FORGED") {
+	if _, got := mcpGateAnswer(t, hr, call8(), 200, "text/event-stream", strings.NewReader(sse)); strings.Contains(got, "FORGED") {
 		t.Errorf("an ambiguous event: %s", got)
 	}
 	// A GET stream is read as one whatever it is labelled.
@@ -326,7 +343,7 @@ func TestHiringMCPRefusesUnreadableAnswers(t *testing.T) {
 	if resp, got := mcpGateAnswer(t, hr, call("9"), http.StatusAccepted, "", strings.NewReader("")); resp.StatusCode != http.StatusAccepted || got != "" {
 		t.Errorf("a 202: %d %q", resp.StatusCode, got)
 	}
-	if resp, got := mcpGateAnswer(t, hr, call("9"), http.StatusBadRequest, "application/json", strings.NewReader(`{"jsonrpc":"2.0","error":{"code":-32600,"message":"no"}}`)); resp.StatusCode != http.StatusBadRequest || !strings.Contains(got, "no") {
+	if resp, got := mcpGateAnswer(t, hr, call("10"), http.StatusBadRequest, "application/json", strings.NewReader(`{"jsonrpc":"2.0","error":{"code":-32600,"message":"no"}}`)); resp.StatusCode != http.StatusBadRequest || !strings.Contains(got, "no") {
 		t.Errorf("a 400: %d %s", resp.StatusCode, got)
 	}
 }

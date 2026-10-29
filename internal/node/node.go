@@ -5,7 +5,7 @@
 //	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
 //	               [--roots <name>=<dir> …] [--env NAME …] [--session-idle 1h] [--max-sessions 8]
 //	               [--key PATH] [--enroll TOKEN|@file|-]… [--api-key KEY|@file|-] [--name NAME] [--rotate]
-//	               [--require-channel-binding] [--max-inflight 64] [--listen 127.0.0.1:7777]
+//	               [--require-channel-binding] [--max-inflight 64] [--listen 127.0.0.1:7777 | off]
 //	               [--local-token FILE] [--allow-origin ORIGIN]… [--log json]
 //
 // Hosting (§8): the node is a fixed-target reverse proxy, not a SOCKS proxy (§8.2, sidecar_not_a_proxy): a
@@ -15,7 +15,8 @@
 //
 // Hiring (§9, internal/hiring): the node serves --listen (default 127.0.0.1:7777) to local clients and forwards
 // each request on a stream it opens on its current session, never on a draining one (§13), keeping at most the
-// gate's cap of node-opened streams in flight per session (§14). A node with no --serve only hires; its key is
+// gate's cap of node-opened streams in flight per session (§14); --listen off turns hiring off, for a node that only
+// hosts (D208). A node with no --serve only hires; its key is
 // admitted on its --api-key (hire scope) alone, on every hello, and the gate refuses it once that key is revoked.
 //
 // MCP hosting (§10, M3 WP-05): `mcp:<name>=<url>` goes through the same fixed-target proxy, which forwards MCP
@@ -90,7 +91,7 @@ type Config struct {
 	Rotate                bool     // --rotate (§12)
 	RequireChannelBinding bool     // --require-channel-binding: refuse cb none (§4.1)
 	MaxInflight           int      // --max-inflight, default tunnel.NodeMaxInflight
-	Listen                string   // --listen, default hiring.DefaultListen (§9)
+	Listen                string   // --listen, default hiring.DefaultListen (§9); hiring.ListenOff binds nothing (D208)
 	LocalToken            string   // --local-token <file>, read: required when Listen is not loopback
 	AllowOrigins          []string // --allow-origin, repeatable
 	LogJSON               bool     // --log json; human-readable on stderr otherwise
@@ -340,6 +341,9 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 		return Config{}, &UsageError{Err: err}
 	}
 	cfg.Listen = *listen
+	if cfg.Listen == hiring.ListenOff && len(cfg.Serves) == 0 {
+		return Config{}, usage("--listen off with no --serve: the node would neither host nor hire (D208)")
+	}
 	if _, err := hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: origins, Gate: cfg.Gate},
 		noOpener{}, nil); err != nil {
 		return Config{}, &UsageError{Err: err}

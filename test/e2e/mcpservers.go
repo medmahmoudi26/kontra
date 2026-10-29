@@ -165,18 +165,58 @@ func (h *Harness) StartEverything(t testingTB, name string) *StockServer {
 	return h.startEverything(t, name, "examples/mcp/everything", "server-everything@1.0.0")
 }
 
-// StartEverything2 runs server-everything@2.0.0 from testdata/everything-2's lock, which needs Node 24 (D171).
+// StartEverything2 runs server-everything@2.0.0 from testdata/everything-2's lock on Node 24 (D171): the node binary
+// Node24 finds.
 func (h *Harness) StartEverything2(t testingTB, name string) *StockServer {
 	t.Helper()
-	return h.startEverything(t, name, "test/e2e/testdata/everything-2", "server-everything@2.0.0")
+	return h.startEverything(t, name, "test/e2e/testdata/everything-2", "server-everything@2.0.0", Node24(t))
 }
 
-func (h *Harness) startEverything(t testingTB, name, src, pkg string) *StockServer {
+// Node24Env names a Node 24 binary for the tests that need one (server-everything@2.0.0, D171) when the node on PATH
+// is older, as in CI, where the 1.0.0 servers run on Node 22; RequireNode24Env, set to 1, fails such a test without
+// one instead of skipping it (M3 review robustness-6).
+const (
+	Node24Env        = "KONTRA_NODE24"
+	RequireNode24Env = "KONTRA_REQUIRE_NODE24"
+)
+
+// Node24 is a Node 24 (or later) binary: $KONTRA_NODE24, or node on PATH. Without one the test is skipped, saying
+// why, or fails under KONTRA_REQUIRE_NODE24=1.
+func Node24(t testingTB) string {
+	t.Helper()
+	node := os.Getenv(Node24Env)
+	if node == "" {
+		node = "node"
+	}
+	out, err := exec.Command(node, "--version").Output()
+	major := 0
+	v := strings.TrimPrefix(strings.TrimSpace(string(out)), "v")
+	if err == nil {
+		major, _ = strconv.Atoi(strings.SplitN(v, ".", 2)[0])
+	}
+	path, perr := exec.LookPath(node)
+	if major < 24 || perr != nil {
+		if os.Getenv(RequireNode24Env) == "1" {
+			t.Fatalf("server-everything@2.0.0 needs Node 24 (D171); %s reports %q (%s=1)", node, v, RequireNode24Env)
+		}
+		t.Skipf("server-everything@2.0.0 needs Node 24 (D171); %s reports %q (set %s to a Node 24 binary)", node, v, Node24Env)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return abs
+}
+
+func (h *Harness) startEverything(t testingTB, name, src, pkg string, node ...string) *StockServer {
 	t.Helper()
 	pkgDir := installed(t, src, pkg)
 	nodeBin, err := exec.LookPath("node")
 	if err != nil {
 		t.Fatalf("node: %v", err)
+	}
+	if len(node) > 0 {
+		nodeBin = node[0]
 	}
 	// From the repository's root, so that a harness attached from another package (test/pentest) finds it too.
 	preload, err := filepath.Abs(filepath.Join(repoRoot, "test", "e2e", "testdata", "loopback.cjs"))

@@ -200,12 +200,14 @@ type Replica struct {
 	// The MCP relay (spec §11; M3 WP-04): its handler, the sessions it pins, the tools cache, and the peer hop
 	// (§11.2, D163): the peer listener's server and listener, and the address this replica advertises (empty
 	// without peer.listen; gate_replicas.peer_addr). peerWarned is the multi-replica warning's (D179).
-	mcp        *mcprelay.Handler
-	tools      *mcprelay.ToolsCache
-	peerSrv    *http.Server
-	peerLn     net.Listener
-	peerAddr   string
-	peerWarned atomic.Bool
+	mcp   *mcprelay.Handler
+	tools *mcprelay.ToolsCache
+	// toolsNotify tells the other replicas of an upstream's tools/list_changed (NOTIFY kontra_tunnel 'tools:…', §11.3).
+	toolsNotify *mcprelay.ToolsNotifier
+	peerSrv     *http.Server
+	peerLn      net.Listener
+	peerAddr    string
+	peerWarned  atomic.Bool
 
 	// admission is the configured Admission (spec §13.1, DM4-8) and admissionOps the operations that consult it
 	// (hooks.admission.operations; none for the built-in).
@@ -478,6 +480,13 @@ func (r *Replica) assemble() error {
 	mcpDispatch := &mcprelay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Services: r.services, Tunnels: r.tunnels,
 		Waker: r.listener, Signals: r.lifecycle, TaskBytes: cfg.Limits.TaskBytes.Int64(), Logger: log,
+		// A durable dispatch's upstream told list_changed: the service's lists go here and on every replica (§11.3).
+		ToolsChanged: func(k mcprelay.ToolsKey) {
+			if r.tools != nil {
+				r.tools.Invalidate(k)
+			}
+			r.toolsNotify.Changed(k)
+		},
 	}
 	if r.anonCaps != nil {
 		mcpDispatch.Tenants = r.anonCaps
@@ -556,13 +565,13 @@ func (r *Replica) assemble() error {
 	// session's stream cap; their principal is the session's (auth.HireSource); blob streams are served from
 	// the bucket for the tasks the session serves or hires.
 	//
-	// SPEC-CONFLICT (tunnel.md §9 "its edge limits are the session's (§6.2 for anonymous sessions; otherwise the
-	// API key's)"; relay.md §2.2): the edge counts in flight per presented credential and rates per client
-	// address, and a hiring request carries neither (the gate holds no API key secret after the handshake, and
-	// the session has no address of its own). The closest faithful behaviour: the edge's limits apply with the
-	// session as the client: limits.body and the body timeout as on the network, rps_per_ip per session, and in
-	// flight the session's stream cap (§14: 32, inflight_per_key's default), not shared with the same key's
-	// requests from the network. The owner may want §9 to say so.
+	// SPEC-CONFLICT (D207; tunnel.md §9 "its edge limits are the session's (§6.2 for anonymous sessions; otherwise
+	// the API key's)"; relay.md §2.2): the edge counts in flight per presented credential and rates per client
+	// address, and a hiring request carries neither (the gate holds no API key secret after the handshake, and the
+	// session has no address of its own). The closest faithful behaviour: the edge's limits apply with the session
+	// as the client: limits.body and the body timeout as on the network, rps_per_ip per session, and in flight the
+	// session's stream cap (§14: 32, inflight_per_key's default), not shared with the same key's requests from the
+	// network. §9 now says so.
 	nodeStreams := &tunnelgate.NodeStreams{
 		Hire:   edge.Middleware(edge.MiddlewareConfig{Limits: ecfg.Limits, ClientIP: edge.ClientIP{From: config.ClientIPRemote}}, routes),
 		Blobs:  &tunnelgate.Blobs{DB: r.pool, Store: r.blobs, Logger: log},
@@ -605,7 +614,7 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 	r.tools = mcprelay.NewToolsCache()
 	// A node of an MCP service connecting or disconnecting on any replica drops the service's era (§11.12, D177): the
 	// registry runs the hook for its own sessions and for the other replicas' (NOTIFY kontra_tunnel 'mcp:…'); a LISTEN
-	// reconnect, which may have lost such a notice, drops every era.
+	// reconnect, which may have lost such a notice, drops every era and every drained list.
 	if r.tunnels != nil {
 		tools := r.tools
 		r.tunnels.OnMCPChange(func(tenantID uuid.UUID, service string) {
@@ -613,7 +622,23 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 		})
 	}
 	if r.listener != nil {
-		r.listener.OnReconnect(r.tools.DropEras)
+		// A notice lost while the connection was down (a node's change, an upstream's tools/list_changed) is made up
+		// for: every era and every drained list goes (D199, D229).
+		r.listener.OnReconnect(r.tools.Reconnected)
+	}
+	// An upstream's tools/list_changed seen on any replica drops the service's drained lists on every one (§11.3):
+	// the replica that relayed it sends NOTIFY kontra_tunnel 'tools:<tenant_id>/<service>' (coalesced per service).
+	r.toolsNotify = &mcprelay.ToolsNotifier{Log: r.log, Notify: func(ctx context.Context, payload string) error {
+		_, err := r.pool.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelTunnel), payload)
+		return err
+	}}
+	if r.listener != nil {
+		tools := r.tools
+		r.listener.OnChannel(pg.ChannelTunnel, func(payload string) {
+			if k, ok := mcprelay.ParseToolsChanged(payload); ok {
+				tools.Invalidate(k)
+			}
+		})
 	}
 	// The configured Admission (spec §13.1, DM4-8): session at initialize, call at a plain tools/call, task at a
 	// task-augmented one, as hooks.admission.operations lists them.
@@ -621,7 +646,7 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 		ReplicaID: r.id, Services: r.services, Auth: authn, Multi: cfg.Tenancy == config.TenancyMulti,
 		Sessions: mcprelay.NewSessions(r.pool), Tools: r.tools, Meter: mcprelay.NewMeter(r.pool),
 		Admission: r.admission, AdmissionOps: r.admissionOps, Tunnels: r.tunnels, Picker: tunnelgate.NewPicker(r.pool),
-		AllowedOrigins: cfg.MCP.AllowedOrigins, Log: r.log,
+		AllowedOrigins: cfg.MCP.AllowedOrigins, Log: r.log, ToolsChanged: r.toolsNotify.Changed,
 	}
 	if peerClient != nil {
 		deps.Peer = peerClient

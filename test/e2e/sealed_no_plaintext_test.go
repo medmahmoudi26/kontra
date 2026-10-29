@@ -22,7 +22,9 @@ import (
 //	    with M;
 //	(b) a plain MCP tools/call echo {message: M};
 //	(c) a durable task-augmented simulate-research-query on an ambiguous topic holding M, whose one elicitation is
-//	    answered with M, and its tasks/result.
+//	    answered with M, and its tasks/result;
+//	(d) A2A: a first message holding M that the seller refuses with an error quoting it (M3 review security-1): the
+//	    task fails, and the error's text stays on the hosting node.
 //
 // The local clients receive M in every answer (the echo, the artifact, the status message, the MCP content, the
 // elicitation and the task's result), so M crossed the gate both ways; and M, in none of its forms (raw,
@@ -158,6 +160,17 @@ func TestSealedNoPlaintext(t *testing.T) {
 	fb, _ := json.Marshal(final)
 	if !strings.Contains(string(fb), "Clarification**: "+jsonText(m)) || strings.Contains(string(fb), sealed.ResourceURI) {
 		t.Fatalf("(c) the task's result did not carry the answer back: %s", fb)
+	}
+
+	// (d) A first message the seller refuses with an error quoting M: the task fails; neither the node's answer nor the
+	// gate's failure text, log line or Temporal history holds M.
+	bad := sendTask(t, ctx, c, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(echoFailPrefix+" "+m)))
+	eventually(t, 90*time.Second, "(d) the refused task fails", func() bool {
+		got, err := c.GetTask(ctx, &a2a.GetTaskRequest{ID: bad.ID})
+		return err == nil && got.Status.State == a2a.TaskStateFailed
+	})
+	if err := h.WaitWorkflowClosed(ctx, bad.ID, time.Minute); err != nil {
+		t.Fatal(err)
 	}
 
 	// What the gate kept: envelopes only.

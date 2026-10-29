@@ -647,9 +647,9 @@ func (t *Tasks) Respond(ctx context.Context, who Caller, m *mcpwire.Message, bod
 // replica, for the principal of the task only (404 otherwise, opening nothing): the input requests logged after n
 // that no answer has been logged for, then each new one, until the task is terminal, when the stream ends.
 //
-// SPEC-CONFLICT (relay §11.7 with §11.6): the stream resumed is a tasks/result response stream, whose last event is
-// the answer to that tasks/result request; the event id k.<taskId>.<seq> names the task and the seq, not the
-// request, and the gate keeps no per-stream state on any replica, so a resumed stream cannot write that answer
+// SPEC-CONFLICT (D203; relay §11.7 with §11.6): the stream resumed is a tasks/result response stream, whose last
+// event is the answer to that tasks/result request; the event id k.<taskId>.<seq> names the task and the seq, not
+// the request, and the gate keeps no per-stream state on any replica, so a resumed stream cannot write that answer
 // with its request's id. The closest faithful behaviour: the resumed stream carries every pending and new input
 // request with its gate id and ends when the task is terminal; the client's tasks/result, asked again, returns the
 // stored outcome at once.

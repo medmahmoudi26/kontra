@@ -3,14 +3,17 @@ package gate
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"filippo.io/age"
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aclient"
 	"github.com/a2aproject/a2a-go/v2/a2aclient/agentcard"
@@ -23,6 +26,7 @@ import (
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/sealed"
 	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/tunnel"
 )
 
 // Sealing through a real gate (spec/ext-sealed.md; sealed_no_plaintext's A2A case, sealed_unsealed_part): a stock
@@ -231,6 +235,57 @@ services:
 		}
 	}
 
+	// D221: a message sealed for vault that the gate delivers to booth, another service of the same node (one identity
+	// key opens both): the hosting node refuses it wrong_job, so booth's agent never gets it, and the task fails
+	// sealed_rejected. The same message to vault, the service it names, completes.
+	_, vaultCard := cardRoute(t, a.url, buyer.Secret, "vault")
+	misdirected := sealedFor(t, vaultCard, "vault", "MARKER-misdirected")
+	postSend := func(service string, msg []byte) string {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/"+service, strings.NewReader(
+			`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":`+string(msg)+`,"configuration":{"returnImmediately":true}}}`))
+		req.Header.Set("Authorization", "Bearer "+buyer.Secret)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("A2A-Version", "1.0")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		var r struct {
+			Result struct {
+				Task struct {
+					ID string `json:"id"`
+				} `json:"task"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(b, &r); err != nil || r.Result.Task.ID == "" {
+			t.Fatalf("SendMessage to %s: %d %s", service, resp.StatusCode, b)
+		}
+		return r.Result.Task.ID
+	}
+	stateOf := func(id string) string {
+		var st string
+		eventually(t, 60*time.Second, "the task's end", func() bool {
+			st = scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id)
+			return st == "completed" || st == "failed"
+		})
+		return st
+	}
+	if st := stateOf(postSend("booth", misdirected)); st != "failed" {
+		t.Fatalf("a message sealed for vault, delivered to booth: %s", st)
+	}
+	if audit := scalar[string](t, e.pool, `select coalesce(string_agg(convert_from(row_jcs, 'UTF8'), ' '), '') from kontra.audit`); !strings.Contains(audit, "wrong_job") {
+		t.Fatalf("no audit row of the node's wrong_job refusal: %s", audit)
+	}
+	if st := stateOf(postSend("vault", sealedFor(t, vaultCard, "vault", "MARKER-direct"))); st != "completed" {
+		t.Fatalf("a message sealed for vault, delivered to vault: %s", st)
+	}
+	if got := agent.received(); got[len(got)-1][0].Text() != "MARKER-direct" {
+		t.Fatalf("vault's agent received %q", got[len(got)-1][0].Text())
+	}
+
 	// An unsealed part straight to the gate: InvalidRequest, no task.
 	before := scalar[int](t, e.pool, `select count(*) from kontra.tasks`)
 	req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/vault", strings.NewReader(
@@ -250,6 +305,56 @@ services:
 	if after := scalar[int](t, e.pool, `select count(*) from kontra.tasks`); after != before {
 		t.Fatalf("a refused unsealed message created %d tasks", after-before)
 	}
+}
+
+// sealedFor is a new task's first message with one text part sealed for service (its header's service member, D221)
+// to the recipients of card, a served card carrying the sealed extension, as kontra seal builds it.
+func sealedFor(t *testing.T, card, service, text string) []byte {
+	t.Helper()
+	var c struct {
+		Capabilities struct {
+			Extensions []struct {
+				URI    string `json:"uri"`
+				Params struct {
+					Recipients []string `json:"recipients"`
+				} `json:"params"`
+			} `json:"extensions"`
+		} `json:"capabilities"`
+	}
+	if err := json.Unmarshal([]byte(card), &c); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		recipients []age.Recipient
+		kids       []string
+	)
+	for _, x := range c.Capabilities.Extensions {
+		if x.URI != sealed.URI {
+			continue
+		}
+		for _, r := range x.Params.Recipients {
+			rc, err := age.ParseX25519Recipient(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recipients, kids = append(recipients, rc), append(kids, tunnel.KeyID(r))
+		}
+	}
+	slices.Sort(kids)
+	job, _ := age.GenerateX25519Identity()
+	rk, _ := sealed.NewRK()
+	msgID, ctxID := uuid.NewString(), uuid.NewString()
+	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: service, IAT: time.Now().Unix(), ContextID: ctxID,
+		MessageID: msgID, Part: 0, Parts: 1, Kind: sealed.KindText, MediaType: "text/plain", Kids: kids,
+		ReplyTo: job.Recipient().String(), RK: sealed.EncodeRK(rk)}
+	ct, err := sealed.Seal(recipients, hd, []byte(text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, _ := sealed.MarshalPart(sealed.Part{Ciphertext: ct, Original: "text/plain"})
+	msg, _ := json.Marshal(map[string]any{"messageId": msgID, "contextId": ctxID, "role": "ROLE_USER", "parts": []json.RawMessage{part},
+		"metadata": map[string]string{sealed.MetadataReplyTo: job.Recipient().String()}})
+	return msg
 }
 
 // askExec asks which one, then completes with the follow-up's text.

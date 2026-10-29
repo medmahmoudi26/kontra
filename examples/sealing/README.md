@@ -7,10 +7,18 @@ relays ciphertext it cannot open: Postgres, its logs and its bucket hold envelop
 (`sealed_no_plaintext`). Neither the service nor the client handles a key: both are unmodified.
 
 What is sealed (§2): the content of every A2A part (`text`, `raw`, `url` or `data`), both directions; for MCP the
-`tools/call` arguments, the result's `content` and `structuredContent`, and, for a task a sealed call created, its
-upstream elicitation and sampling requests, the client's answers, and its `statusMessage` (which becomes
-`"sealed"`). What is not: task states and ids, message and artifact ids, metadata, a part's `filename` (do not put
-secrets in it), tool names, `isError`.
+`tools/call` arguments, the result's `content` and `structuredContent` (on the call's response, or a task's
+`tasks/result`), the upstream's `elicitation/create` and `sampling/createMessage` requests made for a sealed call,
+plain or durable, and the client's answers to them (D219: a plain call's server builds them from the sealed arguments
+too, so they are sealed like a task's), and a sealed task's `statusMessage` (which becomes `"sealed"`). Not relayed
+at all on a sealed job: an artifact's `name` and `description`, which the hosting node drops, since a service may
+write them from the sealed input (D220). Errors are not sealed and keep their code only: on a sealed job the hosting
+node replaces an error's message and data with fixed text, so the service's message (which may quote the input) stays
+on the hosting node, the local client never sees it, and the gate keeps none of a sealed service's error text in its
+logs or its database (D195). What is not sealed: task states and ids, message and artifact ids, `metadata`, a part's
+`filename` (do not put secrets in it), tool names, `isError`, `_meta` outside `sh.kontra/sealed`, `tools/list`, every
+other MCP method, and notifications, a sealed call's progress and log messages included. Every envelope names the
+service it is sealed for, so a gate cannot deliver it to another service of the same node (D221).
 
 ## Run it on one machine
 
@@ -28,8 +36,8 @@ export KONTRA_API_KEY="$(./kontra-gate enroll -f $CFG --api-key demo)"
 
 examples/sellers/hello-exec/run.sh &                        # the seller on 127.0.0.1:9999
 
-# The hosting node: enrolled for hello, so its key is one of the service's recipients.
-HOME=/tmp/seller ./kontra connect --gate http://localhost:8080 --listen 127.0.0.1:7781 \
+# The hosting node: enrolled for hello, so its key is one of the service's recipients; it only hosts (--listen off).
+HOME=/tmp/seller ./kontra connect --gate http://localhost:8080 --listen off \
   --enroll "$(./kontra-gate enroll -f $CFG hello)" --serve a2a:hello=http://127.0.0.1:9999 &
 
 # The hiring node: it hires with the API key, and seals for its local clients on 127.0.0.1:7777.
@@ -50,10 +58,15 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "
 ```
 
 The hiring node keeps a **pin** per (gate, service) in `~/.kontra/pins` (§7): whether the service is sealed, its
-recipients' key ids, and the seller keys that verified its upstream card. A downgrade (sealed to unsealed, signed
-to unsigned) is always refused. A new recipient (a second hosting node enrolled for `hello`) is refused until the
-operator accepts it: `kontra connect … --accept-change hello`; `--pin-recipients` refuses every new one. Both print
-the key ids and thumbprints on stderr and in the log, for comparison out of band (D164, D187).
+recipients' key ids, and the seller keys of its upstream card: the RFC 7638 thumbprint of a key a seller signature
+carries and verifies with, or, for a signature that names its key by `kid` only, of the key it verifies with in the
+seller key set the gate names (`kontra.upstream.jwks`: the gate serves the public keys of its `seller_keys` at
+`<gate>/agents/hello/.well-known/seller-jwks.json`, D223); only when the gate names no set is such a signature pinned
+as the unverified `kid:<kid>`. A card whose seller signatures verify nothing counts as unsigned (D228). A downgrade
+(sealed to unsealed, signed to unsigned) is always refused. A new recipient (a second hosting node enrolled for
+`hello`), or a new or removed seller key, is refused until the operator accepts it: `kontra connect … --accept-change
+hello`; `--pin-recipients` refuses every such change. Both print the recipient key ids and the seller keys
+(thumbprints, or `kid:<kid>`) on stderr and in the log, for comparison out of band (D164, D187, D223).
 
 The hosting node keeps its job state under `~/.kontra/hosted/<gate host>/<service>/` (0600): which reply key opened
 which job, the pairs it forwarded, the input requests it sealed. It refuses a replayed or reordered part itself
@@ -89,19 +102,24 @@ curl -s http://localhost:8080/agents/hello -H "Authorization: Bearer $KONTRA_API
 `kontra seal` verifies the gate's signature on the card (with the key set at `<gate>/.well-known/jwks.json`) and
 checks the pin, as `kontra connect` does; a card that does not verify is refused. It never reads an API key from the
 environment: `--api-key` (or `--api-key @<file>`) names the key for the gate `--service` names, and it is sent only on
-that service's card and upstream card, after the card answered `404` without it (a listed service's cards are
-public), never on the key set. A key exported for one gate therefore never reaches another gate you seal for.
+that service's card, upstream card and seller key set, after the card answered `404` without it (a listed service's
+cards are public), never on the key set. A key exported for one gate therefore never reaches another gate you seal
+for.
 
 ## Sealing in-process
 
 There is no SDK: reproduce §3 exactly. A request part is an [age](https://age-encryption.org/v1) file (binary, X25519
-recipients) of `JCS(header) || 0x00 || body`. The header for one text part of a new task's first message:
+recipients) of `JCS(header) || 0x00 || body`. The header for one text part of a new task's first message to
+`/agents/hello`:
 
 ```json
 {"contextId":"<the message's contextId>","dir":"req","iat":<unix seconds>,"kids":["k1_…","k1_…"],"kind":"text",
  "mediaType":"","messageId":"<the message's messageId>","part":0,"parts":1,"replyTo":"age1<your per-job key>",
- "rk":"<32 random bytes, base64url without padding>","v":1}
+ "rk":"<32 random bytes, base64url without padding>","service":"hello","v":1}
 ```
+
+`service` is the service you hire as the gate's URL path names it: `hello` for `/agents/hello`, `acme/hello` for
+`/agents/acme/hello` on a multi-tenant gate; the hosting node refuses a request sealed for another service (D221).
 
 `kids` are the recipients' key ids, sorted: `"k1_" + lowercase(base32_nopad(SHA-256(utf8(recipient))))[0:26]`
 ([`spec/tunnel.md`](../../spec/tunnel.md) §2.2). A follow-up adds `taskId`. The header must be RFC 8785 JCS (its
@@ -139,7 +157,7 @@ from pyrage import encrypt, decrypt, x25519
 recipients = [x25519.Recipient.from_str(r) for r in card_recipients]
 job = x25519.Identity.generate()            # keep it; job.to_public() is the replyTo
 rk = os.urandom(32)
-header = {"v": 1, "dir": "req", "iat": int(time.time()), "contextId": ctx, "messageId": msg_id,
+header = {"v": 1, "dir": "req", "service": "hello", "iat": int(time.time()), "contextId": ctx, "messageId": msg_id,
           "part": 0, "parts": 1, "kind": "text", "mediaType": "", "kids": sorted(kids),
           "replyTo": str(job.to_public()), "rk": base64.urlsafe_b64encode(rk).rstrip(b"=").decode()}
 hdr = json.dumps(header, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()  # JCS for these values
@@ -151,8 +169,8 @@ part = {"raw": base64.b64encode(encrypt(hdr + b"\x00" + body, recipients)).decod
 floats or non-ASCII strings, which a header never holds.)
 
 A reply part opens with the per-job key: decrypt the whole file, split at the first `0x00`, check that the header is
-canonical, `dir` is `"res"`, its `kids` hold your key's id and its `taskId`, `contextId` and `messageId` (or
-`artifactId`) are the reply's; then check `auth`, `base64url(HMAC-SHA256(rk, JCS(header without auth) || 0x00 ||
+canonical, `dir` is `"res"`, its `service` is the one you hired, its `kids` hold your key's id and its `taskId`,
+`contextId` and `messageId` (or `artifactId`) are the reply's; then check `auth`, `base64url(HMAC-SHA256(rk, JCS(header without auth) || 0x00 ||
 body))`, which only the holder of `rk` (you and the hosting node) can compute:
 
 ```python

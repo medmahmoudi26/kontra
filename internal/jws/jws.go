@@ -74,12 +74,14 @@ type Signature struct {
 }
 
 // Upstream is the kontra.upstream header parameter: the hex SHA-256 over the JCS of the upstream card, the URL
-// it is served at ({public_url}{svc}/.well-known/agent-card.upstream.json), and whether the gate verified a
-// seller signature on it against configured keys.
+// it is served at ({public_url}{svc}/.well-known/agent-card.upstream.json), whether the gate verified a seller
+// signature on it against configured keys, and, when it did, the URL on its origin where it serves the seller key set
+// it verified with ({public_url}{svc}/.well-known/seller-jwks.json; D223), absent otherwise.
 type Upstream struct {
 	SHA256   string `json:"sha256"`
 	URL      string `json:"url"`
 	Verified bool   `json:"verified"`
+	JWKS     string `json:"jwks,omitempty"`
 }
 
 // Header is a decoded protected header.
@@ -425,6 +427,31 @@ func ParseJWKS(b []byte) (*KeySetPublic, error) {
 	return set, nil
 }
 
+// JWKS is the set's public JWK Set, its keys sorted by kid, each {kty EC, crv P-256, x, y, kid, use sig, alg ES256}:
+// what the gate serves at kontra.upstream.jwks of a seller key set it verified with (D223). Only public members are
+// written: the set holds nothing else.
+func (s *KeySetPublic) JWKS() ([]byte, error) {
+	if s == nil || len(s.keys) == 0 {
+		return nil, errors.New("jws: empty key set")
+	}
+	kids := make([]string, 0, len(s.keys))
+	for kid := range s.keys {
+		kids = append(kids, kid)
+	}
+	slices.Sort(kids)
+	set := struct {
+		Keys []jwk `json:"keys"`
+	}{}
+	for _, kid := range kids {
+		x, y, err := coords(s.keys[kid])
+		if err != nil {
+			return nil, err
+		}
+		set.Keys = append(set.Keys, jwk{Kty: "EC", Crv: "P-256", X: x, Y: y, Kid: kid, Use: "sig", Alg: Alg})
+	}
+	return json.Marshal(set)
+}
+
 // Thumbprints are the RFC 7638 thumbprints of the set's keys, sorted (pins record a seller's, ext-sealed §7).
 func (s *KeySetPublic) Thumbprints() ([]string, error) {
 	if s == nil {
@@ -463,7 +490,7 @@ func (s *KeySetPublic) Thumbprint(kid string) (string, bool) {
 // The protected header's bytes need not be JCS: a2a-go v2.7.0's signer writes them with json.Marshal
 // (a2acrypto/sign.go). They are decoded with exact keys, a repeated or case-variant member is refused, and the
 // signature is checked over the protected string as received. typ, jku and kontra.upstream are returned as read
-// (kontra.upstream with exactly its three members); other members are ignored, since none is critical. An
+// (kontra.upstream with exactly its three members, and jwks when present, D223); other members are ignored, since none is critical. An
 // unprotected header may not repeat a protected member or carry crit (RFC 7515 §4, §7.2.1). Payload is a card:
 // its top-level signatures member is left out (CardPayload). Every refusal wraps ErrVerification.
 func Verify(payload []byte, sig Signature, keys *KeySetPublic) (Header, error) {
@@ -554,10 +581,16 @@ func parseUpstream(v json.RawMessage) (*Upstream, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(m) != 3 {
-		return nil, errors.New("want exactly sha256, url and verified")
+	_, hasJWKS := m["jwks"]
+	if n := len(m); n != 3 && !(n == 4 && hasJWKS) {
+		return nil, errors.New("want exactly sha256, url and verified, and jwks when present")
 	}
 	up := &Upstream{}
+	if hasJWKS {
+		if !isString(m["jwks"]) || json.Unmarshal(m["jwks"], &up.JWKS) != nil || up.JWKS == "" {
+			return nil, errors.New("jwks is not a non-empty string")
+		}
+	}
 	for name, dst := range map[string]*string{"sha256": &up.SHA256, "url": &up.URL} {
 		raw, ok := m[name]
 		if !ok || !isString(raw) || json.Unmarshal(raw, dst) != nil {

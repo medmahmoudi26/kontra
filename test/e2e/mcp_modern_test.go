@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -306,20 +304,13 @@ func TestMCPEraFallback(t *testing.T) {
 }
 
 // TestMCPModernEverything2 runs the 2026-07-28 surface against server-everything@2.0.0 as well (D171), which needs
-// Node 24: skipped, saying why, on a host with an older Node.
+// Node 24 ($KONTRA_NODE24, or node on PATH): skipped, saying why, without it, or failed under KONTRA_REQUIRE_NODE24=1
+// (CI sets it, M3 review robustness-6).
 func TestMCPModernEverything2(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped under -short")
 	}
-	out, err := exec.Command("node", "--version").Output()
-	if err != nil {
-		t.Skip("server-everything@2.0.0: node is not on PATH")
-	}
-	v := strings.TrimPrefix(strings.TrimSpace(string(out)), "v")
-	major, _ := strconv.Atoi(strings.SplitN(v, ".", 2)[0])
-	if major < 24 {
-		t.Skipf("server-everything@2.0.0 needs Node 24; this host has Node %s (D171)", v)
-	}
+	Node24(t)
 	h := start(t, Options{MCP: map[string]MCPService{"everything2": {ToolsDeny: EverythingDeny}}})
 	ctx := ctxFor(t, 5*time.Minute)
 	srv := h.StartEverything2(t, "everything2")

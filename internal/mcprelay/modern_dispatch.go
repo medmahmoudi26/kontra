@@ -93,13 +93,13 @@ func (r *modernRun) run(ctx context.Context) lifecycle.DispatchResult {
 	case r.firstID && r.round > 0:
 		r.log.Info("re-attaching to a multi round-trip call (2026-07-28)", "round", r.round)
 	case r.firstID:
-		// SPEC-CONFLICT (relay §6.4 and D42, a lost dispatch of a direct backend re-attaches; §11.12 and D178, the
-		// first InputRequiredResult is the first upstream id and the call is never sent afresh after it): a dispatch
-		// lost after it recorded a multi round-trip call's first id and before it logged that round's input requests
-		// (or after a round that listed none, only a requestState the log does not keep) leaves nothing to re-attach
-		// to: no upstream task, and no round whose answers would send the call again. Neither rule says what then.
-		// The closest faithful behaviour: the call is not sent afresh, and the task fails upstream_error at once
-		// rather than wait for its deadline.
+		// SPEC-CONFLICT (D205; relay §6.4 and D42, a lost dispatch of a direct backend re-attaches; §11.12 and D178,
+		// the first InputRequiredResult is the first upstream id and the call is never sent afresh after it): a
+		// dispatch lost after it recorded a multi round-trip call's first id and before it logged that round's input
+		// requests (or after a round that listed none, only a requestState the log does not keep) leaves nothing to
+		// re-attach to: no upstream task, and no round whose answers would send the call again. Neither rule says
+		// what then. The closest faithful behaviour: the call is not sent afresh, and the task fails upstream_error
+		// at once rather than wait for its deadline.
 		r.log.Warn("re-attaching to a multi round-trip call whose round was never logged; the call is not sent again")
 		res, _ := r.fail(ctx, store.ReasonUpstreamError, "")
 		return res
@@ -214,11 +214,11 @@ func (r *modernRun) call(ctx context.Context, answers json.RawMessage) (lifecycl
 			r.log.Info("the call sent again with its answers was refused for now", "error", xe.Error())
 			return lifecycle.DispatchResult{}, false
 		case xe.class == classUnreachable:
-			// SPEC-CONFLICT (relay §6.4, §11.12): after the first upstream id a failed exchange of a running task is
-			// made again for 30 s (the GetTask rule), but the call sent again with its answers may have run upstream
-			// before its answer was lost, and §11.12 does not say whether it may be repeated. The closest faithful
-			// behaviour: it is not repeated after an exchange that may have reached the upstream; the task fails
-			// upstream_unreachable.
+			// SPEC-CONFLICT (D205; relay §6.4, §11.12): after the first upstream id a failed exchange of a running
+			// task is made again for 30 s (the GetTask rule), but the call sent again with its answers may have run
+			// upstream before its answer was lost, and §11.12 does not say whether it may be repeated. The closest
+			// faithful behaviour: it is not repeated after an exchange that may have reached the upstream; the task
+			// fails upstream_unreachable.
 			return r.fail(ctx, store.ReasonUpstreamUnreachable, "")
 		}
 		r.log.Warn("the upstream's answer to the call failed", "error", xe.Error())
@@ -696,9 +696,11 @@ func (r *modernRun) finishModernResult(ctx context.Context, result json.RawMessa
 	if err != nil {
 		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
-	isErr := false
-	if v, ok := mcpwire.Member(res, "isError"); ok && bytes.Equal(bytes.TrimSpace(v), []byte("true")) {
-		isErr = true
+	isErr, ok := mcpwire.IsErrorFlag(res)
+	if !ok {
+		// A top-level isError that is not a JSON boolean: a malformed upstream message (exchange.go's process).
+		r.log.Warn("the upstream's result has an isError that is not a boolean: the task fails upstream_error")
+		return r.fail(ctx, store.ReasonUpstreamError, "")
 	}
 	state := store.StateCompleted
 	if isErr {

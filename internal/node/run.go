@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
@@ -84,30 +87,30 @@ func (n *Node) Run(ctx context.Context) error {
 	defer tick.Stop()
 
 	// Hiring (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
-	// stops kontra connect at once; its requests wait for a session.
-	//
-	// SPEC-CONFLICT (spec/tunnel.md §9; M3 WP-03 review): §9 has every node serve 127.0.0.1:7777 (--listen), and
-	// none turns it off. So every kontra connect binds it, hosting-only ones included: a second node on the same
-	// host stops at start unless it is given another --listen (this host's kontra-node-hello and
-	// kontra-seller-hello units would collide on an upgrade), and every hosting node offers its hiring principal
-	// (its --api-key, or node:<key_id>, which org:<tenant> admits) to every local process without a token. Built as
-	// written; the owner decides whether a node that hosts serves the endpoint by default, or whether hiring can
-	// be turned off (for example --listen off).
-	ln, err := net.Listen("tcp", n.cfg.Listen)
-	if err != nil {
-		return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>)", n.cfg.Listen, err)
-	}
-	hdone := make(chan struct{})
-	go func() {
-		defer close(hdone)
-		if err := n.hire.Serve(ctx, ln); err != nil {
-			n.logger.Error("the local hiring endpoint stopped", "err", err)
+	// stops kontra connect at once; its requests wait for a session. --listen off binds nothing: a node that only
+	// hosts offers its hiring principal to no local process, and a second node on the host needs no port of its own
+	// (D208).
+	if n.cfg.Listen == hiring.ListenOff {
+		fmt.Fprintln(n.out, "kontra connect: hiring is off (--listen off): this node only hosts")
+		n.logger.Info("hiring: off (--listen off)")
+	} else {
+		ln, err := hiring.Listen(n.cfg.Listen) // a loopback --listen on both loopback families (D262)
+		if err != nil {
+			return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>, "+
+				"or --listen off for a node that only hosts)", n.cfg.Listen, err)
 		}
-	}()
-	defer func() { cancel(); <-hdone }()
-	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	fmt.Fprintf(n.out, "kontra connect: hiring at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
-	n.logger.Info("hiring: serving local clients", "listen", ln.Addr().String())
+		hdone := make(chan struct{})
+		go func() {
+			defer close(hdone)
+			if err := n.hire.Serve(ctx, ln); err != nil {
+				n.logger.Error("the local hiring endpoint stopped", "err", err)
+			}
+		}()
+		defer func() { cancel(); <-hdone }()
+		_, port, _ := net.SplitHostPort(ln.Addr().String())
+		fmt.Fprintf(n.out, "kontra connect: hiring at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
+		n.logger.Info("hiring: serving local clients", "listen", ln.Addr().String())
+	}
 
 	var wait time.Duration
 	for {
@@ -494,6 +497,25 @@ func (n *Node) welcomed(kid string, h *tunnel.Hello, w *tunnel.Welcome, probe bo
 	return err
 }
 
+// servicePaths are the welcome's services as the gate's URL paths name them (spec/relay.md §2.1, D221):
+// "<tenant>/<name>" when the service's URL ends with /agents/<tenant>/<name> (or /mcp/…), a multi-tenant gate's, else
+// "<name>". Only the tenant is the gate's to say: the name is the service's own, which the node serves.
+func servicePaths(w *tunnel.Welcome) map[string]string {
+	out := make(map[string]string, len(w.Services))
+	for _, ws := range w.Services {
+		root := "/agents/"
+		if ws.Kind == tunnel.KindMCP {
+			root = "/mcp/"
+		}
+		out[ws.Name] = ws.Name
+		if u, err := url.Parse(ws.URL); err == nil && w.Tenant != "" &&
+			strings.HasSuffix(strings.TrimRight(u.Path, "/"), root+w.Tenant+"/"+ws.Name) {
+			out[ws.Name] = w.Tenant + "/" + ws.Name
+		}
+	}
+	return out
+}
+
 // servesAll reports whether the welcome lists every declared service.
 func servesAll(w *tunnel.Welcome, declared []tunnel.Service) bool {
 	for _, d := range declared {
@@ -643,6 +665,10 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	var served []string
 	for _, ws := range w.Services {
 		served = append(served, ws.Name)
+	}
+	if n.hosting != nil {
+		// A sealed header names its service as the gate's URL path does (D221): the hosting node's own, from the welcome.
+		n.hosting.SetServicePaths(servicePaths(w))
 	}
 	// The gate's cap of node-opened streams in flight (§14, §6.2): the node keeps under it (session.open).
 	limit := tunnel.GateMaxInflight

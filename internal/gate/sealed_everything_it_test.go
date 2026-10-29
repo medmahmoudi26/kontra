@@ -53,7 +53,7 @@ func everythingServer(t *testing.T) string {
 	install.Dir = dir
 	install.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "npm_config_cache=" + filepath.Join(dir, ".npm"), "npm_config_update_notifier=false"}
 	if out, err := install.CombinedOutput(); err != nil {
-		t.Skipf("server-everything@1.0.0: npm cannot install the pinned package here: %v\n%s", err, out)
+		npmFailed(t, "server-everything@1.0.0", err, out)
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

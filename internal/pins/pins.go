@@ -5,8 +5,9 @@
 // What a hiring node learns from a gate is only what the gate serves, so an active gate could substitute its own
 // recipient, drop the extension or strip the seller's signature. Pins make that visible and, where it matters,
 // refused: a downgrade (sealed to unsealed, signed to unsigned) is always refused; with --pin-recipients any new
-// recipient or seller key is refused; without it a change is refused until the operator runs kontra connect
-// with --accept-change <service>, and is named on stderr and in the log (there is no local console, D164).
+// recipient, and any new or removed seller key, is refused; without it such a change is refused until the operator
+// runs kontra connect with --accept-change <service>, and is named on stderr and in the log (there is no local
+// console, D164, D228).
 // kontra seal reads and writes the same file.
 //
 // The file is JSON, 0600, rewritten atomically under flock(2) like the credentials file, since one
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -37,10 +39,13 @@ const maxFile = 16 << 20
 
 // Pin is what was last accepted for one service at one gate.
 type Pin struct {
-	Sealed     bool      `json:"sealed"`
-	Recipients []string  `json:"recipients"`  // key ids (k1_…), sorted
-	SellerKeys []string  `json:"seller_keys"` // RFC 7638 thumbprints that verified the upstream card, sorted
-	Signed     bool      `json:"signed"`      // the upstream card carried a seller signature the gate verified
+	Sealed     bool     `json:"sealed"`
+	Recipients []string `json:"recipients"` // key ids (k1_…), sorted
+	// SellerKeys are the RFC 7638 thumbprints of the seller keys that verified the upstream card (a signature that
+	// carries its key), and "kid:<kid>" for a signature that names its key only, which the node cannot verify
+	// (sealing.SellerKeyIDs), sorted.
+	SellerKeys []string  `json:"seller_keys"`
+	Signed     bool      `json:"signed"` // the upstream card carried a seller signature the gate verified
 	At         time.Time `json:"at"`
 }
 
@@ -54,18 +59,22 @@ const (
 	ChangeNewRecipient  Change = "new_recipient"  // refused under --pin-recipients, else until accepted
 	ChangeNewSellerKey  Change = "new_seller_key" // as new_recipient
 	ChangeLessRecipient Change = "removed_recipient"
-	// ChangeLessSellerKey, ChangeSealed and ChangeSigned are accepted and recorded: fewer keys, or an upgrade to
-	// sealed or signed, give an active gate nothing (and make a later downgrade refused).
+	// ChangeLessSellerKey is a pinned seller key the card no longer verifies with: a gate that strips or replaces the
+	// seller's signature loses it, so it is refused as a new one is (round 2 sealing-fixes-5, D228).
 	ChangeLessSellerKey Change = "removed_seller_key"
-	ChangeSealed        Change = "sealed"
-	ChangeSigned        Change = "signed"
+	// ChangeSealed and ChangeSigned are accepted and recorded: an upgrade to sealed or signed gives an active gate
+	// nothing (and makes a later downgrade refused); so is ChangeLessRecipient.
+	ChangeSealed Change = "sealed"
+	ChangeSigned Change = "signed"
 )
 
 // refusedAlways are refused whatever the options.
 func (c Change) refusedAlways() bool { return c == ChangeUnsealed || c == ChangeUnsigned }
 
 // needsAccept are refused under --pin-recipients, and otherwise until --accept-change names the service.
-func (c Change) needsAccept() bool { return c == ChangeNewRecipient || c == ChangeNewSellerKey }
+func (c Change) needsAccept() bool {
+	return c == ChangeNewRecipient || c == ChangeNewSellerKey || c == ChangeLessSellerKey
+}
 
 // ChangeError is a refused change; the hiring node answers its local client without forwarding anything.
 type ChangeError struct {
@@ -112,6 +121,11 @@ type Outcome struct {
 type Store struct {
 	path string
 	now  func() time.Time
+
+	// checked are the (gate, service) pairs this process has checked: --accept-change accepts what is pending at a
+	// service's first check of the run only, never a change that comes later (D248).
+	mu      sync.Mutex
+	checked map[string]bool
 }
 
 // file is the pins file's JSON.
@@ -125,7 +139,7 @@ type file struct {
 // An existing file is read once here, so that a bad file stops kontra connect at start; every Check reads it
 // again under the lock.
 func Open(path string) (*Store, error) {
-	s := &Store{path: path, now: time.Now}
+	s := &Store{path: path, now: time.Now, checked: map[string]bool{}}
 	fh, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return s, nil
@@ -159,6 +173,15 @@ func (s *Store) Check(gate, service string, now Pin, opts Options) (Outcome, err
 		return Outcome{}, errors.New("pins: a pin needs a gate and a service")
 	}
 	now = normalize(now)
+	// --accept-change <service> accepts the change pending at the service's first check in this process: the one the
+	// operator saw refused and restarted to accept. A later change is refused until the next explicit acceptance, so
+	// that a node left running with the flag does not record every later substitution silently (D248).
+	s.mu.Lock()
+	key := gate + "\x00" + service
+	first := !s.checked[key]
+	s.checked[key] = true
+	s.mu.Unlock()
+	accept := first && slices.Contains(opts.Accept, service)
 	var out Outcome
 	err := s.change(func(f *file) (bool, error) {
 		prev, ok := f.Pins[gate][service]
@@ -174,7 +197,7 @@ func (s *Store) Check(gate, service string, now Pin, opts Options) (Outcome, err
 			return false, nil
 		}
 		for _, c := range changes {
-			if c.refusedAlways() || (c.needsAccept() && (opts.PinRecipients || !slices.Contains(opts.Accept, service))) {
+			if c.refusedAlways() || (c.needsAccept() && (opts.PinRecipients || !accept)) {
 				return false, &ChangeError{Gate: gate, Service: service, Changes: changes}
 			}
 		}

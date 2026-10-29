@@ -52,6 +52,7 @@ func (n *Node) setupSealing(gate *url.URL, origin string, log *slog.Logger) erro
 	hosting, err := sealing.NewHosting(sealing.HostingConfig{
 		Dir:        filepath.Join(home, nodekey.DirName, sealing.HostedDirName, gate.Host),
 		Identities: identities, KeyIDs: keyIDs, MaxAge: n.cfg.SealedMaxAge, Required: n.cfg.SealedRequired,
+		Shared: upstreamGroups(n.cfg.Serves), // services of one upstream share their sealed state (D236)
 	}, log)
 	if err != nil {
 		return err

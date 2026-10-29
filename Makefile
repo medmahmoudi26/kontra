@@ -42,7 +42,9 @@ test-race:
 # pinned CLI 1.9.1, Server 1.32.0) and a fresh database on $KONTRA_TEST_PG (a server) or, when it is unset,
 # a postgres:17-alpine container. One test at a time, never beside another integration run. The script
 # fails the run when any process or container the harness started outlives it. The M3 tests also need node and
-# npm (Node 22) for the stock MCP servers, installed from examples/mcp's locks: an install that fails fails the
+# npm (Node 22) for the stock MCP servers, installed from examples/mcp's locks, and Node 24 for
+# server-everything@2.0.0 ($$KONTRA_NODE24, or node on PATH; KONTRA_REQUIRE_NODE24=1 fails its test without it, as CI
+# sets): an install that fails fails the
 # test, unless KONTRA_E2E_OFFLINE=1 skips it (D189). Extra arguments go to `go test` (e.g.
 # ARGS='-run TestRelayResume -v').
 test-e2e:
@@ -74,13 +76,19 @@ test-kits:
 	KONTRA_KIT_TESTS=1 KONTRA_KIT_GATE_IMAGE="$$img" $(GO) test -p 1 -count=1 -timeout 120m ./test/vps ./test/demo -v $(ARGS)
 
 # The pentest (M3 WP-10, D168, D186): PRD §12's list and M3's own surface against the compose team gate, built from
-# this repository under the compose project m3pentest. pentest-image builds kontra-gate:m3 once, with the docker
-# driver's builder (BUILDX_BUILDER=default: never another project's builder); `go test` never builds it. pentest runs
+# this repository under the compose project $(KONTRA_PENTEST_PROJECT) (m3pentest by default). pentest-image builds the
+# gate's image, $(KONTRA_PENTEST_IMAGE) (kontra-gate:m3 by default), once, with the docker driver's builder
+# (BUILDX_BUILDER=default: never another project's builder); `go test` never builds it. Another checkout running its
+# pentest on the same Docker sets both to names of its own: one project would tear the other's stack down, one tag
+# run the other's gate. pentest runs
 # test/pentest with -timeout $(KONTRA_PENTEST_TIMEOUT) (default 90m, D186) and, whatever happens to go test, tears the
 # project and its networks down in the trap and removes the run's directory (KONTRA_E2E_SESSION names it). The host
 # processes the run starts die with the test binary (a parent-death signal). KONTRA_PENTEST_REPORT names the file the probe table is written to.
 KONTRA_PENTEST_TIMEOUT ?= 90m
-PENTEST_COMPOSE = docker compose -p m3pentest -f compose.yaml -f compose.pentest.yaml
+KONTRA_PENTEST_PROJECT ?= m3pentest
+KONTRA_PENTEST_IMAGE ?= kontra-gate:m3
+export KONTRA_PENTEST_PROJECT KONTRA_PENTEST_IMAGE
+PENTEST_COMPOSE = docker compose -p $(KONTRA_PENTEST_PROJECT) -f compose.yaml -f compose.pentest.yaml
 
 pentest-image:
 	BUILDX_BUILDER=default KONTRA_PENTEST_DIR=/nonexistent KONTRA_PENTEST_TEMPORAL_PORT=1 KONTRA_PENTEST_S3_ACCESS=x \
@@ -92,6 +100,6 @@ pentest:
 	clean() { \
 	  BUILDX_BUILDER=default KONTRA_PENTEST_DIR=/nonexistent KONTRA_PENTEST_TEMPORAL_PORT=1 KONTRA_PENTEST_S3_ACCESS=x \
 	    KONTRA_PENTEST_S3_SECRET=x KONTRA_PEER_SECRET=x $(PENTEST_COMPOSE) down -v --remove-orphans --timeout 10 >/dev/null 2>&1; \
-	  docker network rm m3pentest_net m3pentest_other >/dev/null 2>&1; rm -rf "$$dir"; true; }; \
+	  docker network rm $(KONTRA_PENTEST_PROJECT)_net $(KONTRA_PENTEST_PROJECT)_other >/dev/null 2>&1; rm -rf "$$dir"; true; }; \
 	trap clean EXIT INT TERM; \
 	KONTRA_E2E_SESSION="$$session" KONTRA_PENTEST=1 $(GO) test -tags pentest -p 1 -count=1 -timeout $(KONTRA_PENTEST_TIMEOUT) ./test/pentest -v

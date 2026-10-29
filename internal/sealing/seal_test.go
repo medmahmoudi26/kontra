@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,8 @@ type sealGate struct {
 	keys     *jws.KeySet
 	card     []byte // served at /agents/echo/.well-known/agent-card.json
 	upstream []byte // served at /agents/echo/.well-known/agent-card.upstream.json when set
+	jwks     []byte // the seller key set, served at /agents/echo/.well-known/seller-jwks.json when set (D223)
+	jwksGets atomic.Int32
 }
 
 func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
@@ -63,6 +66,15 @@ func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(g.upstream)
+	})
+	mux.HandleFunc("GET /agents/echo/.well-known/seller-jwks.json", func(w http.ResponseWriter, r *http.Request) {
+		g.jwksGets.Add(1)
+		if g.jwks == nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/jwk-set+json")
+		_, _ = w.Write(g.jwks)
 	})
 	g.srv = httptest.NewServer(mux)
 	t.Cleanup(g.srv.Close)
@@ -146,7 +158,7 @@ func TestSealCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(body) != "MARKER file contents" || hd.ContextID != "ctx-9" || hd.MessageID != msg.MessageID || hd.ReplyTo != msg.Metadata[sealed.MetadataReplyTo] ||
-		hd.Kids[0] != tunnel.KeyID(node.Recipient().String()) || hd.Kind != sealed.KindRaw {
+		hd.Kids[0] != tunnel.KeyID(node.Recipient().String()) || hd.Kind != sealed.KindRaw || hd.Service != "echo" {
 		t.Fatalf("header %+v body %q", hd, body)
 	}
 
@@ -168,8 +180,8 @@ func TestSealCommand(t *testing.T) {
 		t.Fatalf("the job's key: %v", err)
 	}
 	rk, _ := sealed.DecodeRK(hd.RK)
-	rh := sealed.Header{V: 1, Dir: sealed.DirReply, TaskID: "t1", ContextID: "ctx-9", MessageID: "r1", Part: 0, Parts: 1, Kind: sealed.KindText,
-		Kids: []string{tunnel.KeyID(hd.ReplyTo)}}
+	rh := sealed.Header{V: 1, Dir: sealed.DirReply, Service: hd.Service, TaskID: "t1", ContextID: "ctx-9", MessageID: "r1", Part: 0,
+		Parts: 1, Kind: sealed.KindText, Kids: []string{tunnel.KeyID(hd.ReplyTo)}}
 	rh.Auth, _ = sealed.Auth(rk, rh, []byte("the reply"))
 	ct, err := sealed.Seal([]age.Recipient{key.Recipient()}, rh, []byte("the reply"))
 	if err != nil {
@@ -183,6 +195,18 @@ func TestSealCommand(t *testing.T) {
 	opened, _, err := runSeal(t, home, "", "--open", pf)
 	if err != nil || opened != "the reply" {
 		t.Fatalf("--open: %q %v", opened, err)
+	}
+	// A reply another service of the hosting node sealed (the gate delivered the request there, D221) is refused.
+	wrong := rh
+	wrong.Service, wrong.Auth = "other", ""
+	wrong.Auth, _ = sealed.Auth(rk, wrong, []byte("another service's reply"))
+	wct, _ := sealed.Seal([]age.Recipient{key.Recipient()}, wrong, []byte("another service's reply"))
+	wpart, _ := sealed.MarshalPart(sealed.Part{Ciphertext: wct, Original: "text"})
+	wf := filepath.Join(t.TempDir(), "wrong.json")
+	_ = os.WriteFile(wf, wpart, 0o600)
+	if opened, _, err := runSeal(t, home, "", "--open", wf); err == nil || strings.Contains(opened, "another service") ||
+		!strings.Contains(err.Error(), "another service") {
+		t.Fatalf("--open of a reply naming another service: %q %v", opened, err)
 	}
 	// A reply whose auth is not the job's is refused.
 	rh.Auth = sealed.EncodeRK(make([]byte, 32))
@@ -268,8 +292,8 @@ func TestSealAPIKeyAndFollowUp(t *testing.T) {
 	u, _ := url.Parse(g.srv.URL)
 	jobs, _ := nodekey.OpenJobKeys(home, u.Host)
 	rk, _ := sealed.DecodeRK(hd.RK)
-	rh := sealed.Header{V: 1, Dir: sealed.DirReply, TaskID: "task-1", ContextID: "ctx-1", MessageID: "r1", Part: 0, Parts: 1,
-		Kind: sealed.KindText, Kids: []string{tunnel.KeyID(hd.ReplyTo)}}
+	rh := sealed.Header{V: 1, Dir: sealed.DirReply, Service: hd.Service, TaskID: "task-1", ContextID: "ctx-1", MessageID: "r1",
+		Part: 0, Parts: 1, Kind: sealed.KindText, Kids: []string{tunnel.KeyID(hd.ReplyTo)}}
 	rh.Auth, _ = sealed.Auth(rk, rh, []byte("the reply"))
 	replyTo, err := age.ParseX25519Recipient(hd.ReplyTo)
 	if err != nil {
@@ -298,8 +322,8 @@ func TestSealAPIKeyAndFollowUp(t *testing.T) {
 	// Only that message is left out: a reply part no job key here opens is an error wherever else it sits, here an
 	// artifact sealed to another key beside a status message that opens, and an agent message in history.
 	other, _ := age.GenerateX25519Identity()
-	oh := sealed.Header{V: 1, Dir: sealed.DirReply, TaskID: "task-1", ContextID: "ctx-1", ArtifactID: "a1", Chunk: new(int), Part: 0,
-		Parts: 1, Kind: sealed.KindText, Kids: []string{tunnel.KeyID(other.Recipient().String())}}
+	oh := sealed.Header{V: 1, Dir: sealed.DirReply, Service: hd.Service, TaskID: "task-1", ContextID: "ctx-1", ArtifactID: "a1",
+		Chunk: new(int), Part: 0, Parts: 1, Kind: sealed.KindText, Kids: []string{tunnel.KeyID(other.Recipient().String())}}
 	oh.Auth, _ = sealed.Auth(make([]byte, 32), oh, []byte("not yours"))
 	oct, err := sealed.Seal([]age.Recipient{other.Recipient()}, oh, []byte("not yours"))
 	if err != nil {
