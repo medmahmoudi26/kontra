@@ -3139,8 +3139,11 @@ three times, 15 s apart, because the first `npx` of each package downloads it an
 through `npx` on the first session; every attempt is in the transcript. The laptop then prints the slug and holds the
 node connected while the host checks the public URL with no credential (the card, and a JSON-RPC `SendMessage` "hi"
 answering Hello World; `a2a send` too when a2a is on the host's PATH, which the plan assumed and this host lacks), then
-`docker stop`s it. The script prints its teardown first and runs it in a trap. Options `--network`, `--ca-file` and
-`--resolve` exist for a rehearsal against a local gate only.
+stops it: it copies a file named `stop` into the laptop, which stops its node and exits 0 (`docker stop` is the
+fallback). A file and not only a signal, because on this host runc cannot signal a container's init ("unable to signal
+init: permission denied"), so `docker stop` kills it after its timeout and a TERM trap never runs. The script prints its
+teardown first and runs it in a trap. Options `--network`, `--ca-file` and `--resolve` exist for a rehearsal against a
+local gate only.
 
 **`kontra version` names the commit of a `go install`ed binary.** A module-mode build has no VCS stamp, so it printed
 `dev`; the post-merge check could not read the commit. `internal/version` now reports the main module's version when
@@ -3168,3 +3171,12 @@ sessions that answers for `gateway.kontra.run` on a docker network (`--network`,
 Docker, `test/demo` and `test/vps` check the README block, the scripts (bash -n, shellcheck, the prerequisites each
 refuses without, the teardown each prints, `--dry-run` and `--teardown-only` against stubs of docker, doctl, ssh and
 Cloudflare's API) and the user data's ASCII.
+
+**Measured** (29 Oct, this host, 2 CPUs at a load of 3 to 19 beside other sessions): `make test-kits` passes, exit 0:
+`TestACMEVariantWritesItsCache` 113 s (the gate wrote `acme/` 0700 and `acme_account+key` as 65532 in a fresh volume;
+the attempt to reach Let's Encrypt was refused at 127.0.0.1; healthy once the cache held the name's certificate),
+`TestDemoImage` 3 s, `TestDemoRehearsal` 265 s (the laptop ready in 162 to 443 s, every command passing at its first
+attempt, the public card and `SendMessage` from the host, the stop file, one anonymous tenant created from a /24).
+Checked red: the old healthcheck without `-f` (the gate never healthy, 4 minutes); a fresh volume on `kontra-gate:m3`
+(root's, 65532 cannot write); README blocks with a short slug, `-a` without the card path and a `:7778` console; the
+first rehearsal failing at its `docker stop` (exit 137, the runc refusal above).
