@@ -527,6 +527,59 @@ func TestRegistryRowsAndLastPing(t *testing.T) {
 	eventually(t, 5*time.Second, "the registry forgets the session", func() bool { return a.reg.Count() == 0 })
 }
 
+// Close deletes the session's tunnels row before it returns, also while another removal of the session deletes it:
+// Close shuts the multiplexer, which wakes Add's watcher, and both remove the session. Here the node ends its session
+// first, so the gate's own removal runs the delete, and a lock on the row holds that delete in flight; Close, called
+// then, returns once the row is gone, not before. It returned at once before (dropRow), the row still there: CI's
+// race job failed TestRegistryRowsAndLastPing so ("Close left the tunnels row"), when the watcher won the race.
+func TestRegistryCloseWaitsForARacingRowDelete(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	a := e.replica("a", replicaOpts{})
+	n := e.enrollNode(t, a, newIdentity(t), newAgent(), "hello")
+	s := a.held(t, n)
+	ctx := context.Background()
+
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select 1 from kontra.tunnels where session_id = $1 for update`, n.session); err != nil {
+		t.Fatal(err)
+	}
+	_ = n.mux.Close()
+	eventually(t, 10*time.Second, "the gate's removal of the session waits on the row's lock", func() bool {
+		var waiting bool
+		if err := e.pool.QueryRow(ctx, `select exists (select 1 from pg_stat_activity where datname = current_database()
+			and wait_event_type = 'Lock' and query like 'delete from kontra.tunnels where session_id%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		return waiting
+	})
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close("test") }()
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned (%v) while the other removal's delete of the row was in flight", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return once the delete could run")
+	}
+	if e.hasRow(t, n.session) {
+		t.Fatal("Close left the tunnels row")
+	}
+}
+
 // One session per key per gate (§11): a second handshake of the key on the same replica closes the first,
 // whose open stream and every new one fail ErrSessionGone; the first's row is deleted, the second's kept.
 func TestSupersedeOnOneReplica(t *testing.T) {

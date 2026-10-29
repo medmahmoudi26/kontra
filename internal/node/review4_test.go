@@ -181,6 +181,10 @@ func sessionlessUp(t *testing.T) (*url.URL, func() []string) {
 			var ans json.RawMessage
 			select {
 			case ans = <-waiting:
+			case <-r.Context().Done():
+				// The node went (the test is over): an active handler would hold srv.Close (httptest logs "blocked
+				// in Close after 5 seconds") for the 10 s below.
+				return
 			case <-time.After(10 * time.Second):
 				ans = json.RawMessage(`"none"`)
 			}
@@ -270,7 +274,18 @@ func TestReview4RestartWhileFirstCallInFlight(t *testing.T) {
 	}
 	// The node restarts: its in-memory state is gone, its job directory stays.
 	pp.p.seal = open()
-	defer close(block) // the old process's exchange never answers: it died
+	// The old process's exchange never answers: it died. In this test it lives on, in this process, until the server is
+	// released when the test is over; it then records the server's answer in dir. It is waited for (its stream ends
+	// once its handler has returned) before the TempDir holding dir is removed: this cleanup, registered after the
+	// TempDir's, runs before it. Released at the test's end without the wait, it wrote there during the removal
+	// ("unlinkat .../web/jobs: directory not empty") or after it (a leftover directory in $TMPDIR).
+	t.Cleanup(func() {
+		close(block)
+		_ = st.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if _, err := io.Copy(io.Discard, st); err != nil {
+			t.Errorf("the old process's exchange did not end: %v", err)
+		}
+	})
 	whoami := `{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"whoami","arguments":{}}}`
 	resp, body, _ := pp.raw(t, mcpPreamble("web"), mcpPost(whoami, sid, mcpwire.V20251125))
 	if strings.Contains(body, "BUYER-SECRET-LOGIN") || resp.StatusCode != http.StatusBadRequest {

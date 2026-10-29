@@ -121,7 +121,13 @@ func TestMCPStdioFilesystemThroughTheGate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dirB, "secret.txt"), []byte("dir B is not served"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	services := `services:
+	// limits.rps_per_ip: every request of the test, and the node's, comes from 127.0.0.1, about 85 in all, 21 of them
+	// at once in each of the three racing sessions. The default (50 a second, burst 50) refused the last sessions'
+	// POSTs 429 "rate limited" (id null: the per-address bucket, before authentication) on CI runners fast enough to
+	// send them all in under ~0.7 s; a local run, whose stdio sessions take a second to start, refilled the bucket in
+	// between. The edge's rate is edge_test's to show, not this test's.
+	services := `limits: { rps_per_ip: 10000 }
+services:
   fs:
     kind: mcp
     backend: { tunnel: {} }
