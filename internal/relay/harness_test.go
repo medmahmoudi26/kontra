@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/pg"
@@ -116,6 +117,7 @@ type env struct {
 	signals  *signalRecorder
 	queue    *fakeQueue
 	intc     *Interceptors
+	render   *blob.Renderer
 }
 
 type envOptions struct {
@@ -130,6 +132,8 @@ type envOptions struct {
 	writeTimeout time.Duration
 	// wrapTaskStore wraps each service's task store beneath the dispatch's store-failure notes.
 	wrapTaskStore func(*store.Store) taskstore.Store
+	// bucket is the claim-check bucket (blobs:), nil without one.
+	bucket blob.Store
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
@@ -150,8 +154,10 @@ func newEnv(t *testing.T, o envOptions) *env {
 		o.opts.PollInterval = 50 * time.Millisecond
 	}
 	e.queue = &fakeQueue{e: e, done: make(chan dispatchDone, 64)}
+	e.render = blob.NewRenderer(o.bucket, e.pool, nil)
+	o.opts.Bucket, o.opts.Render = o.bucket, e.render
 	e.intc = &Interceptors{Svc: e.svc, Log: e.log, Rules: o.rules, Admit: o.admit, Canceler: o.canceler, Reviews: o.reviews,
-		PushPolicy: o.policy}
+		PushPolicy: o.policy, Bucket: o.bucket, Render: e.render}
 	e.handlers = NewHandlers(HandlerDeps{
 		Log: e.log, Puller: store.NewPullerProvider(e.log, listener), PushStore: o.push,
 		Queue:        func(store.ServiceRef) workqueue.Queue { q, _ := workqueue.NewPushQueue(e.queue); return q },
@@ -369,6 +375,14 @@ type fakeQueue struct {
 	done chan dispatchDone
 	hold bool // record writes without dispatching
 	sync bool // dispatch before Write returns: the turn ends before a2a-go's subscription reads the store
+	// resendTo answers a new task with this existing task, creating nothing, as lifecycle.Queue answers a resend
+	// (two identical requests that both passed the interceptors' resend check).
+	resendTo a2a.TaskID
+	// failNew refuses a new task with this error, creating nothing.
+	failNew error
+	// refuseFollowUp stores a follow-up's work item, then refuses it and deletes the item, as lifecycle.Queue
+	// does when the workflow refuses kontra.message.
+	refuseFollowUp bool
 }
 
 type dispatchDone struct {
@@ -388,6 +402,16 @@ func (q *fakeQueue) Write(ctx context.Context, p *workqueue.Payload) (a2a.TaskID
 	wid := uuid.Must(uuid.NewV7())
 	n := 1
 	var id uuid.UUID
+	q.mu.Lock()
+	resendTo, failNew, refuse := q.resendTo, q.failNew, q.refuseFollowUp
+	q.mu.Unlock()
+	if req.Message.TaskID == "" && failNew != nil {
+		return "", failNew
+	}
+	if req.Message.TaskID == "" && resendTo != "" {
+		p.TaskID = resendTo
+		return resendTo, nil
+	}
 	if req.Message.TaskID == "" {
 		id, err = uuid.Parse(string(p.TaskID))
 		if err != nil {
@@ -423,6 +447,10 @@ func (q *fakeQueue) Write(ctx context.Context, p *workqueue.Payload) (a2a.TaskID
 		if err := e.log.InsertWorkItem(ctx, nil, store.WorkItem{ID: wid, TaskID: id, Kind: store.WorkExecute,
 			Payload: store.WorkPayload{Request: req, CallContext: cc, Owner: o}}); err != nil {
 			return "", err
+		}
+		if refuse {
+			_ = e.log.DeleteWorkItem(ctx, wid, id)
+			return "", a2a.NewError(a2a.ErrUnsupportedOperation, "the follow-up was refused")
 		}
 		a, err := e.log.LatestAttempt(ctx, id)
 		if err != nil {

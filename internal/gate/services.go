@@ -3,10 +3,13 @@ package gate
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
 	"slices"
 	"sort"
 	"strings"
@@ -23,11 +26,16 @@ import (
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/relay"
+	"kontra.sh/kontra/internal/sealed"
+	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -70,8 +78,14 @@ const RefreshEvery = time.Minute
 // bytes to services.upstream_card with card_fetched_at, then the served card to services.card (json, D49),
 // a best-effort copy left NULL when Postgres refuses it. Every successful fetch of the stored bytes moves
 // card_fetched_at, so the seed of a restarted replica counts the 30 minutes from the gate's last good
-// fetch. Replicas that fetched the same bytes serve the same body and ETag. card_hash (sha256 over the JCS
-// of the upstream card) stays null until the gate has a JCS library (M3 signing).
+// fetch. Replicas that fetched the same bytes serve the same body and ETag (the gate's signature is
+// deterministic). card_hash is the SHA-256 over the JCS of the upstream card (D166).
+//
+// Signing and seller keys (spec §3, D13, D166; M3 WP-02): every served card is signed with the gate's key
+// (ServicesOptions.Signer), its protected header binding the upstream card. A gate without a signer serves an
+// a2a row only when its public_url is a loopback origin (a test registry); off loopback the row is left out, as
+// the configuration refuses such a file (D166). seller_keys on an a2a service are verified on every fetch: a
+// card no configured key verifies makes the service unavailable, and is never recorded (card.Keeper).
 //
 // Tunnel cards (spec §3, spec/tunnel.md; M2): every replica keeps a keeper per enabled tunnel a2a service,
 // seeded from services.upstream_card. Its card is fetched through one of the replica's own sessions serving
@@ -93,6 +107,9 @@ type Services struct {
 	tunnels   TunnelCards
 	sessions  TunnelSessions
 	cardEvery time.Duration // a tunnel card's refetch while serving (card.Refresh)
+	signer    card.Signer   // nil: cards are not signed (loopback test registries only)
+	loopback  bool          // public_url is a loopback origin
+	keyClient *http.Client  // fetches seller_keys {url} sets: the SSRF-safe client (spec §10.3)
 
 	// readMu makes each re-read (its query and its apply) one step, so a read that began before a change
 	// committed is never applied after one that began after it.
@@ -106,6 +123,7 @@ type Services struct {
 
 var (
 	_ a2ahttp.Services          = (*Services)(nil)
+	_ mcprelay.Services         = (*Services)(nil)
 	_ lifecycle.BackendResolver = (*Services)(nil)
 	_ relay.Backends            = (*Services)(nil)
 )
@@ -125,6 +143,8 @@ type entry struct {
 	backend   backendSpec
 	backendJS string // services.backend as read: the persist and touch guards compare it
 	served    *a2ahttp.Service
+	mcp       *mcprelay.Service // a kind: mcp service as the MCP relay serves it
+	mcpKey    string            // what mcp was built from: a change is announced (OnChange)
 	keeper    *card.Keeper
 	keeperKey string             // what the keeper was built from: rebuilt when it changes
 	stop      context.CancelFunc // the keeper's Run, nil when not started
@@ -225,6 +245,12 @@ type ServicesOptions struct {
 	Sessions TunnelSessions
 	// TunnelCardRefresh replaces card.Refresh, a tunnel card's refetch interval while serving (tests).
 	TunnelCardRefresh time.Duration
+	// Signer signs every served card (card.JWSSigner over the gate's signing key, D166). Nil only in tests: a
+	// registry without one leaves every a2a row out unless PublicURL is a loopback origin.
+	Signer card.Signer
+	// SellerKeysClient fetches seller_keys {url} sets; nil takes the SSRF-safe client with the address checks on
+	// (spec §3, §10.3: never allow_private).
+	SellerKeysClient *http.Client
 }
 
 // NewServices returns an empty registry over db; Reload or Sync fills it.
@@ -235,7 +261,13 @@ func NewServices(db *pgxpool.Pool, o ServicesOptions) *Services {
 	s := &Services{
 		db: db, logger: o.Logger, publicURL: o.PublicURL, multi: o.Multi, keeperOpt: o.KeeperOptions,
 		onChange: o.OnChange, byName: map[string]*entry{}, byID: map[svcID]*entry{}, tunnels: o.Tunnels,
-		sessions: o.Sessions, cardEvery: o.TunnelCardRefresh,
+		sessions: o.Sessions, cardEvery: o.TunnelCardRefresh, signer: o.Signer, keyClient: o.SellerKeysClient,
+	}
+	if u, err := url.Parse(o.PublicURL); err == nil {
+		s.loopback = config.IsLocalhost(u.Hostname())
+	}
+	if s.keyClient == nil {
+		s.keyClient = ssrf.NewClient(ssrf.Policy{})
 	}
 	if s.cardEvery <= 0 {
 		s.cardEvery = card.Refresh
@@ -270,13 +302,14 @@ type desired struct {
 	sellerKeys  any // jsonb text or nil
 	sessionIdle int
 	listed      bool
+	maxSessions int // max_sessions_per_principal (D213)
 }
 
 func desiredOf(s config.Service) (desired, error) {
 	d := desired{
 		kind: s.Kind, allow: slices.Clone(s.Allow), sealed: string(s.Sealed.Mode), retries: s.Task.RetryCount(),
 		timeoutS: int64(s.Task.Timeout.D() / time.Second), retentionS: int64(s.Task.Retention.D() / time.Second),
-		annotations: "{}", sessionIdle: int(s.SessionIdle), listed: s.Listed,
+		annotations: "{}", sessionIdle: int(s.SessionIdle), listed: s.Listed, maxSessions: s.SessionsPerPrincipal(),
 	}
 	if d.allow == nil {
 		d.allow = []string{}
@@ -300,7 +333,12 @@ func desiredOf(s config.Service) (desired, error) {
 	if s.Kind == config.KindMCP {
 		d.tasksMode = s.Tasks
 		if s.Tools != nil {
-			t := map[string]any{"allow": nonNil(s.Tools.Allow), "deny": nonNil(s.Tools.Deny)}
+			// An absent allow allows every tool (spec §11.3), an empty one none: allow is written only when the file
+			// names it, so the relay can tell the two apart (mcprelay.Policy).
+			t := map[string]any{"deny": nonNil(s.Tools.Deny)}
+			if s.Tools.Allow != nil {
+				t["allow"] = s.Tools.Allow
+			}
 			tb, err := json.Marshal(t)
 			if err != nil {
 				return desired{}, err
@@ -327,26 +365,26 @@ func nonNil(s []string) []string {
 // The columns Sync compares, in the order of diffSQL's flags; jsonb columns compare as jsonb (semantic
 // equality), so a reformatted file is no change.
 var syncFields = []string{"kind", "backend", "allow", "tools", "tasks", "sealed", "retries", "timeout", "retention",
-	"annotations", "seller_keys", "session_idle_s", "listed"}
+	"annotations", "seller_keys", "session_idle_s", "listed", "max_sessions_per_principal"}
 
 const diffSQL = `select source, disabled_at is not null,
 	kind is distinct from $3, backend is distinct from $4::jsonb, allow is distinct from $5::text[],
 	tools is distinct from $6::jsonb, tasks_mode is distinct from $7::text, sealed is distinct from $8,
 	retries is distinct from $9, timeout_s is distinct from $10, retention_s is distinct from $11,
 	annotations is distinct from $12::jsonb, seller_keys is distinct from $13::jsonb,
-	session_idle_s is distinct from $14, listed is distinct from $15
+	session_idle_s is distinct from $14, listed is distinct from $15, max_sessions_per_principal is distinct from $16
   from kontra.services where tenant_id = $1 and name = $2 for update`
 
 // upsertSQL writes a config service. A changed backend drops the stored cards: they are another seller's.
 const upsertSQL = `insert into kontra.services (tenant_id, name, kind, backend, allow, tools, tasks_mode, sealed,
-	retries, timeout_s, retention_s, annotations, seller_keys, session_idle_s, listed, source)
-values ($1, $2, $3, $4::jsonb, $5::text[], $6::jsonb, $7::text, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, 'config')
+	retries, timeout_s, retention_s, annotations, seller_keys, session_idle_s, listed, max_sessions_per_principal, source)
+values ($1, $2, $3, $4::jsonb, $5::text[], $6::jsonb, $7::text, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, 'config')
 on conflict (tenant_id, name) do update set
 	kind = excluded.kind, backend = excluded.backend, allow = excluded.allow, tools = excluded.tools,
 	tasks_mode = excluded.tasks_mode, sealed = excluded.sealed, retries = excluded.retries,
 	timeout_s = excluded.timeout_s, retention_s = excluded.retention_s, annotations = excluded.annotations,
 	seller_keys = excluded.seller_keys, session_idle_s = excluded.session_idle_s, listed = excluded.listed,
-	source = 'config', disabled_at = null, updated_at = now(),
+	max_sessions_per_principal = excluded.max_sessions_per_principal, source = 'config', disabled_at = null, updated_at = now(),
 	upstream_card   = case when services.backend is distinct from excluded.backend then null else services.upstream_card end,
 	card            = case when services.backend is distinct from excluded.backend then null else services.card end,
 	card_hash       = case when services.backend is distinct from excluded.backend then null else services.card_hash end,
@@ -433,7 +471,7 @@ func (s *Services) syncOne(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, n
 		return false, fmt.Errorf("gate: services.%s: %w", name, err)
 	}
 	args := []any{tenantID, name, d.kind, d.backend, d.allow, d.tools, d.tasksMode, d.sealed, d.retries,
-		d.timeoutS, d.retentionS, d.annotations, d.sellerKeys, d.sessionIdle, d.listed}
+		d.timeoutS, d.retentionS, d.annotations, d.sellerKeys, d.sessionIdle, d.listed, d.maxSessions}
 	var (
 		source   string
 		disabled bool
@@ -507,23 +545,64 @@ type row struct {
 	retentionS  int64
 	annotations []byte
 	sealed      string // off, optional or required
-	sellerKeys  bool   // seller_keys set (not SQL NULL, not JSON null)
+	sellerKeys  []byte // seller_keys as text, nil when SQL NULL or JSON null
 	upstream    []byte
 	fetchedAt   *time.Time
+	tools       []byte // services.tools as text (mcp only), nil when NULL
+	tasksMode   string // services.tasks_mode (mcp only), "" when NULL
+	sessionIdle int    // services.session_idle_s
+	maxSessions int    // services.max_sessions_per_principal (D213)
+	// recipients are a sealed service's recipients (ext-sealed.md §1, D61): the keys enrolled for it, neither
+	// revoked nor rotated, connected or not, as age1… strings in enrollment order; nil for a service that is not
+	// sealed.
+	recipients []string
 }
 
 const selectServices = `select s.tenant_id, t.slug, s.name, s.kind, s.backend::text, s.allow, s.listed,
 	s.disabled_at is not null, s.timeout_s, s.retries, s.retention_s, s.annotations::text, s.sealed,
-	coalesce(s.seller_keys <> 'null'::jsonb, false), s.upstream_card, s.card_fetched_at
+	case when s.seller_keys is null or s.seller_keys = 'null'::jsonb then null else s.seller_keys::text end,
+	s.upstream_card, s.card_fetched_at, s.tools::text, coalesce(s.tasks_mode, ''), s.session_idle_s,
+	s.max_sessions_per_principal,
+	case when s.sealed <> 'off' then array(
+		select k.pubkey from kontra.key_services ks join kontra.tunnel_keys k on k.key_id = ks.key_id
+		 where ks.tenant_id = s.tenant_id and ks.service = s.name and ks.revoked_at is null
+		   and k.revoked_at is null and k.revoked_reason is distinct from 'rotated'
+		 order by ks.enrolled_at, k.key_id) end
   from kontra.services s join kontra.tenants t on t.id = s.tenant_id
  where t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`
 
 func scanRow(r pgx.CollectableRow) (row, error) {
 	var x row
 	var backend, annots string
+	var keys, tools *string
+	var pubkeys [][]byte
 	err := r.Scan(&x.tenantID, &x.tenant, &x.name, &x.kind, &backend, &x.allow, &x.listed, &x.disabled,
-		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.sealed, &x.sellerKeys, &x.upstream, &x.fetchedAt)
+		&x.timeoutS, &x.retries, &x.retentionS, &annots, &x.sealed, &keys, &x.upstream, &x.fetchedAt,
+		&tools, &x.tasksMode, &x.sessionIdle, &x.maxSessions, &pubkeys)
+	if err != nil {
+		return x, err
+	}
 	x.backend, x.annotations = []byte(backend), []byte(annots)
+	if x.sealed != string(config.SealedOff) {
+		x.recipients = []string{}
+		for _, b := range pubkeys {
+			pub, err := ecdh.X25519().NewPublicKey(b)
+			if err != nil {
+				return x, fmt.Errorf("services: a recipient of %s/%s: %w", x.tenant, x.name, err)
+			}
+			rcpt, err := tunnel.FormatRecipient(pub)
+			if err != nil {
+				return x, err
+			}
+			x.recipients = append(x.recipients, rcpt)
+		}
+	}
+	if keys != nil {
+		x.sellerKeys = []byte(*keys)
+	}
+	if tools != nil {
+		x.tools = []byte(*tools)
+	}
 	return x, err
 }
 
@@ -662,7 +741,7 @@ func (s *Services) drop(key string, e *entry) {
 
 func sameEntry(a, b *entry) bool {
 	return a.ref == b.ref && a.listed == b.listed && a.disabled == b.disabled && a.backendJS == b.backendJS &&
-		a.keeperKey == b.keeperKey && slices.Equal(a.allowRaw, b.allowRaw)
+		a.keeperKey == b.keeperKey && a.mcpKey == b.mcpKey && slices.Equal(a.allowRaw, b.allowRaw)
 }
 
 // build returns the entry for x, reusing old's keeper when what it was built from did not change; s.mu is
@@ -677,13 +756,14 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 		return nil, err
 	}
 	if !x.disabled {
-		if err := refusable(x, b); err != nil {
+		if err := s.refusable(x, b); err != nil {
 			return nil, err
 		}
 	}
 	e := &entry{
 		ref: store.ServiceRef{TenantID: x.tenantID, Tenant: x.tenant, Name: x.name, Kind: x.kind,
-			Timeout: time.Duration(x.timeoutS) * time.Second, Retries: x.retries, Retention: time.Duration(x.retentionS) * time.Second},
+			Timeout: time.Duration(x.timeoutS) * time.Second, Retries: x.retries, Retention: time.Duration(x.retentionS) * time.Second,
+			Sealed: store.SealedRef(x.sealed)},
 		allow: allow, allowRaw: slices.Clone(x.allow), listed: x.listed, disabled: x.disabled, backend: b,
 		backendJS: string(x.backend),
 	}
@@ -697,7 +777,12 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 		}
 		in := card.Input{PublicURL: s.publicURL, ServicePath: ServicePath(x.tenant, x.name, s.multi),
 			OnlyAnonymous: allow.OnlyAnonymous(), CardExtensions: exts}
-		e.keeperKey = keeperKey(e.backendJS, in)
+		if x.sealed != string(config.SealedOff) {
+			// ext-sealed.md §1: the recipients are part of the card, so a change of them (an enrollment, a
+			// revocation, a rotation) changes the keeper's key, and the card is rewritten and signed again.
+			in.Sealed = sealedEntry(x)
+		}
+		e.keeperKey = keeperKey(e.backendJS, in, x.sellerKeys)
 		if old != nil && old.keeper != nil && old.keeperKey == e.keeperKey {
 			e.keeper, e.stop, e.tunnel = old.keeper, old.stop, old.tunnel
 			old.stop = nil // handed over: dropping old must not stop it
@@ -727,42 +812,175 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 		cards = e.keeper.Current
 	}
 	e.served = &a2ahttp.Service{Ref: e.ref, Allow: allow, Listed: x.listed, Disabled: x.disabled, Cards: cards}
+	if x.kind == config.KindMCP {
+		m, err := s.mcpService(e, x, b)
+		if err != nil {
+			return nil, err
+		}
+		e.mcp = m
+		e.mcpKey = string(x.tools) + "|" + x.tasksMode + "|" + x.sealed + "|" + string(x.annotations) + "|" + fmt.Sprint(x.sessionIdle) +
+			"|" + fmt.Sprint(x.maxSessions) + "|" + strings.Join(x.recipients, ",")
+	}
 	return e, nil
+}
+
+// mcpService is a kind: mcp row as the MCP relay serves it (spec §11): its policy (services.tools), its tasks:
+// mode, its sealed flag, its session_idle_s and max_sessions_per_principal, its tool_meta and initialize_meta annotations (§13.4), and for a
+// direct mcp: {url} backend the SSRF-safe backend pinned to that URL's host:port (D71), which is the endpoint
+// itself. A value that cannot be read leaves the row out (its policy must never be applied half).
+func (s *Services) mcpService(e *entry, x row, b backendSpec) (*mcprelay.Service, error) {
+	m := &mcprelay.Service{Ref: e.ref, Allow: e.allow, Disabled: x.disabled, Tasks: x.tasksMode,
+		Sealed: x.sealed != string(config.SealedOff), SessionIdle: time.Duration(x.sessionIdle) * time.Second,
+		MaxSessionsPerPrincipal: x.maxSessions}
+	if m.Sealed {
+		m.SealedRequired = x.sealed == string(config.SealedRequired)
+		m.SealedCapability = sealedEntry(x)
+	}
+	if m.Tasks == "" {
+		m.Tasks = config.TasksDurable
+	}
+	if len(x.tools) > 0 && string(x.tools) != "null" {
+		var t struct {
+			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
+		}
+		if err := json.Unmarshal(x.tools, &t); err != nil {
+			return nil, fmt.Errorf("services.tools: %w", err)
+		}
+		for _, g := range slices.Concat(t.Allow, t.Deny) {
+			if g == "" {
+				return nil, errors.New("services.tools: an empty glob")
+			}
+		}
+		m.Tools = mcprelay.Policy{Allow: t.Allow, Deny: t.Deny}
+	}
+	if len(bytes.TrimSpace(x.annotations)) > 0 {
+		var a struct {
+			ToolMeta       map[string]map[string]json.RawMessage `json:"tool_meta"`
+			InitializeMeta map[string]json.RawMessage            `json:"initialize_meta"`
+		}
+		if err := json.Unmarshal(x.annotations, &a); err != nil {
+			return nil, fmt.Errorf("services.annotations: tool_meta and initialize_meta must be objects of objects: %w", err)
+		}
+		m.ToolMeta, m.InitializeMeta = a.ToolMeta, a.InitializeMeta
+	}
+	if b.Kind == config.KindMCP && !x.disabled {
+		be, err := upstream.NewDirect(b.URL, b.AllowPrivate)
+		if err != nil {
+			return nil, err
+		}
+		m.Direct = be
+	}
+	return m, nil
+}
+
+// MCPService implements mcprelay.Services: the tenant's MCP service of that name, disabled ones included (the
+// route answers them as unknown), nil when there is none or it is an a2a service.
+func (s *Services) MCPService(_ context.Context, tenant, name string) (*mcprelay.Service, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if e := s.byName[tenant+"/"+name]; e != nil {
+		return e.mcp, nil
+	}
+	return nil, nil
+}
+
+// MCPServiceByID implements mcprelay.Services by the tenant's id.
+func (s *Services) MCPServiceByID(_ context.Context, tenantID uuid.UUID, name string) (*mcprelay.Service, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if e := s.byID[svcID{tenantID, name}]; e != nil {
+		return e.mcp, nil
+	}
+	return nil, nil
 }
 
 // refusable applies to every row the refusals config.Validate makes for a services: entry, so a row the
 // operator's control plane writes (source db, spec §13.5) cannot bypass them and fail open.
 //
 // SPEC-CONFLICT (the configuration's resolutions, config/validate.go; D90, D91): sealing needs backend tunnel (the
-// recipients are the service's enrolled node keys and the hosting node unseals, ext-sealed.md §1), and this
-// build, which does not seal, would relay a sealed direct service in plaintext; seller card signatures are
-// not verified until M3, so a direct a2a service with seller_keys would serve its card unverified, where
-// spec §3 makes it unavailable. Such a row is left out rather than served.
+// recipients are the service's enrolled node keys and the hosting node unseals, ext-sealed.md §1), and a direct
+// backend has neither, so a sealed direct service would be relayed in plaintext. Such a row is left out rather
+// than served. A sealed tunnel row is served since M3 WP-08, which lifts D144's refusal: its card or initialize
+// result publishes the recipients (sealedEntry), and the gate refuses unsealed parts to a required one.
 //
-// M2 serves tunnel services, so the same holds for them (D90 and D91 as amended for M2, M2 plan WP-04): a
-// tunnel row with sealed would be relayed in plaintext, and one with seller_keys would serve its card
-// unverified.
-func refusable(x row, b backendSpec) error {
+// Seller card signatures are verified since M3 WP-02, which lifts D90 and the seller_keys half of D144: a row
+// with seller_keys is served, its keeper verifying the card, unless the keys cannot be read (left out: a card
+// that cannot be verified must not be served unverified). An a2a row on a gate that has no signing key off a
+// loopback public_url is left out too (D166: the configuration refuses such a file; a row written later is
+// treated as D90 treated a refused key).
+func (s *Services) refusable(x row, b backendSpec) error {
 	if b.direct() && x.sealed != string(config.SealedOff) {
 		return fmt.Errorf("sealed %q on a direct backend: sealing needs backend tunnel (ext-sealed.md §1), and this build would relay the service in plaintext", x.sealed)
 	}
-	if b.Kind == backendTunnel && x.sealed != string(config.SealedOff) {
-		return fmt.Errorf("sealed %q on a tunnel service: sealing is not built in this release (M3), and the service would be relayed in plaintext", x.sealed)
-	}
-	if x.sellerKeys && b.direct() && x.kind == config.KindA2A {
-		return errors.New("seller_keys on a direct a2a service: seller card signatures are not verified in this release (M3), and the card would be served unverified (spec §3)")
-	}
-	if x.sellerKeys && b.Kind == backendTunnel {
-		return errors.New("seller_keys on a tunnel service: seller card signatures are not verified in this release (M3), and the card would be served unverified (spec §3)")
+	if x.kind == config.KindA2A && s.signer == nil && !s.loopback {
+		return errors.New("an a2a service on a gate without signing_key: its card would be served unsigned (D166); set signing_key")
 	}
 	return nil
 }
 
-func keeperKey(backendJS string, in card.Input) string {
+// sealedDescription is the sealed extension entry's description (ext-sealed.md §1).
+const sealedDescription = "Parts are end-to-end sealed to the service's recipients; the gate relays ciphertext."
+
+// sealedEntry is a sealed service's extension object (ext-sealed.md §1): in the served card's
+// capabilities.extensions for A2A, under capabilities.experimental["sh.kontra/sealed"] of a legacy initialize result
+// for MCP (D27). Its recipients are the row's (the keys enrolled for the service, neither revoked nor rotated,
+// D61), params.required is sealed: required, and the entry itself is required: false, so a client that ignores it
+// can still call an optional service unsealed.
+func sealedEntry(x row) json.RawMessage {
+	recipients := x.recipients
+	if recipients == nil {
+		recipients = []string{}
+	}
+	b, err := json.Marshal(map[string]any{
+		"uri":         sealed.URI,
+		"description": sealedDescription,
+		"required":    false,
+		"params": map[string]any{
+			"recipients": recipients,
+			"envelope":   sealed.MediaType,
+			"required":   x.sealed == string(config.SealedRequired),
+		},
+	})
+	if err != nil {
+		panic(err) // strings and booleans only
+	}
+	return b
+}
+
+// RecipientsChanged applies a NOTIFY that may change a sealed service's recipients (ext-sealed.md §1, tunnel.md
+// §5, §12): kontra_tunnel's 'enrolled:<key_id>/<tenant_id>/<service>' re-reads that service; kontra_revoke's
+// 'key:<key_id>' and 'binding:<key_id>/<service>' (a revocation, the end of a rotation's overlap) re-read every
+// service, whose recipients the query reads again. A rotation and a first enrollment send NOTIFY kontra_services
+// for the service (enroll.Admit), which Notify applies. Other payloads are ignored. The periodic refresh repairs a
+// lost notification.
+func (s *Services) RecipientsChanged(payload string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var err error
+	switch {
+	case strings.HasPrefix(payload, "enrolled:"):
+		b, ok := enroll.ParseEnrolledPayload(payload)
+		if !ok {
+			return
+		}
+		err = s.reloadID(ctx, b.TenantID, b.Service)
+	case strings.HasPrefix(payload, "key:"), strings.HasPrefix(payload, "binding:"):
+		err = s.Reload(ctx)
+	default:
+		return
+	}
+	if err != nil {
+		s.logger.Warn("services: re-read after a recipients change failed", "notify", payload, "error", err)
+	}
+}
+
+func keeperKey(backendJS string, in card.Input, sellerKeys []byte) string {
 	b, _ := json.Marshal(struct {
-		Backend json.RawMessage
-		In      card.Input
-	}{json.RawMessage(backendJS), in})
+		Backend    json.RawMessage
+		In         card.Input
+		SellerKeys string
+	}{json.RawMessage(backendJS), in, string(sellerKeys)})
 	return string(b)
 }
 
@@ -785,8 +1003,12 @@ func cardExtensions(annotations []byte) ([]json.RawMessage, error) {
 // backend's (fetched from its URL), or a tunnel service's (fetched through this replica's sessions; its
 // state is the returned tunnelCard).
 func (s *Services) newKeeper(e *entry, b backendSpec, in card.Input, x row) (*card.Keeper, *tunnelCard, error) {
+	common, err := s.cardOptions(e, x)
+	if err != nil {
+		return nil, nil, err
+	}
 	if b.Kind == backendTunnel {
-		k := s.newTunnelKeeper(e, in)
+		k := s.newTunnelKeeper(e, in, common)
 		tc := newTunnelCard()
 		if len(x.upstream) > 0 && x.fetchedAt != nil {
 			if err := k.Seed(x.upstream, *x.fetchedAt); err != nil {
@@ -803,18 +1025,11 @@ func (s *Services) newKeeper(e *entry, b backendSpec, in card.Input, x row) (*ca
 		return nil, nil, err
 	}
 	ref, backendJS := e.ref, e.backendJS
-	opts := []card.KeeperOption{
+	opts := append(common,
 		card.WithPersist(func(ctx context.Context, sv *card.Served, _ time.Time) error {
 			return s.persistCard(ctx, ref, backendJS, sv, false)
 		}),
-		card.WithFetch(func(ctx context.Context, b upstream.Backend) (*upstream.Fetched, error) {
-			f, err := upstream.FetchCard(ctx, b)
-			if err == nil {
-				s.touchCard(ctx, ref, backendJS, f.Raw)
-			}
-			return f, err
-		}),
-	}
+	)
 	k := card.NewKeeper(be, in, append(opts, s.keeperOpt...)...)
 	if len(x.upstream) > 0 && x.fetchedAt != nil {
 		if err := k.Seed(x.upstream, *x.fetchedAt); err != nil {
@@ -835,10 +1050,10 @@ func (s *Services) newKeeper(e *entry, b backendSpec, in card.Input, x row) (*ca
 // faithful behaviour: the nodes of one service are expected to serve the same card; the last good fetch
 // through any session is the service's card, and a fetch that differs from the card served is logged as a
 // warning (it is also how a node's new card version arrives). A card per session would need a migration.
-func (s *Services) newTunnelKeeper(e *entry, in card.Input) *card.Keeper {
+func (s *Services) newTunnelKeeper(e *entry, in card.Input, common []card.KeeperOption) *card.Keeper {
 	ref, backendJS := e.ref, e.backendJS
 	var k *card.Keeper
-	k = card.NewKeeper(nil, in, append([]card.KeeperOption{
+	k = card.NewKeeper(nil, in, append(append(common,
 		card.WithPersist(func(ctx context.Context, sv *card.Served, _ time.Time) error {
 			return s.persistCard(ctx, ref, backendJS, sv, true)
 		}),
@@ -851,11 +1066,32 @@ func (s *Services) newTunnelKeeper(e *entry, in card.Input) *card.Keeper {
 				s.logger.Warn("services: the card fetched through a tunnel session differs from the one served; the last good fetch is served from now on (a service's nodes should serve one card, relay.md §3)",
 					"service", ref.Tenant+"/"+ref.Name)
 			}
-			s.touchCard(ctx, ref, backendJS, f.Raw)
 			return f, nil
 		}),
-	}, s.keeperOpt...)...)
+	), s.keeperOpt...)...)
 	return k
+}
+
+// cardOptions are the keeper options every a2a service's keeper gets: the gate's signer, the service's seller
+// keys (a value that cannot be read leaves the row out: its card must not be served unverified), and the touch
+// hook that moves card_fetched_at on every good fetch of the recorded card (D89; never for a card no seller key
+// verifies).
+func (s *Services) cardOptions(e *entry, x row) ([]card.KeeperOption, error) {
+	ref, backendJS := e.ref, e.backendJS
+	opts := []card.KeeperOption{
+		card.WithTouch(func(ctx context.Context, sv *card.Served) { s.touchCard(ctx, ref, backendJS, sv.Upstream) }),
+	}
+	if s.signer != nil {
+		opts = append(opts, card.WithSigner(s.signer))
+	}
+	if x.sellerKeys != nil {
+		keys, err := card.NewSellerKeys(x.sellerKeys, s.keyClient)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, card.WithSellerKeys(keys))
+	}
+	return opts, nil
 }
 
 // seedTunnel installs a tunnel service's stored card when it is newer than the one its keeper has: another
@@ -942,6 +1178,11 @@ func (s *Services) runTunnelCard(ctx context.Context, ref store.ServiceRef, k *c
 		case <-t.C:
 		}
 		if !s.tunnels.Serves(ref.TenantID, ref.Name) {
+			// No session to fetch the card through: the stored card is served (seedTunnel), and a {url} seller
+			// key set is fetched here, so a seeded card that waits for it is verified.
+			if err := k.RefreshSellerKeys(ctx); err != nil && ctx.Err() == nil {
+				s.logger.Warn("services: a tunnel service's seller keys were not fetched", "service", ref.Tenant+"/"+ref.Name, "error", err)
+			}
 			wait, backoff = s.cardEvery, time.Second
 			continue
 		}
@@ -960,8 +1201,8 @@ func (s *Services) runTunnelCard(ctx context.Context, ref store.ServiceRef, k *c
 }
 
 // persistCard records the card a keeper serves (its persist hook, called after a good fetch until it
-// succeeds): first the upstream bytes, verbatim, and the fetch time, which are what a restarted replica
-// seeds from; then the served card, a best-effort copy (json, D49): a body Postgres refuses as json (a
+// succeeds): first the upstream bytes, verbatim, their JCS hash (card_hash, D166) and the fetch time, which
+// are what a restarted replica seeds from; then the served card, a best-effort copy (json, D49): a body Postgres refuses as json (a
 // data exception: text that is not UTF-8, a NUL character) leaves services.card NULL, as the audit
 // proposed, and is not an error. Any other failure is returned, and the keeper calls again at its next good
 // fetch. The backend guard keeps a keeper of a URL the configuration has just replaced from writing its
@@ -970,9 +1211,9 @@ func (s *Services) runTunnelCard(ctx context.Context, ref store.ServiceRef, k *c
 // which the replicas without a session do not fetch themselves) a recorded card is announced with NOTIFY
 // kontra_services, on which every replica seeds its keeper with it.
 func (s *Services) persistCard(ctx context.Context, ref store.ServiceRef, backendJS string, sv *card.Served, notify bool) error {
-	tag, err := s.db.Exec(ctx, `update kontra.services set upstream_card = $3, card_fetched_at = now(),
+	tag, err := s.db.Exec(ctx, `update kontra.services set upstream_card = $3, card_fetched_at = now(), card_hash = $5,
 			updated_at = case when upstream_card is distinct from $3 then now() else updated_at end
-		 where tenant_id = $1 and name = $2 and backend = $4::jsonb`, ref.TenantID, ref.Name, sv.Upstream, backendJS)
+		 where tenant_id = $1 and name = $2 and backend = $4::jsonb`, ref.TenantID, ref.Name, sv.Upstream, backendJS, sv.Hash[:])
 	if err != nil {
 		return fmt.Errorf("upstream_card: %w", err)
 	}
@@ -1193,6 +1434,11 @@ func (s *Services) tunnelBackend(e *entry, svc store.ServiceRef, attempt *store.
 	}
 	_, info, err := e.keeper.Dispatch()
 	if err != nil {
+		if errors.Is(err, card.ErrNotVerified) {
+			// The card was fetched and no configured seller key verifies it: the service is unavailable
+			// (spec §3), and fetching again changes nothing before the seller publishes another card.
+			return nil, upstream.Info{}, err
+		}
 		if cur, _ := e.keeper.Current(); (cur == nil || cur.Unavailable) && e.tunnel != nil {
 			// No usable card: none fetched or stored yet, or only one past card.UnavailableAfter (the node was
 			// away for more than 30 minutes, and its agent is not up yet now that it is back). The attempt's

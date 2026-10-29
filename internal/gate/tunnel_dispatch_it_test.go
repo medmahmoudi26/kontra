@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"net"
@@ -323,6 +324,18 @@ type attemptRow struct {
 	firstID                          bool
 }
 
+// settledAttemptOf is attempt n of a task once its outcome is written: the answer can reach the client before
+// the dispatch records the attempt's outcome, so a test reading the row at once may see none yet.
+func settledAttemptOf(t *testing.T, e *gateEnv, id a2a.TaskID, n int) attemptRow {
+	t.Helper()
+	var a attemptRow
+	eventually(t, 10*time.Second, fmt.Sprintf("attempt %d of %s settled", n, id), func() bool {
+		a = attemptOf(t, e, id, n)
+		return a.outcome != ""
+	})
+	return a
+}
+
 func attemptOf(t *testing.T, e *gateEnv, id a2a.TaskID, n int) attemptRow {
 	t.Helper()
 	var a attemptRow
@@ -411,7 +424,7 @@ func TestDispatchThroughTheTunnel(t *testing.T) {
 	if hi.Status.State != a2a.TaskStateCompleted || hi.Status.Message == nil || hi.Status.Message.Parts[0].Text() != "Hello World" {
 		t.Fatalf("hi: %+v", hi.Status)
 	}
-	at := attemptOf(t, e, hi.ID, 1)
+	at := settledAttemptOf(t, e, hi.ID, 1)
 	if at.backend != "tunnel" || at.session == nil || *at.session != n1.session || at.keyID != n1.id.KeyID() || at.replica != b.r.ID() ||
 		at.outcome != "completed" || !at.firstID {
 		t.Fatalf("attempt %+v, want the session %s on replica %s", at, n1.session, b.r.ID())
@@ -437,7 +450,7 @@ func TestDispatchThroughTheTunnel(t *testing.T) {
 	if answered.Status.State != a2a.TaskStateCompleted || answered.Status.Message.Parts[0].Text() != "done: the blue one" {
 		t.Fatalf("follow-up: %+v", answered.Status)
 	}
-	if at := attemptOf(t, e, ask.ID, 1); at.session == nil || *at.session != n1.session || at.replica != b.r.ID() || at.outcome != "completed" {
+	if at := settledAttemptOf(t, e, ask.ID, 1); at.session == nil || *at.session != n1.session || at.replica != b.r.ID() || at.outcome != "completed" {
 		t.Fatalf("the follow-up's attempt %+v", at)
 	}
 
@@ -508,7 +521,7 @@ func TestDispatchThroughTheTunnel(t *testing.T) {
 	if after := len(n1.exchanges()); after != before {
 		t.Fatalf("%d streams reached the node after the binding's revocation", after-before)
 	}
-	if at := attemptOf(t, e, ks.ID, 1); at.outcome != "tunnel_lost" {
+	if at := settledAttemptOf(t, e, ks.ID, 1); at.outcome != "tunnel_lost" {
 		t.Fatalf("attempt %+v", at)
 	}
 	// The cancel of a task on that session: nothing can be forwarded; it fails tunnel_lost.
@@ -529,7 +542,7 @@ func TestDispatchThroughTheTunnel(t *testing.T) {
 		t.Fatalf("no candidate: %+v %v", none.Status, none.Metadata)
 	}
 	for n := 1; n <= 4; n++ {
-		if at := attemptOf(t, e, none.ID, n); at.backend != "tunnel" || at.outcome != "no_session" || at.session != nil {
+		if at := settledAttemptOf(t, e, none.ID, n); at.backend != "tunnel" || at.outcome != "no_session" || at.session != nil {
 			t.Fatalf("attempt %d %+v", n, at)
 		}
 	}

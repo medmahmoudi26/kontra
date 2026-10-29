@@ -47,15 +47,28 @@
 // exports its TaskLifecycle history and replays it against the current workflow; with
 // KONTRA_RECORD_HISTORIES=1 it also writes it to internal/lifecycle/testdata/histories, never over an
 // existing file.
+//
+// M3's (D171, D172, D189; m3_test.go lists them): the six gate tests sealed_no_plaintext, sealed_replay,
+// sealed_unsealed_part, mcp_session_cross_node, mcp_tool_denied and mcp_task_resume, and card_passthrough,
+// mcp_batch_refused, mcp_meta_spoof, mcp_session_revoked, mcp_case_smuggling, a2a_case_smuggling, stdio_roots,
+// local_rebinding and the hiring row, mcp_modern_task, mcp_era_fallback, mcp_peer_hop and a sealed part through the
+// bucket. For them both replicas share one signing_key (D166), log at debug level, and get a peer listener and a
+// gofakes3 bucket when a test asks (Options.Peer, Options.Blobs); nodes host MCP services and hire; the stock npm
+// servers and every other server the harness starts listen on 127.0.0.1 only, which each test asserts at its end
+// (D185, CheckLoopback).
 package e2e
 
 import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -139,12 +152,47 @@ type Options struct {
 	Tunnel map[string]TunnelService
 	// DrainTimeout is drain_timeout (default 10 s, spec §14.3).
 	DrainTimeout time.Duration
+
+	// M3 (WP-09). MCP declares the MCP services (kind mcp, spec §11): a direct mcp: {url} backend with
+	// allow_private, or, without a URL, a tunnel service hosted by the nodes enrolled for it.
+	MCP map[string]MCPService
+	// Blobs gives the gate its claim-check bucket (blobs:, spec §10.4, D167): a gofakes3 server in the test
+	// process on 127.0.0.1 (bucket.go), whose credentials only the replicas' environment carries.
+	Blobs bool
+	// Peer gives each replica a peer listener on a loopback port of its own (--peer-listen) and both the shared
+	// secret in KONTRA_PEER_SECRET (spec §11.2, D163, D179).
+	Peer bool
+	// SellerKeys is services.<name>.seller_keys of a direct A2A service (spec §3): a JWKS document, inline.
+	SellerKeys map[string]string
 }
 
 // TunnelService is one tunnel service of Options.Tunnel.
 type TunnelService struct {
 	Retries *int // task.retries; nil: Options.Retries
+	// Sealed is the service's sealed: value as YAML ("true", "{required: false}"); "" leaves it unsealed
+	// (ext-sealed.md §1).
+	Sealed string
+	// Listed makes the service's cards public (spec §2.1, §12.2): kontra seal reads the card without a
+	// credential (ext-sealed.md §5.1).
+	Listed bool
 }
+
+// MCPService is one service of Options.MCP.
+type MCPService struct {
+	URL   string   // a direct backend's endpoint URL; "" is a tunnel service
+	Allow []string // allow: (default org:default)
+	// ToolsAllow and ToolsDeny are tools: {allow, deny} (spec §11.3); a nil ToolsAllow writes no allow.
+	ToolsAllow []string
+	ToolsDeny  []string
+	Tasks      string // tasks: durable (default), passthrough or off
+	Sealed     string // sealed: as YAML, as for TunnelService
+	// SessionIdle is session_idle_s (0: the default, 3600).
+	SessionIdle int
+	Retries     *int // task.retries; nil: Options.Retries
+}
+
+// PeerSecretEnv is the variable the replicas read the peer hop's secret from (peer.secret_env).
+const PeerSecretEnv = "KONTRA_PEER_SECRET"
 
 // tunnelled reports whether name is one of Options.Tunnel.
 func (o Options) tunnelled(name string) bool {
@@ -170,9 +218,16 @@ type Harness struct {
 	// Front is public_url: new connections go to the replica it is routed to (replica A at start).
 	Front *Front
 	Dir   string // config, logs
+	// Bucket is the gate's bucket with Options.Blobs.
+	Bucket *Bucket
+	// PeerSecret is the peer hop's shared secret with Options.Peer.
+	PeerSecret string
+	// SigningKey is the PEM file both replicas sign cards with (signing_key, D166): one key, one JWKS.
+	SigningKey string
 
 	run         string
 	opts        Options
+	ext         *External // the gate Attach attached to; nil for one Start started
 	bin         string
 	cli         string
 	configPath  string
@@ -187,6 +242,7 @@ type Harness struct {
 	nodes   []*Node            // every `kontra connect` started, killed at Close
 	cleanup []func() error     // what tests added (sellers, fake doubles), run at Close, last first
 	agents  []*slowagent.Agent // slowagents started for a test (Agent), closed at Close
+	pgids   []int              // process groups of the stock servers the harness started (CheckLoopback)
 }
 
 // Gate is one kontra-gate replica subprocess.
@@ -195,7 +251,8 @@ type Gate struct {
 	URL       string // http://127.0.0.1:<port>
 	Addr      string // 127.0.0.1:<port>, what the Front dials
 	ReplicaID string // what the process registered in gate_replicas
-	LogPath   string
+	LogPath   string // its JSON log, at debug level (D171's marker scans read it)
+	PeerAddr  string // 127.0.0.1:<port> of its peer listener with Options.Peer, else ""
 	cmd       *exec.Cmd
 	done      chan struct{}
 	waitErr   error
@@ -365,12 +422,25 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 	}
 	h.Upstream = h.Upstreams["slow"]
 
-	ports, err := freePorts(4)
+	nports := 4
+	if o.Peer {
+		nports = 6 // and each replica's peer listener
+		h.PeerSecret = randomHex(32)
+	}
+	ports, err := freePorts(nports)
 	if err != nil {
 		return h, err
 	}
 	if h.Front, err = NewFront(); err != nil {
 		return h, err
+	}
+	if h.SigningKey, err = writeSigningKey(h.Dir); err != nil {
+		return h, err
+	}
+	if o.Blobs {
+		if h.Bucket, err = StartBucket(); err != nil {
+			return h, err
+		}
 	}
 	if err := h.writeConfig(temporalAddr, ports[0]); err != nil {
 		return h, err
@@ -396,12 +466,17 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 		return h, err
 	}
 	for i, name := range []string{"A", "B"} {
-		if h.Gates[i], err = h.startGate(name, h.configPaths[i], ports[2*i], ports[2*i+1]); err != nil {
+		peerPort := 0
+		if o.Peer {
+			peerPort = ports[4+i]
+		}
+		if h.Gates[i], err = h.startGate(name, h.configPaths[i], ports[2*i], ports[2*i+1], peerPort); err != nil {
 			return h, err
 		}
 	}
 	h.Front.Route(h.Gates[0])
-	// A tunnel service has no card before a node connects: readiness waits on the direct ones only.
+	// A tunnel service has no card before a node connects, and an MCP service none at all: readiness waits on
+	// the direct A2A ones only.
 	direct := slices.DeleteFunc(slices.Sorted(mapKeys(services)), o.tunnelled)
 	for _, g := range h.Gates {
 		if err := h.waitReady(ctx, g, direct); err != nil {
@@ -464,42 +539,80 @@ const (
 )
 
 func (h *Harness) env() []string {
-	return append(os.Environ(), RunEnv+"="+h.run, "KONTRA_E2E_HOSTS="+PrivateHost+"="+PrivateAddr)
+	base := os.Environ()
+	if h.ext != nil && h.ext.Env != nil {
+		base = slices.Clone(h.ext.Env)
+	}
+	return append(base, RunEnv+"="+h.run, "KONTRA_E2E_HOSTS="+PrivateHost+"="+PrivateAddr)
 }
+
+// gateEnv is a replica's environment: env, and the secrets only the gate reads (the bucket's credentials and the
+// peer hop's secret), which no node and no stock server ever gets (D185).
+func (h *Harness) gateEnv() []string {
+	env := h.env()
+	if h.Bucket != nil {
+		env = append(env, h.Bucket.Env()...)
+	}
+	if h.PeerSecret != "" {
+		env = append(env, PeerSecretEnv+"="+h.PeerSecret)
+	}
+	return env
+}
+
+// Run is the run's id: the value of KONTRA_E2E_RUN on every process the harness starts.
+func (h *Harness) Run() string { return h.run }
 
 // gateCommand runs a short kontra-gate command and returns its combined output.
 func (h *Harness) gateCommand(ctx context.Context, args ...string) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	if h.ext != nil {
+		return h.ext.Gate(cctx, args...)
+	}
 	cmd := exec.CommandContext(cctx, h.bin, args...)
-	cmd.Env = h.env()
+	cmd.Env = h.gateEnv()
 	cmd.SysProcAttr = procAttr()
 	return cmd.CombinedOutput()
 }
 
 // enroll mints an API key with `kontra-gate enroll --api-key <name>`: a new key, and with it a new buyer.
 func (h *Harness) enroll(ctx context.Context, name string) (string, error) {
-	cctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, h.bin, "enroll", "-f", h.configPath, "--api-key", name)
-	cmd.Env = h.env()
-	cmd.SysProcAttr = procAttr()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("e2e: kontra-gate enroll --api-key %s: %v\n%s", name, err, stderr.String())
+	out, err := h.gateStdout(ctx, "enroll", "-f", h.configPath, "--api-key", name)
+	if err != nil {
+		return "", err
 	}
-	key := strings.TrimSpace(stdout.String())
+	key := strings.TrimSpace(string(out))
 	if !strings.HasPrefix(key, "kk_") {
 		return "", fmt.Errorf("e2e: enroll printed %q, not a key", key)
 	}
 	return key, nil
 }
 
+// gateStdout runs a short kontra-gate command and returns its stdout; its stderr is in the error. An attached
+// harness runs it where the gate runs (External.Gate).
+func (h *Harness) gateStdout(ctx context.Context, args ...string) ([]byte, error) {
+	cctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	if h.ext != nil {
+		return h.ext.Gate(cctx, args...)
+	}
+	cmd := exec.CommandContext(cctx, h.bin, args...)
+	cmd.Env = h.gateEnv()
+	cmd.SysProcAttr = procAttr()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("e2e: kontra-gate %s: %v\n%s", strings.Join(args, " "), err, stderr.String())
+	}
+	return stdout.Bytes(), nil
+}
+
 // writeConfig writes the one kontra.yaml both replicas share; each gets its own listeners by flag, so
 // listen: is replica A's. public_url is the Front's: the origin of every served card's interfaces and the
 // one a node's hello must name (spec/tunnel.md §4). The tunnel's channel binding is none: the replicas do
-// not terminate TLS, and the Front and the nodes are on loopback (spec/tunnel.md §4, D69).
+// not terminate TLS, and the Front and the nodes are on loopback (spec/tunnel.md §4, D69). Both replicas sign
+// cards with one key (signing_key, D166), so a card served by either verifies against the one JWKS; with
+// Options.Blobs the bucket is blobs:, and with Options.Peer each replica's peer listener is set by flag.
 func (h *Harness) writeConfig(temporalAddr string, listenPort int) error {
 	retries := 2
 	if h.opts.Retries != nil {
@@ -520,8 +633,16 @@ auth: { api_keys: true }
 drain_timeout: %s
 push: { allow_private: %t }
 tunnel: { channel_binding: none }
-services:
-`, listenPort, h.Front.URL, h.PostgresURL, temporalAddr, Namespace, drain, h.opts.PushAllowPrivate)
+signing_key: %q
+`, listenPort, h.Front.URL, h.PostgresURL, temporalAddr, Namespace, drain, h.opts.PushAllowPrivate, "file:"+h.SigningKey)
+	if h.Bucket != nil {
+		fmt.Fprintf(&b, "blobs: %q\n", h.Bucket.URL)
+	}
+	if h.opts.Peer {
+		// Each replica's own --peer-listen replaces this one, which only has to be valid.
+		fmt.Fprintf(&b, "peer: { listen: \"127.0.0.1:1\", secret_env: %s }\n", PeerSecretEnv)
+	}
+	b.WriteString("services:\n")
 	names := slices.Collect(mapKeys(h.Upstreams))
 	for name := range h.opts.Tunnel {
 		if !slices.Contains(names, name) {
@@ -541,6 +662,12 @@ services:
     allow: ["org:default"]
     task: { timeout: 10m, retries: %d }
 `, name, r)
+			if ts.Sealed != "" {
+				fmt.Fprintf(&b, "    sealed: %s\n", ts.Sealed)
+			}
+			if ts.Listed {
+				b.WriteString("    listed: true\n")
+			}
 			continue
 		}
 		fmt.Fprintf(&b, `  %s:
@@ -549,9 +676,74 @@ services:
     allow: ["org:default"]
     task: { timeout: 10m, retries: %d }
 `, name, h.Upstreams[name].URL(), retries)
+		if keys, ok := h.opts.SellerKeys[name]; ok {
+			fmt.Fprintf(&b, "    seller_keys: %s\n", keys)
+		}
+	}
+	for _, name := range slices.Sorted(mapKeys(h.opts.MCP)) {
+		m := h.opts.MCP[name]
+		fmt.Fprintf(&b, "  %s:\n    kind: mcp\n", name)
+		if m.URL != "" {
+			fmt.Fprintf(&b, "    backend: { mcp: { url: %q, allow_private: true } }\n", m.URL)
+		} else {
+			b.WriteString("    backend: { tunnel: {} }\n")
+		}
+		allow := m.Allow
+		if allow == nil {
+			allow = []string{"org:default"}
+		}
+		fmt.Fprintf(&b, "    allow: %s\n", yamlList(allow))
+		if m.ToolsAllow != nil || m.ToolsDeny != nil {
+			var parts []string
+			if m.ToolsAllow != nil {
+				parts = append(parts, "allow: "+yamlList(m.ToolsAllow))
+			}
+			if m.ToolsDeny != nil {
+				parts = append(parts, "deny: "+yamlList(m.ToolsDeny))
+			}
+			fmt.Fprintf(&b, "    tools: { %s }\n", strings.Join(parts, ", "))
+		}
+		if m.Tasks != "" {
+			fmt.Fprintf(&b, "    tasks: %s\n", m.Tasks)
+		}
+		if m.Sealed != "" {
+			fmt.Fprintf(&b, "    sealed: %s\n", m.Sealed)
+		}
+		if m.SessionIdle > 0 {
+			fmt.Fprintf(&b, "    session_idle_s: %d\n", m.SessionIdle)
+		}
+		r := retries
+		if m.Retries != nil {
+			r = *m.Retries
+		}
+		fmt.Fprintf(&b, "    task: { timeout: 10m, retries: %d }\n", r)
 	}
 	h.configPath = filepath.Join(h.Dir, "kontra.yaml")
 	return os.WriteFile(h.configPath, []byte(b.String()), 0o600)
+}
+
+// yamlList writes a flow sequence of quoted strings.
+func yamlList(xs []string) string {
+	q := make([]string, len(xs))
+	for i, x := range xs {
+		q[i] = strconv.Quote(x)
+	}
+	return "[" + strings.Join(q, ", ") + "]"
+}
+
+// writeSigningKey writes signing_key's PEM file under dir, 0600 (jws.LoadKeySet refuses a file others may read):
+// one ECDSA P-256 key in PKCS #8, the key both replicas sign with.
+func writeSigningKey(dir string) (string, error) {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(k)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "signing.pem")
+	return path, os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
 }
 
 // writeConfigCopy writes a copy of the shared kontra.yaml named name whose postgres: is postgresURL.
@@ -568,9 +760,9 @@ func (h *Harness) writeConfigCopy(name, postgresURL string) (string, error) {
 	return path, os.WriteFile(path, bytes.Replace(b, []byte(from), []byte(to), 1), 0o600)
 }
 
-// startGate starts one replica from the configuration file configPath and waits for its "replica ready to
-// serve" line.
-func (h *Harness) startGate(name, configPath string, port, metricsPort int) (*Gate, error) {
+// startGate starts one replica from the configuration file configPath, logging at debug level (D171), with its
+// peer listener on peerPort when it is not 0, and waits for its "replica ready to serve" line.
+func (h *Harness) startGate(name, configPath string, port, metricsPort, peerPort int) (*Gate, error) {
 	addr := "127.0.0.1:" + strconv.Itoa(port)
 	g := &Gate{Name: name, URL: "http://" + addr, Addr: addr, LogPath: filepath.Join(h.Dir, "gate-"+name+".log"),
 		done: make(chan struct{})}
@@ -579,9 +771,14 @@ func (h *Harness) startGate(name, configPath string, port, metricsPort int) (*Ga
 		return nil, err
 	}
 	g.logFile = f
-	g.cmd = exec.Command(h.bin, "serve", "-f", configPath,
-		"--listen", "127.0.0.1:"+strconv.Itoa(port), "--metrics-listen", "127.0.0.1:"+strconv.Itoa(metricsPort))
-	g.cmd.Env = h.env()
+	args := []string{"serve", "-f", configPath, "--log-level", "debug",
+		"--listen", "127.0.0.1:" + strconv.Itoa(port), "--metrics-listen", "127.0.0.1:" + strconv.Itoa(metricsPort)}
+	if peerPort != 0 {
+		g.PeerAddr = "127.0.0.1:" + strconv.Itoa(peerPort)
+		args = append(args, "--peer-listen", g.PeerAddr)
+	}
+	g.cmd = exec.Command(h.bin, args...)
+	g.cmd.Env = h.gateEnv()
 	g.cmd.Stdout, g.cmd.Stderr = f, f
 	g.cmd.SysProcAttr = procAttr()
 	if err := g.cmd.Start(); err != nil {
@@ -741,6 +938,9 @@ func (h *Harness) Close() error {
 		}
 		for _, a := range h.Upstreams {
 			a.Close()
+		}
+		if h.Bucket != nil {
+			h.Bucket.Close()
 		}
 		if h.TC != nil {
 			h.TC.Close()

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"reflect"
@@ -21,18 +22,24 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/client"
 
 	"kontra.sh/kontra/internal/a2ahttp"
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/ids"
+	"kontra.sh/kontra/internal/jws"
 	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/migrate"
+	"kontra.sh/kontra/internal/peer"
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/push"
 	"kontra.sh/kontra/internal/relay"
@@ -171,6 +178,24 @@ type Replica struct {
 	enroll   *enroll.Store
 	tunnels  *tunnelgate.Registry
 
+	// Card signing (spec §3, D166): the key set, nil on a gate off loopback without signing_key (which serves no
+	// a2a service). The claim-check bucket (spec §10.4, D167), nil without blobs:, and the egress renderer.
+	signingKeys *jws.KeySet
+	blobs       blob.Store
+	render      *blob.Renderer
+
+	// The MCP relay (spec §11; M3 WP-04): its handler, the sessions it pins, the tools cache, and the peer hop
+	// (§11.2, D163): the peer listener's server and listener, and the address this replica advertises (empty
+	// without peer.listen; gate_replicas.peer_addr). peerWarned is the multi-replica warning's (D179).
+	mcp   *mcprelay.Handler
+	tools *mcprelay.ToolsCache
+	// toolsNotify tells the other replicas of an upstream's tools/list_changed (NOTIFY kontra_tunnel 'tools:…', §11.3).
+	toolsNotify *mcprelay.ToolsNotifier
+	peerSrv     *http.Server
+	peerLn      net.Listener
+	peerAddr    string
+	peerWarned  atomic.Bool
+
 	refusals   lifecycle.PatchRefusals // operator patches refused (spec §13.3's metric)
 	draining   atomic.Bool
 	pgUp       atomic.Bool
@@ -217,16 +242,23 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 		return nil, err
 	}
 	r = &Replica{cfg: cfg, id: id, log: log.With("replica", id), opts: o}
+	// The cleanup holds the replica itself: every error return below sets the named result r to nil before the
+	// deferred function runs, so reading r there dereferenced nil and turned a start failure (Temporal unreachable,
+	// a bad signing key, a bucket it cannot use) into a panic (M3 WP-10 pentest, finding F-1).
+	built := r
 	defer func() {
 		if err != nil {
 			// Release what New bound or opened: the listeners (closed unserved), the client and the pool.
-			if r.server != nil {
-				_ = r.server.Shutdown(context.WithoutCancel(ctx))
+			if built.server != nil {
+				_ = built.server.Shutdown(context.WithoutCancel(ctx))
 			}
-			if r.metrics != nil {
-				_ = r.metrics.Shutdown(context.WithoutCancel(ctx))
+			if built.metrics != nil {
+				_ = built.metrics.Shutdown(context.WithoutCancel(ctx))
 			}
-			r.close()
+			if built.peerLn != nil {
+				_ = built.peerLn.Close()
+			}
+			built.close()
 		}
 	}()
 
@@ -244,6 +276,21 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 		return nil, err
 	}
 	r.temporalUp.Store(true)
+	if r.signingKeys, err = loadSigningKeys(cfg, r.log); err != nil {
+		return nil, err
+	}
+	if cfg.Blobs != "" {
+		bcfg, err := blob.ParseURL(cfg.Blobs)
+		if err != nil {
+			return nil, err
+		}
+		// Open checks that the bucket exists and is writable: a gate that cannot store a large part refuses to
+		// start rather than fail the first one.
+		if r.blobs, err = blob.Open(ctx, bcfg); err != nil {
+			return nil, fmt.Errorf("gate: blobs: %w", err)
+		}
+		r.log.Info("claim-check bucket ready", "bucket", bcfg.Bucket, "prefix", bcfg.Prefix, "endpoint", bcfg.Endpoint)
+	}
 	if err = r.assemble(); err != nil {
 		return nil, err
 	}
@@ -254,6 +301,9 @@ func New(ctx context.Context, cfg *config.Config, opts ...Option) (r *Replica, e
 		return nil, err
 	}
 	if _, err = r.metrics.Listen(); err != nil {
+		return nil, err
+	}
+	if err = r.listenPeer(); err != nil {
 		return nil, err
 	}
 	if err = r.register(ctx); err != nil {
@@ -291,6 +341,9 @@ func (r *Replica) assemble() error {
 		DB: r.pool, ReplicaID: r.id, Revocations: r.nodeKeys, Logger: log, LastPingEvery: r.opts.tunnelPing,
 	})
 	r.nodeKeys.Subscribe(r.tunnels.Revoked)
+	// An API key revocation (NOTIFY kontra_revoke 'apikey:<id>', or the re-read that finds it) reaches the
+	// sessions hiring with that key: 401 on their later streams, {"t": "auth_revoked"} (tunnel.md §12).
+	r.revoked.Subscribe(r.tunnels.APIKeyRevoked)
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
 	r.enroll = enroll.NewStore(r.pool, enroll.Options{
 		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti,
@@ -306,17 +359,37 @@ func (r *Replica) assemble() error {
 	}
 	snapshot := lifecycle.HooksSnapshot{LifecycleQueue: hookQueue, OperatorPrefixes: cfg.OperatorMetadataPrefixes}
 
+	// Egress rendering (spec §10.4): kontra-blob: parts become presigned GETs for callers, push receivers and
+	// direct backends.
+	r.render = blob.NewRenderer(r.blobs, r.pool, log)
+	var signer card.Signer
+	if r.signingKeys != nil {
+		signer = &card.JWSSigner{Keys: r.signingKeys, JWKSURL: strings.TrimRight(cfg.PublicURL, "/") + jws.JWKSPath}
+	}
+
 	var handlers *relay.Handlers
 	r.services = NewServices(r.pool, ServicesOptions{
-		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
+		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti, Logger: log, Signer: signer,
+		// seller_keys {url} sets: the SSRF dialer with its address checks always on (spec §3, §10.3).
+		SellerKeysClient: ssrf.NewClient(ssrf.Policy{Resolver: pushResolver(log)}),
 		OnChange: func(ref store.ServiceRef) {
 			if handlers != nil {
 				handlers.Invalidate(ref)
+			}
+			// The MCP tools cache follows the row as the cards do (§11.3): a changed or removed service is drained
+			// again at its next tools/list.
+			if r.tools != nil {
+				// And what the gate learned of its upstream's era (§11.12, D177): another backend may answer next.
+				r.tools.Forget(mcprelay.ToolsKey{TenantID: ref.TenantID, Service: ref.Name})
 			}
 		},
 		Tunnels: r.tunnels, Sessions: r.tunnels, TunnelCardRefresh: r.opts.tunnelCards,
 	})
 	r.listener.OnChannel(pg.ChannelServices, r.services.Notify)
+	// A sealed service's recipients are republished when its keys change (ext-sealed.md §1; tunnel.md §5, §12):
+	// an enrollment (kontra_tunnel 'enrolled:…'), a revocation and the end of a rotation's overlap (kontra_revoke).
+	r.listener.OnChannel(pg.ChannelTunnel, r.services.RecipientsChanged)
+	r.listener.OnChannel(pg.ChannelRevoke, r.services.RecipientsChanged)
 	r.listener.OnReconnect(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -328,6 +401,7 @@ func (r *Replica) assemble() error {
 	registry := relay.NewRegistry()
 	executor := r.opts.executor
 	executor.TaskBytes = cfg.Limits.TaskBytes.Int64()
+	executor.Bucket, executor.Render = r.blobs, r.render
 	handlers = relay.NewHandlers(relay.HandlerDeps{
 		Log:       r.storeLog,
 		Puller:    store.NewPullerProvider(r.storeLog, r.listener),
@@ -339,7 +413,7 @@ func (r *Replica) assemble() error {
 		},
 		Interceptors: func(svc store.ServiceRef) []a2asrv.CallInterceptor {
 			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Canceler: r.lifecycle,
-				Reviews: r.lifecycle, PushPolicy: policy}
+				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render}
 			return i.Chain()
 		},
 		Registry: registry,
@@ -349,11 +423,24 @@ func (r *Replica) assemble() error {
 		Executor: executor,
 	})
 	r.handlers = handlers
+	// Gate-owned MCP tasks (spec §11.5; M3 WP-06) are dispatched by the MCP relay's dispatcher, which relay's hands
+	// them to and which registers its dispatches in the same registry, so abort reaches them.
+	mcpDispatch := &mcprelay.Dispatcher{
+		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Services: r.services, Tunnels: r.tunnels,
+		Waker: r.listener, Signals: r.lifecycle, TaskBytes: cfg.Limits.TaskBytes.Int64(), Logger: log,
+		// A durable dispatch's upstream told list_changed: the service's lists go here and on every replica (§11.3).
+		ToolsChanged: func(k mcprelay.ToolsKey) {
+			if r.tools != nil {
+				r.tools.Invalidate(k)
+			}
+			r.toolsNotify.Changed(k)
+		},
+	}
 	r.dispatch = &countingDispatch{DispatchActivities: &relay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Handlers: handlers, Backends: r.services,
-		Signals: r.lifecycle, Logger: log,
+		Signals: r.lifecycle, Logger: log, MCP: mcpDispatch,
 	}}
-	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log})
+	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log, Render: r.render})
 	// prepare places a tunnel service's attempts on the sessions of every replica (spec §6.1); the
 	// dispatch runs on kontra-tunnel-<the session's replica> (§14.2).
 	acts := &lifecycle.LifecycleActivities{Log: r.storeLog, Backends: r.services, Sessions: tunnelgate.NewPicker(r.pool),
@@ -375,32 +462,183 @@ func (r *Replica) assemble() error {
 		return err
 	}
 
-	writer := sse.NewWriterWithOptions(r.storeLog, r.listener, sse.Options{Logger: log})
+	writer := sse.NewWriterWithOptions(r.storeLog, r.listener, sse.Options{Logger: log, Render: r.render})
 	routes := edge.NewRouter()
 	a2ahttp.New(a2ahttp.Deps{
 		Services: r.services, Handlers: handlers, SSE: writer, Auth: authn,
 		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
 	}).Register(routes)
+	// /mcp/{svc} (spec §11; M3 WP-04): plain MCP requests, sessions pinned to a tunnel session or a direct backend,
+	// and the peer hop to the replica holding a tunnel session (§11.2). The gate's own /mcp is M4's (D170).
+	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
+		return err
+	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))
+	// GET /.well-known/jwks.json (spec §2.1, D166): the card-signing public keys, every key of the file.
+	if r.signingKeys != nil {
+		jwks, err := card.JWKSHandler(r.signingKeys)
+		if err != nil {
+			return err
+		}
+		routes.Handle("GET "+jws.JWKSPath, jwks)
+	}
+	ecfg, err := edge.FromConfig(cfg, log)
+	if err != nil {
+		return err
+	}
+	// The streams nodes open (tunnel.md §9, §8.3; D34): hiring requests are served by the same routes as the
+	// network's, behind an edge of their own whose per-address counts are per session (the session is the
+	// client, NodeStreams gives each its own address; never X-Forwarded-For) and whose in-flight cap is the
+	// session's stream cap; their principal is the session's (auth.HireSource); blob streams are served from
+	// the bucket for the tasks the session serves or hires.
+	//
+	// SPEC-CONFLICT (D207; tunnel.md §9 "its edge limits are the session's (§6.2 for anonymous sessions; otherwise
+	// the API key's)"; relay.md §2.2): the edge counts in flight per presented credential and rates per client
+	// address, and a hiring request carries neither (the gate holds no API key secret after the handshake, and the
+	// session has no address of its own). The closest faithful behaviour: the edge's limits apply with the session
+	// as the client: limits.body and the body timeout as on the network, rps_per_ip per session, and in flight the
+	// session's stream cap (§14: 32, inflight_per_key's default), not shared with the same key's requests from the
+	// network. §9 now says so.
+	nodeStreams := &tunnelgate.NodeStreams{
+		Hire:   edge.Middleware(edge.MiddlewareConfig{Limits: ecfg.Limits, ClientIP: edge.ClientIP{From: config.ClientIPRemote}}, routes),
+		Blobs:  &tunnelgate.Blobs{DB: r.pool, Store: r.blobs, Logger: log},
+		Logger: log.With("component", "tunnel"),
+	}
+	if r.keys != nil {
+		nodeStreams.Keys = r.keys
+	}
 	// GET /v1/tunnel (spec §2.1, tunnel.md §3): the node's WebSocket upgrade. A draining replica refuses new
 	// tunnels (relay.md §14.3).
 	th, err := tunnelgate.NewHandler(tunnelgate.HandlerConfig{
 		PublicURL: cfg.PublicURL, ChannelBinding: cfg.Tunnel.ChannelBinding, ReplicaID: r.id,
-		Admitter: r.enroll, Registry: r.tunnels, Draining: r.draining.Load, Logger: log,
+		Admitter: r.enroll, Registry: r.tunnels, Draining: r.draining.Load, Logger: log, NodeStreams: nodeStreams,
 	})
 	if err != nil {
 		return err
 	}
 	routes.Handle("GET "+tunnel.Path, th)
-	ecfg, err := edge.FromConfig(cfg, log)
-	if err != nil {
-		return err
-	}
 	if r.server, err = edge.New(ecfg, routes); err != nil {
 		return err
 	}
 	r.metrics = edge.NewMetrics(cfg.Metrics.Listen, http.HandlerFunc(r.serveMetrics))
 	return nil
+}
+
+// assembleMCP builds the MCP relay over the replica's registry, sessions and tunnels, mounts its routes, and the
+// peer listener's handler when peer.listen is set.
+func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, snapshot lifecycle.HooksSnapshot, rules hooks.KeyRules) error {
+	cfg := r.cfg
+	signer, peerClient, err := peerSetup(cfg)
+	if err != nil {
+		return err
+	}
+	r.tools = mcprelay.NewToolsCache()
+	// A node of an MCP service connecting or disconnecting on any replica drops the service's era (§11.12, D177): the
+	// registry runs the hook for its own sessions and for the other replicas' (NOTIFY kontra_tunnel 'mcp:…'); a LISTEN
+	// reconnect, which may have lost such a notice, drops every era and every drained list.
+	if r.tunnels != nil {
+		tools := r.tools
+		r.tunnels.OnMCPChange(func(tenantID uuid.UUID, service string) {
+			tools.DropEra(mcprelay.ToolsKey{TenantID: tenantID, Service: service})
+		})
+	}
+	if r.listener != nil {
+		// A notice lost while the connection was down (a node's change, an upstream's tools/list_changed) is made up
+		// for: every era and every drained list goes (D199, D229).
+		r.listener.OnReconnect(r.tools.Reconnected)
+	}
+	// An upstream's tools/list_changed seen on any replica drops the service's drained lists on every one (§11.3):
+	// the replica that relayed it sends NOTIFY kontra_tunnel 'tools:<tenant_id>/<service>' (coalesced per service).
+	r.toolsNotify = &mcprelay.ToolsNotifier{Log: r.log, Notify: func(ctx context.Context, payload string) error {
+		_, err := r.pool.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelTunnel), payload)
+		return err
+	}}
+	if r.listener != nil {
+		tools := r.tools
+		r.listener.OnChannel(pg.ChannelTunnel, func(payload string) {
+			if k, ok := mcprelay.ParseToolsChanged(payload); ok {
+				tools.Invalidate(k)
+			}
+		})
+	}
+	var ops []hooks.Operation
+	if a := cfg.Hooks.Admission; a != nil {
+		// The remote Admission hook is refused at load until M5 (C3); its operations are read for when it is not.
+		for _, op := range a.Operations {
+			ops = append(ops, hooks.Operation(op))
+		}
+	}
+	deps := mcprelay.Deps{
+		ReplicaID: r.id, Services: r.services, Auth: authn, Multi: cfg.Tenancy == config.TenancyMulti,
+		Sessions: mcprelay.NewSessions(r.pool), Tools: r.tools, Meter: mcprelay.NewMeter(r.pool),
+		Admission: hooks.BuiltinAdmission{}, AdmissionOps: ops, Tunnels: r.tunnels, Picker: tunnelgate.NewPicker(r.pool),
+		AllowedOrigins: cfg.MCP.AllowedOrigins, Log: r.log, ToolsChanged: r.toolsNotify.Changed,
+	}
+	if peerClient != nil {
+		deps.Peer = peerClient
+	}
+	// Gate-owned MCP tasks (spec §11.5–§11.8; M3 WP-06): tasks/* served from Postgres on any replica, LISTEN for
+	// tasks/result, the lifecycle client for the start, kontra.cancel and kontra.input_response.
+	if deps.Tasks, err = mcprelay.NewTasks(mcprelay.TasksConfig{
+		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Hooks: snapshot, Rules: rules, Logger: r.log,
+	}); err != nil {
+		return err
+	}
+	h, err := mcprelay.NewHandler(deps)
+	if err != nil {
+		return err
+	}
+	h.Register(routes)
+	r.mcp = h
+	if signer != nil {
+		ps, err := peer.NewServer(signer, h, peer.WithMaxBody(cfg.Limits.Body.Int64()), peer.WithLogger(r.log.With("component", "peer")))
+		if err != nil {
+			return err
+		}
+		r.peerSrv = peer.NewHTTPServer(ps, r.log)
+	}
+	return nil
+}
+
+// loadSigningKeys is the card-signing key set (spec §3, D166): the PEM file signing_key names (a file the gate
+// cannot use refuses the start); without one, on a loopback public_url, a key minted at start, logged with its
+// kid (one replica, development: another replica's cards would not verify against this one's JWKS); off
+// loopback, none, and the registry leaves every a2a service out (the configuration refuses a file that names
+// one).
+func loadSigningKeys(cfg *config.Config, log *slog.Logger) (*jws.KeySet, error) {
+	if p, ok := strings.CutPrefix(cfg.SigningKey, "file:"); ok {
+		keys, err := jws.LoadKeySet(p)
+		if err != nil {
+			return nil, fmt.Errorf("gate: signing_key: %w", err)
+		}
+		kid, _ := keys.KeyID()
+		log.Info("card-signing keys loaded", "kid", kid, "keys", len(keys.KeyIDs()))
+		return keys, nil
+	}
+	if cfg.SigningKey != "" {
+		return nil, fmt.Errorf("gate: signing_key: want file:<path> (D166)")
+	}
+	u, err := url.Parse(cfg.PublicURL)
+	if err != nil || !config.IsLocalhost(u.Hostname()) {
+		log.Warn("no signing_key: this gate serves no a2a service (their cards must be signed, D166)")
+		return nil, nil
+	}
+	keys, err := jws.EphemeralKeySet()
+	if err != nil {
+		return nil, err
+	}
+	kid, _ := keys.KeyID()
+	log.Warn("no signing_key: the served cards are signed with a key minted at start, which only this process's "+
+		"JWKS lists (a loopback gate of one replica, for development; set signing_key: file:<path>, D166)", "kid", kid)
+	return keys, nil
+}
+
+// objects is the bucket as the retention sweep deletes from it, nil without one.
+func (r *Replica) objects() store.ObjectDeleter {
+	if r.blobs == nil {
+		return nil
+	}
+	return r.blobs
 }
 
 // ID is the replica id.
@@ -480,6 +718,7 @@ func (r *Replica) Run(ctx context.Context) error {
 	r.checkHealth(bg)
 	goLoop("health", r.healthLoop)
 	goLoop("sweeps", r.RunSweeps)
+	goLoop("peer", r.servePeer)
 	if r.opts.hup {
 		goLoop("sighup", r.hupLoop)
 	}
@@ -684,7 +923,8 @@ func (r *Replica) hupLoop(ctx context.Context) error {
 
 // register inserts the replica's gate_replicas row (before any worker polls, spec/tunnel.md §11).
 func (r *Replica) register(ctx context.Context) error {
-	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version) values ($1, $2)`, r.id, version.Get())
+	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version, peer_addr) values ($1, $2, $3)`,
+		r.id, version.Get(), r.peerAddrArg())
 	if err != nil {
 		return fmt.Errorf("gate: register replica %s: %w", r.id, err)
 	}
@@ -700,15 +940,18 @@ func (r *Replica) beat(ctx context.Context) error {
 	if r.deregistered {
 		return nil
 	}
-	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version, draining_at)
-		values ($1, $2, case when $3 then now() end)
-		on conflict (replica_id) do update set last_seen_at = now(),
-			draining_at = coalesce(gate_replicas.draining_at, excluded.draining_at)`, r.id, version.Get(), r.draining.Load())
+	_, err := r.pool.Exec(ctx, `insert into kontra.gate_replicas (replica_id, version, draining_at, peer_addr)
+		values ($1, $2, case when $3 then now() end, $4)
+		on conflict (replica_id) do update set last_seen_at = now(), peer_addr = excluded.peer_addr,
+			draining_at = coalesce(gate_replicas.draining_at, excluded.draining_at)`, r.id, version.Get(), r.draining.Load(), r.peerAddrArg())
 	return err
 }
 
 // reap deletes the rows of replicas silent for more than ReplicaSilence (their tunnels rows cascade) and
-// closes the MCP sessions pinned to them, tunnel_lost (spec/tunnel.md §11). It returns the reaped ids.
+// closes the MCP sessions pinned to them, tunnel_lost (spec/tunnel.md §11). mcp_sessions.replica_id names the
+// replica holding a session's tunnel, never the one its client reached (D179): a row whose holder is live stays
+// open when the replica that wrote it is reaped, and a direct backend's row (replica_id NULL) is never closed here.
+// It returns the reaped ids.
 func (r *Replica) reap(ctx context.Context) ([]string, error) {
 	rows, err := r.pool.Query(ctx, `with gone as (
 			delete from kontra.gate_replicas
@@ -766,6 +1009,7 @@ func (r *Replica) replicaLoop(ctx context.Context) error {
 		if err := r.beat(bctx); err != nil && ctx.Err() == nil {
 			r.log.Warn("gate_replicas heartbeat failed", "error", err)
 		}
+		r.warnWithoutPeer(bctx)
 		if gone, err := r.reap(bctx); err != nil && ctx.Err() == nil {
 			r.log.Warn("reaping silent replicas failed", "error", err)
 		} else if len(gone) > 0 {

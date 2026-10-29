@@ -251,6 +251,10 @@ func newFixture(t *testing.T, multi bool) *fixture {
 	f.reg[tn+"/open"] = &Service{Ref: ref("open", "a2a"), Allow: allow(t, "anonymous"), Cards: cards}
 	f.reg[tn+"/listed"] = &Service{Ref: ref("listed", "a2a"), Allow: allow(t, "org:default"), Listed: true, Cards: cards}
 	f.reg[tn+"/off"] = &Service{Ref: ref("off", "a2a"), Allow: allow(t, "org:default"), Disabled: true, Cards: cards}
+	verified := cardOf(t, false)
+	verified.Verified, verified.SellerJWKS = true, []byte(`{"keys":[]}`)
+	f.reg[tn+"/verified"] = &Service{Ref: ref("verified", "a2a"), Allow: allow(t, "org:default"),
+		Cards: func() (*card.Served, error) { return verified, nil }}
 	f.reg[tn+"/tools"] = &Service{Ref: ref("tools", "mcp"), Allow: allow(t, "org:default"), Cards: cards}
 	f.srv = New(Deps{Services: f.reg, Handlers: handlers{f.h}, SSE: f.st, Multi: multi,
 		Auth: authn{"alice": alice, "bob": bob, "enroller": enroller}})
@@ -448,6 +452,18 @@ func TestCards(t *testing.T) {
 	w := f.do(req{"GET", "/agents/hello/.well-known/agent-card.upstream.json", "", hdr("Authorization", "Bearer alice")})
 	if w.Code != 200 || w.Body.String() != string(c.Upstream) {
 		t.Errorf("upstream card: %d %s", w.Code, w.Body)
+	}
+	// The seller key set (D223): a card route like the others, 404 when the gate verified the card with none, and
+	// the unknown-service 404 for a caller the service does not admit.
+	if w := f.do(req{"GET", "/agents/hello/.well-known/seller-jwks.json", "", hdr("Authorization", "Bearer alice")}); w.Code != 404 || w.Body.Len() != 0 {
+		t.Errorf("the seller key set of a card no seller key verified: %d %s", w.Code, w.Body)
+	}
+	if w := f.do(req{"GET", "/agents/verified/.well-known/seller-jwks.json", "", hdr("Authorization", "Bearer bob")}); w.Code != 404 || w.Body.Len() != 0 {
+		t.Errorf("the seller key set for a caller the service does not admit: %d %s", w.Code, w.Body)
+	}
+	if w := f.do(req{"GET", "/agents/verified/.well-known/seller-jwks.json", "", hdr("Authorization", "Bearer alice")}); w.Code != 200 ||
+		w.Body.String() != `{"keys":[]}` || w.Header().Get("Content-Type") != "application/jwk-set+json" {
+		t.Errorf("the seller key set of a verified card: %d %s %v", w.Code, w.Body, w.Header())
 	}
 	// Public cards: anonymous and listed services show their cards to anyone; their A2A routes still
 	// follow allow:.
@@ -728,6 +744,7 @@ func TestRegister(t *testing.T) {
 			{"GET", svc, "", v1("alice")},
 			{"HEAD", svc + "/.well-known/agent-card.json", "", v1("alice")},
 			{"GET", svc + "/.well-known/agent-card.upstream.json", "", v1("alice")},
+			{"GET", strings.Replace(svc, "hello", "verified", 1) + "/.well-known/seller-jwks.json", "", v1("alice")},
 			{"POST", svc, rpc("GetTask", `{"id":"x"}`, 1), v1("alice")},
 			{"POST", svc + "/", rpc("GetTask", `{"id":"x"}`, 1), v1("alice")},
 			{"POST", svc + "/message:send", msg, v1("alice")},

@@ -240,6 +240,24 @@ func (l *Log) BeginDispatch(ctx context.Context, taskID uuid.UUID, n int, replic
 // never follows an attempt whose upstream task exists. It is a no-op when the same id is already recorded
 // and ErrUpstreamIDMismatch when a different one is.
 func (l *Log) SetFirstUpstreamID(ctx context.Context, f *Fence, upstreamTaskID, upstreamContextID string) error {
+	return l.setFirstUpstreamID(ctx, f, upstreamTaskID, upstreamContextID, "")
+}
+
+// SetFirstUpstreamTask is SetFirstUpstreamID for an MCP dispatch whose first upstream id is an upstream task it
+// follows on the attempt's upstream_session (a 2026-07-28 CreateTaskResult's taskId, spec §11.12): the id and the
+// session are written in one statement, so that a dispatch lost between them never leaves an attempt whose first id
+// is recorded without what a re-attach needs to follow it (M3 review of WP-07). The no-op for the same id writes the
+// session when the attempt has none.
+func (l *Log) SetFirstUpstreamTask(ctx context.Context, f *Fence, upstreamTaskID, upstreamSession string) error {
+	if upstreamSession == "" {
+		return errors.New("store: an empty upstream session")
+	}
+	return l.setFirstUpstreamID(ctx, f, upstreamTaskID, "", upstreamSession)
+}
+
+// setFirstUpstreamID is SetFirstUpstreamID, with attempts.upstream_session written in the same statement when
+// session is not empty.
+func (l *Log) setFirstUpstreamID(ctx context.Context, f *Fence, upstreamTaskID, upstreamContextID, session string) error {
 	if f == nil {
 		return errors.New("store: a first upstream task id is recorded under a dispatch's fence")
 	}
@@ -249,11 +267,12 @@ func (l *Log) SetFirstUpstreamID(ctx context.Context, f *Fence, upstreamTaskID, 
 	ctx, cancel := l.writeCtx(ctx)
 	defer cancel()
 	tag, err := l.writeExec(ctx, `update kontra.attempts a
-			set upstream_task_id = $3, upstream_context_id = $4, first_upstream_id_at = now()
+			set upstream_task_id = $3, upstream_context_id = $4, first_upstream_id_at = now(),
+			    upstream_session = coalesce($6::text, a.upstream_session)
 			where a.task_id = $1 and a.n = $2 and a.upstream_task_id is null
 			  and a.ended_at is null and a.dispatch_id = $5
 			  and not exists (select 1 from kontra.attempts b where b.task_id = a.task_id and b.n > a.n)`,
-		f.TaskID, f.N, upstreamTaskID, nullString(upstreamContextID), f.DispatchID)
+		f.TaskID, f.N, upstreamTaskID, nullString(upstreamContextID), f.DispatchID, nullString(session))
 	if err != nil {
 		return fmt.Errorf("store: first upstream id of attempt %d of task %s: %w", f.N, f.TaskID, err)
 	}
@@ -274,6 +293,9 @@ func (l *Log) SetFirstUpstreamID(ctx context.Context, f *Fence, upstreamTaskID, 
 	}
 	if a.UpstreamTaskID != upstreamTaskID {
 		return fmt.Errorf("store: attempt %d of task %s: %w", f.N, f.TaskID, ErrUpstreamIDMismatch)
+	}
+	if session != "" && a.UpstreamSession != session {
+		return l.SetUpstreamSession(ctx, f, session)
 	}
 	return nil
 }

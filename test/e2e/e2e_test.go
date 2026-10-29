@@ -58,6 +58,12 @@ func start(t *testing.T, o Options) *Harness {
 			t.Logf("harness logs:\n%s", h.LogTail(150))
 		}
 	})
+	// Before the harness stops them: nothing it started listens off loopback (D185).
+	t.Cleanup(func() {
+		if err := h.CheckLoopback(); err != nil {
+			t.Error(err)
+		}
+	})
 	t.Logf("harness up: replicas A=%s (%s) B=%s (%s), upstream %s", h.Gates[0].ReplicaID, h.Gates[0].URL,
 		h.Gates[1].ReplicaID, h.Gates[1].URL, h.Upstream.URL())
 	return h

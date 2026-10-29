@@ -465,7 +465,8 @@ func (a *LifecycleActivities) ApplyMetadata(ctx context.Context, in ApplyMetadat
 	if err := a.Rules.CheckOperatorMaps(in.Patch.Metadata, in.Patch.MCPMeta); err != nil {
 		return 0, a.refusePatch(ctx, id, in.Source, err)
 	}
-	seq, err := a.Log.ApplyMetadata(ctx, id, in.Patch.Metadata)
+	// An MCP task keeps the patch's mcpMeta too (spec §13.3); an A2A task's store drops it.
+	seq, err := a.Log.ApplyPatch(ctx, id, in.Patch.Metadata, in.Patch.MCPMeta)
 	switch {
 	case errors.Is(err, a2a.ErrInvalidParams):
 		return 0, a.refusePatch(ctx, id, in.Source, err)
@@ -506,15 +507,15 @@ func (a *LifecycleActivities) Submit(ctx context.Context, in SubmitInput) (Submi
 	if err != nil {
 		return SubmitResult{}, err
 	}
-	if err := a.Rules.CheckOperatorMaps(in.Metadata, nil); err != nil {
+	if err := a.Rules.CheckOperatorMaps(in.Metadata, in.MCPMeta); err != nil {
 		return SubmitResult{}, a.refusePatch(ctx, id, "kontra.approval", err)
 	}
 	row, err := a.Log.Load(ctx, id)
 	if err != nil {
 		return SubmitResult{}, taskGone(err)
 	}
-	if row.State == store.StateQuoted && len(in.Metadata) > 0 {
-		if _, err := a.Log.ApplyMetadata(ctx, id, in.Metadata); err != nil {
+	if row.State == store.StateQuoted && (len(in.Metadata) > 0 || len(in.MCPMeta) > 0) {
+		if _, err := a.Log.ApplyPatch(ctx, id, in.Metadata, in.MCPMeta); err != nil {
 			if errors.Is(err, a2a.ErrInvalidParams) {
 				return SubmitResult{}, a.refusePatch(ctx, id, "kontra.approval", err)
 			}
@@ -536,20 +537,12 @@ func (a *LifecycleActivities) Submit(ctx context.Context, in SubmitInput) (Submi
 			}
 			return SubmitResult{Deadline: row.Deadline.UTC()}, nil
 		}
-		ev := a2a.NewStatusUpdateEvent(row.Snapshot, a2a.TaskStateSubmitted, nil)
-		next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
+		w, err := submittedWrite(row)
 		if err != nil {
 			return SubmitResult{}, err
 		}
-		payload, err := json.Marshal(a2a.StreamResponse{Event: ev})
-		if err != nil {
-			return SubmitResult{}, err
-		}
-		ap, err := a.Log.Append(ctx, nil, store.Write{
-			TaskID: id, PrevVersion: row.Version, Kind: store.KindStatus, State: store.StateSubmitted,
-			StatusAt: store.StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
-			Timeout: time.Duration(in.TimeoutSeconds) * time.Second,
-		})
+		w.Timeout = time.Duration(in.TimeoutSeconds) * time.Second
+		ap, err := a.Log.Append(ctx, nil, w)
 		if err == nil {
 			if ap.Deadline == nil {
 				return SubmitResult{}, fmt.Errorf("task %s: the submitted write returned no deadline", id)
@@ -562,6 +555,27 @@ func (a *LifecycleActivities) Submit(ctx context.Context, in SubmitInput) (Submi
 		last = err
 	}
 	return SubmitResult{}, last
+}
+
+// submittedWrite is a quoted task's move to submitted in its protocol: an A2A status event, or an MCP status row
+// (spec §11.9), whose statusMessage, the approve URL while quoted (D21), it drops.
+func submittedWrite(row *store.TaskRow) (store.Write, error) {
+	if row.Protocol == store.ProtocolMCP {
+		return store.MCPStatusWrite(row, store.StateSubmitted, "", nil)
+	}
+	ev := a2a.NewStatusUpdateEvent(row.Snapshot, a2a.TaskStateSubmitted, nil)
+	next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
+	if err != nil {
+		return store.Write{}, err
+	}
+	payload, err := json.Marshal(a2a.StreamResponse{Event: ev})
+	if err != nil {
+		return store.Write{}, err
+	}
+	return store.Write{
+		TaskID: row.ID, PrevVersion: row.Version, Kind: store.KindStatus, State: store.StateSubmitted,
+		StatusAt: store.StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
+	}, nil
 }
 
 // TaskRef builds the hooks' TaskRef from Postgres (spec §13.3): ids, the task's state and only the

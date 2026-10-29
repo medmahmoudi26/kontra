@@ -34,11 +34,22 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"version"}, 0, "kontra", ""},
 		{nil, 2, "", "usage:"},
 		{[]string{"nope"}, 2, "", "usage:"},
-		{[]string{"seal"}, 1, "", "kontra seal: not until M3"},
-		{[]string{"console"}, 1, "", "kontra console: not until M4"},
+		{[]string{"seal"}, 2, "", "kontra seal --service <service URL>"},
+		{[]string{"seal", "--service", "http://gate.example/agents/x", "-"}, 2, "", "https:// except on localhost"},
+		{[]string{"seal", "--open", "/nonexistent/part.json"}, 1, "", "kontra seal: open /nonexistent/part.json"},
+		{[]string{"connect", "-h"}, 0, "--sealed-max-age DURATION", ""},
+		{[]string{"connect", "-h"}, 0, "--accept-change NAME", ""},
+		{[]string{"console"}, 2, "", "usage:"}, // no local console (D164)
 		{[]string{"login"}, 1, "", "kontra login: not until M4"},
 		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},
+		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},
+		{[]string{"connect", "-h"}, 0, "mcp:NAME=stdio:CMD", ""},
+		{[]string{"connect", "-h"}, 0, "--roots NAME=DIR", ""},
+		{[]string{"seal", "--help"}, 0, "usage:\n  kontra seal --service <service URL>", ""},
+		{[]string{"seal", "-h"}, 0, "\n  kontra seal --open <part.json>\n", ""},
+		{[]string{"seal", "--bogus"}, 2, "", "usage:\n  kontra seal --service"},
+		{[]string{"--help"}, 0, "kid:<kid> for a seller signature", ""},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(ctx, c.args, &stdout, &stderr); code != c.code ||
@@ -46,6 +57,26 @@ func TestSubcommands(t *testing.T) {
 			t.Errorf("kontra %q = %d, stdout %q, stderr %q; want %d, %q, %q", c.args, code, stdout.String(), stderr.String(),
 				c.code, c.out, c.errOut)
 		}
+	}
+}
+
+// Round 2 records-4: kontra seal's usage error escapes its reason for the terminal and prints the synopsis as it is
+// (no literal \n); --help is no usage error; the base-path refusal cites its decisions, not "M2" or "the owner".
+func TestCLITexts(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"seal", "--bogus\x1b[31m"}, &stdout, &stderr); code != 2 ||
+		strings.Contains(stderr.String(), `\n`) || strings.Contains(stderr.String(), "\x1b") || !strings.Contains(stderr.String(), "\n  kontra seal --open") {
+		t.Errorf("a seal usage error = %d, %q", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), []string{"seal", "--help"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 ||
+		strings.Contains(stdout.String(), "help requested") {
+		t.Errorf("kontra seal --help = %d, %q, %q", code, stdout.String(), stderr.String())
+	}
+	_, err := node.ParseServe("a2a:x=http://127.0.0.1:9/path")
+	if err == nil || strings.Contains(err.Error(), "M2") || strings.Contains(err.Error(), "owner") || !strings.Contains(err.Error(), "D210") {
+		t.Errorf("the base-path refusal: %v", err)
 	}
 }
 
@@ -117,13 +148,21 @@ func TestConnectRefusesFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000"}, "not until M3"},
+		{[]string{"--serve", "mcp:fs=stdio:npx 'unterminated"}, "unterminated"},
+		{[]string{"--serve", "mcp:fs=stdio:npx server > log"}, "without a shell"},
+		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--roots", "hello=/"}, "no --serve mcp:hello"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--roots", "fs=relative"}, "absolute"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--env", "A=b"}, "variable name"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--max-sessions", "0"}, "--max-sessions"},
+		{[]string{"--serve", "mcp:fs=http://127.0.0.1:8000/mcp", "--session-idle", "0s"}, "--session-idle"},
 		{[]string{"--serve", "a2a:x=http://h:1/base"}, "base path"},
-		{[]string{"--serve", "a2a:x=http://h:1/base"}, "conflict"},
+		{[]string{"--serve", "a2a:x=http://h:1/base"}, "(D123, D210)"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--gate", "http://gate.example"}, "--gate"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--gate", "https://gate.example/?k=v"}, "no query"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--enroll", "nope"}, "not an enrollment token"},
-		{[]string{"--gate", "https://gate.example"}, "--serve"},
+		{[]string{"--gate", "https://gate.example", "--listen", "0.0.0.0:7777"}, "--local-token"},
+		{[]string{"--listen", "127.0.0.1"}, "host:port"},
+		{[]string{"--local-token", "/nonexistent/token-file"}, "--local-token"},
 		{[]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--bogus"}, "bogus"},
 	} {
 		var stdout, stderr bytes.Buffer
@@ -148,7 +187,7 @@ func TestConnectRefusesAReadableKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"connect", "--gate", "http://127.0.0.1:1", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
+	code := run(context.Background(), []string{"connect", "--gate", "http://127.0.0.1:1", "--listen", "127.0.0.1:0", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "mode 0644") {
 		t.Fatalf("connect with a 0644 key = %d, %q", code, stderr.String())
 	}
@@ -182,7 +221,7 @@ func TestConnectExitsOnANonRetryableCode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	code := run(ctx, []string{"connect", "--gate", srv.URL, "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
+	code := run(ctx, []string{"connect", "--gate", srv.URL, "--listen", "127.0.0.1:0", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
 	if ctx.Err() != nil {
 		t.Fatal("kontra connect kept retrying a non-retryable code")
 	}
@@ -218,7 +257,7 @@ func TestConnectPrintsNoGateEscapes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	var stdout, stderr bytes.Buffer
-	code := run(ctx, []string{"connect", "--gate", srv.URL, "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
+	code := run(ctx, []string{"connect", "--gate", srv.URL, "--listen", "127.0.0.1:0", "--serve", "a2a:hello=http://127.0.0.1:9"}, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "service_denied") {
 		t.Fatalf("connect = %d, stderr %q", code, stderr.String())
 	}

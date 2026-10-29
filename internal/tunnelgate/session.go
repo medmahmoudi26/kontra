@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
 
+	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/tunnel"
 )
@@ -37,12 +38,28 @@ type Session struct {
 	control   net.Conn  // the control stream, the first one the gate opened (set by the Handler)
 	controlMu sync.Mutex
 
+	// Hiring (spec/tunnel.md §9, §12; set by the Handler): the auth API key's principal as the admission
+	// authenticated it (nil: the session hires as node:<key_id>), whether it was found revoked, the NodeStreams
+	// that serve the session's node-opened streams, and their counts.
+	hire         *auth.Principal
+	hireRevoked  atomic.Bool
+	hiring       *NodeStreams
+	nodeAccepted atomic.Int64
+	nodeInFlight atomic.Int64
+
+	// rowMu serializes the deletes of its tunnels row (Registry.dropRow); it is taken before mu, never under it.
+	rowMu sync.Mutex
+
 	mu         sync.Mutex
 	served     map[string]string // service name → kind
+	hostsMCP   bool              // an MCP service was in its served set when it was added (Add): MCP sessions may pin it
+	revokedSvc map[string]bool   // services whose binding was revoked on this session (dropService)
+	revoked    bool              // its key was revoked, or its rotation overlap ended (markRevoked)
 	closed     bool              // no new stream: closing, closed, revoked or superseded
 	why        string            // why it closed, for the streams refused after
 	registered bool              // its tunnels row is in (Add committed)
 	rowGone    bool              // its tunnels row was deleted by this replica
+	mcpGone    bool              // its removal ran the OnMCPChange hooks (once: a session is removed more than once)
 	toldDrain  bool
 	exchanges  map[*exchange]struct{}
 	// Gate-opened streams the gate has closed and the node has not (exchange.linger), and the watch that
@@ -76,21 +93,28 @@ func (s *Session) allows(ctx context.Context, service, kind string) error {
 	ok, err := rev.Usable(ctx, s.KeyID, service)
 	switch {
 	case err != nil:
-		return fmt.Errorf("%w: the key's revocation state cannot be read (%v)", ErrSessionGone, err)
+		return fmt.Errorf("%w (%v)", ErrCheckUnavailable, err)
 	case !ok:
-		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap, or its binding to %s was revoked", ErrSessionGone, s.KeyID, service)
+		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap, or its binding to %s was revoked", ErrRevoked, s.KeyID, service)
 	}
 	return nil
 }
 
 // allowsLocal is Allows without a database read: the session's own state, and the revocation view when it
 // is fresh.
+//
+// A refusal because the key or the binding was revoked, or the key is past its rotation's overlap, wraps
+// ErrRevoked (relay.md §6.1: a pinned MCP session then closes revoked); any other wraps ErrSessionGone only.
 func (s *Session) allowsLocal(service, kind string) error {
 	s.mu.Lock()
-	closed, why := s.closed, s.why
+	closed, why, revoked, svcRevoked := s.closed, s.why, s.revoked, s.revokedSvc[service]
 	k, ok := s.served[service]
 	s.mu.Unlock()
 	switch {
+	case revoked:
+		return fmt.Errorf("%w: %s", ErrRevoked, why)
+	case svcRevoked && !ok:
+		return fmt.Errorf("%w: the binding of key %s to %s was revoked", ErrRevoked, s.KeyID, service)
 	case closed:
 		return fmt.Errorf("%w: %s", ErrSessionGone, why)
 	case s.mux != nil && s.mux.IsClosed():
@@ -105,12 +129,39 @@ func (s *Session) allowsLocal(service, kind string) error {
 		return nil
 	}
 	if !rev.KeyUsable(s.KeyID, time.Now()) {
-		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap", ErrSessionGone, s.KeyID)
+		return fmt.Errorf("%w: key %s is revoked or past its rotation's overlap", ErrRevoked, s.KeyID)
 	}
 	if rev.BindingRevoked(s.KeyID, service) {
-		return fmt.Errorf("%w: the binding of key %s to %s was revoked", ErrSessionGone, s.KeyID, service)
+		return fmt.Errorf("%w: the binding of key %s to %s was revoked", ErrRevoked, s.KeyID, service)
 	}
 	return nil
+}
+
+// markRevoked records that the session's key was revoked or its rotation overlap ended: its later refusals wrap
+// ErrRevoked, and its pinned MCP sessions close revoked.
+func (s *Session) markRevoked() {
+	s.mu.Lock()
+	s.revoked = true
+	s.mu.Unlock()
+}
+
+// hostedMCP reports whether s hosted an MCP service when it was added, so that MCP sessions may be pinned to it
+// (relay.md §11.2), whatever bindings were revoked since.
+func (s *Session) hostedMCP() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.hostsMCP
+}
+
+// closeReason is the close_reason of the MCP sessions pinned to s when it closes: revoked after a key revocation,
+// tunnel_lost otherwise.
+func (s *Session) closeReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revoked {
+		return mcpRevoked
+	}
+	return mcpTunnelLost
 }
 
 func (s *Session) revocations() *enroll.Revocations {
@@ -290,6 +341,12 @@ func (s *Session) dropService(service string, why error) bool {
 	s.mu.Lock()
 	_, had := s.served[service]
 	delete(s.served, service)
+	if errors.Is(why, ErrRevoked) {
+		if s.revokedSvc == nil {
+			s.revokedSvc = map[string]bool{}
+		}
+		s.revokedSvc[service] = true
+	}
 	var xs []*exchange
 	for x := range s.exchanges {
 		if x.service == service {

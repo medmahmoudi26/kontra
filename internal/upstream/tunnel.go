@@ -59,6 +59,28 @@ func TaskFrom(ctx context.Context) (ExchangeTask, bool) {
 	return t, ok
 }
 
+// MCPExchange is what an MCP exchange's preamble carries besides the service (tunnel.md §8.1, D180): the hex
+// SHA-256 of the client's gate Mcp-Session-Id and, for a tools/call (and every exchange of a durable task), the
+// client's JSON-RPC id of that call as a string. Both empty on a 2026-07-28 exchange. Like ExchangeTask, it
+// travels in the request's context (WithMCP), which http.Transport hands to the dial that opens the stream.
+type MCPExchange struct {
+	Session   string
+	RequestID string
+}
+
+type mcpExchangeKey struct{}
+
+// WithMCP returns ctx carrying the MCP preamble fields of the exchanges made with it.
+func WithMCP(ctx context.Context, m MCPExchange) context.Context {
+	return context.WithValue(ctx, mcpExchangeKey{}, m)
+}
+
+// MCPFrom returns the MCP preamble fields WithMCP set, if any.
+func MCPFrom(ctx context.Context) (MCPExchange, bool) {
+	m, ok := ctx.Value(mcpExchangeKey{}).(MCPExchange)
+	return m, ok
+}
+
 // StreamOpener opens one tunnel stream for one exchange with its preamble written (tunnel.md §8.1): the
 // service and kind it was made for, and the task of TaskFrom(ctx). An error the session caused (a stream
 // that could not be opened, a session closing, a key or binding that no longer allows it) should wrap

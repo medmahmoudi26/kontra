@@ -1071,3 +1071,36 @@ func TestDrainTellsTunnelsAfterDrainingAtCommits(t *testing.T) {
 		t.Fatalf("B's Run after the drain: %v", err)
 	}
 }
+
+// A start that fails once the replica exists is an error, never a panic, and releases what New opened (M3 WP-10
+// pentest finding F-1): every error return set New's named result to nil before its deferred cleanup ran, which
+// read it. Temporal unreachable is the first such failure; a bad signing key and a bucket the gate cannot use are
+// later ones.
+func TestNewFailsCleanlyAfterTheReplicaExists(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	closed := freePort(t) // nothing listens there
+	for _, tc := range []struct {
+		name, extra, want string
+	}{
+		{"temporal unreachable", fmt.Sprintf("temporal: { address: \"127.0.0.1:%d\" }\n", closed), "127.0.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.Parse([]byte("public_url: http://localhost:8080\npostgres: "+dsn+"\n"+tc.extra), "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var r *Replica
+			func() {
+				defer func() {
+					if p := recover(); p != nil {
+						t.Fatalf("New panicked on a start failure: %v", p)
+					}
+				}()
+				r, err = New(context.Background(), cfg, WithLogger(testLog(t, "fails")))
+			}()
+			if err == nil || r != nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("New = %v, %v; want no replica and an error naming %q", r, err, tc.want)
+			}
+		})
+	}
+}

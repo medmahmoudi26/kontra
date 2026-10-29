@@ -9,8 +9,10 @@
 // same-URI seller entries) and signatures. A card is never round-tripped through a typed struct: every
 // other member keeps its bytes and its place.
 //
-// M1 rewrites without signing (PRD §14): the served card carries no signatures field and the seller's
-// signatures are not copied (D13). Signer is the M3 seam.
+// The served card carries exactly one signature, the gate's (D13, D166): ES256 over the JCS of the served card
+// without signatures, whose protected header binds the upstream card (kontra.upstream: its JCS hash, the URL it
+// is served at, and whether a configured seller key verified it). The seller's signatures stay on the upstream
+// card. JWSSigner signs; SellerKeys verifies a seller's signatures against the keys the operator configured.
 package card
 
 import (
@@ -45,8 +47,12 @@ type Input struct {
 	OIDC          bool   // add an openIdConnect scheme (operator IdP)
 	// OIDCIssuer is the IdP's issuer URL; the scheme's openIdConnectUrl is its discovery document. OIDC
 	// principals are not built in M1, so this stays empty there.
-	OIDCIssuer     string
-	SealedURI      string            // https://kontra.sh/ext/sealed/v1 for a sealed service (M3), else ""
+	OIDCIssuer string
+	// Sealed is the sealed extension's entry for a sealed service (ext-sealed.md §1: uri
+	// https://kontra.sh/ext/sealed/v1, required false, params recipients, envelope and required), nil otherwise.
+	// It replaces a seller entry with the same URI, and a card whose upstream offers no A2A 1.0 interface is not
+	// installed (D165: the nodes seal and open the 1.0 shapes only), so the service is unavailable.
+	Sealed         json.RawMessage
 	CardExtensions []json.RawMessage // the operator's card_extensions annotation (spec §13.4)
 }
 
@@ -509,8 +515,9 @@ func v0Skills(raw json.RawMessage) (json.RawMessage, error) {
 	return b.Bytes(), nil
 }
 
-// Rewrite returns the served card bytes: the normalized card with the gate's fields of §3 set and its
-// signatures removed (M1 does not sign). Members the gate does not own keep their bytes and order.
+// Rewrite returns the served card bytes before signing: the normalized card with the gate's fields of §3 set and
+// its signatures removed (the keeper then adds the gate's one signature, D13). Members the gate does not own
+// keep their bytes and order.
 func Rewrite(in Input) ([]byte, error) {
 	norm, err := Normalize(in.Upstream)
 	if err != nil {
@@ -561,9 +568,15 @@ func Rewrite(in Input) ([]byte, error) {
 func extensions(caps object, in Input) (json.RawMessage, error) {
 	var gate []json.RawMessage
 	owned := map[string]bool{}
-	if in.SealedURI != "" {
-		gate = append(gate, mustJSON(map[string]string{"uri": in.SealedURI}))
-		owned[in.SealedURI] = true
+	if len(in.Sealed) > 0 {
+		var ext struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal(in.Sealed, &ext); err != nil || ext.URI == "" {
+			return nil, fmt.Errorf("card: the sealed extension entry is not an extension object with a uri")
+		}
+		gate = append(gate, in.Sealed)
+		owned[ext.URI] = true
 	}
 	for _, e := range in.CardExtensions {
 		var ext struct {
@@ -614,18 +627,26 @@ func extensions(caps object, in Input) (json.RawMessage, error) {
 	return b.Bytes(), nil
 }
 
-// Signer signs a served card (ES256 over RFC 8785 JCS, protected header with kontra.upstream, D13). M3.
+// Signer signs a served card (ES256 over RFC 8785 JCS, protected header with kontra.upstream, D13): it returns
+// one AgentCardSignature's JSON. JWSSigner is the gate's.
 type Signer interface {
-	Sign(ctx context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL string, verified bool) (json.RawMessage, error)
+	// Sign signs served; jwksURL is kontra.upstream.jwks, the URL of the seller key set the gate verified the upstream
+	// card with ("" when it verified none, D223).
+	Sign(ctx context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL, jwksURL string, verified bool) (json.RawMessage, error)
 }
 
 // Served is one service's current cards.
 type Served struct {
-	Body         []byte // the served card
+	Body         []byte // the served card, signed when the keeper has a Signer
 	Upstream     []byte // the upstream card, verbatim
 	ETag         string // hash of Body
 	LastModified time.Time
-	Unavailable  bool // configured seller keys and no verifying signature (M3), or no fetch for 30 min: card routes answer 503
+	Unavailable  bool     // configured seller keys and no verifying signature, or no fetch for 30 min: card routes answer 503
+	Hash         [32]byte // SHA-256 over the JCS of Upstream (kontra.upstream.sha256, services.card_hash)
+	Verified     bool     // a configured seller key verified a signature of Upstream (kontra.upstream.verified)
+	// SellerJWKS is the public JWK Set of the seller keys that verified Upstream, served at kontra.upstream.jwks
+	// ({svc}/.well-known/seller-jwks.json, D223); nil when no configured key verified it.
+	SellerJWKS []byte
 }
 
 // ETag is the strong entity tag of a served body: a quoted hex SHA-256 prefix. Replicas that fetched the
@@ -637,6 +658,47 @@ func ETag(body []byte) string {
 
 // CacheControl is the card responses' Cache-Control (spec §3).
 const CacheControl = "max-age=60"
+
+// SellerJWKSHandler serves GET {svc}/.well-known/seller-jwks.json (spec/relay.md §2.1, §3; D223): the public JWK Set
+// of the seller keys the gate verified the current upstream card with, the set kontra.upstream.jwks names, with
+// Cache-Control max-age=60 and an ETag, as the cards it goes with. A service whose card is unavailable answers 503,
+// as its card routes do; one whose card no configured seller key verified (none configured) has no such set: 404.
+func SellerJWKSHandler(get func(r *http.Request) (*Served, error)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		s, err := get(r)
+		switch {
+		case err != nil || s == nil || s.Unavailable:
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		case len(s.SellerJWKS) == 0:
+			w.Header().Set("Content-Length", "0")
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		etag := ETag(s.SellerJWKS)
+		h := w.Header()
+		h.Set("Cache-Control", CacheControl)
+		h.Set("ETag", etag)
+		if notModified(r, etag, time.Time{}, false) {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		h.Set("Content-Type", "application/jwk-set+json")
+		h.Set("Content-Length", strconv.Itoa(len(s.SellerJWKS)))
+		h.Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(s.SellerJWKS)
+		}
+	})
+}
 
 // Handler serves a card with Cache-Control: max-age=60, ETag and Last-Modified (the TCK hard-fails
 // without them). upstream selects the verbatim upstream card.

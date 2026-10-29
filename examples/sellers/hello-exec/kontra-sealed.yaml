@@ -1,0 +1,19 @@
+# A team gate on one machine, for the hello-exec seller hosted through the tunnel and sealed (M3,
+# spec/ext-sealed.md): the hiring node seals every part to the recipients this gate publishes in the card (the
+# keys enrolled for `hello`), the hosting node opens them before the seller sees anything and seals what it
+# answers; the gate stores and relays ciphertext only. `sealed: true` is {required: true}: a message with an
+# unsealed part is refused InvalidRequest before any task exists. Postgres and Temporal are the repository's
+# compose.dev.yaml, as for kontra.yaml. See examples/sealing/README.md.
+listen: 127.0.0.1:8080
+public_url: http://localhost:8080 # a node's --gate must be this origin (spec/tunnel.md §4: bad_origin otherwise)
+postgres: postgres://kontra:kontra@localhost:5432/kontra
+temporal: { address: localhost:7233, namespace: kontra }
+auth: { api_keys: true }
+
+services:
+  hello:
+    kind: a2a
+    backend: { tunnel: {} }          # hosted by the nodes enrolled for it: their keys are the recipients
+    allow: ["org:default"]           # every API key of this gate's one tenant
+    sealed: true                     # {required: true}; {required: false} lets unsealed parts through, marked
+    task: { timeout: 10m, retries: 2 }

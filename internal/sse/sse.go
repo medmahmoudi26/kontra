@@ -30,6 +30,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/edge"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
@@ -80,6 +81,9 @@ type Options struct {
 	// WriteTimeout bounds each write of the stream (an event, a keep-alive): WriteTimeout when zero.
 	WriteTimeout time.Duration
 	Logger       *slog.Logger
+	// Render renders the kontra-blob: parts of every event and snapshot the stream sends as presigned GETs
+	// (spec §10.4, D167); a row that names no ref is sent as stored, without being decoded. Nil renders nothing.
+	Render *blob.Renderer
 }
 
 // WriteTimeout is how long one write of a stream may block: a caller that keeps its connection open but
@@ -395,7 +399,13 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 		p.lead, p.leadCloses = lead, !p.followUp && endsTurn(lead.Status.State)
 	}
 	if p.lead != nil {
-		if sw.event(0, mustStreamResponse(p.lead)) != nil || p.leadCloses {
+		lead, err := w.opts.Render.Task(ctx, p.lead)
+		if err != nil {
+			w.opts.Logger.Warn("sse: the snapshot's parts could not be rendered; ending the stream", "task", p.task, "error", err)
+			_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the task's parts could not be rendered; subscribe to the task again"))
+			return
+		}
+		if sw.event(0, mustStreamResponse(lead)) != nil || p.leadCloses {
 			return
 		}
 	}
@@ -422,11 +432,11 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 			backoff = min(2*backoff, 5*time.Second)
 			continue
 		}
-		failingSince, backoff = time.Time{}, 100*time.Millisecond
+		var renderErr error
 		for i, ev := range evs {
 			evs[i] = store.Event{} // the read's rows are let go one by one as they are sent
-			cursor = ev.Seq
 			if !ev.Kind.Carried() {
+				cursor = ev.Seq
 				continue // message and metadata rows show in the next snapshot (spec §9)
 			}
 			state, data, err := rowData(ev)
@@ -435,13 +445,37 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 				_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the task's log holds an unreadable event"))
 				return
 			}
+			if data, renderErr = w.opts.Render.StreamResponse(ctx, p.task, data); renderErr != nil {
+				break // like a read that failed: the row is sent once it renders
+			}
 			if sw.event(ev.Seq, data) != nil {
 				return
 			}
+			cursor = ev.Seq
 			if state != "" && p.closes(state) {
 				return
 			}
 		}
+		if renderErr != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			if failingSince.IsZero() {
+				failingSince = time.Now()
+			}
+			if time.Since(failingSince) >= w.opts.ReadGrace {
+				w.opts.Logger.Warn("sse: a row's parts could not be rendered; ending the stream", "task", p.task, "after", cursor, "error", renderErr)
+				_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the task's parts could not be rendered; resume with Last-Event-ID"))
+				return
+			}
+			w.opts.Logger.Warn("sse: a row's parts could not be rendered; retrying", "task", p.task, "after", cursor, "error", renderErr)
+			if !w.wait(ctx, sw, keep.C, nil, backoff) {
+				return
+			}
+			backoff = min(2*backoff, 5*time.Second)
+			continue
+		}
+		failingSince, backoff = time.Time{}, 100*time.Millisecond
 		if more {
 			continue
 		}

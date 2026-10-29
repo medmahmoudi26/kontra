@@ -193,6 +193,8 @@ func TestSidecarNotAProxy(t *testing.T) {
 			t.Fatalf("%s: T's answer carries Kontra-Node %q", c.what, v)
 		}
 	}
+	blobBody := `{"jsonrpc":"2.0","id":8,"method":"SendMessage","params":{"message":{"messageId":"m-2","role":"ROLE_USER",` +
+		`"parts":[{"url":"kontra-blob:aaaaaaaaaaaaaaaaaaaaaaaaaa","mediaType":"text/plain"}]}}}`
 	refused := []struct {
 		what   string
 		pre    tunnel.Preamble
@@ -208,6 +210,10 @@ func TestSidecarNotAProxy(t *testing.T) {
 			"GET / HTTP/1.1\r\nHost: x\r\n\r\n", http.StatusNotFound, tunnel.NodeNotHosted},
 		{"another kind", tunnel.Preamble{Op: tunnel.OpHTTP, Service: "hello", Kind: tunnel.KindMCP},
 			"GET / HTTP/1.1\r\nHost: x\r\n\r\n", http.StatusNotFound, tunnel.NodeKindMismatch},
+		// A kontra-blob: part is fetched on a blob stream inside the tunnel (§8.3), never dialed; the fake gate
+		// serves no bucket (not_found), so the request is refused and T never sees it.
+		{"a kontra-blob: part the gate does not serve", hello, "POST / HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n" +
+			fmt.Sprintf("Content-Length: %d\r\n\r\n%s", len(blobBody), blobBody), http.StatusBadRequest, ""},
 	}
 	for _, c := range refused {
 		resp, got, err := Exchange(sess, c.pre, c.raw, 15*time.Second)

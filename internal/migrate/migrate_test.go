@@ -64,8 +64,8 @@ func applied(t *testing.T, m *migrate.Migrator) []int64 {
 	return v
 }
 
-// `migrate up` on an empty database creates schema kontra and kontra.goose_db_version and applies 0001;
-// nothing lands in public.
+// `migrate up` on an empty database creates schema kontra and kontra.goose_db_version and applies 0001 and
+// 0002, in order; nothing lands in public.
 func TestUpOnEmptyDatabase(t *testing.T) {
 	dsn := pgtest.Database(t)
 	c := connect(t, dsn)
@@ -79,16 +79,19 @@ func TestUpOnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 1 || res[0].Source.Version != 1 || res[0].Direction != "up" || res[0].Error != nil || res[0].Empty {
-		t.Fatalf("Up = %v, want 0001 applied", res)
+	if len(res) != 2 {
+		t.Fatalf("Up = %v, want 0001 and 0002 applied", res)
 	}
-	if !strings.HasSuffix(res[0].Source.Path, "0001_init.sql") {
-		t.Errorf("applied %q", res[0].Source.Path)
+	for i, name := range []string{"0001_init.sql", "0002_m3.sql"} {
+		r := res[i]
+		if r.Source.Version != int64(i+1) || r.Direction != "up" || r.Error != nil || r.Empty || !strings.HasSuffix(r.Source.Path, name) {
+			t.Errorf("Up[%d] = %v, want %s applied", i, r, name)
+		}
 	}
 	if !scalar[bool](t, c, "select to_regclass('kontra.goose_db_version') is not null") {
 		t.Error("kontra.goose_db_version missing")
 	}
-	for _, table := range []string{"tasks", "task_events", "attempts", "work_items", "services", "api_keys", "audit"} {
+	for _, table := range []string{"tasks", "task_events", "attempts", "work_items", "services", "api_keys", "audit", "blobs"} {
 		if !scalar[bool](t, c, "select to_regclass($1) is not null", "kontra."+table) {
 			t.Errorf("kontra.%s missing after up", table)
 		}
@@ -96,8 +99,8 @@ func TestUpOnEmptyDatabase(t *testing.T) {
 	if n := relations(t, c, "public"); n != 0 {
 		t.Errorf("%d relations in public, want 0 (D37)", n)
 	}
-	if got := applied(t, m); len(got) != 1 || got[0] != 1 {
-		t.Errorf("applied = %v, want [1]", got)
+	if got := applied(t, m); len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Errorf("applied = %v, want [1 2]", got)
 	}
 	if err := m.Check(ctx); err != nil {
 		t.Errorf("Check after up: %v", err)
@@ -117,8 +120,8 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st) != 1 || st[0].State != goose.StatePending || st[0].Source.Version != 1 {
-		t.Fatalf("Status on an empty database = %+v, want 0001 pending", st)
+	if len(st) != 2 || st[0].State != goose.StatePending || st[0].Source.Version != 1 || st[1].State != goose.StatePending || st[1].Source.Version != 2 {
+		t.Fatalf("Status on an empty database = %+v, want 0001 and 0002 pending", st)
 	}
 	if _, err := m.Up(ctx); err != nil {
 		t.Fatal(err)
@@ -127,13 +130,16 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st) != 1 || st[0].State != goose.StateApplied || st[0].AppliedAt.IsZero() || !strings.HasSuffix(st[0].Source.Path, "0001_init.sql") {
-		t.Fatalf("Status after up = %+v, want 0001 applied with a time", st[0])
+	for i, name := range []string{"0001_init.sql", "0002_m3.sql"} {
+		if len(st) != 2 || st[i].State != goose.StateApplied || st[i].AppliedAt.IsZero() || !strings.HasSuffix(st[i].Source.Path, name) {
+			t.Fatalf("Status after up = %+v, want %s applied with a time", st, name)
+		}
 	}
 }
 
-// Down then up is clean: down removes every relation of 0001 (the version table stays), Check fails at
-// version 0, and up again builds the same schema.
+// Down then up is clean: the first down removes 0002's relations and column (Check then fails at version 1),
+// the second every relation of 0001 (the version table stays; Check fails at version 0), and up again builds
+// the same schema.
 func TestDownThenUp(t *testing.T) {
 	dsn := pgtest.Database(t)
 	c := connect(t, dsn)
@@ -148,8 +154,27 @@ func TestDownThenUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if res.Source.Version != 2 || res.Direction != "down" {
+		t.Fatalf("first Down = %v", res)
+	}
+	if scalar[bool](t, c, "select to_regclass('kontra.blobs') is not null") || !scalar[bool](t, c, "select to_regclass('kontra.tasks') is not null") {
+		t.Error("the first down did not undo exactly 0002")
+	}
+	if scalar[bool](t, c, `select exists (select 1 from information_schema.columns
+		where table_schema = 'kontra' and table_name = 'gate_replicas' and column_name = 'peer_addr')`) {
+		t.Error("gate_replicas.peer_addr survives 0002's down")
+	}
+	if scalar[bool](t, c, "select to_regclass('kontra.mcp_sessions_virtual') is not null") {
+		t.Error("mcp_sessions_virtual survives 0002's down")
+	}
+	if err := m.Check(ctx); !errors.Is(err, migrate.ErrSchemaNotCurrent) || !strings.Contains(err.Error(), "at version 1") {
+		t.Errorf("Check at version 1 = %v", err)
+	}
+	if res, err = m.Down(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if res.Source.Version != 1 || res.Direction != "down" {
-		t.Fatalf("Down = %v", res)
+		t.Fatalf("second Down = %v", res)
 	}
 	if scalar[bool](t, c, "select to_regclass('kontra.tasks') is not null") {
 		t.Error("kontra.tasks survives down")
@@ -174,7 +199,7 @@ func TestDownThenUp(t *testing.T) {
 	}
 
 	res2, err := m.Up(ctx)
-	if err != nil || len(res2) != 1 {
+	if err != nil || len(res2) != 2 {
 		t.Fatalf("Up after down = %v, %v", res2, err)
 	}
 	if n := relations(t, c, "kontra"); n != afterUp {
@@ -185,8 +210,8 @@ func TestDownThenUp(t *testing.T) {
 	}
 }
 
-// Two first runs at once: both succeed, exactly one applies 0001, and neither trips over the other's
-// CREATE SCHEMA.
+// Two first runs at once: both succeed, each migration is applied exactly once, and neither trips over the
+// other's CREATE SCHEMA.
 func TestConcurrentUpAppliesOnce(t *testing.T) {
 	for range 3 {
 		dsn := pgtest.Database(t)
@@ -201,10 +226,10 @@ func TestConcurrentUpAppliesOnce(t *testing.T) {
 		if errs[0] != nil || errs[1] != nil {
 			t.Fatalf("concurrent Up: %v / %v", errs[0], errs[1])
 		}
-		if n := len(results[0]) + len(results[1]); n != 1 {
-			t.Fatalf("concurrent Up applied %d migrations in total (%v, %v), want 1", n, results[0], results[1])
+		if n := len(results[0]) + len(results[1]); n != 2 {
+			t.Fatalf("concurrent Up applied %d migrations in total (%v, %v), want 2", n, results[0], results[1])
 		}
-		if got := applied(t, a); len(got) != 1 {
+		if got := applied(t, a); len(got) != 2 {
 			t.Fatalf("applied = %v", got)
 		}
 	}
@@ -241,7 +266,7 @@ func TestUpWaitsForTheLock(t *testing.T) {
 	}
 	select {
 	case r := <-done:
-		if r.err != nil || len(r.res) != 1 {
+		if r.err != nil || len(r.res) != 2 {
 			t.Fatalf("Up after the lock was released = %v, %v", r.res, r.err)
 		}
 	case <-time.After(15 * time.Second):
@@ -249,8 +274,8 @@ func TestUpWaitsForTheLock(t *testing.T) {
 	}
 }
 
-// Check fails at version 0 and passes at 1; it is read-only, and it refuses a database ahead of the
-// binary.
+// Check fails at version 0 and passes at 2, the latest; it is read-only, and it refuses a database ahead of
+// the binary.
 func TestCheck(t *testing.T) {
 	dsn := pgtest.Database(t)
 	c := connect(t, dsn)
@@ -264,16 +289,16 @@ func TestCheck(t *testing.T) {
 	if scalar[bool](t, c, "select exists (select 1 from pg_namespace where nspname = 'kontra')") {
 		t.Error("Check created schema kontra")
 	}
-	if m.Latest() != 1 {
-		t.Errorf("Latest = %d, want 1", m.Latest())
+	if m.Latest() != 2 {
+		t.Errorf("Latest = %d, want 2", m.Latest())
 	}
 	if _, err := m.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Check(ctx); err != nil {
-		t.Errorf("Check at version 1 = %v", err)
+		t.Errorf("Check at version 2 = %v", err)
 	}
-	if _, err := c.Exec(ctx, "insert into kontra.goose_db_version (version_id, is_applied) values (2, true)"); err != nil {
+	if _, err := c.Exec(ctx, "insert into kontra.goose_db_version (version_id, is_applied) values (3, true)"); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Check(ctx); !errors.Is(err, migrate.ErrSchemaNotCurrent) || !strings.Contains(err.Error(), "does not know") {

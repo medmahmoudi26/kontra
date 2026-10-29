@@ -80,7 +80,18 @@ const (
 	// task tunnel_lost and answers the caller with it, instead of "the task continues" (spec §8's row
 	// "exists, session gone"; lifecycle.CancelTunnelLost).
 	changeCancelTunnelLost = "cancel-tunnel-lost"
+	// changeMCPCancel: a gate-owned MCP task's kontra.cancel (MCP tasks/cancel, spec §11.6, D57) runs abort (no
+	// upstream task yet) or forward_cancel, waits for them at most mcpCancelWait, then writes canceled whatever
+	// the upstream answered, and stops the dispatch: an MCP task never "continues" after a cancel, and D79's wait
+	// for a lost replica's heartbeat timeout is for A2A CancelTask only. Only MCP tasks (Input.Protocol mcp, M3)
+	// reach it.
+	changeMCPCancel = "mcp-cancel"
 )
+
+// mcpCancelWait is how long an MCP task's cancel waits for abort or forward_cancel before it writes canceled (spec
+// §11.6: "it waits at most 10 s"): 8 s, so that the canceled write, and the caller's read of it, land within the
+// 10 s from the Update's start that the client is promised.
+const mcpCancelWait = 8 * time.Second
 
 // phase is the task's state as the workflow knows it, from its own Updates and activity results.
 type phase int
@@ -185,6 +196,8 @@ type lc struct {
 	reviewInFlight int
 	disputed       bool
 	closed         bool
+
+	inputSeq int64 // the last kontra.input_response seq (MCP, spec §11.5 step 5): workflow state only
 
 	pushes       map[string]bool // configs whose push_webhook this run started
 	pushPending  int
@@ -500,9 +513,11 @@ func (l *lc) signals(ctx workflow.Context) {
 		l.closed = true
 	})
 	sel.AddReceive(workflow.GetSignalChannel(ctx, SignalInputResponse), func(c workflow.ReceiveChannel, _ bool) {
-		// MCP (M3): the running dispatch writes the response upstream; the signal only updates state.
+		// MCP (spec §11.5 step 5): the running dispatch, which tails the log, writes the response upstream; the
+		// signal only updates workflow state, and schedules nothing.
 		var s InputResponseSignal
 		c.Receive(ctx, &s)
+		l.inputSeq = max(l.inputSeq, s.Seq)
 	})
 	sel.AddReceive(ctx.Done(), func(workflow.ReceiveChannel, bool) { stop = true })
 	for !stop {
@@ -721,7 +736,8 @@ func (l *lc) approve(ctx workflow.Context, op *approvalOp) {
 		return
 	}
 	var r SubmitResult
-	err := l.call(ctx, ActSubmit, &r, SubmitInput{TaskID: l.in.TaskID, Metadata: op.u.Metadata, TimeoutSeconds: l.in.TimeoutSeconds})
+	err := l.call(ctx, ActSubmit, &r, SubmitInput{TaskID: l.in.TaskID, Metadata: op.u.Metadata, MCPMeta: op.u.MCPMeta,
+		TimeoutSeconds: l.in.TimeoutSeconds})
 	if err != nil {
 		op.err = refusal("the approval could not be applied")
 		return
@@ -1255,8 +1271,12 @@ func unreachable() CancelResult {
 	return CancelResult{Outcome: CancelNotCancelable, UpstreamError: &UpstreamError{Code: -32603, Message: "the service could not be reached to cancel the task"}}
 }
 
-// cancelDispatching is §8's cancel table while a dispatch runs.
+// cancelDispatching is §8's cancel table while a dispatch runs (§11.6's for an MCP task, cancelMCP).
 func (l *lc) cancelDispatching(ctx workflow.Context, c *call) {
+	if l.mcpCancel(ctx) {
+		l.cancelMCP(ctx, c)
+		return
+	}
 	op := l.cancel
 	st, ok := l.attemptState(ctx)
 	if !ok {
@@ -1332,6 +1352,10 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 		l.finishEnded(op, "")
 		return
 	}
+	if l.mcpCancel(ctx) {
+		l.cancelMCP(ctx, nil)
+		return
+	}
 	st, ok := l.attemptState(ctx)
 	if !ok {
 		l.finishEnded(op, st.TaskState)
@@ -1361,6 +1385,102 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 		l.finishEnded(op, tr.State)
 	default:
 		l.finish(op, CancelResult{Outcome: r.Outcome, UpstreamError: r.UpstreamError}, nil)
+	}
+}
+
+// mcpCancel reports whether the cancel in flight follows spec §11.6's MCP rule (changeMCPCancel): the task is a
+// gate-owned MCP task.
+func (l *lc) mcpCancel(ctx workflow.Context) bool {
+	return l.in.Protocol == ProtocolMCP && workflow.GetVersion(ctx, changeMCPCancel, workflow.DefaultVersion, 1) >= 1
+}
+
+// cancelMCP is spec §11.6's tasks/cancel (D57), while a dispatch runs (c) or none does (c nil): with no upstream
+// task yet, abort the dispatch in process and wait for it to stop; with one, forward_cancel, which sends upstream
+// tasks/cancel when the upstream declared it; either is waited for at most mcpCancelWait from the cancel's start,
+// then canceled is written whatever the upstream answered (or did not), and the dispatch is stopped. An abort or a
+// forward_cancel still running then is left to finish on its own (its control slot is counted until it does), and
+// a dispatch that is still alive cannot write once canceled is logged (the terminal rule, §5.1) and is fenced
+// (D77). A task that ended otherwise first answers not cancelable.
+func (l *lc) cancelMCP(ctx workflow.Context, c *call) {
+	op := l.cancel
+	until := op.started.Add(mcpCancelWait)
+	left := func() time.Duration { return until.Sub(workflow.Now(ctx)) }
+	running := c != nil && !c.done
+	st, ok := l.attemptState(ctx)
+	if !ok {
+		l.finishEnded(op, st.TaskState)
+		return
+	}
+	endAttempt := string(store.OutcomeCanceled)
+	switch {
+	case l.n == 0 || (st.FirstUpstreamIDAt == nil && !running):
+		endAttempt = string(store.OutcomeAborted)
+	case st.FirstUpstreamIDAt == nil:
+		endAttempt = string(store.OutcomeAborted)
+		l.abortAsync(ctx, c, st)
+		if d := left(); d > 0 {
+			_, _ = workflow.AwaitWithTimeout(ctx, d, func() bool { return c.done })
+		}
+		if c.done {
+			st2, ok := l.attemptState(ctx)
+			if !ok {
+				l.finishEnded(op, st2.TaskState)
+				return
+			}
+			if st2.FirstUpstreamIDAt != nil {
+				// The dispatch recorded a first upstream task id before it stopped: tell the upstream, within what
+				// is left of the wait.
+				l.forwardCancelWithin(ctx, st2, false, left())
+				endAttempt = string(store.OutcomeCanceled)
+			}
+		}
+	default:
+		l.forwardCancelWithin(ctx, st, running, left())
+	}
+	tr := l.writeTerminal(ctx, WriteTerminalInput{State: string(store.StateCanceled), Canceled: store.CanceledClient, EndAttempt: endAttempt})
+	if running && !c.done {
+		c.cancel()
+	}
+	l.finishEnded(op, tr.State)
+}
+
+// abortAsync schedules abort on the dispatch's replica (and asks Temporal to cancel the dispatch) without waiting
+// for it; with no replica recorded, Temporal's cancellation alone (an activity that has not started completes at
+// once). The control slot counts until the abort returns.
+func (l *lc) abortAsync(ctx workflow.Context, c *call, st AttemptState) {
+	if st.ReplicaID == "" {
+		c.cancel()
+		return
+	}
+	l.ctl++
+	f := workflow.ExecuteActivity(ctlCtx(ctx, QueueCtl(st.ReplicaID), abortStartToClose), ActAbort, AttemptRef{TaskID: l.in.TaskID, N: l.n})
+	c.cancel()
+	workflow.Go(ctx, func(gc workflow.Context) {
+		defer func() { l.ctl-- }()
+		if err := f.Get(gc, nil); err != nil {
+			l.logger.Info("abort did not run", "replica", st.ReplicaID, "error", err)
+		}
+	})
+}
+
+// forwardCancelWithin starts forward_cancel and waits for it at most d (none when d is not positive); its answer
+// changes nothing (D57). The control slot counts until it returns.
+func (l *lc) forwardCancelWithin(ctx workflow.Context, st AttemptState, running bool, d time.Duration) {
+	_ = workflow.Await(ctx, func() bool { return !l.applying })
+	queue, tunnel := l.cancelRoute(st, running)
+	f := l.startForwardCancel(ctx, queue)
+	done := false
+	l.ctl++
+	workflow.Go(ctx, func(gc workflow.Context) {
+		defer func() { l.ctl--; done = true }()
+		if r, err := l.awaitForwardCancel(gc, f, queue, tunnel); err != nil {
+			l.logger.Info("forward_cancel of an MCP task got no answer; the task is canceled all the same", "error", err)
+		} else {
+			l.logger.Info("forward_cancel of an MCP task answered", "outcome", r.Outcome)
+		}
+	})
+	if d > 0 {
+		_, _ = workflow.AwaitWithTimeout(ctx, d, func() bool { return done })
 	}
 }
 

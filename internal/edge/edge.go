@@ -373,8 +373,8 @@ type MiddlewareConfig struct {
 	now      func() time.Time // tests
 }
 
-// Middleware is the edge chain in front of routes, outermost first: the closed default route (an empty 404
-// for anything routes does not register), HSTS (TLS only), the per-IP rate, the body cap (the body is
+// Middleware is the edge chain in front of routes, outermost first: HSTS (TLS only, on every response, the closed
+// route's included), the closed default route (an empty 404 for anything routes does not register), the per-IP rate, the body cap (the body is
 // read here, within BodyTimeout, so a handler only ever sees a complete body within the limit), then the
 // per-key in-flight cap, counted per presented Authorization value before it is verified (spec §2.2: the
 // limits come before authentication; rps_per_ip bounds credential spraying). Refusals happen before any
@@ -411,13 +411,14 @@ const (
 )
 
 func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// HSTS first: the closed default route's 404 is a response over TLS too (M3 WP-10 pentest finding F-2).
+	if c.cfg.HSTS && r.TLS != nil {
+		w.Header().Set("Strict-Transport-Security", HSTS)
+	}
 	rt, ok := c.routes.match(r)
 	if !ok {
 		emptyNotFound(w)
 		return
-	}
-	if c.cfg.HSTS && r.TLS != nil {
-		w.Header().Set("Strict-Transport-Security", HSTS)
 	}
 	addr := c.cfg.ClientIP.Addr(r)
 	r = r.WithContext(withClientAddr(r.Context(), addr))

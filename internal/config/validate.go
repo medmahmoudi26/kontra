@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/jws"
 	"kontra.sh/kontra/internal/pg"
 )
 
@@ -150,6 +152,9 @@ func (c *Config) validateListeners(v *validator) {
 		v.add("metrics.listen %q: must differ from listen %q, which binds the same port (metrics never share the public listener, spec §2.1)",
 			c.Metrics.Listen, c.Listen)
 	}
+	if p := c.Peer; p != nil {
+		c.validatePeer(v, p)
+	}
 	if err := checkHostPort(c.Temporal.Address); err != nil {
 		v.add("temporal.address %q: %v", c.Temporal.Address, err)
 	}
@@ -163,6 +168,38 @@ func (c *Config) validateListeners(v *validator) {
 	case TenancySingle, TenancyMulti:
 	default:
 		v.add("tenancy %q: want single or multi", c.Tenancy)
+	}
+}
+
+// peerSecretRE is the shape of peer.secret_env (spec/schema/config.json).
+var peerSecretRE = regexp.MustCompile(`^[A-Z_][A-Z0-9_]*$`)
+
+// validatePeer checks peer: (spec/relay.md §11.2, §17; D163, D179): listen a host:port that is neither the public
+// nor the metrics listener's port (the peer listener is never the public one), advertise a host:port with a host
+// and a port when set, and secret_env the name of an environment variable. The secret itself is read at start
+// (at least 32 bytes), not here: a configuration is checked where the secret may not be set.
+func (c *Config) validatePeer(v *validator, p *Peer) {
+	if p.Listen == "" {
+		v.add("peer.listen: required (the peer listener's host:port, spec §11.2)")
+	} else if err := checkHostPort(p.Listen); err != nil {
+		v.add("peer.listen %q: %v", p.Listen, err)
+	} else {
+		for _, other := range []struct{ key, addr string }{{"listen", c.Listen}, {"metrics.listen", c.Metrics.Listen}} {
+			if checkHostPort(other.addr) == nil && listenersCollide(p.Listen, other.addr) {
+				v.add("peer.listen %q: must differ from %s %q, which binds the same port (the peer listener is never the public one, spec §11.2)",
+					p.Listen, other.key, other.addr)
+			}
+		}
+	}
+	if p.Advertise != "" {
+		host, port, err := net.SplitHostPort(p.Advertise)
+		n, perr := strconv.Atoi(port)
+		if err != nil || host == "" || perr != nil || n < 1 || n > 65535 {
+			v.add("peer.advertise %q: want host:port, a host and a port from 1 to 65535", p.Advertise)
+		}
+	}
+	if !peerSecretRE.MatchString(p.SecretEnv) {
+		v.add("peer.secret_env %q: required, the name of the environment variable holding the shared secret (at least 32 bytes)", p.SecretEnv)
 	}
 }
 
@@ -317,7 +354,39 @@ func (c *Config) validateBackends(v *validator) {
 			v.add("blobs %q: want s3://<bucket>[/<prefix>]", redactURL(c.Blobs))
 		} else if u.User != nil {
 			v.add("blobs %q: credentials do not belong in the URL (the bucket's come from the environment)", redactURL(c.Blobs))
+		} else if _, err := blob.ParseURL(c.Blobs); err != nil {
+			v.add("blobs %q: %v (want s3://<bucket>[/<prefix>][?endpoint=<URL>&region=<region>], D167)", redactURL(c.Blobs),
+				strings.TrimPrefix(err.Error(), "blob: blobs: "))
 		}
+	}
+}
+
+// validateSigningKey checks signing_key (spec §3, D166): file:<path> of a PEM file of ECDSA P-256 private keys,
+// read at start (a KMS reference is Cloud's, M5). A gate whose public_url is not a loopback origin and that
+// serves A2A services from this file needs one: their cards are signed with it, and an unsigned card is one
+// `kontra connect` refuses to serve locally (spec/tunnel.md §9). On loopback the gate signs with a key minted
+// at start (one replica, development) and logs it. A gate that learns of A2A services only from rows its
+// operator writes (spec §13.5) leaves those rows out of its registry instead (internal/gate refusable).
+func (c *Config) validateSigningKey(v *validator, pub *url.URL) {
+	if c.SigningKey != "" {
+		if p, ok := strings.CutPrefix(c.SigningKey, "file:"); !ok || p == "" {
+			v.add("signing_key: want file:<path> of a PEM file of ECDSA P-256 private keys (D166; a KMS reference is Cloud's, M5)")
+		}
+		return
+	}
+	if pub == nil || IsLocalhost(pub.Hostname()) {
+		return
+	}
+	var a2a []string
+	for _, name := range sortedKeys(c.Services) {
+		if c.Services[name].Kind == KindA2A {
+			a2a = append(a2a, name)
+		}
+	}
+	if len(a2a) > 0 {
+		v.add("signing_key: required (D166): public_url %q is not a loopback origin and the gate serves A2A services (%s), "+
+			"whose cards it signs (spec §3); set signing_key: file:<path> of a PEM file of ECDSA P-256 private keys",
+			redactURL(c.PublicURL), strings.Join(a2a, ", "))
 	}
 }
 
@@ -413,11 +482,10 @@ func (c *Config) validateHooks(v *validator) {
 		// would deny, so the gate refuses to start rather than fail open.
 		v.add("hooks.admission: the remote Admission hook is not built in this release (M5); remove it to use the built-in")
 	}
-	if h := c.Hooks.Lifecycle; h != nil {
-		if h.TaskQueue == "" {
-			v.add("hooks.lifecycle.task_queue: required")
-		}
-		v.add("hooks.lifecycle: the remote Lifecycle hook is not built in this release (M5); remove it to use the built-in")
+	// The remote Lifecycle hook is accepted (D186): the five activities are scheduled by type name on the operator's
+	// queue (spec §13.3, lifecycle.WorkerConfig.RemoteHooks), and the built-in no-ops are then not registered.
+	if h := c.Hooks.Lifecycle; h != nil && h.TaskQueue == "" {
+		v.add("hooks.lifecycle.task_queue: required")
 	}
 }
 
@@ -480,6 +548,12 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		if s.Tasks != "" {
 			v.add("%s.tasks: mcp services only (spec §11.5)", at)
 		}
+		if s.MaxSessionsPerPrincipal != nil {
+			v.add("%s.max_sessions_per_principal: mcp services only (spec §11.2)", at)
+		}
+	}
+	if n := s.SessionsPerPrincipal(); n < 1 || n > MaxSessionsPerPrincipal {
+		v.add("%s.max_sessions_per_principal %d: want 1 to %d (spec §11.2)", at, n, MaxSessionsPerPrincipal)
 	}
 	if s.Kind == KindMCP {
 		switch s.Tasks {
@@ -509,25 +583,14 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		v.add("%s.sealed: sealing needs backend tunnel: the recipients are the service's enrolled node keys and "+
 			"the hosting node unseals (ext-sealed.md §1); a direct backend has neither", at)
 	}
-	tunnelled := s.Backend.Tunnel != nil && n == 1
-	if s.Sealed.Mode != SealedOff && tunnelled {
-		// SPEC-CONFLICT (D91 amended for M2, M2 plan WP-04): D91 accepted sealed: on a tunnel service with a
-		// warning while tunnel backends were not served. This build serves them and does not seal (M3), so
-		// it would relay the service's parts in plaintext (fail open): refused, as on a direct backend.
-		v.add("%s.sealed: sealing is not built in this release (M3), and this build serves tunnel services: it "+
-			"would relay the service's parts in plaintext; remove sealed until sealing is built (ext-sealed.md §1)", at)
-	}
+	// sealed: on a tunnel service is served since M3 WP-08 (ext-sealed.md §1, §5), which lifts D144's refusal:
+	// the gate publishes the service's recipients, refuses unsealed parts to a required service and relays the
+	// envelopes, and the hosting node unseals. D91's refusal above stays for direct backends.
 	if !s.SellerKeys.IsZero() {
+		// Seller card signatures are verified (spec §3; M3 WP-02 lifts D90 and the seller_keys half of D144): an
+		// a2a service's card none of whose signatures its keys verify makes it unavailable.
 		if err := checkSellerKeys(s.SellerKeys); err != nil {
 			v.add("%s.seller_keys: %v", at, err)
-		} else if (direct && s.Kind == KindA2A) || tunnelled {
-			// SPEC-CONFLICT (D90; amended for tunnel services in M2, M2 plan WP-04): spec §3 makes a service
-			// whose card no configured key verifies unavailable (503 card routes, service_unavailable at the
-			// first attempt). Verification is M3; ignoring the keys would serve the card unverified (fail
-			// open), so the gate refuses to start instead, as for the remote hooks. This build serves tunnel
-			// services and their cards, so D90's warning for them no longer fails closed.
-			v.add("%s.seller_keys: seller card signatures are not verified in this release (M3); remove seller_keys "+
-				"rather than serve the card unverified (spec §3)", at)
 		}
 	}
 	if !s.Annotations.IsZero() && (len(s.Annotations) == 0 || s.Annotations[0] != '{') {
@@ -605,6 +668,10 @@ func checkSellerKeys(j JSON) error {
 		var keys []map[string]any
 		if err := json.Unmarshal(m["keys"], &keys); err != nil || len(keys) == 0 {
 			return fmt.Errorf("keys: want a non-empty list of JWKs")
+		}
+		// The set the gate verifies with: exact keys, at least one EC P-256 signing key (spec §3).
+		if _, err := jws.ParseJWKS(j); err != nil {
+			return fmt.Errorf("%v", strings.TrimPrefix(err.Error(), "jws: "))
 		}
 	case hasURL:
 		var u string
@@ -704,9 +771,10 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
 // (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
-// Validate instead (the remote hooks, sealed on any backend, seller_keys on a direct a2a backend or a
-// tunnel service). seller_keys loads only on a direct MCP service, which has no card and is not built
-// either. Remove an entry when the work that builds it lands. Tunnel backends are served since M2.
+// Validate instead (the remote hooks, sealed on a direct backend). seller_keys on an MCP service, which has no card
+// (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
+// served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
+// M3 WP-04; sealed: on tunnel services since M3 WP-08.
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
@@ -714,13 +782,9 @@ func (c *Config) unbuilt() []string {
 		note("auth.oidc: OIDC callers are not built in this release; their bearer tokens are refused (401)")
 	}
 	if c.Auth.MCPOAuth != nil {
-		note("auth.mcp_oauth: the MCP endpoints are not built in this release (M3)")
-	}
-	if c.Blobs != "" {
-		note("blobs: the claim-check bucket is not built in this release (M3); parts over 256 KiB are refused")
-	}
-	if c.SigningKey != "" {
-		note("signing_key: cards are not signed in this release (M3)")
+		// D170: the MCP OAuth resource server comes with the OIDC principals in M5; until then /mcp/{svc} accepts API
+		// keys and node principals, and a bearer JWT is refused (401).
+		note("auth.mcp_oauth: the MCP OAuth resource server is not built in this release (M5, D170); /mcp/{svc} accepts API keys and node principals")
 	}
 	if c.Tunnel.Anonymous {
 		// Fails closed: an M2 gate creates no anonymous tenant, so a hello with neither enroll nor auth from an
@@ -729,11 +793,8 @@ func (c *Config) unbuilt() []string {
 	}
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]
-		if s.Kind == KindMCP {
-			note("services.%s: MCP services are not built in this release", name)
-		}
-		if !s.SellerKeys.IsZero() {
-			note("services.%s.seller_keys: seller card signatures are not verified in this release (M3)", name)
+		if !s.SellerKeys.IsZero() && s.Kind == KindMCP {
+			note("services.%s.seller_keys: an MCP service has no card, so its seller_keys verify nothing (spec §3)", name)
 		}
 	}
 	return w

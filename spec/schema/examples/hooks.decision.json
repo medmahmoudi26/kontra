@@ -1,1 +1,1 @@
-{"outcome": "quote", "metadata": {"kontra.escrow.quote": {"amount": "15.00", "currency": "EUR"}}, "quote": {"approveUrl": "https://app.kontra.run/t/0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11", "expiresAt": "2026-10-25T12:00:00Z"}}
+{"outcome": "quote", "metadata": {"kontra.escrow.quote": {"amount": "15.00", "currency": "EUR"}}, "quote": {"approveUrl": "https://app.kontra.sh/#/t/0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11", "expiresAt": "2026-10-25T12:00:00Z"}}

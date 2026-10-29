@@ -548,7 +548,8 @@ before any query, resend detection needs the same request hash (the TCK reuses m
 Revision 3 (M1 planning): `services.card` is `json` too, like `snapshot` and `payload`. `jsonb` refuses U+0000
 (`22P05`) and reorders keys, so neither the served bytes nor their ETag could come from it; the served card is
 produced from `upstream_card` and kept as `json`, and `scripts/migration_tests.sql` checks that a card with U+0000
-is accepted ([`migrations/0001_init.sql`](../migrations/0001_init.sql), [`relay.md`](../spec/relay.md) §3).
+is accepted ([`migrations/0001_init.sql`](../migrations/0001_init.sql), [`relay.md`](../spec/relay.md) §3). Amended
+by D193 (a card that has no JCS form is not installed).
 
 ## From the adversarial review of the M0 specs (25 Oct, 60 findings, all confirmed or partly confirmed)
 
@@ -654,7 +655,8 @@ its upstream's elicitation and sampling requests, the client's answers and its `
 `task_events`; leaving them in plaintext would narrow PRD goal 3 ("the gate never sees plaintext when `sealed:
 true`"). Decision: for a task a sealed call created, the hosting node seals the result, the input requests and the
 status message to the job's reply key, and the hiring node seals its answers to the recipients
-([`ext-sealed.md`](../spec/ext-sealed.md) §2–§3).
+([`ext-sealed.md`](../spec/ext-sealed.md) §2–§3). Amended by D219 (a sealed plain call's input requests and
+answers).
 
 ### D63. Tasks whose workflow never started end `lifecycle_unavailable` — **accepted by the owner, 25 Oct** (adds to PRD §7's reasons)
 
@@ -710,7 +712,8 @@ loopback. Decision: `allow_private` (per backend, and `push.allow_private`) also
 `https://` is allowed; redirects are never followed and the environment's proxy is ignored either way
 ([`relay.md`](../spec/relay.md) §10.3). Revision 2's rule also clashed with §13.1, which lets the Admission hook
 URL be `http://` on a loopback host. The clash is now stated: §10.3 names that exception (and any other `hooks.*`
-URL §13 allows), and every other operator URL follows §10.3 ([`relay.md`](../spec/relay.md) §10.3, §13.1).
+URL §13 allows), and every other operator URL follows §10.3 ([`relay.md`](../spec/relay.md) §10.3, §13.1). Amended
+by D192 (the bucket's endpoint).
 
 ### D68. API key globs are written `key:kk_acme_*`
 
@@ -1121,6 +1124,7 @@ what the projection already holds; the 256 KiB part rule is unchanged. Two gaps 
 restarts from the projection at every dispatch, so the status rows of many follow-up turns are not all counted; and
 every append rewrites the whole snapshot, which may want a cap on rows or on write volume
 ([`relay.md`](../spec/relay.md) §6.6; `internal/relay/executor.go` `overLimit`, `TestTaskBytesCountsWholeEvents`).
+Amended by D194 (the task's bucket objects count too).
 
 ### D104. No bucket in M1: parts over 256 KiB are refused even with `blobs:` — **accepted by the owner, 26 Oct** (M1 only)
 
@@ -1349,7 +1353,7 @@ under the root base instead: `/../../etc/passwd` reaches the target as `/etc/pas
 now forwards a path already under the base as it is and prefixes any other, and says that `kontra connect` refuses a
 target with a path until the node forwards by that rule; with the root base the two rules are one, so M2's refusal
 stands and every example still serves its agent at the root ([`tunnel.md`](../spec/tunnel.md) §8.2;
-`internal/node/serve.go`, `TestSidecarNotAProxy`).
+`internal/node/serve.go`, `TestSidecarNotAProxy`). Amended by D210 (an MCP target names its endpoint).
 
 ### D124. A hello whose outcome was lost is probed; a confirmed token is never sent again — **decided under the owner's standing instruction, 26 Oct** (C2)
 
@@ -1463,7 +1467,7 @@ node would lose its other services (the audit's correction). A token that applie
 nothing committed. Decision: an unknown key that nothing in the hello enrolls is `unknown_key`, whatever else the
 hello carries; `service_denied` stays for known keys and for hellos that enroll some declared services but not all
 (`key_scope`'s step 2) ([`tunnel.md`](../spec/tunnel.md) §4, §5; `internal/enroll/admit.go`, `TestAdmitRefusals`,
-`TestKeyScope`).
+`TestKeyScope`). Amended by D206 (a node that only hires).
 
 ### D134. A hello of the wrong shape takes its subject's code — **decided under the owner's standing instruction, 26 Oct**
 
@@ -1514,7 +1518,8 @@ binding's commit and every replica, the admitting one included, sends `{"t": "en
 the supersede's fallback. Registrations of one key serialize on a row lock on its `tunnel_keys` row. It is Postgres
 between replicas, not tunnel wire protocol, and needs no migration ([`tunnel.md`](../spec/tunnel.md) §5, §11;
 `internal/tunnelgate/registry.go`, `internal/enroll/enroll.go` `EnrolledPayload`, `TestSupersedeAcrossReplicas`,
-`TestAddSerializesOneKey`, `TestEnrolledNotices`, `TestAdmitAnnouncesEnrollments`).
+`TestAddSerializesOneKey`, `TestEnrolledNotices`, `TestAdmitAnnouncesEnrollments`). Extended by D199 (the `mcp:` and
+`tools:` payloads).
 
 ### D139. "Older" is the order of the handshakes
 
@@ -1738,3 +1743,1803 @@ half when it has written its response, or at once when the gate's half closes, s
 reaches the cap. Decided: the proposal, with D137's: §14 now says that a stream is in flight until both halves end,
 on either side, and gives this cap ([`tunnel.md`](../spec/tunnel.md) §7, §14; `internal/tunnelgate/session.go`
 `linger`, `TestHalfClosedStreamsAreCapped`).
+
+## From M3 planning (26 Oct)
+
+M3 builds sealing and MCP hosting (PRD §14's M3 row as the owner restated it on 26 Oct: envelope v1, `kontra seal`,
+card re-signing with a JWKS, the claim-check bucket; `/mcp/{name}` with session affinity, `TaskLifecycle` for
+task-augmented calls, per-tool policy and the stdio bridge). Planning it met the points below. The owner said on
+26 Oct "Don't ask me anything": the entries marked **decided under the owner's standing instruction, 26 Oct**
+settle open points with the recommended option and change the specs where they say so; the others record the
+owner's own decisions (kontra-cloud#60) where they land. The 2026-07-28 evidence is the MCP specification at tag
+`2026-07-28` (`5f5440bb`) and the tasks extension at `v0.2.2` (`5246bc3d`), pinned in [`relay.md`](../spec/relay.md) §0.
+
+### D158. A request's era is read from its method and its `MCP-Protocol-Version` — **decided under the owner's standing instruction, 26 Oct** (carries out D24)
+
+D24 has the gate serve 2025-11-25 and 2026-07-28 on the same endpoints and asked for the text before M3 builds the
+relay; it left open how one endpoint tells the eras apart, and what happens when the upstream speaks only one.
+2026-07-28 has a dual-era server select "from how the client opens" (an `initialize` is legacy, per-request `_meta`
+is modern; Versioning, "Backward Compatibility"), requires `MCP-Protocol-Version` on every modern POST, equal to
+`_meta`'s version (Streamable HTTP, "Protocol Version Header"), and has a dual-era client fall back to `initialize`
+on a `400` whose body is not a recognized modern error. Decision ([`relay.md`](../spec/relay.md) §11.12):
+`initialize` is legacy whatever its headers; `MCP-Protocol-Version: 2026-07-28` is modern, and its `Mcp-Session-Id`
+and `Last-Event-ID` are ignored; a legacy or absent header needs a session, and without one gets a `-32000` body,
+as legacy servers send: `400` with `-32000` `Bad Request: No valid session ID provided` (the text of
+`server-everything@1.0.0`'s `GET` handler, `dist/transports/streamableHttp.js:143-151`; its `POST` without a
+session goes to a new SDK transport, lines 87-111, which answers its own `-32000` body and is never closed, D176);
+any other version is `-32022` listing the three the gate speaks. The gate never translates between eras: a modern
+request goes upstream as it came, and a legacy-only upstream's own `400` reaches the client, which falls back. A
+service is modern exactly when its upstream is, and no translation between server-to-client requests and multi
+round-trip results is built. The gate validates `Mcp-Method` and `Mcp-Name` against the body (`-32020`) because it
+processes the body; policy still reads the body only (research brief C15). Amended by D176 (the version checks) and
+D177 (the service's era).
+
+### D159. Modern clients get gate-owned tasks through the tasks extension; the gate decides, and answers in line when the task ends within 2 s — **decided under the owner's standing instruction, 26 Oct** (carries out D24)
+
+D24 makes the `io.modelcontextprotocol/tasks` extension the durable surface for modern clients. The extension has no
+per-request opt-in and 2026-07-28 removed `Tool.execution`: "the server is the sole decider" (ext-tasks
+`tasks.md`, "Capability Negotiation"), and a `CreateTaskResult` must not be returned before the task is durable.
+§11.5's step 0 (`execution.taskSupport`) therefore has nothing to read, and note 1's default ("never run the task
+shape over a plain upstream call") must be kept. Two shapes were weighed. Adopting the upstream's task after the
+fact would start work before Admission, so a quote (D45) could never precede it. Deciding up front keeps Admission
+first. Decision: on a `durable` service whose upstream declared the extension in `server/discover`, every modern
+`tools/call` that declares the extension becomes a gate-owned task (Admission `task`, a quote possible), and the
+gate waits up to 2 s before answering: a task that ended is answered with its outcome in line, the client never
+seeing a task; one that did not, or a quoted one (D21), is answered `CreateTaskResult` with `pollIntervalMs` 1000.
+The dispatch speaks to the upstream in the era of the request that created the task (the modern dispatch polls
+upstream `tasks/get`, sends `tasks/update`, and handles an upstream `InputRequiredResult` the same way), and the log
+stays era-neutral: an input request is logged once per upstream key under the gate id `k.<taskId>.<seq>`, so either
+era can read the task. `tasks/update` logs answers once each and signals `kontra.input_response`; `tasks/cancel`
+sends `kontra.cancel` without awaiting it (D57 still writes `canceled` within 10 s); `tasks/result` and
+`tasks/list` are `-32601`, as the extension requires. A terminal task is presented to a modern reader by its
+terminal event: a stored `CallToolResult` is `completed` even with `isError: true` (the extension forbids `failed`
+for it), a JSON-RPC error or a gate failure is `failed`. Consequence: every such call on such a service starts a
+workflow; an operator who wants plain calls sets `tasks: off` ([`relay.md`](../spec/relay.md) §11.12). Amended
+by D178 (a client that leaves cancels; the first upstream id of a multi round-trip call; what such a task keeps).
+
+### D160. `per_session` for modern clients is a virtual session per principal and service — **decided under the owner's standing instruction, 26 Oct** (carries out D24)
+
+D24 redefines `per_session` for modern clients as "per principal per service per period" without saying what the
+gate records. `per_session` prices carry `idleTimeoutSeconds` ([`schema/price.json`](../spec/schema/price.json)),
+and Admission has a `session` operation. Decision: the gate keeps one `mcp_sessions` row per service and principal
+for modern requests, `protocol_version = '2026-07-28'`, keyed by the hash of a random id it never sends, with no
+upstream or tunnel ids; it is opened by the principal's first modern request (after Admission `session`), closed
+`idle` after `session_idle_s`, and named by its `calls` rows. It pins nothing ([`relay.md`](../spec/relay.md)
+§11.12). Amended by D177: 0001's columns hold the row, but one open row per principal and service needs a unique
+index (migration 0002), and the row opens only after the upstream answered a modern request.
+
+### D161. What modern clients are not offered in v4.0 — **decided under the owner's standing instruction, 26 Oct**
+
+Four parts of the modern surface have no faithful mapping yet. A `passthrough` task's later `tasks/get` would need
+routing to the node holding the upstream task, with no session to pin it to; the gate removes the extension from
+those services' requests and discovery, so their modern clients get plain calls. `notifications/tasks` would make
+the gate write into a relayed `subscriptions/listen` stream (§11.7 forbids it); `taskIds` is removed and clients
+poll. A stdio child speaks one era per process, and the bridge (tunnel.md §10) is built for 2025-11-25's
+session-per-child; it answers a modern request with the legacy `400`, so dual-era clients fall back. Sealed services:
+D162 ([`relay.md`](../spec/relay.md) §11.12, [`tunnel.md`](../spec/tunnel.md) §10).
+
+### D162. Sealed MCP is legacy-era only in envelope v1 — **decided under the owner's standing instruction, 26 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §3 binds a sealed MCP call to `session` (the hash of the gate
+`Mcp-Session-Id`) and `messageId` (the JSON-RPC id, unique within that session), and §5 keeps per-session replay
+state. 2026-07-28 has neither a session nor ids unique beyond a connection, and its `Mcp-Param-*` headers would
+copy argument values outside the envelope. Decision: a sealed MCP service is served to 2025-11-25 and 2025-06-18
+requests only; a modern request to it gets the legacy `400` (D158), so a dual-era client falls back and the
+guarantee of D31 and D62 holds unchanged. The hiring node never sends `Mcp-Param-*` for a sealed call. A modern
+binding (a per-call nonce in place of `session`) is an envelope v2 question.
+
+### D163. A tunnel session held by another replica is reached through a peer hop — **decided under the owner's standing instruction, 26 Oct**
+
+[`relay.md`](../spec/relay.md) §11.2 routes every later request of a pinned MCP session "to the same tunnel
+session", but only the replica holding the socket can open a stream on it ([`tunnel.md`](../spec/tunnel.md) §11),
+and A2A reaches it through Temporal (per-replica queues), which a plain MCP request must not use (no durability,
+and events never in history). The spec named no mechanism, so on a gate of several replicas a client routed to a
+replica other than its session's could not be served. Decision: each replica may run a peer listener
+(`peer.listen`, advertised in a new `gate_replicas.peer_addr` column) that accepts one route: an MCP exchange for a
+tunnel session it holds, carried with an assertion of the principal, the session, the service and the preamble's MCP
+fields, a nonce and the time, under HMAC-SHA256 with a shared secret (`peer.secret_env`) over the assertion, method,
+path and body hash; refused after 30 s or on a seen nonce. The holding replica only checks §6.1 and runs the
+exchange; the receiving replica applies every other rule once. Without `peer.listen` only local sessions are
+candidates, which is all one replica needs. The listener is a new internal surface: it never serves the public
+routes, and on Kubernetes the gate's egress policy (443 only, kontra-cloud#60) must allow the peer port within the
+namespace ([`relay.md`](../spec/relay.md) §11.2, §17). Amended by D179 (what the HMAC covers, `replica_id`, more
+than one replica) and D183 (this repository's chart).
+
+### D164. No local console — **decided by the owner, 26 Oct** (kontra-cloud#60)
+
+Note 2 put a read-only console on `:7778`, served by `kontra connect`, and [`ext-sealed.md`](../spec/ext-sealed.md)
+§7 showed recipient changes on it. The owner's final decisions on 26 Oct: no local console; the CLI is `connect`,
+`login`, `seal` and `publish`. Decision: the node serves no port but `:7777`; a pin change is named on `kontra
+connect`'s stderr and in its log and waits for `--accept-change <service>`; `local_rebinding` covers `:7777`
+([`ext-sealed.md`](../spec/ext-sealed.md) §7, [`tunnel.md`](../spec/tunnel.md) §9, §16; `cmd/kontra` drops
+`console`).
+
+### D165. Sealing needs an A2A 1.0 upstream — **decided under the owner's standing instruction, 26 Oct**
+
+The hosting node replaces sealed parts in whatever the gate forwards and seals every part of every reply
+([`ext-sealed.md`](../spec/ext-sealed.md) §5), so it must parse each A2A binding and version the dispatch can
+speak. The dispatch prefers 1.0 JSON-RPC, then 1.0 HTTP+JSON, then 0.3 (`internal/upstream` `pickInterface`); 0.3
+parts have another shape (`kind`, `file.bytes`, `mimeType`) and predate extensions. Decision: a sealed service whose
+upstream card offers no 1.0 interface is unavailable as a seller-key failure is (card routes `503`, tasks
+`service_unavailable`, [`relay.md`](../spec/relay.md) §3), so the hosting and hiring nodes handle 1.0 JSON-RPC and
+1.0 HTTP+JSON only, unary and SSE. The hiring side sees only 1.0 anyway: the gate serves 1.0 only.
+
+### D166. The card-signing key is a PEM file; the first key signs, the rest stay published — **decided under the owner's standing instruction, 26 Oct**
+
+PRD §8 and §11: `signing_key: file:./kontra.key`, "or Scaleway Key Manager in Cloud", rotated by `kid` "with
+overlap"; [`relay.md`](../spec/relay.md) §3 signs ES256 and serves `/.well-known/jwks.json`; neither says what a
+gate without a key does. Decision: `signing_key: file:<path>` names a PEM file of ECDSA P-256 private keys; the
+first signs, every key is in the JWKS (`kid` = RFC 7638 thumbprint, `Cache-Control: max-age=300`), so a rotation is
+"prepend the new key, deploy, drop the old one after the cache and the card refresh have passed". Every replica
+reads the same file. Without the key a gate whose `public_url` is loopback signs with a key minted at start (one
+replica, development) and logs it; any other gate serving A2A services refuses to start, since an unsigned card is
+one `kontra connect` refuses to serve locally ([`tunnel.md`](../spec/tunnel.md) §9). A KMS reference is Cloud's
+(M5). The JCS is `github.com/gowebpki/jcs` v1.0.2 behind `internal/jcs`; the JWS is the gate's own (D13), checked
+against a2a-go's verifier (`card_passthrough`). `services.card_hash` is now filled. Amended by D183: the
+repository's chart mounts the key.
+
+### D167. The claim-check bucket is S3-compatible, its refs live in the parts and a `blobs` table, and its objects die with their task — **decided under the owner's standing instruction, 26 Oct** (lifts D104)
+
+[`relay.md`](../spec/relay.md) §10.4 names `blobs:` and presigned GETs, and has the event row carry
+`payload_ref`, but says nothing of the store's API, the object names, who deletes objects, or how a blob stream
+finds a ref's task ([`tunnel.md`](../spec/tunnel.md) §8.3). One `payload_ref` column also cannot name the several
+large parts one message or artifact may hold. Decision: `blobs: s3://<bucket>[/<prefix>][?endpoint=…&region=…]`
+through the S3 API (`minio-go` v7; Scaleway Object Storage in Cloud, any S3-compatible store for a team gate),
+credentials from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. A part over 256 KiB is stored as an object whose
+key is `<prefix>/<tenant>/<task>/<ref>` (`ref` 128 random bits) and logged in the event's payload as a `url`
+part `kontra-blob:<ref>`, which is a name, not a URL anyone dials; a new `blobs(ref, tenant_id, task_id, size,
+created_at)` table (migration 0002, cascading with the task) maps each ref to its task; `payload_ref` stays
+unused. Reads render the part per reader: a presigned GET valid 15 minutes for a caller, a push receiver or a
+direct backend, `kontra-blob:<ref>` for a node. A blob stream's ref is checked against the session asking: a task
+one of its attempts serves, or one its hiring principal's buyer owns. Retention deletes a task's objects (by
+prefix) before its rows. The bucket carries A2A parts only: MCP has no parts, and its bodies stay under the edge's
+body limit. Without `blobs:` the gate behaves as D104 says; with it, D104's refusal is lifted. Amended by D181
+(`kontra-blob:` is reserved; the blob stream's framing).
+
+### D168. The team-gate compose comes with M3, and the pentest runs on it — **decided by the owner, 26 Oct** (the M3 goal; amends D43's milestone and PRD §14's "VPS")
+
+PRD §14 runs M3's pentest "against a VPS deployment with no proxy in front"; D43 placed the compose in M4. The
+owner's M3 goal: "PRD §12 pentest list run on a compose team gate". Decision: M3 adds `compose.yaml` as D43
+describes it (the gate built from this repository's `Dockerfile`, `temporalio/server:1.32.1` with its dynamic
+config and the two `admin-tools` jobs, Postgres 16, no Temporal or Postgres port published), with the gate
+terminating TLS itself from a provided certificate, as on a VPS with no proxy. The pentest drives it from the host:
+nodes, sellers and attackers are host processes, as a team's machines would be. M4 runs it from a clean VPS.
+Amended by D186 (what the pentest overlay publishes on this host).
+
+### D169. "Escrow dispute after release" is tested at the hook boundary — **decided under the owner's standing instruction, 26 Oct**
+
+PRD §12's pentest list ends with "escrow dispute after release". The open-source gate has no money code (PRD §13);
+what it owns is the review window ([`relay.md`](../spec/relay.md) §13.3, D106): a review-window message is accepted
+only while the window the Lifecycle hook opened is open. Decision: the pentest runs a test Lifecycle worker on its
+own queue (`hooks.lifecycle.task_queue`) whose `ReviewWindow` is 5 s, and asserts that a dispute message sent after
+the window closed is refused and reaches no hook. The money side of the item is Cloud's, tested in M5. Amended by
+D186: the worker reaches Temporal through the pentest overlay, and M3 lifts the load-time refusal of
+`hooks.lifecycle`.
+
+### D170. What M3 leaves to M4 and M5 — **decided under the owner's standing instruction, 26 Oct**
+
+The owner's plan (26 Oct) puts the gate's own `/mcp` with `hire` and URL elicitation, anonymous sessions, the pinned
+TCK and the README demo in M4, and Cloud's JWTs as principals in M5. Decision: M3 does not build
+[`relay.md`](../spec/relay.md) §12 (`/mcp` answers as an unknown route until M4), `kontra login`, `--public` and
+anonymous sessions ([`tunnel.md`](../spec/tunnel.md) §6, `anon_limits`), nor the MCP OAuth resource server
+(§12.1, `auth.mcp_oauth`), which comes with the OIDC principals in M5; until then `/mcp/{svc}` accepts API keys and
+node principals, and `auth.mcp_oauth` keeps its start-time note. M3 builds direct `mcp: {url}` backends as well as
+tunnel ones: the relay is the same, and direct backends never hop. D225 adds what the M3 decisions leave to build.
+
+### D171. The named tests M3 runs — **decided under the owner's standing instruction, 26 Oct**
+
+Like D80 and D154. The gate tests the owner named: `sealed_no_plaintext` (an A2A task, a plain MCP call and a
+durable MCP call whose upstream asks one elicitation, each carrying a marker; the marker is absent from every table,
+both replicas' logs at debug level, the Temporal histories and the bucket's objects), `sealed_replay`,
+`sealed_unsealed_part`, `mcp_session_cross_node`, `mcp_tool_denied` and `mcp_task_resume` (both variants). With them:
+`card_passthrough`, `mcp_batch_refused`, `mcp_meta_spoof`, `mcp_session_revoked`, `stdio_roots`, `local_rebinding`,
+`mcp_modern_task`, `mcp_era_fallback` and `mcp_peer_hop`, and a sealed part over 256 KiB through the bucket. The
+stock upstreams are `@modelcontextprotocol/server-everything@1.0.0` and `server-filesystem@1.0.0` (Node 22); both
+2.0.0 releases need Node 24, so the modern-era tests run against an in-repository dual-era upstream double, and
+against `server-everything@2.0.0` too, skipped saying why, when Node 24 is not installed. `anon_limits` and the TCK
+tests are M4's. Amended by D172 (`mcp_case_smuggling` and `a2a_case_smuggling` join them) and D173 (`stdio_roots`
+asserts the node's roots).
+
+## From the M3 plan's audit (26 Oct)
+
+An adversarial audit of the M3 plan, its spec text and its skeleton found five blockers (D172–D176) and smaller
+problems in all three. The owner's standing instruction ("Don't ask me anything") covers them: the five blockers
+were settled as recorded below, and the rest with the audit's proposals, changing the specs where the entries say
+so. The builders' corrections to the plan follow from these entries.
+
+### D172. JSON-RPC bodies are decoded with exact keys, and a repeated or case-variant key is `-32600` — **decided under the owner's standing instruction, 26 Oct**
+
+The skeleton's `mcpwire.Message` decoded through `encoding/json` struct tags, which match keys case-insensitively
+and keep the last of a repeated key. On go1.26.10, `{"method": "tools/call", "METHOD": "ping"}` read as `ping` and
+`{"name": "echo", "NAME": "add"}` as `add`, while Node upstreams (`JSON.parse`) and go-sdk v1.8.0 (which turns case
+folding off on purpose, `internal/json/json.go:32`) read `tools/call` and `echo`. The relay forwards the bytes it
+received ([`relay.md`](../spec/relay.md) §11.2), so a denied tool would run with no `calls` row, and a seller
+answering `{"isError": true, "ISERROR": false}` would be metered as a success. The A2A JSON-RPC route has two
+readers as well: `internal/a2ahttp` reads the method (to route streams), `params.tenant` and the id, and a2a-go
+decodes the body again. Decision: the gate decodes every JSON-RPC body it acts on with exact, case-sensitive keys,
+and refuses a message in which a key repeats, or two keys are equal under Unicode case folding, at a level it reads
+or rewrites. On MCP, from a client: the message, `params`, `params._meta`,
+`params._meta["io.modelcontextprotocol/clientCapabilities"]` and its `extensions`, `params.capabilities`, the top
+level of `params.arguments` and of `params.inputResponses`, `result` and `result._meta`. On MCP, from an upstream:
+the message, `params` and `params._meta` (of requests and notifications), `result`, `result._meta`, each of
+`result.tools` and its `_meta`, `result.capabilities` and its `experimental` and `extensions`, the task objects it
+reads (`result.task`; `result.inputRequests`, each of its entries and their `params` and `params._meta`;
+`result.result` and `result.error`), and `error`. On A2A JSON-RPC: the request, `params`, `params.metadata`,
+`params.configuration`, `params.message`, `params.message.metadata`, each part and each part's `metadata`. (The
+first text named only the levels that route and meter; the revision check of the M3 planning extended them to the
+levels the gate reads or rewrites, §2.5's scrub locations included, so that `internal/strictjson`, `mcpwire` and
+`a2ahttp` list exactly the spec's levels.) A client's message is refused with `-32600` and HTTP `400` before
+policy, metering, Admission or dispatch; an upstream's is not relayed (`502` with `-32603`, the `calls` row
+`is_error` true, a dispatch `upstream_error`). The hosting node and the node's MCP filters read the same way, since
+the gate is not trusted to have done it. A2A HTTP+JSON is decoded by a2a-go alone and is not checked. Consequence:
+a tool whose arguments have two names that differ only in case cannot be called through the gate
+([`relay.md`](../spec/relay.md) §2.1, §2.4, §11.1; [`ext-sealed.md`](../spec/ext-sealed.md) §5;
+[`tunnel.md`](../spec/tunnel.md) §10; `internal/strictjson`, `mcpwire.Parse`, `a2ahttp`'s `strictJSONRPC`;
+`mcp_case_smuggling`, `a2a_case_smuggling`). Amended by D191 (a lone case variant is refused like a pair).
+
+### D173. Roots never leave the node — **decided under the owner's standing instruction, 26 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §10 routed a stdio server's `roots/list` to the remote client, and `stdio_roots`
+asserted a first call "using the client's roots". `server-filesystem@1.0.0` replaces the directories it was started
+with by the client's roots (`dist/server.js:590-643`), so a buyer, or the gate forging the answer, that sent a root
+of `file:///` would read and write the node's whole filesystem: `~/.kontra/identity.key` and the job keys, and code
+execution by writing `~/.bashrc` or `~/.ssh`. That breaks PRD §12 (the gate never executes code) and tunnel.md §15
+(the node is not a proxy). Decision: for every MCP server a node hosts, stdio or `mcp:<name>=<url>`, the node
+answers `roots/list` itself from roots its operator names (`kontra connect --roots <name>=<dir>`, repeatable with
+one directory per flag, as in `--roots fs=/a --roots fs=/b`; none by default, which is an empty list), replaces the
+client's `capabilities.roots` in the `initialize` it forwards with its own (present only when roots are
+configured), and never relays `roots/list`, `notifications/roots/list_changed` or the client's roots in either
+direction; on a 2026-07-28 exchange it removes the roots capability, roots answers and roots requests, and
+configured roots are offered to legacy sessions only. A separate flag was chosen over a `,roots=` suffix on
+`--serve` because a stdio command line or a URL may contain commas, and one directory per flag because a
+directory's name may contain one too. `stdio_roots` now asserts that the server sees only the node's configured
+roots, and `examples/mcp/fs-stdio` passes its allowed directory on its command line ([`relay.md`](../spec/relay.md)
+§11.10; [`tunnel.md`](../spec/tunnel.md) §8.2, §10, §15, §16; `internal/mcproots`, `stdiobridge.Config.Roots`).
+Amended by D212 (which client responses reach a hosted server).
+
+### D174. The sealed envelope is kept exactly where ext-sealed §3 puts it — **decided under the owner's standing instruction, 26 Oct** (SPEC-CONFLICT)
+
+[`relay.md`](../spec/relay.md) §2.5 removed every `sh.kontra/` key from the `params._meta` of upstream requests,
+which is where [`ext-sealed.md`](../spec/ext-sealed.md) §3 puts the envelope of a sealed `elicitation/create` or
+`sampling/createMessage`, so `sealed_no_plaintext` (c) could not pass; and it had no rule for MCP callers, whose
+sealed `tools/call` and answers carry the envelope in `_meta` too. Both texts predate M3. Decision: §2.5 scrubs
+`sh.kontra/` keys from MCP callers as well (`params._meta` of requests and notifications, `result._meta` of
+responses), and on a service with `sealed` set, for 2025-11-25 and 2025-06-18 messages, keeps
+`_meta["sh.kontra/sealed"]` in the `params._meta` of a caller's `tools/call` and of an upstream `elicitation/create`
+or `sampling/createMessage`, and in the `result._meta` of the caller's answer to one, when its value is exactly
+`{"v": 1, "envelope": <base64>}`, as the A2A rule keeps `kontra.sealed` on envelope parts. Any other `sh.kontra/`
+key, and `sh.kontra/sealed` anywhere else or on another service, is removed. A sealed result's envelope is in
+`content`, which §2.5 never reads (`mcpwire.ScrubParams` and `ScrubResult` take the direction, the method and the
+service's sealed flag; `mcp_meta_spoof` gains the case of a service without `sealed`). Amended by D200 (the envelope
+on every client response).
+
+### D175. A sealed MCP input request is bound to the upstream's own request id — **decided under the owner's standing instruction, 26 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §3 sealed an upstream's input request with `messageId` "the gate request
+id the gate gives it" (`k.<taskId>.<seq>`), which the hosting node cannot know when it seals, and hosting rule 4,
+written for `tools/call`, would then refuse the hiring node's answer (its `tool` and `messageId` match no preamble
+field), or rule 5 would call it replayed. Rule 4's mismatches had no reason either, so `sealed_replay`'s MCP call
+resent on another session had none to assert. Decision: the hosting node seals an input request with `messageId` =
+the upstream server's JSON-RPC id for it, which it reads as it relays the request, and with the `session` and
+`tool` of the call that created the task. The gate rewrites JSON-RPC ids for routing and never touches the
+envelope. The hiring node checks `session`, `tool` and that the `messageId` is new in the task, keeps which gate
+request id carried it, and seals the local client's answer with the same `messageId` and the job's `replyTo` and
+`rk`. A new hosting rule 4b accepts an answer only for an input request the node sealed for the preamble's task
+less than `max_age` ago, once (`wrong_message`, `replayed`, `wrong_job`), and rule 5 applies to requests only,
+since a server's ids are another space than the client's. A mismatch of rule 4's `session`, `tool` or `messageId`
+is `wrong_message`, already a §6 reason. In a job whose request was sealed, an answer to an input request the node
+sealed must itself be sealed and pass rule 4b: an unsealed one is refused `bad_header` and nothing of it reaches
+the service, so a gate cannot answer the server's question in plaintext for the buyer (the hosting node's half of
+the hiring node's rule 4a; added by the revision check). A per-job input id minted by the node (the audit's other
+option) was not taken: it needs a new header member and a preamble field for answer exchanges, while the upstream's
+id already reaches the node on both legs ([`ext-sealed.md`](../spec/ext-sealed.md) §3, §5, §9; `sealing.Hosting`,
+`sealing.Job`; `sealed_replay`).
+
+### D176. A modern request's version is checked as 2026-07-28 says, and D158's evidence is corrected — **decided under the owner's standing instruction, 26 Oct**
+
+[`relay.md`](../spec/relay.md) §11.12 answered a `_meta` `protocolVersion` that differs from
+`MCP-Protocol-Version` with `-32602`. 2026-07-28 Streamable HTTP, "Protocol Version Header": the header MUST
+match `_meta`'s version, and a mismatch MUST be rejected with `400` and `HeaderMismatch` (`-32020`); `-32602` is
+for a missing required `_meta` field (basic, "Per-request protocol fields"). §11.12 also gave `-32021` no HTTP
+status (basic requires `400`), and removed `notifications.taskIds` from a `subscriptions/listen` that does not
+declare the tasks extension, which the extension (v0.2.2, "Task Status Notifications") answers with `-32021`.
+D158 cited `server-everything@1.0.0` `dist/transports/streamableHttp.js:143-151` for "exactly what legacy servers
+answer": that is its `GET` handler; its `POST` without a session goes to a new SDK transport (lines 87-111) that
+answers its own `-32000` body and is never closed. Decision: a missing `protocolVersion` or `clientCapabilities` is
+`400` with `-32602`; a `protocolVersion` other than the header is `400` with `-32020`; `-32021` is `400` with
+`data.requiredCapabilities` naming the extension; a `subscriptions/listen` asking for `taskIds` without declaring
+the extension is `400` with `-32021`, and any other has them removed. Rule 3's body stays: a `-32000` body is what
+legacy servers send and is not a modern error, so D158's conclusion holds, and D177 stops forwarding modern probes
+to upstreams known to be legacy-only ([`relay.md`](../spec/relay.md) §11.12; `mcpwire.CheckModern`).
+
+### D177. The gate learns each service's era, and opens one virtual session per principal and service after a modern answer — **decided under the owner's standing instruction, 26 Oct** (SPEC-CONFLICT)
+
+Four problems with D158 and D160 as written. A modern request to a legacy-only upstream was always forwarded: each
+probe of `server-everything@1.0.0` leaks a server and its transport on the seller's node (D176), and it opened a
+virtual session after Admission `session` for a service the client then uses through a legacy session.
+`mcp_sessions` has no unique constraint for open modern rows, and Claude Code sends `server/discover` and
+`tools/list` at once, so two first requests wrote two rows; D160's "no schema change" was wrong. The plan had the
+gate refuse modern requests to stdio services, which it cannot tell apart (the hello declares kind `mcp` only,
+[`tunnel.md`](../spec/tunnel.md) §10). And 2026-07-28 makes the era a property of the server that a client SHOULD
+cache per origin (Versioning, "Backward Compatibility"), while one gate origin serves modern services beside
+legacy-only, sealed and stdio ones. Decision: the gate keeps each service's era. A `server/discover` result makes a
+service modern (its cached rewrite, or the answer to one the gate sends itself when it has none, which a modern
+request finding the era unknown waits for). Only an explicit legacy answer to the gate's own `server/discover`
+makes it legacy-only: rule 3's `-32000` body, a `404` or `405`, or a `200` or `400` whose body is not a 2026-07-28
+response. A response to a client's request never does: a `400`, `404` or `405` answering a client's modern request
+is relayed to that client and changes nothing for other principals, since otherwise one principal could make a
+modern service legacy-only for every other with a request its upstream refuses (the revision check). The era is
+kept 10 minutes like the tools list and dropped when a node of the service connects or disconnects; while a service
+is legacy-only, a modern request is answered with rule 3's `400` at the gate, as for a sealed service. A virtual
+session opens only once the upstream has answered a modern request with a modern result, after Admission `session`;
+migration `0002_m3.sql` adds a partial unique index on `mcp_sessions (tenant_id, service, principal) nulls not
+distinct where protocol_version = '2026-07-28' and closed_at is null`, and the insert is `on conflict do nothing`
+followed by a read, so concurrent first requests share one row (Admission may still be asked twice by two replicas:
+it decides and moves no money, §13.1). The gate refuses modern requests itself for sealed services only; a stdio
+service is learned like any upstream, from the bridge's answer to the gate's probe. The per-origin cache stays a
+residual, logged by a new `mcp_era_fallback` variant (a modern success on `/mcp/a`, then a legacy-only `/mcp/b` on
+the same origin), and Claude Code runs against the compose gate before M4 ([`relay.md`](../spec/relay.md) §11.12,
+§16).
+
+### D178. A modern client that leaves cancels its task, an `InputRequiredResult` is the first upstream id, and a gate-owned task's retention is stated — **decided under the owner's standing instruction, 26 Oct**
+
+Three gaps in D159. A client that closes its stream during the 2 s inline wait never learns the task's id, but the
+task ran on; 2026-07-28 Streamable HTTP ("Cancellation") has the server treat a closed response stream as a
+cancellation. An `InputRequiredResult` answering the dispatch's `tools/call` set no first upstream id (§11.12 named
+only a `CreateTaskResult`'s `taskId`), so a retried attempt sent the original call again: the upstream ran it again
+and asked again under new keys, and the first input requests stayed outstanding in `tasks/get`. And D159 recorded
+only the cost of making every modern call on a durable service a task, not that its arguments and result are then
+kept in `work_items` and `task_events` for the retention period, where a plain call keeps nothing. Decision: a
+client that closes its stream before the inline answer or the `CreateTaskResult` makes the gate send
+`kontra.cancel` (D57); the first `InputRequiredResult` counts as the first upstream task id (the attempt records
+its first `inputRequests` key in `upstream_task_id`), so a tunnel lost after it fails the task `tunnel_lost`; and
+§11.12 and the operator docs next to `tasks: off` state the retention. A `tasks: durable_tools` allowlist was
+considered and not added: `tasks: off` is the switch in v4.0 ([`relay.md`](../spec/relay.md) §11.12, §16:
+`mcp_modern_task`, `mcp_task_resume`).
+
+### D179. The peer hop signs what the holder forwards, `mcp_sessions.replica_id` names the holder, and several replicas SHOULD set `peer.listen` — **decided under the owner's standing instruction, 26 Oct**
+
+D163's HMAC covered the assertion, the method, the path and the body's hash, but not the headers the holding
+replica sends upstream: the upstream `Mcp-Session-Id` it substitutes, `Last-Event-ID`, `MCP-Protocol-Version`,
+`Mcp-Method`, `Mcp-Name` and `Mcp-Param-*`. On a plaintext peer link, anyone on the path could steer a vetted
+request to another client's upstream session on the same tunnel. The tunnel reaper closed "the `mcp_sessions`
+pinned to" a dead replica, but with the hop the replica that wrote a row (the one the client reached) may not hold
+its tunnel, and nothing said which one `replica_id` names. Nothing said either that a gate of two replicas behind a
+balancer and without `peer.listen` sends about half of its pinned requests to a `404` and a new `initialize`.
+Decision: the assertion carries the upstream session id and the SHA-256 of the other forwarded headers in a
+canonical form (names lowercased and sorted, one `name: value` line each), and the holder builds the upstream
+request from signed data only and refuses a request whose headers do not match; the peer address is reachable only
+from the replicas, or carries TLS; `mcp_sessions.replica_id` is the replica holding the tunnel session, NULL for a
+direct backend, so killing a replica that held only a client's connection closes nothing (a reaper unit test); and
+a gate of more than one replica SHOULD set `peer.listen` (§11.2, §17, the config schema). D183 covers this
+repository's chart; Cloud's Helm values open the peer port within the namespace (D163)
+([`relay.md`](../spec/relay.md) §11.2, §17; [`tunnel.md`](../spec/tunnel.md) §11; `peer.Assertion`,
+`peer.ForwardedHeaders`; `mcp_peer_hop`).
+
+### D180. A modern exchange's preamble carries no MCP session — **decided under the owner's standing instruction, 26 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §8.1 defined `mcp_session` as the hash of the client's gate `Mcp-Session-Id`,
+which a 2026-07-28 exchange does not have, so its value for modern requests and modern dispatches was undefined. A
+virtual session's hash (D160) would hand nodes an identifier that binds nothing, and a first modern request has
+none yet (D177). Decision: on an exchange for a modern request, and on every exchange of a task a modern request
+created, `mcp_session` and `mcp_request_id` are absent, and a node must not rely on them there; sealed services,
+which need them, are never sent a modern request (D162).
+
+### D181. `kontra-blob:` is reserved, and a blob stream answers with one line — **decided under the owner's standing instruction, 26 Oct**
+
+D167 renders every `kontra-blob:<ref>` part as a presigned GET and authorizes a blob stream for a task the session
+serves, but nothing refused a `kontra-blob:` part that a caller or an upstream wrote: anyone who learned a ref (a
+node serving several buyers, say) could put it into another task and receive a presigned URL or a blob stream for
+another buyer's object. The plan also wrote the stream's framing twice, once without `too_large`. Decision: a `url`
+part whose URL starts with `kontra-blob:` is refused from a caller (`InvalidRequest`) and from a service
+(`upstream_error`); egress rendering and blob streams resolve a ref through `blobs`, and only for the task its row
+names; a blob stream answers with one JSON line, `{"size": n}` and then exactly `n` bytes, or `{"error":
+"not_found" | "forbidden" | "too_large"}`, and closes ([`relay.md`](../spec/relay.md) §10.4;
+[`tunnel.md`](../spec/tunnel.md) §8.3; `blob.Fetch`, `tunnelgate.NodeStreams`).
+
+### D182. A node-opened stream over the cap gets `429`, and a node that keeps refused streams open loses its session — **decided under the owner's standing instruction, 26 Oct** (settles D137's text)
+
+[`tunnel.md`](../spec/tunnel.md) §14 answered a node-opened stream over the cap with `429` and kept the session.
+yamux v0.1.2's `Stream` exports `Close`, `Read`, `Write` and the deadline setters only (`forceClose` and
+`closeTimeout` are unexported), so there is no reset, and a refused stream frees nothing while the node holds its
+half; D137 counted a stream from its accept until both halves end, and left §14's text open. Decision: §14 says
+that a stream counts from its accept until both halves end; over the cap (32, 8 for an anonymous session) the gate
+answers `429`, and a node that keeps more than the cap of refused streams open loses its session.
+
+### D183. The repository's chart mounts the signing key, and runs more than one replica only with a peer port — **decided under the owner's standing instruction, 26 Oct**
+
+`charts/kontra` mounted only `kontra.yaml` from its config Secret, so after D166 a chart deployment serving A2A
+services at a public `public_url` refuses to start: it has no file for `signing_key`. It runs one replica and its
+NetworkPolicy admits only the public and metrics ports, and no work package listed it. Decision: M3 WP-02 adds
+`signingKey: {existingSecret, key}` to the chart's values, mounted read-only at `/etc/kontra/signing/` with mode
+`0440`, which the pod's `fsGroup` makes readable and `jws.LoadKeySet` accepts, and the values document
+`signing_key: file:/etc/kontra/signing/kontra.key`. M3 WP-04 adds `gate.peer: {enabled, port, secret:
+{existingSecret, key}}` (the container port, the `peer.secret_env` variable from that Secret, and NetworkPolicy
+ingress to the peer port from the release's gate pods with the matching egress) and `gate.replicas` (default 1),
+which the chart refuses above 1 while `persistence.enabled` holds the one-replica ACME cache (D70) or without
+`gate.peer.enabled` (D179).
+
+### D184. A stdio child is stopped with its process group — **decided under the owner's standing instruction, 26 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §10 closed the child's stdin, then sent `SIGTERM` after 5 s, to the child only.
+The pinned commands start with `npx`, which runs `node` as its child, so killing the `npx` pid could leave `node`
+running past `--max-sessions` and past the e2e leak check. Decision: the bridge starts each child in its own
+process group, sends the group `SIGTERM` 5 s after closing stdin and `SIGKILL` 5 s later, and does the same on
+idle, on a crash and on `Close`; WP-05's tests assert that no process of the group survives
+(`stdiobridge.KillAfter`).
+
+### D185. The e2e and pentest harnesses keep stock servers on loopback, with nothing to leak — **decided under the owner's standing instruction, 26 Oct**
+
+`server-everything@1.0.0` listens on every interface (`dist/transports/listen.js`, `app.listen(port)`) with CORS
+`*`, and ships `get-env` (all of `process.env`) and `gzip-file-as-resource` (fetches any URL while
+`GZIP_ALLOWED_DOMAINS` is empty). Started with the harness's environment on this shared host, it would hand the
+network `KONTRA_TEST_PG`'s credentials, the bucket's keys and `KONTRA_PEER_SECRET`. The bridge's scrubbed
+environment also hides stdio children from `scripts/test_e2e.sh`, which finds leftovers by their `KONTRA_E2E_*`
+variables. Decision: every server the harnesses start listens on `127.0.0.1` only (Go servers bind it; the npm
+servers start with a `--require` preload from `test/e2e/testdata` that makes a port-only `listen` bind
+`127.0.0.1`), with a minimal environment (`PATH`, `HOME`, `LANG` and the run's marker variables) and
+`GZIP_ALLOWED_DOMAINS` set to a name that matches nothing; MCP services deny `get-env` and `gzip-file-as-resource`
+unless a test needs them; stdio services get `--env KONTRA_E2E_RUN --env KONTRA_E2E_SESSION`, and the leak check
+also matches children by process group. `examples/mcp/everything` tells operators the same.
+
+### D186. The pentest runs on this host's Docker without touching its neighbours — **decided under the owner's standing instruction, 26 Oct**
+
+Five things stopped the pentest from running as D168 and D169 describe it. The D169 test Lifecycle worker needs
+Temporal's frontend, which `compose.yaml` does not publish; and the `hooks.lifecycle` key it needs is refused at
+load until M5 (`internal/config/validate.go`), although the gate's half (the hooks snapshot, and the five
+activities scheduled by type name on the configured queue, `lifecycle.WorkerConfig.RemoteHooks`) is built since
+M1. Port 8333, SeaweedFS's S3 default, is held on this host by `windmill-seaweedfs`. SigV4 presigning signs the
+host, so a presigned GET works only through the endpoint the gate signed it for, which the gate's container and
+the host's attackers must both reach. `go test`'s default 10-minute timeout is shorter than building the gate
+image on 2 CPUs and running the targets, and would panic with the stack left up. And a key file bind-mounted
+root-owned at `0440` is unreadable to the image's uid 65532. Decision: `compose.yaml` publishes no Temporal or
+Postgres port; `compose.pentest.yaml` publishes Temporal's frontend on `127.0.0.1` and a free port for the test
+worker, which runs on the host, and the D169 probe alone runs with `hooks.lifecycle` set (a second gate
+configuration, applied by a restart); M3 lifts the load-time refusal of `hooks.lifecycle`, with an integration
+test of a worker on its own queue, while `hooks.admission` stays refused until M5. The driver creates the run's
+network first, reads its gateway address and publishes the bucket on that address and a free port, which is
+`blobs`' `endpoint`. It passes `-timeout 90m` (`KONTRA_PENTEST_TIMEOUT` overrides it), builds the image once
+(`make pentest-image`) before `go test`, and tears down in `t.Cleanup` and in the make target's trap. The run's
+signing key and certificate are owned by uid 65532 before `up`, and the acceptance asserts that the gate starts
+with them.
+
+### D187. `kontra connect` prints key ids and thumbprints where the console showed them — **decided under the owner's standing instruction, 26 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §7's threat table still said "The seller's key ids are shown in the
+operator's console for out-of-band comparison", though D164 removed the local console and a team gate has none.
+Decision: `kontra connect` prints the recipient key ids and the seller key thumbprints on stderr and in its log
+when it first sees a service and on every change. Amended by D223 (a `kid`-only seller signature is verified with the
+seller key set the gate names, and pinned unverified only when it names none).
+
+### D188. Cloud's thread URL is `https://app.kontra.sh/#/t/<taskId>` — **decided by the owner, 26 Oct** (kontra-cloud#60)
+
+[`relay.md`](../spec/relay.md) §12.3, the hooks fixture and the docs named `https://app.kontra.run/t/<taskId>`.
+The owner's final decisions (kontra-cloud#60) put the app at `app.kontra.sh`, with hash routes. Decision: the
+examples use `https://app.kontra.sh/#/t/<taskId>`. The URL stays the operator's, and the gate never builds it.
+
+## From building M3 (27 Oct)
+
+### D189. The named tests M3 runs, the refusals it lifted, and the spec conflicts met while building it
+
+Like D154 for M2. **The tests** (`test/e2e`, `make test-e2e`; D171, D172): the six gate tests the owner named,
+`sealed_no_plaintext` (`TestSealedNoPlaintext`: an A2A task with a 300 KiB part and a follow-up, a plain MCP call
+and a durable MCP call whose one elicitation is answered, all carrying a random marker; the marker, raw,
+JSON-escaped, hex, base64 or base64url, is in no table of schema `kontra`, neither replica's debug log, no node's
+log, no Temporal history with its payloads decoded and no bucket object, with positive controls showing the scan
+reads each source), `sealed_replay` (`kontra seal` against the gate: `replayed`, `wrong_job` and the MCP
+`replayed`/`wrong_message`, each audited and never retried, the gate's own retry after a node-written `502`
+accepted), `sealed_unsealed_part`, `mcp_session_cross_node`, `mcp_tool_denied` (with `mcp_batch_refused`) and
+`mcp_task_resume` (both variants, and the modern ones: a replica kill, and an `InputRequiredResult` before the
+tunnel dies); and with them `card_passthrough`, `mcp_batch_refused`, `mcp_meta_spoof`, `mcp_session_revoked`,
+`mcp_case_smuggling`, `a2a_case_smuggling`, `stdio_roots`, `local_rebinding` and the hiring row (with
+`auth_revoked`), `mcp_modern_task`, `mcp_era_fallback`, `mcp_peer_hop` and a sealed 2 MiB part through the bucket.
+Each runs on two gate replicas behind the Front, with the client on one replica and the tunnel on the other
+wherever the row allows. The harness writes one `signing_key` both replicas sign with (D166), runs a gofakes3
+bucket on `127.0.0.1` whose credentials only the replicas get, gives each replica a peer listener
+(`--peer-listen`, `KONTRA_PEER_SECRET`), logs the replicas at debug level (`kontra-gate serve --log-level`, added
+for this), installs `server-everything@1.0.0` and `server-filesystem@1.0.0` once per run from the example locks
+(an install that fails fails the test, unless `KONTRA_E2E_OFFLINE=1` skips it), and keeps D185: every server on
+`127.0.0.1` (asserted through `ss -Hltnp` at the end of every test; the preload binds `127.0.0.1` for every `listen`
+Node would bind on every interface, a backlog, no port, an empty or null host and an options object included, not
+only a port-only one), the npm servers and the harness's own `npm ci` with a minimal environment and the run's
+markers, stdio children given the run's markers with `--env`, and `scripts/test_e2e.sh` also killing every process
+in the group of a leftover and every process whose command line names the run's directory or whose working
+directory is under it. The modern-era tests use the
+in-repository dual-era double; `server-everything@2.0.0` runs from a pinned lock (`test/e2e/testdata/everything-2`)
+and is skipped, saying why, without Node 24 (this host has Node 22). The residuals of ext-sealed.md §7 (a replay to
+another hosting node within `max_age`) and of relay.md §11.12 (a client that caches the era per origin) are
+logged by `sealed_replay` and `mcp_era_fallback`, not asserted as passes.
+
+**The refusals M3 lifted.** D90 (`seller_keys` on a direct service) and the `seller_keys` half of D144 (on a tunnel
+service): seller signatures are verified (M3 WP-02, `internal/card` `SellerKeys`), and a card no configured key
+verifies makes the service unavailable. D104: parts over 256 KiB go to the bucket (D167). The `sealed:` half of
+D144: sealing is built (M3 WP-08), so a sealed tunnel service is served and its recipients published; D91 stands
+(`sealed:` needs a tunnel backend). `hooks.admission` stays refused until M5 (C3, D186).
+
+**Spec conflicts met while building M3**, each marked `SPEC-CONFLICT` where it is implemented; the closest faithful
+behaviour was built, and each is decided in D191–D224 (28 Oct), which change the specs where they say so:
+
+- Strict decoding (relay.md §11.1, D172): a lone case variant (`METHOD` without `method`, `NAME`, `ISERROR`, a
+  Kelvin-sign `tasK`) of a member the gate reads is refused like a pair; the four `Task` members are checked only
+  where the dispatch reads them (`mcpwire` `Parse`, `CheckTask`). §11.1 should name lone variants. The A2A route
+  refuses ambiguous levels only, every reader there decoding as a2a-go does (`a2ahttp` strict.go).
+- The bucket's endpoint is dialed as configured, `http://` only when written so, never through the SSRF dialer
+  (§10.3, D67; `internal/blob` s3.go). A card that is not valid UTF-8 has no JCS form and is not installed (§3,
+  D49; `card` keeper.go). `limits.task_bytes` counts each bucket object as well as each logged encoding (§6.6, D103;
+  `relay` executor.go): §6.6's table and D103 should say so.
+- Hiring (tunnel.md §4, §5, §9, §14; D133): an unknown key whose hello declares no service and carries a
+  hire-scoped API key is admitted hire-only, and a known key with no binding only with one (`enroll` admit.go); a
+  specific non-loopback `--listen` is an accepted `Host` (`hiring` CheckLocal); the hiring edge applies its limits
+  with the session as the client (`gate` gate.go); a blob stream over the cap is closed unanswered
+  (`tunnelgate` nodestreams.go); a hosting exchange whose `kontra-blob:` part cannot be fetched answers D151's
+  final `400`, or `503 full` when a retry may succeed (`node` proxy.go); every node binds `--listen`, which the
+  owner may want to turn off for nodes that only host (`node` run.go).
+- The MCP relay (relay.md §11.1–§11.4, §6.6; D174): the holder answers a refused session `404` with
+  `Kontra-Peer-Gone`; plain MCP maps a node's own answers (`not_hosted`/`kind_mismatch` close the row
+  `tunnel_lost`, `full` is `503`), a `DELETE` whose upstream is gone is `200`, a `401` and an unknown session use
+  `-32001`, and a call whose answer never arrived is metered `is_error` true (`mcprelay` exchange.go, legacy.go);
+  only SSE events a client dispatches are relayed and metered, and a second answer ends the stream; a `tools/list`
+  drain is bounded to 30 s (`policy.go`); on a sealed service an exact `{v, envelope}` is kept on every client
+  response, since a response does not name its request (`legacy.go`); an absent `tools.allow` allows all and an
+  empty one none (`gate` services.go); a `GET` or `DELETE` with 2026-07-28 and a session is `405` (`mcpwire`
+  wire.go); a hosting node's `sealed_rejected` on a plain call reaches the client as a JSON-RPC error with `200`.
+- Hosting MCP (tunnel.md §8.2, §10; D173): an MCP `--serve` target may name its endpoint path, and the gate's `/`
+  goes to it (`node` serve.go, proxy.go); an unquoted shell operator in a stdio command line is a usage error
+  (`stdiobridge` command.go); `Last-Event-ID` replays only a GET-stream event the queue holds, and a second `GET`
+  replaces the first; a client response reaches a hosted server only as the answer to a request the node relayed
+  and has not seen answered, and any result with `roots` is dropped (`mcproots` roots.go): §10 should be reworded.
+- Durable MCP (relay.md §11.5–§11.8): a resumed `k.` stream ends without the `tasks/result` answer, which a client
+  asks for again (`mcprelay` tasks.go); `forward_cancel` sends `tasks/cancel` where the upstream's declaration is
+  not known (`dispatch.go`); an upstream that cancels its own task ends it `canceled` with no `kontra.canceled`
+  (`legacy_dispatch.go`).
+- 2026-07-28 (relay.md §11.12; D177, D178): an inconclusive era probe is not repeated for every waiting request
+  (`mcprelay` era.go); a cached modern `tools/list` and a gate-owned task open the virtual session; an `Mcp-Name` on
+  a method that has no name in its body is not forwarded; an `InputRequiredResult` is metered with `is_error` NULL;
+  a re-attach that finds a multi round-trip first id and no logged round fails `upstream_error`, and a call sent
+  again with its answers is never repeated after an exchange that may have reached the upstream (`modern.go`,
+  `modern_dispatch.go`).
+- Sealing (ext-sealed.md §3, §5, §6): a hiring node refuses a request to a service its pin says is sealed when the
+  card cannot be read; the client's own sealed message in a Task's history is restored or left out, never refused;
+  a first sight of an artifact may start at any chunk (`sealing` hiring.go); the hosting node lets no exchange reach
+  a sealed job's upstream task unless it is that job's (`hosting.go`); a durable MCP task is kept in its session's
+  job, and its input requests carry the gate task id (`sealing` mcp.go).
+- `kontra seal` (§5.1, M3 WP-09): it sends an API key, since the card of a service that is neither listed nor open
+  to anonymous is otherwise the unknown-service `404` (relay.md §2.1); only one given with `--api-key` (or `@file`),
+  never one read from the environment, which is tied to no gate (the gate a `--service` names is untrusted, §7), and
+  only on the service's card once it was `404` without it, then on its upstream card, never on the key set
+  (`sealing` seal.go). And `--open` binds a job to the task its reply names, so that `--task` seals a follow-up with
+  that job's key and `rk`, which rule 3 requires. §5.1 should say both.
+
+Three defects the gate tests exposed were fixed where they were, each with a regression test: a follow-up whose
+header names another task than the preamble's is `wrong_job` (rule 3), not `wrong_task` (`sealing` hosting.go);
+`kontra seal --open` leaves out the client's own sealed message in a Task's history (only it: any other part no
+job key opens is still an error); and the replica holding a tunnel flushes
+an exchange's headers before its body, so an idle event stream answers through the peer hop (`mcprelay`
+`RunExchange`, `TestPeerHopIdleGET`).
+
+### D190. The M3 pentest's findings, and how its harness departs from D186
+
+The PRD §12 list and M3's own surface ran against the compose team gate on this host, as D168, D169 and D186 say
+([`pentest-m3.md`](pentest-m3.md) records every probe). **Four findings, fixed** with a regression test each:
+
+- F-1: a start that failed after `gate.New` had built the replica panicked (its deferred cleanup read the named
+  result every error return had set to nil). The cleanup holds the replica it built.
+- F-2: the closed default route's empty `404` carried no HSTS. HSTS is set before the route is matched.
+- F-3: the bucket check at start had no bound (minio-go's retries held an unreachable bucket's gate for minutes,
+  never healthy). `blob.Open` gives up after 30 s.
+- F-4: a hosting node's refusal of an answer to a sealed MCP input request (ext-sealed.md §5 rule 4b) was treated as
+  an upstream's refusal: no audit row, and the task waited at `input_required` until its deadline. ext-sealed.md §6
+  already says what the gate does with a node's refusal: an audit row, the task's failure, no retry. The durable
+  dispatch now does it for an answer as for any other sealed part. No spec text changes.
+
+**The harness's departures from D186.** The bucket's endpoint is its own address on the run's network, not the
+network's gateway address with a published port: this host's firewall drops what a container sends to the host's own
+addresses, so the gate's container could not reach a port published there, while the bucket's network address is
+reachable from the gate and from the host alike, and nothing of the bucket is published. Images are built with the
+docker driver's builder only (`BUILDX_BUILDER=default`), never with another project's buildx builder. The trap of
+`make pentest` also removes the run's directory.
+
+**What the run could not exercise on this host**, each covered elsewhere and named in the record: the push redirect leg
+(it needs a globally reachable webhook, and D185 keeps every server on loopback), an oversized blob announcement to a
+node (the e2e FakeGate serves no node-opened blob stream), and a node's own `replayed` refusal of an answer the gate
+sent twice (the gate takes one answer per gate request id, relay.md §11.7). The dual-era client run D177 asks to record
+before M4 was Claude Code 2.1.281's `claude mcp list` against a modern and a legacy-only service on the gate's one
+origin: both connected, the modern one in the modern era. Amended by D266 (the second run, after the review rounds).
+
+## From M3's spec conflicts and its review (28 Oct)
+
+Building M3 met the spec conflicts D189 lists, and the review after its pentest (the eleven `M3 review:` commits of 28
+Oct) met more; each is marked `SPEC-CONFLICT` where the code departs from the text, with the closest faithful
+behaviour built. The owner's standing instruction ("Don't ask me anything", 26 Oct) covers them: each is **decided
+under the owner's standing instruction, 28 Oct** below, with the option its builder or reviewer recommended, and each
+code marker names its entry. Where that option is what the code does, the specs now say it and cite the entry
+([`relay.md`](../spec/relay.md) revision 7, [`tunnel.md`](../spec/tunnel.md) revision 5,
+[`ext-sealed.md`](../spec/ext-sealed.md) revision 3); where it was not built yet, the specs stated the built behaviour
+and its residual, and D225 listed what was left to build, since built in M3 too. As in M2, a proposal that would only
+add a value to what both binaries already speak (a blob refusal, a `Kontra-Node` reason) is not taken where the built
+behaviour holds; the envelope's `service` member (D221) is taken, because it closes a residual nothing else closes.
+
+### D191. A lone case variant of a member the gate reads is refused like a pair — **decided under the owner's standing instruction, 28 Oct** (amends D172)
+
+D172 and [`relay.md`](../spec/relay.md) §11.1 refuse a level in which a key repeats or two keys are equal under
+Unicode case folding. A lone variant is neither: `{"METHOD": "ping"}` with no `method`, a lone `NAME` or `ISERROR`,
+`tasK` spelt with the Kelvin sign. The gate reads the member as absent, while a decoder that folds case (Go's
+`encoding/json` into a struct, as mark3labs/mcp-go decodes) reads it as the member, so a denied tool could run, or a
+failed call be metered a success. Decision, as built: at the levels §11.1 names, a key equal under case folding, but
+not exactly, to a member the gate reads is refused like a pair, from a client (`400`, `-32600`) and from an upstream
+(not relayed); the members are those `mcpwire` lists (`clientReads`, `upstreamReads`), where a member is added
+before the gate reads it. The four members of a task object (`taskId`, `status`, `statusMessage`, `pollInterval`)
+are checked only where the dispatch reads them (`mcpwire.CheckTask`): checked in every upstream result, they would
+refuse ordinary results that carry a `Status`. The A2A JSON-RPC route refuses ambiguous levels only, since every
+reader there (the gate's and a2a-go's) decodes with `encoding/json` alike (`a2ahttp` strict.go)
+([`relay.md`](../spec/relay.md) §11.1; `mcpwire.Parse`, `mcp_case_smuggling`).
+
+### D192. The bucket's endpoint is dialed as configured — **decided under the owner's standing instruction, 28 Oct** (amends D67, D167)
+
+[`relay.md`](../spec/relay.md) §10.3 has every other operator URL follow the SSRF dialer (D67): `https://` and
+globally reachable addresses only, with no `allow_private` for `blobs:`. That refuses every private team bucket
+(MinIO or SeaweedFS beside the gate, the e2e harness's gofakes3 on `127.0.0.1`, the pentest's bucket on its compose
+network, D190). Decision, as built: the bucket is the gate's own storage, like its Postgres and Temporal, and
+nothing a caller or a seller writes chooses its address; its endpoint is dialed as configured (`http://` only when
+the operator writes it), with the environment's proxy ignored and redirects never followed, as §10.3 says of every
+connection ([`relay.md`](../spec/relay.md) §10.3; `internal/blob` s3.go `Open`).
+
+### D193. A card that has no JCS form is not installed — **decided under the owner's standing instruction, 28 Oct** (amends D49)
+
+§3 serves the upstream card byte for byte (D49) and signs the served card over its RFC 8785 JCS, with the upstream
+card's JCS hash in the header (D166). JCS is defined for valid Unicode only, so a card that is not valid UTF-8, or
+holds a lone surrogate, can be neither hashed nor signed; M1 served such bytes as they were. Decision, as built:
+such a card is not installed (`ErrBadCard`, as for any card the gate cannot serve): the service has no card (`503`,
+`service_unavailable`) until its seller publishes one, and nothing is ever served unsigned or altered
+([`relay.md`](../spec/relay.md) §3; `card` keeper.go, `TestUnsignableCardIsNotServed`).
+
+### D194. `limits.task_bytes` counts the task's bucket objects — **decided under the owner's standing instruction, 28 Oct** (amends D103)
+
+D103 counts in `limits.task_bytes` each logged event's whole encoding, and the M3 plan counted a part moved to the
+bucket as its logged `url` part only. That bounded a task's objects in number, not in bytes (`task_bytes` over a
+`url` part's few hundred bytes, each object up to an SSE event's 4 MiB), against §6.6's rule that nothing an
+upstream sends is unbounded and §10.4's "per-task totals are bounded". Decision, as built: `task_bytes` bounds
+everything the gate stores for a task, each logged event's whole encoding plus each of its bucket objects
+(`blobs.size`), the caller's included; a dispatch starts from the projection and the task's `blobs` rows, and an
+upstream object that would cross the limit is never written: the task fails `upstream_error`
+([`relay.md`](../spec/relay.md) §6.6; `relay` executor.go `storePart`).
+
+### D195. A sealed service's errors keep their code only, at the node and at the gate — **decided under the owner's standing instruction, 28 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §2 lists what is sealed (parts, MCP arguments and results) and says nothing
+of errors, while §7 promises that the gate's database and logs hold ciphertext only; and
+[`relay.md`](../spec/relay.md) §6.4 fails a task `upstream_error` "with the upstream message", while §11.8 stores an
+MCP task's JSON-RPC error verbatim. A service's error routinely quotes the input it refused (a validation error
+echoing a card number), so the gate logged and stored sealed content (M3 review security-1). The reviewer's options:
+§2 says that a sealed job's errors carry their code only, or §3 defines an error envelope that the hiring node
+opens. Decision: the first, as built. On a sealed job the hosting node relays an error (a JSON-RPC error, an
+HTTP+JSON `google.rpc.Status`) with its code, and its status, and fixed text in place of its message and data; and
+for a sealed service the gate logs and stores its own words, never the service's: an A2A failure's text names the
+HTTP status at most, and a durable MCP task's stored error keeps its code. An error envelope, which would give the
+buyer the text, is an envelope v2 question ([`ext-sealed.md`](../spec/ext-sealed.md) §2;
+[`relay.md`](../spec/relay.md) §6.4, §11.8; `sealing` hosting.go `errorResponse`, mcp.go; `relay` executor.go
+`failureText`; `mcprelay` legacy_dispatch.go `finishError`; `sealed_no_plaintext` (d),
+`TestReviewSealedJobErrorsKeepTheirCodeOnly`, `TestReviewSealedFailureText`).
+
+### D196. What the MCP relay answers where §11.2 and §11.4 are silent — **decided under the owner's standing instruction, 28 Oct**
+
+The spec does not say how the replica holding a tunnel session reports, to the replica the client reached, a session
+that §6.1 refuses; what a plain MCP request gets for a node-written answer; what a `DELETE` gets when the upstream
+is gone; which JSON-RPC code a `401` or an unknown session carries; or how a call whose answer never arrived is
+metered (M3 WP-04). Decision, as built: the holder answers `404` with `Kontra-Peer-Gone: tunnel_lost | revoked`
+(`503` when it cannot read the key check), a gate-internal header like D138's channel, and the receiving replica
+closes the row with that reason; a node's `not_hosted` or `kind_mismatch` on a pinned session closes it
+`tunnel_lost` and is `404`, `full` is `503` with `Retry-After`, `sealed_rejected` is D202's, and any other node
+answer is `502` with `-32603`; a `DELETE` always closes the row (`deleted`), and is `200` when the upstream's tunnel
+is gone; the gate's `401` and its unknown-session `404` carry `-32001`, as the TypeScript SDK's servers answer an
+unknown session; a call whose exchange was answered but whose JSON-RPC response never arrived (a cut stream, a
+refused event, a client that left) is metered `is_error` true, and a call that got no answer at all (a §6.1 refusal,
+an unreachable upstream or peer, a client that left first) has no `calls` row ([`relay.md`](../spec/relay.md) §11.2,
+§11.4; `mcprelay` exchange.go, legacy.go).
+
+### D197. The MCP relay reads what a client reads — **decided under the owner's standing instruction, 28 Oct**
+
+§11.1 and §11.2 say what happens to an SSE event whose message fails strict decoding, and that events otherwise pass
+unchanged. They say nothing of an event a client does not dispatch, a second response to one request, a leading byte
+order mark, how a response is matched to its request, or an `isError` that is not a boolean, and each let the gate
+meter, scrub or check other bytes than the client acts on (M3 WP-04; M3 review mcp-spec-1 to mcp-spec-3). Decision,
+as built: the gate's SSE reader, and the node's URL filter, drop one leading UTF-8 byte order mark, as WHATWG SSE
+and stock clients do; only events whose type is absent or `message` are read, metered and relayed, and others are
+dropped; the response that answers the client's request is matched as the TypeScript SDK matches it (`Number(id)`:
+`"7"`, `7.0` and `7e0` answer `7`; a string request id only its own string), it is what is metered, and the stream
+ends before a second one; a top-level `isError` that is not a JSON boolean is a malformed upstream message (`502`
+with `-32603` and `is_error` true; `upstream_error` in a dispatch) ([`relay.md`](../spec/relay.md) §11.1, §11.4;
+`mcprelay` stream.go, exchange.go `relaySSE`; `mcpwire.IsErrorFlag`; `mcp_meta_spoof`, `mcp_case_smuggling`).
+
+### D198. An empty `allow` allows no tool, and a `tools/list` drain has 30 s — **decided under the owner's standing instruction, 28 Oct**
+
+Two gaps in §11.3 and §6.6. M1 stored a service's `tools` as `{"allow": [], …}` whenever the file named no `allow`,
+so a deny-only policy could not be told from an explicit empty `allow`, which §11.3 does not define. And §6.6 bounds
+a drain in pages and bytes only, while every request of the service on a replica waits for the one drain in flight,
+so an upstream session that never answers held them all for as long as the client that started it waited (M3 WP-04).
+Decision, as built: `allow` is stored only when the file names it; an absent `allow` allows every tool and an empty
+one none (on a team gate's first start with M3, each configured MCP row with a `tools:` block is rewritten once,
+with an `audit` row; a row Cloud wrote with `"allow": []` now denies every tool). A drain runs on the gate's own
+context, detached from the client that started it, and has 30 s in all; past it the drain fails `upstream_error`
+(`502` with `-32603`), and each waiter drains again through its own session ([`relay.md`](../spec/relay.md) §6.6,
+§11.3; `gate` services.go `desiredOf`, `mcprelay` policy.go `DrainTimeout`).
+
+### D199. Replicas tell each other of an MCP service's nodes and tools on `kontra_tunnel` — **decided under the owner's standing instruction, 28 Oct** (extends D138)
+
+§11.12 drops a service's era "when a node of the service connects or disconnects", and §11.3 refreshes the drained
+`tools/list` on the upstream's `notifications/tools/list_changed`. With the peer hop (D163) every replica serves
+other replicas' nodes, and only the replica that saw the change acted on it: after a `list_changed` relayed on one
+replica, a tool the upstream had just added was refused `Unknown tool` on the other for up to 10 minutes (M3 WP-07;
+M3 review mcp-spec-5). Decision, as built: two more gate-internal payloads on D138's `NOTIFY kontra_tunnel`.
+`'mcp:<tenant_id>/<service>/<replica_id>'` is sent when a node of an MCP service connects to or leaves a replica,
+and every other replica drops the service's era (a `LISTEN` reconnect drops every era, for a lost notice).
+`'tools:<tenant_id>/<service>'` is sent after an upstream's `tools/list_changed`, whether the relay or a durable
+dispatch on its own session saw it, coalesced per service (at most one each 250 ms, sent at the window's end), and
+every replica drops the service's lists, both eras. This is Postgres between replicas, not tunnel wire protocol, and
+needs no migration ([`relay.md`](../spec/relay.md) §11.3, §11.12; [`tunnel.md`](../spec/tunnel.md) §11; `tunnelgate`
+registry.go, `mcprelay` toolsnotify.go; `TestReviewToolsListChangedReachesEveryReplica`). The payload, the hooks and
+the coalescing are unit-tested; a gate-level test of the round trip between two replicas is not written (D225).
+
+### D200. On a sealed service the envelope is kept on every client response — **decided under the owner's standing instruction, 28 Oct** (amends D174)
+
+D174 keeps `_meta["sh.kontra/sealed"]` "in the `result._meta` of the caller's response to" an `elicitation/create`
+or `sampling/createMessage`. A JSON-RPC response does not name the request it answers, and on a pinned session that
+request may have reached the client through another replica's stream, so the receiving replica cannot tell which
+responses those are (M3 WP-04). Decision, as built: on a sealed service an exact `{"v": 1, "envelope": "<base64>"}`
+is kept in the `result._meta` of every client response; every other `sh.kontra/` key is still removed, nothing
+changes on unsealed services, and the hosting node, which sealed the request, still checks the answer
+([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4b) ([`relay.md`](../spec/relay.md) §2.5; `mcprelay` legacy.go
+`forward`).
+
+### D201. A `GET` or `DELETE` with `2026-07-28` is `405`, and a repeated version header is `-32022` — **decided under the owner's standing instruction, 28 Oct**
+
+§11.1 makes a request with `MCP-Protocol-Version: 2026-07-28` modern, and §11.12 rule 5 makes `GET` and `DELETE`
+legacy only; neither says what a `GET` or `DELETE` carrying `2026-07-28` and an `Mcp-Session-Id` gets, nor which
+version a header sent twice names (M3 WP-04, WP-07). Decision, as built: such a `GET` or `DELETE` is modern, so its
+session id is never read (rule 2), and a modern request has no `GET` stream and no session to delete: it is `405`,
+as rule 5 answers one without a session and as a 2026-07-28 server answers a `GET`. `MCP-Protocol-Version` is read
+once, as its field value: a header sent more than once is its lines joined with `, ` (RFC 9110 §5.3), which names no
+version, so such a request other than an `initialize` (rule 1) is rule 4's `-32022` (a `GET` or `DELETE` without a
+session `405`), never classified by one line while the upstream reads another ([`relay.md`](../spec/relay.md)
+§11.12; `mcpwire` wire.go `Classify`).
+
+### D202. A node's `sealed_rejected` reaches a plain MCP client as a JSON-RPC error with `200` — **decided under the owner's standing instruction, 28 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §6's `400` is the hosting node's answer to the gate; nothing says what
+status a plain MCP client gets when the gate relays it, and a Streamable HTTP client takes a `400` as a transport
+failure and may not read its body (M3 WP-08). Decision, as built: the gate relays the node's error as a JSON-RPC
+error response with HTTP `200`: `-32602`, `sealed part rejected[: <reason>]` (the reason only when it is one of
+§6's), the request's id and the session header, as it answers any other failed call; the `calls` row has `is_error`
+true, and an `audit` row `sealed.rejected` is written. A durable dispatch fails its task `sealed_rejected` with no
+retry, as §6 says ([`ext-sealed.md`](../spec/ext-sealed.md) §6; [`relay.md`](../spec/relay.md) §11.4; `mcprelay`
+exchange.go `relayResponse`).
+
+### D203. Durable MCP where §11.6–§11.8 are silent — **decided under the owner's standing instruction, 28 Oct**
+
+Three points (M3 WP-06). (a) A `GET` whose `Last-Event-ID` is `k.<taskId>.<n>` resumes a `tasks/result` stream,
+whose last event is the answer to that `tasks/result` request; the event id names the task and the seq, not the
+request, and no replica keeps per-stream state, so a resumed stream cannot write that answer with its request's id.
+(b) §11.6's `forward_cancel` sends upstream `tasks/cancel` "only if the upstream declared `tasks.cancel`", which is
+in the `InitializeResult` of the dispatch's own session, and `attempts` has no column for it. (c) An upstream that
+cancels its own task fits neither §11.8 case 3, whose data names who cancelled, nor §11.5 step 6:
+`server-everything@1.0.0` stores no result for a cancelled task and answers its `tasks/result` with an error.
+Decision, as built: (a) the resumed stream carries every pending input request after `n`, then each new one, under
+its gate id, and ends when the task is terminal; the client asks `tasks/result` again and gets the stored outcome at
+once. (b) The replica running the dispatch keeps the declaration in memory and sends nothing to an upstream that did
+not declare it; where it is not known (the dispatching process is gone, a `forward_cancel` on `kontra-direct-ctl`),
+`tasks/cancel` is sent, and an upstream that does not serve it answers `-32601`, which changes nothing: the workflow
+writes `canceled` whatever it answers (D57). (c) As §11.12 says of the modern dispatch ("`cancelled` is
+`canceled`"), the task ends `canceled` with no `sh.kontra/canceled`: its `tasks/result` is `-32603` `task cancelled`
+without `data`, and its `calls` row has `is_error` true ([`relay.md`](../spec/relay.md) §11.6, §11.7, §11.8;
+`mcprelay` tasks.go `Resume`, dispatch.go `ForwardCancel`, legacy_dispatch.go `cancelledUpstream`).
+
+### D204. The modern relay where §11.12 is silent — **decided under the owner's standing instruction, 28 Oct**
+
+Four points (M3 WP-07). (a) "A modern request that finds the era unknown waits for that probe": read literally,
+every modern request to a service whose probe keeps ending inconclusively would probe again and wait up to 10 s. (b)
+The virtual session opens "once the upstream has answered that request with a modern result", but a `tools/list`
+served from the modern cache and a `tools/call` that becomes a gate-owned task are answered without the upstream
+answering them. (c) `Mcp-Name` is defined for `tools/call`, `prompts/get`, `resources/read` and the tasks methods
+only; on any other method no body member checks it, and an intermediary behind the gate that routed on it would
+route on a value nobody checked. (d) §11.4 writes one `calls` row when "the response completes" and says nothing of
+an `InputRequiredResult`, which answers a multi round-trip call without its outcome before the call is sent again
+with its answers, so `per_call` would be billed twice. Decision, as built: (a) after a probe that left the era
+unknown, requests are forwarded at once for 5 s, and the next one after that probes again; (b) both open the virtual
+session, the service being known modern from its upstream's own answers (a probe ending in the legacy `400` still
+opens nothing); (c) an `Mcp-Name` on such a method is not forwarded; (d) the row of an `InputRequiredResult` has
+`is_error` NULL, as a passthrough `CreateTaskResult`'s has (§11.5), and the call sent again has its own row
+([`relay.md`](../spec/relay.md) §11.12; `mcprelay` era.go `probeBackoff`, modern.go `openVirtual`, `modernHeaders`,
+`modernForward`).
+
+### D205. The modern dispatch never sends again a call that may have run — **decided under the owner's standing instruction, 28 Oct**
+
+§6.4 makes a failed exchange again for 30 s after the first upstream id and re-attaches a lost dispatch of a direct
+backend (D42); §11.12 and D178 make the first `InputRequiredResult` the first upstream id and never send the call
+afresh after it. Neither says whether the call sent again with its answers may be repeated after an exchange that
+may have reached the upstream, nor what a re-attach does after a dispatch was lost between recording a multi
+round-trip first id and logging that round's input requests (or after a round that listed only a `requestState`,
+which no event keeps): there is no upstream task to follow and no round to answer (M3 WP-07). Decision, as built: a
+call sent again with its answers is not repeated after an exchange that may have reached the upstream (the task
+fails `upstream_unreachable`, or `tunnel_lost`); only a refusal given before the call ran (`full`, `408`, `429`) is
+sent again at the next wake. Such a re-attach sends the upstream nothing and fails the task `upstream_error` at
+once, rather than at its deadline. The choices §11.12 leaves open are recorded as built: a modern attempt keeps its
+upstream task id in `attempts.upstream_session` (it has no session) and its first id in `upstream_task_id` (the task
+id, the first `inputRequests` key, or `requestState` for a round that listed none); a legacy reader's JSON-RPC error
+answering a modern input request is left out of `inputResponses` and `tasks/update`, so the upstream asks again; and
+D159's inline wait answers `CreateTaskResult` before its 2 s when the task is `input_required`
+([`relay.md`](../spec/relay.md) §11.12; `mcprelay` modern_dispatch.go `modernRun`).
+
+### D206. A node that only hires is admitted on a hire-scoped API key — **decided under the owner's standing instruction, 28 Oct** (amends D133)
+
+[`tunnel.md`](../spec/tunnel.md) §5 and D133 make an unknown key that nothing in its hello enrolls `unknown_key`
+"whatever else the hello carries", while §4 allows a hello that declares no service ("a node that only hires"), §9
+gives its streams the API key's principal, and a session needs a `tunnel_keys` row. §9 also gives a session without
+`auth` the principal `node:<key_id>`, which `org:<tenant>` admits, so a key admitted once on a hire-scoped API key
+would hire on after that API key's revocation, against §12 (M3 WP-03). Decision, as built: an unknown key whose
+hello declares no service and carries an `auth` API key with the `hire` scope (and no token) is admitted hire-only:
+a `tunnel_keys` row in the API key's tenant, no binding, and an `audit` row naming the API key; without such a key
+it stays `unknown_key` (D133), so the lost-welcome probe, which carries no `auth`, still learns that nothing
+committed. A known key with no binding at all is admitted only on a hello that carries such an API key (whose
+principal the session hires as) or that enrolls it; otherwise it is `unknown_key`, retried, or `auth_invalid` for a
+revoked or expired API key. A key with bindings, revoked ones included, keeps `node:<key_id>`, so a hosting node
+whose API key was revoked hires as `node:<key_id>` once it reconnects without it, as §9 says. Hire-only admission
+does not need `tunnel.enroll_with_api_key`, which governs the `enroll:` scopes that bind keys to services; with that
+option's self-hosted default (`false`) a node could otherwise never hire through such a gate without hosting
+([`tunnel.md`](../spec/tunnel.md) §5, §9; `enroll` admit.go).
+
+### D207. The hiring endpoint: a specific `--listen` address, the session's edge limits, and the node's own user — **decided under the owner's standing instruction, 28 Oct**
+
+Three points of [`tunnel.md`](../spec/tunnel.md) §9. Its `Host` check accepts only `127.0.0.1:<port>`,
+`localhost:<port>` and `[::1]:<port>`, yet it allows `--listen` on a non-loopback address with `--local-token`,
+whose clients reach the node by that address (M3 WP-03). It gives a hiring request "the API key's" edge limits, but
+the edge counts in flight per presented credential and rates per client address, and a hiring request carries
+neither: the gate keeps no API key secret after the handshake (M3 WP-03). And on a loopback `--listen` without
+`--local-token`, every account on the machine could hire as the node's principal and read the sealed answers its
+per-job keys open (M3 review security-7). Decision, as built: with a non-loopback `--listen` of one specific address
+(never `0.0.0.0` or `::`), that address and port are an accepted `Host` too, the local token guarding them; the
+edge's limits apply with the session as the client (`limits.body` and the body timeout as on the network,
+`rps_per_ip` per session, and in flight the session's stream cap of 32, §14), not shared with the same key's
+requests from the network; and on Linux the node serves only its own user, reading the owner of each client socket
+from `/proc/net/tcp` and `/proc/net/tcp6`, as §9 says since the review. The reviewer's further options (a `0600`
+Unix socket, a local token minted by default) are not taken: where the socket table does not exist, §9 tells the
+operator of a shared machine to set `--local-token` ([`tunnel.md`](../spec/tunnel.md) §9; `hiring` hiring.go
+`CheckLocal`, peer.go; `gate` gate.go; `TestHiringRefusesOtherLocalUsers`).
+
+### D208. Every node serves `--listen` until `--listen off` turns it off — **decided under the owner's standing instruction, 28 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §9 has every node serve `127.0.0.1:7777` and names no way to turn it off, so every
+`kontra connect` binds it, hosting-only ones included: a second node on one host stops at start unless it is given
+another `--listen` (this host's `kontra-node-hello` and `kontra-seller-hello` units would collide on an upgrade),
+and a hosting node offers its hiring principal to local processes (M3 WP-03 review). Decision, the builder's
+recommended option: `--listen off` turns the hiring endpoint off, for a node that only hosts; the default stays
+`127.0.0.1:7777`, so a node that hosts and hires needs nothing new. Built (D225): `--listen off` binds no port; a
+`--local-token` or an `--allow-origin` beside it, which guard `--listen`, and `--listen off` with no `--serve` (a node
+that would neither host nor hire) are usage errors ([`tunnel.md`](../spec/tunnel.md) §9; `node` run.go, node.go;
+`hiring` hiring.go `ListenOff`; `TestRunListenOff`, `TestNewChecksListen`).
+
+### D209. A blob that cannot be fetched — **decided under the owner's standing instruction, 28 Oct**
+
+§14 answers a node-opened stream over the cap with `429`, but a blob stream is no HTTP exchange and §8.3's error
+line has no `busy`; §8.2 and §8.3 do not say what a hosting exchange answers when one of its `kontra-blob:` parts
+cannot be fetched (M3 WP-03); and a blob stream copied its object with nothing bounding a stalled read, holding its
+slot of the cap until the session ended (M3 review robustness-10). Decision, as built: a blob stream over the cap is
+closed unanswered, which the node reads as a fetch that ended early (the node keeps its own streams under the cap,
+so it meets this only while the gate still counts a stream the node has seen end); a hosting exchange whose fetch
+would fail again (a refused ref, a bad answer, a malformed body, more bytes than announced) answers D151's final
+`400` without `Kontra-Node`, and one whose fetch may succeed if asked again answers `503` `Kontra-Node: full`, which
+the gate already retries; and opening an object in the bucket, and each read of it, must bring bytes within 30 s, or
+the gate ends the blob stream. A `busy` blob refusal and a `Kontra-Node` reason of its own were proposed and are not
+taken: each adds to what both binaries speak, while `full` and an unanswered close already lead to the retry
+([`tunnel.md`](../spec/tunnel.md) §8.3, §14; `tunnelgate` nodestreams.go, blobs.go; `node` proxy.go `inlineBody`;
+`TestReviewBlobStreamStallEnds`).
+
+### D210. An MCP target names its endpoint, and the gate's `/` goes to it — **decided under the owner's standing instruction, 28 Oct** (amends D123)
+
+D123 had `kontra connect` refuse a `--serve` target with a path until the node forwards by §8.2's rule.
+`server-everything@1.0.0` serves `/mcp` only, so a root-only MCP target cannot host the pinned example; and the gate
+sends every MCP exchange of a tunnel service to `/`, which §8.2's prefix rule turns into `<base>/`, a `404` from a
+server whose one endpoint is an exact route (M3 WP-05). Decision, as built: the node forwards by §8.2's rule (a path
+already under the base as it is, any other prefixed); an MCP target may name its endpoint path (clean, with no query
+or fragment), and the gate's `/` goes to that endpoint exactly as `--serve` names it; an A2A target with a path is
+still refused, as D123 decided ([`tunnel.md`](../spec/tunnel.md) §8.2; `node` serve.go `ParseServe`, proxy.go
+`targetPath`).
+
+### D211. The stdio bridge refuses shell syntax, and resumes only its `GET` stream — **decided under the owner's standing instruction, 28 Oct**
+
+§10 splits the command line "with POSIX shell word rules" and runs it without a shell, but does not say what an
+unquoted operator, expansion or comment becomes; it replays "the queue after" a `GET`'s `Last-Event-ID`, though
+`POST` streams share the id sequence, so an id from one could skip `GET` messages never delivered; and it does not
+say what a second `GET` does (M3 WP-05). Decision, as built: an unquoted `|`, `&`, `;`, `<`, `>`, `(`, `)`, `$` or
+backtick, or a `#` that starts a word, is a usage error at start (passed on as arguments, they would run something
+other than what the operator wrote; quoted, they pass); a `GET`'s `Last-Event-ID` replays the queue after it only
+when it names an event of the `GET` stream (a `POST` stream's id replays nothing: the bridge resumes no `POST`
+stream); and a `GET` that opens while another is open takes its place, the older one ending
+([`tunnel.md`](../spec/tunnel.md) §10; `stdiobridge` command.go `SplitCommand`, bridge.go).
+
+### D212. A client response reaches a hosted MCP server only as the answer to a request the node relayed — **decided under the owner's standing instruction, 28 Oct** (amends D173)
+
+§10 dropped "any client response whose id is that of a request it answered". That cannot keep a client's roots from
+a hosted server: a response that arrives before the node has seen the server's `roots/list` is not one, and server
+ids are predictable (the TypeScript SDK's first is `0`). Through the real gate, `{"id": 0, "result": {"roots":
+[{"uri": "file:///"}]}}` sent right behind `notifications/initialized` reached `server-filesystem@1.0.0` ahead of
+the node's answer, which then listed `/` and read a file outside `--roots` (M3 WP-05 review). Decision, as built:
+the node forwards a client response only when it answers a server-to-client request that the node relayed on that
+session and has not seen answered; it drops any result carrying `roots` (any case variant) whatever its id, and
+every response on a 2026-07-28 exchange, which relays no server request; each dropped one is `202`
+([`tunnel.md`](../spec/tunnel.md) §10; `mcproots` roots.go `FromClient`; `stdio_roots`,
+`TestMCPStdioFilesystemThroughTheGate`).
+
+### D213. A principal will hold at most two MCP sessions of a service, and a full stdio bridge will stop its longest-idle child — **decided under the owner's standing instruction, 28 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §10 caps a stdio service at 8 children (`--max-sessions`), `503` `full` beyond, and
+[`relay.md`](../spec/relay.md) §11.2 caps no principal. Every principal admitted to the service, and every durable
+task's own upstream session (D22), shares those children, so one principal holding eight idle sessions has every other
+`initialize` answered `full` until `--session-idle` (1 h) and the gate's `session_idle_s` pass (M3 review
+security-10). The bridge sees tunnel sessions, never principals. Decision: the reviewer's proposal, both halves. The
+gate caps the open MCP sessions of one principal on one service (`services.<name>.max_sessions_per_principal`, default
+2), an `initialize` beyond the cap closing that principal's longest-idle session with an upstream `DELETE`; and a
+bridge that is full stops its longest-idle child, when that child has been idle for at least 5 minutes, rather than
+answer `full`. Both are built (D225). At the gate (`services.max_sessions_per_principal`, in 0002, 1 to 10000): the
+eviction runs once an upstream is chosen, before the upstream `initialize` (one refused before then closes nothing),
+closing with reason `idle` the principal's sessions beyond the cap other than the new one, the oldest `last_seen_at`
+first, each with a `DELETE` on its pinned target made before the `initialize` goes; it runs again once the new row is
+written, for concurrent `initialize`s; 2026-07-28 virtual sessions are not counted. On the node: an open `GET` stream
+counts as an exchange, so its session is never idle; a stopping child still counts against `--max-sessions` until its
+group is gone, and an `initialize` that finds one waits for it (the gate's `DELETE` reaches the bridge first),
+stopping no other child meanwhile, rather than answer `full` ([`relay.md`](../spec/relay.md) §11.2, §17;
+[`tunnel.md`](../spec/tunnel.md) §10; `mcprelay` exchange.go `makeRoom`, sessions.go `Evict`; `stdiobridge` bridge.go
+`reserve`; `TestSessionsPerPrincipal`, `TestSessionsPerPrincipalThroughTheHop`,
+`TestFullBridgeStopsItsLongestIdleChild`, `TestSessionsPerPrincipalThroughTheGate`). Amended by D231: the gate's half
+closes only a session idle for 5 minutes and none in use, and otherwise refuses the `initialize`; it leaves
+`anonymous` and direct backends alone, and its default is 4.
+
+### D214. A hiring node that cannot read a sealed service's card — **decided under the owner's standing instruction, 28 Oct**
+
+[`ext-sealed.md`](../spec/ext-sealed.md) §5 has the hiring node seal for a service "whose verified card carries the
+extension" once it has checked its pin, and says nothing of a card it cannot read at all (the gate unreachable, a
+`503` card route, a card that does not verify) (M3 WP-08). Decision, as built: when the service's pin says it is
+sealed, the request is refused `502`, and nothing is sent in plaintext to a service known to be sealed; with no pin,
+or an unsealed one, it goes as it came, which is what a first sight would record anyway (trust on first use, §7),
+and that unknown is kept 5 s only. One card read serves every request waiting on it and runs on its own bounded
+context, so a request that leaves never ends it for the others (M3 review robustness-1); card routes themselves are
+not sealed ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hiring.go `info`).
+
+### D215. The hiring node reads a Task's history, and an artifact first seen in a snapshot — **decided under the owner's standing instruction, 28 Oct**
+
+§5 rule 4 opens every sealed part the node receives for the job as `dir: "res"`, and has chunks arrive in order. But
+a Task's history holds the client's own message as the gate stored it, sealed `dir: "req"` to the service's
+recipients, which the per-job key cannot open; and a Task's artifact holds the chunks the gate merged (after an
+`append: false`, only those since), so a node that first sees an artifact in a snapshot (a client that polls) cannot
+tell that from a gate that dropped the first chunks (M3 WP-08). Decision, as built: the client's own sealed message
+in a history is restored from what this node sealed for the job (its plaintext, kept in memory), or else left out of
+what the local client gets, never refused; the first sight of an artifact in a Task may start at any chunk, its
+chunks then consecutive, and every later chunk is next in order or a byte-identical repeat, anything else
+`sealed_rejected` and dropped. After a restart in the middle of a job, an artifact is a first sight again, and the
+client's own history parts are left out ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hiring.go
+`openContainer`, `checkChunks`).
+
+### D216. `chunk` counts every chunk a node sealed for an artifact — **decided under the owner's standing instruction, 28 Oct**
+
+§3's `chunk` is "for artifact updates, the 0-based count of updates for that `artifactId` this node sealed; 0 for a
+whole artifact". A whole artifact reuses the ciphertext of the parts the gate already holds (§5, so that polling
+sees identical bytes), which carry the chunk they were sealed as, and its new parts cannot be chunk 0 again once a
+chunk 0 was sealed: the hiring node refuses a `(chunk, part)` seen before with other bytes (rule 4) (M3 review
+sealing-spec-7). Decision: the reviewer's amendment, which is what the node does: `chunk` is the 0-based count of
+the chunks this node sealed for the `artifactId`, an update or the new parts of a whole artifact each counting as
+one, so a whole artifact sealed first is chunk 0 and the updates that follow count on from it
+([`ext-sealed.md`](../spec/ext-sealed.md) §3; `sealing` hosting.go `sealContainer`).
+
+### D217. Only a sealed job's own exchanges reach its task, and a sealed job takes nothing unsealed — **decided under the owner's standing instruction, 28 Oct**
+
+§5's rules bind the sealed parts of a request and say nothing of an exchange without one (a `GetTask`, a
+`CancelTask`, a `SubscribeToTask`, an unsealed message) that names a sealed job's upstream task: its replies would
+be sealed to whatever job the preamble names, or not at all, so a gate could read a sealed task's content on an
+exchange of a job of its own (M3 WP-08). Nor do they say what a service with sealed jobs does with a request that
+would carry a task's plaintext out of the node, or with an unsealed part inside a sealed job (M3 review security-3,
+security-4). Decision, as built: an exchange reaches a sealed job's upstream task or context only if it is that
+job's (its preamble names the job's gate task, or for MCP its session); a request naming another job's upstream task
+is `wrong_task`, one naming another gate context's upstream context `wrong_context`, and a service reply naming a
+sealed job's task on another exchange is refused before anything of it is forwarded. A service with sealed jobs, or
+started with `--sealed-required`, refuses `bad_header` a push config (inline, by method or by route: it would have
+the service post a sealed task's plaintext to a URL the gate chose), a JSON-RPC method that is none of A2A 1.0's
+(0.3 methods included), and a body that is not one JSON object. In a job whose request was sealed, an unsealed part
+beside sealed ones, an unsealed message and an unsealed `tools/call` on its session are `bad_header`, whatever
+`--sealed-required` says, and the job's MCP tasks keep their `statusMessage` sealed on every exchange
+([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hosting.go).
+
+### D218. A durable MCP task lives in its session's job, and its input requests and their answers name its gate task — **decided under the owner's standing instruction, 28 Oct**
+
+§5 keys a hosting node's job "by the gate task id; for plain MCP calls, by the session hash", while rule 4 holds one
+`replyTo` and `rk` per session and the hiring node keeps one per-job key per MCP session (§4). §3's MCP reply column
+names `taskId` only for a durable task's result, and an input request is sealed "like a reply" with `session`,
+`tool` and `messageId`; with those alone the hiring node cannot tell an input request replayed from another task of
+the same session and tool (M3 WP-08). And the answer, sealed "like a request" with no `taskId`, binds `session`,
+`tool` and `messageId`, while each durable task has its own upstream session whose ids start again, so a gate could
+deliver the buyer's answer to one task's question as the answer to another's (M3 review security-2). Decision, as
+built: a durable task is kept inside its session's job, with its gate task id and its input requests, so both keys
+find it; a durable task's input request carries its gate `taskId` (a passthrough task's and a plain call's carry
+none), which the hiring node checks under rule 4; an answer carries the `taskId` of the input request it answers
+(absent when that had none), which the hosting node requires under rule 4b; and a `tools/call` still carries none.
+Whether a response answers a sealed input request is read from the node's own index by upstream session and id,
+whatever the preamble says (M3 review sealing-spec-3) ([`ext-sealed.md`](../spec/ext-sealed.md) §3, §5; `sealing`
+mcp.go `sealInput`, `mcpRule1`).
+
+### D219. A sealed plain call's input requests and answers are sealed — **decided under the owner's standing instruction, 28 Oct** (amends D62)
+
+§2 and D62 seal the input requests of "a task the sealed call created", and say that the gate holds no plaintext of
+a sealed MCP call, plain or durable. A plain call's server builds its input requests from the sealed arguments too
+(`server-everything`'s `sampleLLM` sends the prompt), so they reached the gate in plaintext (M3 review security-6).
+Decision: the reviewer's amendment, as built. A sealed plain call's `elicitation/create` and
+`sampling/createMessage`, and the client's answers, are sealed as a task's are, the header naming the call's session
+and tool, the server's id, and no `taskId`; the binding to the call is implicit (the call's own stream, and the
+node's index by upstream session); the answers must come sealed and pass rule 4b; and the hiring node drops any
+other input request on a sealed session. Upstream `notifications/message` and progress of a sealed call stay
+unsealed, as §2 says of notifications ([`ext-sealed.md`](../spec/ext-sealed.md) §2, §3, §5; `sealing` mcp.go
+`inputOf`).
+
+### D220. A sealed job's artifact name and description are not relayed — **decided under the owner's standing instruction, 28 Oct**
+
+§2 seals the content of every part and keeps "a part's `filename`" outside, with a warning; it says nothing of an
+artifact's `name` and `description`, which a service may write from the sealed input (M3 review security-8).
+Decision: the reviewer's first option, as built: on a sealed job the hosting node drops an artifact's `name` and
+`description` (any case variant, which a lenient decoder takes for the member), and §2 says so beside its warning on
+`filename`. Sealing them into the first part's body, the other option, would change the body's form, an envelope v2
+question ([`ext-sealed.md`](../spec/ext-sealed.md) §2; `sealing` hosting.go `sealContainer`).
+
+### D221. The envelope names no service: replay sets are node-wide, and the header gains a `service` member — **decided under the owner's standing instruction, 28 Oct**
+
+§3's header binds the gate's task, context, session, tool and `messageId`, never the service, and §5 keeps the
+replay sets per service, so a gate could deliver a buyer's sealed request to another service of the same node than
+the one hired, which opens it and answers with a valid `auth`; the hiring node checks no service either (M3 review
+security-5). Decision: the reviewer's proposal. Built: rule 2's `replyTo` set and rule 5's `(session, messageId)`
+set are checked across every service of the node, so a request one service accepted is refused by every other
+(`replayed`). And built since (D225): a `service` member in every request and reply header, the hired service as
+the gate's URL path names it (`<name>`, or `<tenant>/<name>` on a multi-tenant gate), checked by the hosting node
+against the preamble's `service` and by the hiring node against the service it hired. Envelope v1 is not released, so
+the member joins v1 and both nodes, and `kontra seal`, change together; the recorded age CLI vector is made again
+with it. The hosting node reads its services' paths from its `welcome` (each service's `url` and the `tenant`: only
+the tenant is the gate's to say, the name being the node's own service), and a header naming another service, or
+none, is `wrong_job`, the reason for a request that is another job's, in rule 1 so that it holds for a message, a
+`tools/call` and an answer alike; no new §6 reason is added, which would change what both binaries speak. The hiring
+node and `kontra seal --open` refuse a reply naming another service as they refuse any reply that fails rule 4. The
+node-wide replay sets stay, so §7's row holds both ways ([`ext-sealed.md`](../spec/ext-sealed.md) §3, §5, §6, §7;
+`sealed` envelope.go `Header.Service`; `sealing` hosting.go `checkService`, hiring.go `openContainer`, seal.go
+`openParts`; `node` run.go `servicePaths`; `TestHostingChecksTheService`, `TestHiringChecksTheService`,
+`TestReviewCrossServiceSplice`, `TestServicePaths`, `TestAgeInterop`, `TestSealedThroughTheGate`).
+
+### D222. `kontra seal` takes `--api-key`, and `--open` binds a job for `--task` — **decided under the owner's standing instruction, 28 Oct**
+
+§5.1 has `kontra seal` fetch the service's card with no word on a credential, but [`relay.md`](../spec/relay.md)
+§2.1 answers a card `GET` of a service that is neither listed nor open to `anonymous` with `404` when no credential
+admits the caller, so it could seal for listed services only (`examples/sealing`'s `allow: org:default` service
+failed). §5.1 also mints a per-job key and `rk` for every message, `--task` included, while rule 3 requires a
+follow-up to carry its job's `replyTo` and `rk` (`wrong_job` otherwise) (M3 WP-09). Decision, as built: `--api-key
+<key>` (or `@<file>`) is sent as a bearer credential only to the `--service`'s origin, only to the service's card
+once a `GET` of it without one was `404`, and then to its upstream card; never to the gate's key set, and never read
+from the environment, which ties a key to no gate (the gate a `--service` names is untrusted, §7). `--open` binds a
+job to the gate task its reply names (its key and state renamed to that id, as the hiring node names its jobs), and
+`--task <id>` seals with that job's key, `rk` and `contextId`; a task with no job here is refused, with a hint to
+`--open` one of its replies first. `--open` leaves out the client's own sealed message in a Task's history, as the
+hiring node does (D215). The other option, the API key `kontra connect` keeps per gate in `~/.kontra/credentials`,
+is not taken: `internal/sealing` cannot import `internal/node` ([`ext-sealed.md`](../spec/ext-sealed.md) §5.1;
+`sealing` seal.go `SealCommand`, `keyedGet`; `sealed_replay`).
+
+### D223. A seller signature that names its key by `kid` only is pinned unverified, and the gate will name the seller key set — **decided under the owner's standing instruction, 28 Oct** (amends D187)
+
+§7 pins "the seller key thumbprints that verified its upstream card", and [`relay.md`](../spec/relay.md) §3 has a
+verifier check the seller's signatures "against keys it trusts for the seller". `kontra connect` and `kontra seal`
+pinned the `kid` of every signature as a thumbprint without verifying any, so a gate that replaced the card and its
+signature with a forged one claiming the pinned `kid` left the pin unchanged (M3 review sealing-spec-4). The node is
+given no seller key set: `seller_keys` is the gate's configuration. Built: a signature that carries its key (a `jwk`
+in its protected header) is verified over the card's JCS and its key's RFC 7638 thumbprint pinned; one that names
+its key by `kid` only is pinned as the unverified `kid:<kid>` and printed so, never as a thumbprint; a pin that
+recorded a raw `kid` before reports a seller-key change once. Decision: the reviewer's first proposal. The gate's
+`kontra.upstream` header parameter gains `jwks`, the URL on the gate's origin where it serves the seller key set it
+verified with (`seller_keys`); the node fetches it through its tunnel, verifies `kid`-only signatures with it and pins
+its keys' thumbprints, trusted on first use like every pin and compared out of band through the printed thumbprints
+(D187). A `kontra connect --seller-keys` flag, the other option, would have every operator carry each seller's keys.
+Built (D225): `jwks` is `{public_url}{svc}/.well-known/seller-jwks.json`, present only with `verified: true` (a
+verifier that read exactly three members refuses the card, but v4 is not released and both sides change together);
+the route serves the public keys (`kty`, `crv`, `x`, `y`, `kid`, `use`, `alg`, nothing private) of the set the
+current card verified with, with the cards' admission and caching, `404` when the gate verified none and `503` while
+the card is unavailable; the hiring node and `kontra seal` (its `--api-key` going to the set as to the cards, D222)
+fetch it from the gate's origin only. A `kid`-only signature the named set does not verify is no seller key, as one
+carrying a key that does not verify (D228); a named set that cannot be read leaves the card unreadable (D214's rules
+then apply); with no set named, a `kid`-only signature is pinned unverified as before, and a pin that recorded
+`kid:<kid>` reports a seller-key change once its gate names the set. Each replica installs its card with the set it
+verified it with, so during a seller's key rotation a node may, for one refresh, read one replica's card and
+another's set: the card then reads as unsigned, refused once and read again a minute later
+([`ext-sealed.md`](../spec/ext-sealed.md) §7; [`relay.md`](../spec/relay.md) §2.1, §3; `jws` jws.go `Upstream.JWKS`;
+`card` keeper.go, card.go `SellerJWKSHandler`; `sealing` seal.go `SellerKeySet`, `SellerKeyIDs`; `hiring` hiring.go
+`verified`; `TestReviewSellerKeyIDsVerified`, `TestSellerKeySetNamedByTheGate`, `TestKeeperWithSellerKeys`,
+`TestSellerKeySetThroughTheGate`, `TestCardPassthrough`).
+
+### D224. A sealed MCP session's key outlives the gate's idle period, and the gate will state it — **decided under the owner's standing instruction, 28 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §2.3 deletes an MCP session's per-job key "when the session closes and every task
+created in it is done", but a client may leave without a `DELETE`, and the gate closes an idle session on its own
+after the service's `session_idle_s` ([`relay.md`](../spec/relay.md) §11.2), which the node does not learn (M3
+review robustness-3). Built: the hiring node deletes a session's key when the gate answers `404` for the session, or
+when the session has had no exchange for a day (`sessionJobIdle`, beyond the gate's default `session_idle_s` of an
+hour) and its tasks are done; a client of a gate that keeps sessions longer than a day must `initialize` again (the
+node answers `404` for a session it no longer knows). Decision: the reviewer's first proposal: the gate states the
+service's `session_idle_s` in the `initialize` result's `_meta["sh.kontra/session_idle_s"]`, and the hiring node
+keeps an idle session's key that long; a flag on `kontra connect`, the other option, would have to match every
+gate's setting. Built (D225): the gate writes the service's `session_idle_s` as a JSON integer into every legacy
+`initialize` result's `_meta`, after the operator's `initialize_meta` and in place of any upstream's; the hiring node
+keeps it with the session's job and deletes the key once the session has been idle that long and its tasks are done.
+A value it does not take (not a whole number of seconds from 1 to 30 days, the node's own bound on a key a gate
+asks it to keep), or none, counts as a day, as before ([`relay.md`](../spec/relay.md) §2.5, §11.2;
+[`tunnel.md`](../spec/tunnel.md) §2.3; `mcprelay` legacy.go `initializeResult`; `sealing` hiring.go `sessionIdleOf`,
+`sweepJobs`; `TestSessionKeyKeptForTheGatesSessionIdle`, `TestIdleSweep`, `TestSealedMCPThroughTheGate`).
+
+### D225. What the M3 decisions leave to build — **decided under the owner's standing instruction, 28 Oct** (adds to D170)
+
+Five options decided above were not built when the M3 decisions were recorded, and were to join D170's list for M4:
+`kontra connect --listen off` (D208); the gate's cap of MCP sessions per principal and service,
+`services.<name>.max_sessions_per_principal`, with the stdio bridge's eviction of a long-idle child (D213); the
+envelope header's `service` member (D221); the seller key set the gate names in `kontra.upstream.jwks` (D223); and
+`_meta["sh.kontra/session_idle_s"]` in the `initialize` result (D224). The review also left two smaller follow-ups:
+the hosting node's sealing state took one node-wide lock, so that a commit's append and `fsync` and the job files'
+writes happened under it (M3 review robustness-4), and D199's notice has no gate-level test across two replicas (M3
+review mcp-spec-5). All five options are built in M3 now, before it merges, each with its spec text and its entry
+above saying how: `--listen off` (`node` run.go; `TestRunListenOff`), the cap and the bridge's eviction (`mcprelay`
+`makeRoom`, `stdiobridge` `reserve`, 0002's `services.max_sessions_per_principal`; `TestSessionsPerPrincipal`,
+`TestFullBridgeStopsItsLongestIdleChild`, `TestSessionsPerPrincipalThroughTheGate`), the `service` member
+(`sealing` `checkService`; `TestHostingChecksTheService`, `TestHiringChecksTheService`, `TestSealedThroughTheGate`),
+the named seller key set (`card` `SellerJWKSHandler`, `sealing` `SellerKeySet`; `TestSellerKeySetNamedByTheGate`,
+`TestSellerKeySetThroughTheGate`) and the stated `session_idle_s` (`mcprelay` `initializeResult`, `sealing`
+`sessionIdleOf`; `TestSessionKeyKeptForTheGatesSessionIdle`, `TestSealedMCPThroughTheGate`); so is the review's
+proposal for robustness-4: each hosted service's state has a lock of its own, and the node-wide replay checks of
+D221 a lock of their own over an index of what each service recorded, filled at start, checked and reserved in one
+step (`sealing` hosting.go `hostedService`, `claimNode`; `TestHostingServicesLockedApart`,
+`TestHostingNodeWideReplyToIsClaimedOnce`, `TestHostingNodeWideMCPCallIsClaimedOnce`; an MCP call's claim names its
+service as the A2A `replyTo`'s does, since a plain call has no gate task, M3 review D225-5). The specs no longer state those residuals. What remains for M4 of this
+list is mcp-spec-5's gate-level two-replica test of D199's notice; D170's list is otherwise unchanged.
+
+### D226. A sealed MCP job holds its upstream session, and its requests' ids — **decided under the owner's standing instruction, 28 Oct** (amends D217)
+
+D217 lets an exchange reach a sealed job's upstream task or context only if it is that job's, "for MCP its
+session", and the hosting node bound a job to the preamble's `mcp_session`. The upstream session it forwards on is
+the request's `Mcp-Session-Id`, which the gate chooses as it does the preamble: with a preamble naming another gate
+session, or none, and the header naming the buyer's upstream session, the gate could send an unsealed `tools/call`
+into the session the buyer's sealed calls set up (a login, an opened document) and read its result, or a sealed one
+of its own and open the result with its own key (M3 review round 2, sealing-fixes-2). And 6ba105f dropped a sealed
+call's record whenever a later request reused its JSON-RPC id, before anything refused that request: a `ping` with
+the id, then a `GET` with `Last-Event-ID`, had the server replay the sealed result into no record, and the node
+relayed it in plaintext (sealing-fixes-1). Rule 4a and rule 4b also matched a response by the id's exact spelling,
+where the TypeScript SDK takes `"8"` for `8` (`Number(id)`), so a gate could answer a sealed call in plaintext with a
+string id (other-fixes-2). Decision, as built, the reviewers' first proposals: the upstream session a sealed call of
+a job went on is indexed to the job in the service's state (in flight from the node's checks on, as the job's
+binding is), and any message on it from an exchange of another session, or of none, is refused (`wrong_job` for a
+sealed `tools/call`, `bad_header` otherwise), and nothing the server sends on it reaches such an exchange; a request
+that reuses the id of a sealed request the node recorded on the session is `replayed` (MCP never reuses an id in a
+session), and the record stays; both nodes match a response to a request as the gate does
+(`mcpwire.SameID`, `AnswerKeys`); the gate's durable dispatch draws its own ids per run, so a re-attach on the same
+upstream session (D42) reuses none. On a sealed job's exchange, a response that answers neither the exchange's
+request nor one the node holds is not relayed, so that Sweep can drop an answered request's index entry once its
+record is older than `--sealed-max-age` (the indexes no longer grow with a long-lived session, sealing-fixes-9). The
+other proposal, scoping the reuse to the reusing exchange, would still relay a sealed result a server routes by id
+to that exchange ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` mcp.go `sessionOwner`, `recorded`,
+`FromServer`; `TestReviewReusedIDAfterSealedCall`, `TestReview2SealedJobOwnsItsUpstreamSession`,
+`TestReview2StringSpelledIDsAreSealed`, `TestReview2SweepPrunesAnsweredIndexEntries`).
+
+### D227. A sealed A2A job is guarded before its first reply, and a request the service had is recorded — **decided under the owner's standing instruction, 28 Oct** (amends D217)
+
+D217's guard held only once a job's first reply had named its upstream task. Before that, the gate could list the
+service's tasks (`ListTasks` with `historyLength`) on any exchange, the job's own included, and read the buyer's
+message in plaintext, holding the window open with a blocking send (`returnImmediately` is the gate's to set); and a
+gate that ended the tunnel stream before the answer released the job, although the service had the message, and
+could then open the gate task with a binding of its own (M3 review round 2, sealing-fixes-3). An unsealed first
+message of another gate task naming the sealed job's upstream context passed, and its reply too, so an agent keeping
+a conversation per context could repeat the buyer's (sealing-fixes-6). And a job went 7 days after its last exchange
+whatever `--sealed-max-age` was, so with a longer one the first message resent under its own task found no pairs
+(sealing-fixes-8). Decision, as built, the reviewers' proposals: a service with sealed state (or a job being opened,
+or `--sealed-required`) refuses a task list `bad_header` (the gate never lists the upstream's tasks, relay.md §6); a
+request of a gate task whose first sealed message the service has not answered is `wrong_task`; a reply on an
+exchange of no sealed job that names an upstream task or context the node has not indexed waits while a job of the
+service is being opened (at most 30 s, then `wrong_task`) and is read again; a request the node handed whole to the
+service whose exchange ends before the answer is recorded as an accepted one (a node-written answer, or a non-2xx,
+records nothing, as before); an unsealed message into any sealed job's upstream context is `bad_header`, and a reply
+of an unsealed exchange naming one is refused; a job is kept for 7 days or `--sealed-max-age` and the clock skew,
+whichever is longer. The residual: a first message whose exchange ended before its reply leaves its upstream task
+unindexed, readable on another exchange by an id the gate already knows (not by a list). The other proposal for the
+window, a provisional job other exchanges seal to, would write a job before the service accepted its request
+([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hosting.go `replyHeld`, `End`, `other`, `unsealedSend`,
+`Sweep`; `TestReview2NoTaskListWhileAJobOpens`, `TestReview2ReplyHeldWhileAJobOpens`,
+`TestReview2AbandonedFirstMessageIsRecorded`, `TestReview2UnsealedMessageIntoSealedContext`,
+`TestReview2JobKeptForMaxAge`).
+
+### D228. A card whose seller signatures verify nothing is unsigned, and a lost seller key needs acceptance — **decided under the owner's standing instruction, 28 Oct** (amends D187, D223)
+
+D223 verifies a seller signature that carries its key, but a signature that did not verify was only dropped from the
+seller keys, the card still counted as signed, and losing a pinned key (`removed_seller_key`) was accepted silently,
+even under `--pin-recipients`: a gate could replace the upstream card, keep a signature that verifies nothing, and
+the pin was rewritten with no seller key (M3 review round 2, sealing-fixes-5). Decision, as built, both halves of the
+reviewer's proposal: a card is signed only when a seller signature verified, or names its key by `kid` only
+(unverifiable, D223), so a pinned signed card replaced so is `unsigned`, always refused; and a removed seller key is
+refused under `--pin-recipients`, and otherwise until `--accept-change <service>`, as a new one is
+([`ext-sealed.md`](../spec/ext-sealed.md) §7; `sealing` seal.go `VerifyCard`, `hiring` hiring.go `verified`, `pins`
+`needsAccept`; `TestReview2SellerSignatureThatVerifiesNothingIsUnsigned`, `TestAcceptedChanges`).
+
+### D229. The hiring endpoint checks every connection's owner, and attributes only sockets a process holds — **decided under the owner's standing instruction, 28 Oct** (amends D207)
+
+The same-user check of [`tunnel.md`](../spec/tunnel.md) §9 ran only for a connection from a loopback address, while
+Linux accepts a connection to 127.0.0.1 from any of the machine's addresses (`curl --interface`); it read the uid of
+the first matching socket table entry, which the kernel lists as 0 for a socket its owner closed (orphaned,
+TIME_WAIT), so a request sent and closed at once reached a node running as root; and it read `/proc/net`, hidden by
+`ProcSubset=pid`, letting every connection through with no word (M3 review round 2, other-fixes-1, -3, -4).
+Decision, as built: every connection to a loopback `--listen` without `--local-token` is checked, whatever its source
+address; only an entry with a non-zero inode (a socket a process holds) is attributed, and the overflow uid (a user a
+user namespace does not map) attributes nothing; the tables are read from `/proc/self/net`, and on Linux a table
+that cannot be read closes the connection, with a warning at start (as does a node running as the overflow uid).
+Off Linux the check is still not made ([`tunnel.md`](../spec/tunnel.md) §9; `hiring` peer.go; `TestFindPeer`,
+`TestPeerListenerAccept`, `TestPeerUIDTables`, `TestHiringRefusesOtherLocalUsers`).
+
+### D230. A LISTEN reconnect drops the drained tool lists too — **decided under the owner's standing instruction, 28 Oct** (amends D199)
+
+D199 has the replica that relays an upstream's `tools/list_changed` tell the others by `NOTIFY kontra_tunnel
+'tools:…'`, and a LISTEN reconnect drop every era "for a lost notice"; a `tools:` notice lost while a replica's
+connection was down was never made up for, and the replica kept the old list, and the `Unknown tool` decisions on
+it, for up to the 10-minute refresh (M3 review round 2, other-fixes-5, records-6). Decision, as built: the reconnect
+drops every cached list as well as every era ([`relay.md`](../spec/relay.md) §11.3; `mcprelay` era.go
+`Reconnected`, `gate` gate.go; `TestToolsCacheReconnected`).
+
+### D231. The session cap closes only an idle session, and leaves `anonymous` and direct backends alone — **decided under the owner's standing instruction, 28 Oct** (amends D213)
+
+The review of D225's builds found D213's gate half too blunt (M3 review D225-1 to -4). Every unauthenticated caller is
+the one principal `anonymous`, so one budget held every anonymous client of a service, and any anonymous `initialize`
+closed another client's session, even one in use: one caller looping `initialize` ended every other anonymous
+session. A hiring node's local clients, and every user of one API key, are one principal too, so at the default of 2
+a third client closed another's session and they then closed each other's in turn; and the cap applied to direct
+HTTP backends, which have no children to share. The longest-idle session was the oldest `last_seen_at`, written only
+as a request starts and at most once a minute, so a session with a long `tools/call` or an open `GET` stream was
+taken for idle and closed mid-call, its client losing the result. And a buyer's several keys, and its durable tasks'
+own upstream sessions (D22), each escaped the cap. Decision, as built ([`relay.md`](../spec/relay.md) §2.3, §11.2,
+§17; [`tunnel.md`](../spec/tunnel.md) §9, §10; `mcprelay` exchange.go `capped`, `makeRoom`, `openSession`,
+sessions.go `Evict`, `OpenCapped`, inuse.go):
+
+- **Only an idle session is closed for a new one.** An `initialize` beyond the cap closes as many of the principal's
+  sessions as it needs among those whose `last_seen_at` is at least 5 minutes old (`EvictIdle`, the stdio bridge's
+  own bound), the oldest first, with reason `idle` and the upstream `DELETE` of D213. When too few are that old it
+  closes none and is refused `429` with `Retry-After: 60` and JSON-RPC error `-32600` `too many sessions`
+  (`data.max_sessions_per_principal`), as the edge's in-flight caps are (§2.2): a refusal costs the new client a
+  retry, where a close cost a working client its session.
+- **A session in use is never idle.** The replica serving a request or a `GET` stream of a legacy session writes its
+  `last_seen_at` at least every 90 s while one is open (a timer per session in use; the column is still written at
+  most once a minute) and once more as the last ends when it has not for a minute, so a session in use on any replica is never
+  5 minutes old; the replica's own sessions in use are also excluded by hash. The idle sweep reads the same column,
+  so a session with a `GET` stream open is no longer closed under `session_idle_s` while the stream lasts (for a
+  `session_idle_s` over 90 s), as the bridge never stops a child with one open (D213).
+- **The check is atomic.** It runs in one transaction under an advisory lock of the (tenant, service, principal),
+  before the upstream `initialize` (so a refused one reaches no upstream) and again as the new row is inserted (so
+  concurrent `initialize`s of one principal leave at most the cap open); the one that finds no room the second time
+  writes no row, is refused the same way, and its upstream session gets a `DELETE`.
+- **`anonymous` is not capped.** Its callers are distinct clients the gate cannot tell apart: a shared budget lets any
+  of them crowd out, or close, the others' sessions, and a separate one that refuses would let one caller hold every
+  place until `session_idle_s`. A service open to `anonymous` shares its upstream's sessions with everyone; the
+  bridge's own eviction of an idle child and the edge's limits are what bound them.
+- **Direct backends are not capped.** A direct `mcp: {url}` backend is an HTTP server the operator runs, with no
+  stdio children; the cap counts and closes only sessions pinned to a tunnel. The gate cannot tell a node's stdio
+  server from its URL server, so a tunnel service is capped either way.
+- **The default is 4**, half the bridge's default `--max-sessions`: one principal keeping its sessions in use leaves
+  another room on a default bridge, and a hiring node (or a team key) serves four clients of a service at once, its
+  idle ones making room for more. Every local client of a hiring node, and every user of one API key, shares the
+  principal's cap, as [`tunnel.md`](../spec/tunnel.md) §9 now says.
+- **The cap counts the credential.** It stays per principal, the identity a session is bound to: counting a
+  `buyer_id` would make every key minted for one buyer share one budget, the sharing above, and a party that can mint
+  keys can mint buyers too. A buyer's several keys each hold the cap. A durable task's upstream session (D22) is the
+  dispatch's for the attempt and is not counted: a principal's durable tasks on a stdio service can hold its children
+  (the bridge never sees them idle, the dispatch polls), bounded only by `limits.dispatch_slots`. A cap of a
+  principal's durable tasks per service joins what D225 leaves to M4.
+
+Tests: `TestSessionsPerPrincipal`, `TestSessionsCapLeavesAnonymousAlone`, `TestSessionsCapLeavesDirectBackendsAlone`,
+`TestSessionsCapNeverClosesASessionInUse` (a held call and a `GET` stream through the peer hop, the new
+`initialize`s on the other replica), `TestSessionsCapConcurrentInitializes`, `TestSessionsCapCountsTheCredential`,
+`TestSessionsPerPrincipalThroughTheHop`, `TestSessionsPerPrincipalThroughTheGate`.
+
+### D232. On a sealed session an input request is sealed or not relayed, on whichever exchange it comes — **decided under the owner's standing instruction, 28 Oct** (amends D219)
+
+D219 sealed a plain call's `elicitation/create` and `sampling/createMessage` only when they came on the call's own
+`POST` exchange. The stdio bridge routes every server request without a related task to the session's `GET` stream,
+and a URL server resumed with `Last-Event-ID` replays one there: on that exchange the node had no call to attribute
+it to, relayed it in plaintext (the canonical `server-everything` deployment puts the sealed prompt into it), and then
+forwarded the gate's own unsealed answer, since the request was in no record (M3 review round 3, r3-hosting-1).
+Decision, the reviewer's proposal: on an exchange of a session that holds a sealed job (or whose first sealed call is
+with the server) such a request is sealed or not relayed, never relayed in plaintext. It is a task's when its related
+task, or the exchange's gate task, names one; the exchange's own sealed call's; or else the session's one sealed plain
+call the server has not answered, on that upstream session. A call in flight counts: a URL server that answers JSON
+sends its headers only with its result, and its request about the call is its acceptance of the call, which the node
+then records as `Accepted` would. With none, or more than one, the request goes nowhere, and its id is recorded on the
+upstream session (swept after `--sealed-max-age`), so that any answer to it, sealed or not, is refused: no client saw
+it. Every answer the gate could give for the buyer is so either checked by rule 4b or refused; a server's `ping`, the
+only other request a client answers, carries nothing. The hiring node opens a plain call's input request on a `GET`
+too, when its `tool` is one of the session's unanswered sealed calls' ([`ext-sealed.md`](../spec/ext-sealed.md) §2,
+§3, §5; `sealing` mcp.go `soleCall`, `dropInput`, `answer`; hiring.go `openInput`; `TestReview3PlainCallInputOnGET`,
+`TestReview3UnattributableInputIsNotRelayed`, `TestReview3InputWhileFirstCallInFlight`,
+`TestReview3StdioPlainCallInputOnGET`, `TestReview3URLInputOnResumedGET`).
+
+### D233. An MCP message the node handed whole is recorded when the gate ends its exchange — **decided under the owner's standing instruction, 28 Oct** (amends D227)
+
+D227's rule, that a request the node handed whole to the service whose exchange the gate ended before the answer is
+recorded as an accepted one, was built for A2A only: an MCP exchange was recorded when the server's response headers
+came, and a server that answers JSON sends them with its result, so a gate that ended the stream after the server had
+the buyer's sealed call released everything. It could then open the buyer's session's job with a sealed call of its
+own and read the upstream session the buyer's call set up, or replay the buyer's call, which ran again (M3 review
+round 3, r3-hosting-3). Decision, as the reviewer proposed: the MCP exchange marks itself handed once the transport has
+read its forwarded body whole, and its end with no answer records it as `Accepted` does (the job's binding, `(session,
+messageId)`, the upstream session's index, the call's record); one never handed is released, as before. One rule now
+holds for both protocols ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` mcp.go `End`, `Body`; `node` proxy.go;
+`TestReview3MCPCutBeforeAnswerIsRecorded`).
+
+### D234. The hosting node refuses a 2026-07-28 request to a sealed MCP service itself — **decided under the owner's standing instruction, 28 Oct** (amends D162)
+
+D162 has the gate never serve a sealed MCP service to a 2026-07-28 request, and only the gate enforced it: a gate could
+send the buyer's sealed legacy `tools/call` as a 2026-07-28 request, its modern `_meta` keys beside the envelope (which
+binds only its own key), and the node opened it. A dual-era server then answered with what the modern shapes carry
+outside `content` (a multi round-trip's `inputRequests` and `requestState`, built from the arguments; a
+`CreateTaskResult` at the top of `result`, not the legacy `result.task` the node binds) in plaintext (M3 review round 3,
+r3-hosting-2). Decision, the reviewer's proposal: the node reads the exchange's era itself and refuses `bad_header`,
+before anything reaches the server, every 2026-07-28 request to an MCP service with sealed state or started with
+`--sealed-required`, and any sealed `tools/call` on a modern exchange; and, in depth, a reply to a sealed call that
+carries `resultType`, `inputRequests`, `requestState` or a top-level `taskId` is never relayed. The class closes
+because no 2026-07-28 shape reaches a sealed service at all, whatever the gate checked
+([`ext-sealed.md`](../spec/ext-sealed.md) §2, §5; `sealing` mcp.go `SetModern`, `modernResult`; `node` mcp.go;
+`TestReview3SealedCallAsModernIsRefused`, `TestReview3ModernRefusedOnSealedService`).
+
+### D235. The hosting node reads the route the service gets — **decided under the owner's standing instruction, 28 Oct** (amends D217, D227)
+
+The sealing classified a request by its raw path, while the node forwards it cleaned (`path.Clean`, [`tunnel.md`](../spec/tunnel.md)
+§8.2): `GET /tasks/x/..` read as a `GetTask` of `x` reached the service as `GET /tasks`, a2a-go's `ListTasks`, past
+D227's refusal of a task list, and `…/tasks/{id}/./pushNotificationConfigs` reached it as a push config route, past
+D217 (M3 review round 3, r3-hosting-4). Decision, the reviewer's first option: the sealing reads the path the node
+forwards, cleaned as the node cleans it (a trailing slash kept); the node hands it the forwarded path itself. There
+is one spelling of a route on the node, so no spelling can hide one ([`ext-sealed.md`](../spec/ext-sealed.md) §5;
+`sealing` hosting.go `cleanRoute`; `node` proxy.go; `TestReview3DotSegmentRoutes`,
+`TestReview3DotSegmentRoutesAreRefused`).
+
+### D236. Services that reach one upstream keep one sealed state — **decided under the owner's standing instruction, 28 Oct** (amends D217, D226)
+
+Every guard of D217 and D226 was kept per service name, while the node accepts two `--serve` names with one target,
+and one service's base path may cover another's on one origin: an exchange of the other service reached the sealed
+job's upstream task or session unguarded, and its replies passed unread (an unsealed `whoami` on a second MCP service
+read the buyer's sealed login; a `GetTask` on a second A2A service read the buyer's task) (M3 review round 3,
+r3-hosting-5). Serving one server under two names is a natural configuration (per-tool policy and pricing are per
+service: a read-only and a full tier), and the e2e suites do it, so refusing it at start, the reviewer's first option,
+was not taken. Decision, the second: the node groups the services whose targets share an upstream (one origin, any
+loopback name of a loopback host as one, a default port written or not; the base path of one the other's or under
+it, the root covering every path; a stdio service shares nothing) and the hosting sealing keeps each group's state
+as one, under the group's first name: its locks, job files, indexes and the `guarded` test. A header's `service` and
+`--sealed-required` stay per service. Every guard then holds across the services one upstream is reached by, since
+there is one state to consult ([`tunnel.md`](../spec/tunnel.md) §8.2; [`ext-sealed.md`](../spec/ext-sealed.md) §5;
+`node` serve.go `upstreamGroups`; `sealing` hosting.go `stateOf`; `TestReview3TwoServicesOneUpstreamMCP`,
+`TestReview3TwoServicesOneUpstreamA2A`, `TestReview3UpstreamGroups`).
+
+### D237. Every task a request names counts, a message's references included — **decided under the owner's standing instruction, 28 Oct** (amends D217)
+
+The node read only a message's `taskId` and `contextId`, while A2A 1.0's `referenceTaskIds` name tasks an agent loads
+into the message's context, history and artifacts in plaintext (a2a-go's `ReferencedTasksLoader`, a2a-python's referred
+tasks): a message of any gate task referencing the buyer's sealed upstream task was forwarded, and its reply passed
+unread, or sealed to the gate's key (M3 review round 3, r3-hosting-7). And `other()` checked the index only when the
+exchange's job knew its own upstream task, so a job recorded by `End` reached another job's task (r3-hosting-9).
+Decision, the reviewer's proposal: `referenceTaskIds` is read with exact keys on every send; an entry naming another
+sealed job's upstream task is `wrong_task`, sealed message or not, and on a service with sealed jobs an unsealed
+message with any reference is `bad_header` (the node cannot tell a task it has not indexed, D227, from another);
+every task id a request names is checked against the index, whatever the job knows. D217's rule now reads every
+member of A2A 1.0 that names a task ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hosting.go
+`referenceTaskIDs`, `other`; `TestReview3ReferenceTaskIDs`, `TestReview3OtherChecksIndexWithoutUpstreamTask`).
+
+### D238. A sealed MCP exchange's error that is not JSON keeps its status only — **decided under the owner's standing instruction, 28 Oct** (amends D195)
+
+D195 relays a sealed job's error with its code and fixed text. A URL MCP server's non-2xx answer whose body is not JSON
+(Go's `http.Error`, a framework's error page, a validation error quoting the refused argument) was not read, so it
+reached the gate in plaintext; the A2A side replaces any non-2xx body on a sealed job (M3 review round 3,
+r3-hosting-8). Decision, the reviewer's proposal: on an exchange that carries a sealed call or an answer to a sealed
+input request, sits on a session with a sealed job, or is of a service started with `--sealed-required`, a non-2xx
+answer that is neither JSON nor an event stream is replaced by the node's own JSON-RPC error with the request's id,
+code `-32603` and D195's fixed text, its status kept ([`ext-sealed.md`](../spec/ext-sealed.md) §2; `sealing` mcp.go
+`SealedReply`, `ErrorBody`; `node` mcp.go; `TestReview3MCPNon2xxTextErrorIsScrubbed`).
+
+### D239. An MCP header names its role: `op` — **decided under the owner's standing instruction, 28 Oct** (amends D175, D218)
+
+An MCP envelope's header did not say which of four roles it plays: a `tools/call`'s arguments, the client's answer to
+an input request, a result, an input request. A plain call's answer has no `taskId` (D218), so its header had a
+`tools/call` header's form, and an input request's had a result's; and `messageId` holds the client's ids and the
+server's. A gate could send the buyer's sealed answer to elicitation `N` of tool `X` as a `tools/call` with id `N`, and
+the node ran `X` again with the answer as its arguments; or deliver an input request whose server id equals a later
+call's id as that call's result, which the hiring node opened as an empty success (M3 review round 3, r3-hiring-5).
+Decision, the reviewer's first option: the header gains `op`, `"call"` | `"answer"` (dir `req`, the hiring node's) |
+`"result"` | `"input"` (dir `res`, the hosting node's), on every MCP header (one with `session`) and no A2A header,
+which `Canonical` enforces; it is authenticated with the rest of the header (the age file, and `auth` for replies).
+The hosting node takes a `tools/call` only with `op: "call"` and an answer only with `"answer"` (`wrong_message`); the
+hiring node a result only with `"result"`, whose body holds `content` or `structuredContent`, and an input request
+only with `"input"`. Envelope v1 is not released, so the member joins v1, and both nodes change together, as with
+D221's `service`. One member closes every splice between roles, where namespacing the server's ids in `messageId`,
+the other option, would leave a client free to choose a request id that looks like one
+([`ext-sealed.md`](../spec/ext-sealed.md) §3; `sealed` envelope.go `Header.Op`; `sealing` mcp.go, hiring.go;
+`TestReview3RolesAreNotSpliced`, `TestInputRequestHeaders`).
+
+### D240. MCP sessions and A2A services are kept apart on the hiring node — **decided under the owner's standing instruction, 28 Oct**
+
+The hiring node kept A2A services by their path and MCP sessions by the gate's `Mcp-Session-Id` in one map, and the
+gate chooses that id: answering an MCP `initialize` with `Mcp-Session-Id: /agents/<sealed service>` wrote the session's
+"not sealed" over the A2A service's entry, and the service's next messages went unsealed for a minute, renewable at
+will (M3 review round 3, r3-hiring-2). Decision, as proposed: the two are separate maps, and an `initialize` result whose
+session id is not MCP's form (visible ASCII, 0x21 to 0x7E) or starts with `/` is refused. No id the gate chooses can
+then stand for anything but an MCP session ([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4c; `sealing` hiring.go
+`sessions`, `sessionIDForm`; `TestReview3SessionIDCollidesWithA2APath`).
+
+### D241. A sealed MCP session's job stays while one of its exchanges is open — **decided under the owner's standing instruction, 28 Oct** (amends D224)
+
+Round 2 refused unread messages only on `GET`s opened after a session's job was gone. A stream already open when the
+job went (a gate `404` on another exchange closes the session; the sweep runs with the `session_idle_s` the gate chose,
+down to 1 s, and in-flight requests did not refresh it) then passed, unread, a plaintext result for a pending sealed
+call; with an honest gate, a sealed call that outlasted `session_idle_s` across a sweep lost its key and its genuine
+result was refused (M3 review round 3, r3-hiring-6). Decision, the reviewer's proposal: the node counts each session's
+exchanges in flight (the hiring server ends one when its handler returns) and never drops a session's job, by the
+sweep or a `404`, while one is open; the last to end drops a closed session's. And on a sealed session a result that
+answers no request the node tracks is refused on a `GET`, and on any stream once the node no longer holds the session.
+The job, and the records of its sealed requests, outlive every stream that could carry their answers
+([`tunnel.md`](../spec/tunnel.md) §2.3; [`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4a, 4c; `sealing` hiring.go
+`Job.Done`, `maybeEndSession`, `mcpMessage`; `TestReview3OpenGETAfterSessionJobDropped`,
+`TestReview3SweepKeepsAnOpenCallsKey`).
+
+### D242. A session entry with no job is swept when idle — **decided under the owner's standing instruction, 28 Oct**
+
+Every MCP `initialize` added a session entry that went only with a `DELETE`, a gate `404` or the session's job; a
+session that never made a sealed call, every session of an unsealed service included, has no job, and clients often
+leave without `DELETE`, so a long-running `kontra connect` grew with each new session (M3 review round 3,
+r3-hiring-10). Decision: an entry records when it was last used, and the sweep drops one with no job and no exchange
+open once it has been idle for its bound (the gate's `session_idle_s`, else a day) ([`tunnel.md`](../spec/tunnel.md)
+§2.3; `sealing` hiring.go `sweepJobs`; `TestReview3UnsealedSessionEntryIsSwept`).
+
+### D243. An input request is opened once per id space, and one gate id carries one — **decided under the owner's standing instruction, 28 Oct** (amends D218, D219)
+
+The hiring node recorded which sealed question a gate request id stands for by plain overwrite and never cleared it:
+a gate that delivered question Q1 and then Q2 with the same id had the client's answer to Q1 sealed as Q2's (the
+TypeScript SDK runs both handlers and answers each with the id), so "may I read notes.txt?" accepted became "may I
+delete everything?" accepted (M3 review round 3, r3-hiring-4). And it counted "opened before" per call or task, while
+an input request's `messageId` is the upstream session's: a plain call's question replayed on another plain call's
+stream opened again (r3-hiring-8). Decision, the reviewers' proposals: an input request on a gate id the session holds
+for an unanswered one is dropped; the entry goes once its answer is sealed, and a second answer to the id is refused
+locally; "opened before" is kept apart from the pending answers, per durable task for an input request that names one
+and per session for one with no `taskId` (plain calls and passthrough tasks share their session's upstream session);
+and once an input request of a task named it, one of that task's that does not is dropped (a durable task's always
+do, D218). Each question is then opened once and answered once, under the id it came with
+([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4; `sealing` hiring.go `openInput`, `sealAnswer`, `hireJob.Opened`,
+`Answered`; `TestReview3InputRequestIDReuse`, `TestReview3InputRequestReplayedAcrossCalls`).
+
+### D244. A `CreateTaskResult` answers only a call that asked for a task, and holds only the task — **decided under the owner's standing instruction, 28 Oct**
+
+The hiring node passed unread any result of a sealed call that had a `task` object, a plain call's included: a gate
+answered `{"task": …, "content": [forged]}`, and stock clients, which ignore `task`, read the forged `content` as the
+tool's result; the forged task also kept the session's key forever (M3 review round 3, r3-hiring-3). Decision, the
+reviewer's proposal: the node records whether a sealed call carried `params.task`, and takes a `CreateTaskResult` only
+for such a call and only with nothing beside `task` and `_meta`; anything else is refused as an unsealed result is,
+and only then is the task registered ([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4a; `sealing` hiring.go
+`openAnswer`; `TestReview3ForgedCreateTaskResult`).
+
+### D245. One local client per sealed session, and a reused id is refused on the hiring node too — **decided under the owner's standing instruction, 28 Oct** (amends D226)
+
+The hiring node accepted an `initialize` result naming a session id it already held, so a gate could put a second
+local client into a sealed session's job; and it deleted a sealed call's record whenever the session sent any request
+reusing the call's id, the deletion round 2 removed from the hosting node: two stock clients number their requests
+alike, so client B's `tools/list` id 3 deleted client A's pending sealed call 3, and the gate's plaintext result for it
+reached A on its `GET` (M3 review round 3, r3-hiring-7). Decision, as proposed: an `initialize` result whose session id
+the node holds (an entry, or a job's file) is refused; a request that reuses a sealed request's id is refused locally,
+as the hosting node refuses it (D226), and the record stays the sealed request's. The two nodes then apply one rule
+to a session's ids ([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4c; `sealing` hiring.go `mcpRequest`,
+`initResult`; `TestReview3SessionFixation`, `TestReviewReusedIDAfterSealedCall`).
+
+### D246. A client's error answer to a sealed input request goes with its code only — **decided under the owner's standing instruction, 28 Oct** (amends D175)
+
+A JSON-RPC error answer to a sealed input request (a user who rejects a sampling request, MCP 2025-11-25's `-1`; a
+client without a handler's `-32601`) could not be sent: the hiring node refused it locally, and the hosting node would
+have refused it unsealed, so the service never learnt it and the call or task waited for its own timeout; §3 and §5 said
+nothing of it (M3 review round 3, r3-hiring-9). Decision, the reviewer's second option, D195's rule for errors: the
+hiring node sends the error with its code and fixed text in place of its message and data; the hosting node takes it,
+once, on an exchange of the input request's session and task, as that request's answer, with its code and fixed text.
+An error carries no answer, so sealing it is not needed: a gate can send one of its own to deny the buyer's input
+request, as it can drop the request, never answer it, and §7 says so. Sealing it, the other option, would give the
+envelope an error body for no confidentiality gained ([`ext-sealed.md`](../spec/ext-sealed.md) §2, §5, §7; `sealing`
+hiring.go `sealAnswer`, mcp.go `declined`; `TestReview3ErrorAnswerToSealedInputRequest`).
+
+### D247. A served card names the service's own path, and the hiring node seals by it — **decided under the owner's standing instruction, 28 Oct** (amends D207)
+
+The hiring node seals by path, and the gate chose the path a local A2A client posts to: the card it serves kept the
+gate's path in every `supportedInterfaces[].url`, so a signed card for a pinned sealed service could send the client's
+messages to `/agents//x`, `{svc}/.well-known/a`, `/.well-known/a` or `/mcp`, none of which the node sealed (a card read
+was any method on a `.well-known` path), or to another service's path with a fresh first-sight pin (M3 review round 3,
+r3-hiring-1). Decision, the reviewer's proposal: the card served locally names `http://localhost:<port>{svc}`, the
+service it was read for, in every interface; a card read is a `GET` (or `HEAD`) only, and only a `GET` card route is
+unsealed; a request other than a `GET` to `/.well-known/…` or to an `/agents/…` path that names no service is refused
+`404` locally. The client can then reach only the path the node seals for the pinned service
+([`tunnel.md`](../spec/tunnel.md) §9; [`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 1; `hiring` cards.go
+`RewriteCard`, hiring.go `Handler`; `sealing` hiring.go `Request`; `TestReview3InterfaceURLIsTheService`).
+
+### D248. `--accept-change` accepts the change pending at a service's first check of the run — **decided under the owner's standing instruction, 28 Oct** (amends D228)
+
+`--accept-change <service>` accepted every later needs-accept change of that service for the life of the process, so
+a node left running with it (a systemd unit, say) recorded the service's later recipient substitutions and seller-key
+swaps silently, where the pin is meant to refuse them until the operator accepts the change it saw (M3 review round 3,
+r3-hiring-11). Decision, the reviewer's first option: the acceptance applies to the service's first check in the
+process, the change the operator saw refused and restarted to accept; any later change is refused until the next
+explicit acceptance. `kontra connect --help` and §7 say so; `--accept-change NAME=<key ids>`, the other option, would
+have the operator copy key ids for a decision the restart already expresses ([`ext-sealed.md`](../spec/ext-sealed.md)
+§7; `pins` pins.go `Check`; `TestAcceptChangeIsOnce`).
+
+### D249. The session cap evicts after 2 minutes, and its `Retry-After` says when a retry finds room — **decided under the owner's standing instruction, 28 Oct** (amends D231)
+
+D231 let an `initialize` beyond the cap close only sessions idle for 5 minutes, the stdio bridge's own bound. The
+TypeScript SDK, and Claude Code built on it, end a session without a `DELETE`, so the fifth short-lived client of one
+key within 5 minutes was refused `429`, and its `Retry-After: 60` led to another refusal: no retry inside a stock
+client's reconnect window could succeed (M3 review round 3, r3-relay-1). Decision, the reviewer's first proposal: the
+gate's bound (`EvictIdle`) is 2 minutes, just above what a session in use shows (its `last_seen_at` is written at least
+every minute and a half while a request or stream of it is open, so a session in use is still never closed), and the
+`Retry-After` is the time until enough of the principal's sessions not in use here will be that idle (2 minutes when
+the sessions in use leave too few). A client abandoned without a `DELETE` then makes room within two minutes, and
+the refusal says exactly when ([`relay.md`](../spec/relay.md) §11.2; `mcprelay` sessions.go `capped`,
+`TooManySessionsError`; exchange.go `tooManySessions`; `TestReview3SerialShortLivedClients`).
+
+### D250. A session the gate answers `404` for without a hop is closed, and a `DELETE` always closes it `deleted` — **decided under the owner's standing instruction, 28 Oct** (amends D196)
+
+A multi-replica gate without `peer.listen` answers a request for a session another replica holds `404`, and §11.2 tells
+the client to initialize again; the row stayed open and, touched by the request, looked freshly used, so the new
+`initialize` counted it and after `cap` bounces the client was refused `429` holding no usable session (M3 review round
+3, r3-relay-2). A `DELETE` that reached such a replica, or found the holder replica no longer live or the tunnel
+revoked, was answered `404` and the row closed `tunnel_lost` or left open, against D196's "a `DELETE` always closes the
+row (deleted)", and the TypeScript SDK's `terminateSession()` then throws (r3-relay-3). Decision, the reviewers'
+proposals: the no-hop `404` closes the row `tunnel_lost`, so a session the client is told is gone is gone; and a
+`DELETE` is dispatched before the target's error is acted on: it closes the row `deleted` and answers `200` when the
+tunnel is gone or cannot be reached, `503` only for a key the gate could not check ([`relay.md`](../spec/relay.md)
+§11.2; `mcprelay` legacy.go `pinned`, `upstreamFailed`; `TestReview3NoHopRowsDoNotCountAgainstTheCap`,
+`TestReview3DeleteClosesTheRowDeleted`).
+
+### D251. A gate's own sealed first message into a buyer's context is a residual — **decided under the owner's standing instruction, 28 Oct** (amends D227)
+
+D227 refuses an unsealed message into a sealed job's upstream context, since an agent that keeps a conversation per
+context would answer it from the buyer's sealed one. A gate can seal a first message of its own to the node's public
+recipients, with its own `replyTo`, under a new gate task but the buyer's gate context and its recorded upstream
+`contextId`: rule 2 accepts it, the agent answers from the buyer's conversation, and the answer is sealed to the gate's
+key (M3 review round 3, r3-hosting-6). The node cannot tell it from the buyer's own next task in the context: each
+A2A task has a fresh per-job key, and nothing in the header binds a context to its first job. Decision, the
+reviewer's second option: §7 states it as a residual next to the unsealed case D227 refuses, and §7's claim that a
+forged request "gains nothing it could not get as a buyer" names it. Binding a context to its first job (a MAC of the
+`contextId` under the first job's `rk` in every later first message) would change the header and the hiring node's
+key keeping for every context; it joins D170's list for a later envelope revision. A service that keeps no
+conversation per context is not exposed ([`ext-sealed.md`](../spec/ext-sealed.md) §7).
+
+### D252. A sealed session reaches only the tasks bound to its job, and MCP keeps the task list rule — **decided under the owner's standing instruction, 28 Oct** (amends D227, D233)
+
+The hosting node bound a sealed task-augmented call's task to the job only as it read the server's `CreateTaskResult`.
+A gate that ended the call's exchange first (on the stdio bridge, closing the `POST` is enough: the answer is then
+dropped) left the task unbound, and on the buyer's own session, whose preamble and `Mcp-Session-Id` it chooses,
+`tasks/result` relayed the task's result and `tasks/list` its `statusMessage` in plaintext; D227's residual ("the gate
+cannot list it") did not hold, since `tasks/list` was not refused (M3 review round 4, r4-hosting-1). The reviewer
+proposed binding an unbound task on first sight to the session's one unanswered task-augmented call. Decision, the
+simpler rule that closes the class, refuse rather than track: every task of a sealed session is a sealed call's (an
+unsealed call is refused there), so one the node has not bound is one whose `CreateTaskResult` it never read; on a
+sealed session (a job, or one being opened, or an upstream session a sealed job holds) a `tasks/get`, `tasks/result` or
+`tasks/cancel` naming it is `wrong_task`, `tasks/list` lists the job's own tasks only, and its status notification is
+not relayed; on an MCP service with sealed state a `tasks/list` on an exchange of no sealed job is `bad_header`, as
+D227 has it for A2A. No honest party loses anything: neither the client nor the gate's dispatch ever learned the
+task's id. What remains is D227's residual: an upstream that does not bind tasks to the session could hand the task
+to another session by an id the gate knows ([`ext-sealed.md`](../spec/ext-sealed.md) §2, §5; `sealing` mcp.go
+`fromClient`, `FromServer`, `ownList`; `TestReview4UnboundTaskAfterCut`, `TestReview4UnboundTaskURL`,
+`TestReview4UnboundTaskStdio`).
+
+### D253. A server that mints no session id is one upstream session for the input requests the node seals — **decided under the owner's standing instruction, 28 Oct** (amends D175, D232)
+
+The hosting node indexed a sealed input request by upstream session only when there was one, and looked an answer up
+in the preamble's job when there was none: on a URL server that mints no `Mcp-Session-Id`, the gate's own plaintext
+answer to the buyer's sealed sampling request, posted under a preamble naming no session or another one, was found to
+answer nothing and was forwarded, and the server took it for the buyer's (M3 review round 4, r4-hosting-2). Decision,
+the reviewer's proposal for input requests: the sessionless state is one upstream session, `""`, whose request ids are
+the server's one id space; a sealed input request is indexed under it as under any session, and an answer is checked
+against the index whatever the preamble names, so "answers must be sealed" holds there too. The client's own request
+ids are not indexed so: they are not one id space across a sessionless server's clients (two clients both send id
+`1`), and such a server answers a request only on its own stream, which carries the exchange's own record
+([`ext-sealed.md`](../spec/ext-sealed.md) §5, §7; `sealing` mcp.go `sealInput`, `answer`;
+`TestReview4SessionlessPlainAnswer`, `TestReview4SessionlessAnswerURL`).
+
+### D254. What a sealed request records is written down before it is handed — **decided under the owner's standing instruction, 28 Oct** (amends D227, D233)
+
+A sealed request's records (the job's binding, its `replyTo`, the MCP `(session, messageId)`, the upstream session's
+owner, the record of the call whose answer the node seals) were held in memory until the service's headers came, or
+the exchange ended: a node that stopped meanwhile (a crash, an OOM kill, a reboot) forgot them while the service had
+the buyer's plaintext. After the restart the buyer's upstream session was nobody's, so the gate's unsealed call on it
+read what the sealed call set up, and on A2A the service had no sealed state, so `ListTasks` listed the buyer's task
+with its history and the first message resent ran again (M3 review round 4, r4-hosting-3). Decision, the reviewer's
+first option: an exchange's records are data (`commitOp`), written to the service's `pending/<id>.json`, synced, before
+the body is handed; acceptance (or End once handed) applies them and removes the file, the node's own answer removes
+it unapplied, and the node applies, as accepted, every file left when it starts, since the service may have had the
+request. One write covers every record a request makes, so no state of a request in flight is left in memory only; a
+removal a crash lost records a request the node answered itself (the gate's retry is then a replay), never forgets one
+the service had. The other option, a §7 residual, would have left the restart window open
+([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` pending.go, mcp.go `FromClient`, hosting.go `Request`,
+`NewHosting`; `TestReview4RestartA2AFirstMessageInFlight`, `TestReview4RestartMCPCallInFlight`,
+`TestReview4RestartWhileFirstCallInFlight`).
+
+### D255. A sealed job's upstream session stays held after the job is swept, until a `DELETE` of it is answered — **decided under the owner's standing instruction, 28 Oct** (amends D226)
+
+D226 held the upstream session a sealed job's calls set up for that job only while the job's file lived: Sweep removed
+the job 7 days after its last sealed exchange, and its session's index entry with it. The gate's own traffic on the
+session kept nothing alive, and the gate could withhold the buyer's `DELETE`; a URL server keeps the session, the
+buyer's login or opened document in it, until a `DELETE` or a restart, so a week later the gate's unsealed call on it
+was forwarded and answered in plaintext (M3 review round 4, r4-hosting-4). Decision, the reviewer's second proposal:
+Sweep moves a swept job's sessions to `held`, which guards them as a live job's do (an unsealed `tools/call` on one is
+refused under any preamble, the job's own included), until a `DELETE` of the session is answered `2xx` or `404`, by
+the server or the stdio bridge: only the server's end of the session ends what the job's calls set up there, and no
+clock of the node's bounds it. Updating the job's last use on every exchange, the first proposal, would not hold
+against a gate that sends nothing for a week ([`ext-sealed.md`](../spec/ext-sealed.md) §5; `sealing` hosting.go
+`sweepService`, mcp.go `sessionOwner`, `SessionGone`; `node` mcp.go, proxy.go; `TestReview4SessionHeldAfterSweep`,
+`TestReview4DeleteEndsTheHold`).
+
+### D256. The gate's own unsealed methods on a sealed session are a residual — **decided under the owner's standing instruction, 28 Oct** (amends D217, D226)
+
+D217 and D226 refuse the gate's own unsealed `tools/call` on a sealed session; every other method passes there under
+the buyer's preamble, which the gate chooses: `resources/read`, `prompts/get`, `completion/complete`, and
+`logging/setLevel`, which raises the level of a sealed call's unsealed `notifications/message`. A server that exposes
+what a sealed call opened as a resource answers the gate in plaintext, and §7 stated no residual for it (M3 review
+round 4, r4-hosting-5). Decision, the reviewer's first option: §2 says these methods are unsealed, so the buyer's own
+use of them already reaches the gate in plaintext; §7 now states that the gate can send them itself on a sealed
+session and read what the server exposes there. Refusing them under `--sealed-required`, the other option, would take
+resources and prompts from a sealed service's buyers for a guarantee §2 never made; sealing them would change the
+envelope and is left to a later revision (D170) ([`ext-sealed.md`](../spec/ext-sealed.md) §2, §7;
+`TestReview4OtherMethodsOnASealedSessionAreAResidual`).
+
+### D257. Services that reach the local host by any of its names are one upstream — **decided under the owner's standing instruction, 28 Oct** (amends D236)
+
+D236 groups services whose targets reach one upstream, a loopback host by any of its names, but read only `localhost`
+and loopback addresses so: `0.0.0.0` and `::` (what a server prints as its listen address, which Linux dials as the
+local host) and `localhost.` were not grouped with `127.0.0.1`, and an unsealed call on one service read the buyer's
+session on the other (M3 review round 4, r4-hosting-6). Decision, the reviewer's proposal: a target's host is read
+without its trailing dot, and the unspecified addresses and names under `localhost` (RFC 6761) are the local host too.
+Grouping too much only shares a guard; grouping too little opens one, so every name of the local host counts
+([`ext-sealed.md`](../spec/ext-sealed.md) §5; `node` serve.go `upstreamOrigin`; `TestReview4UpstreamGroupAliases`).
+
+### D258. The hiring node never relays a redirect — **decided under the owner's standing instruction, 28 Oct**
+
+The hiring node passed the gate's `3xx` answers, `Location` included, to the local client. a2a-go's `http.Client` and
+the Python MCP SDK (`follow_redirects=True`) follow a `307` or `308` with their own plaintext body, so a gate that
+answered a sealed send or `tools/call` with `307 Location: https://<gate>/collect`, or a local path of a service with no
+pin, read it in plaintext (M3 review round 4, r4-hiring-1). Decision, the reviewer's proposal: on every hiring path a
+`3xx` is replaced by the node's own `502` (an A2A or MCP error body) with no `Location`, whatever the service's
+sealing. The gate has no hiring route that redirects, so the rule costs nothing and needs no list of what a client
+does with each status ([`tunnel.md`](../spec/tunnel.md) §9; [`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 1;
+`hiring` hiring.go `modify`, `proxyError`; `TestReview4RedirectsAreNotRelayed`, `TestReview4RedirectPythonMCPClient`).
+
+### D259. A served card holds nothing else a client builds an endpoint from — **decided under the owner's standing instruction, 28 Oct** (amends D247)
+
+D247 rewrote only an interface's exact `url` under the exact `supportedInterfaces`. a2a-go's REST transport joins an
+interface's `tenant` into the path (`../evil` reaches another service, `x` the service `hello/x`), and decodes a card
+with `encoding/json`, which reads a lone `URL` or `SupportedInterfaces` as the member: the client posted to a path with
+no pin, or to the gate's own URL, in plaintext (M3 review round 4, r4-hiring-2). Decision, the reviewer's proposal: a
+served interface keeps `url` (rewritten), `protocolBinding` and `protocolVersion` only; the 0.3 members a compatibility
+parser reads an endpoint from (`url`, `preferredTransport`, `additionalInterfaces`, any case) are left out; a card
+with a lone case variant of a member a client reads there is not served. Keeping a list of what may stay, rather than
+of what must go, closes the members A2A adds later too. A follow-up of a task whose job another service holds is
+refused on the hiring node, since it would carry that job's `replyTo` and `rk` to the other service
+([`tunnel.md`](../spec/tunnel.md) §9; [`ext-sealed.md`](../spec/ext-sealed.md) §5 rules 1 and 3; `hiring` cards.go
+`RewriteCard`; `sealing` hiring.go `sealSend`; `TestReview4CardInterfaceEscapes`,
+`TestReview4HiringFollowUpOfAnotherService`).
+
+### D260. Only an `initialize` answer names a session, a session is its service's, and a response answers a request the node relayed — **decided under the owner's standing instruction, 28 Oct** (amends D240, D245)
+
+The TypeScript SDK (1.32.2) takes the `Mcp-Session-Id` of every `POST` answer for its session, and the hiring node
+read a request's sealing from its session id alone: a gate that named another session the node held on any answer
+moved the client there, so its next `tools/call` to the sealed service went in plaintext on an unsealed session, or its
+answer to a sealed sampling request went unsealed on another sealed session, where no input request of that id was
+known (M3 review round 4, r4-hiring-3). Decision, all three of the reviewer's proposals: the node removes
+`Mcp-Session-Id` from every answer but an `initialize`'s; a session entry records the service path it was initialized
+for, and a request on it to another path, or on an unsealed session to a service whose pin says sealed, is `404` (the
+client initializes again); on a sealed session a response of the local client goes only as the answer to a request
+the node relayed on that session (an opened input request, sealed; a `ping` or `roots/list`, as it is), once. The last
+rule closes the class for any way a client could be moved, since an answer is checked against what its own session
+was asked ([`tunnel.md`](../spec/tunnel.md) §9; [`ext-sealed.md`](../spec/ext-sealed.md) §5 rules 4 and 4c; `hiring`
+hiring.go `modify`; `sealing` hiring.go `mcpRequest`, `otherService`, `sealAnswer`;
+`TestReview4HiringSessionOfAnotherService`, `TestReview4HiringResponseToNoRelayedRequest`,
+`TestReview4TSClientStaysOnItsSession`, `TestReview4TSAnswerStaysOnItsSession`).
+
+### D261. A task-augmented input request is opened without its task, and a sealed session relays no other server request — **decided under the owner's standing instruction, 28 Oct** (amends D219)
+
+MCP 2025-11-25 lets a server augment `sampling/createMessage` and `elicitation/create` with a task (server-everything
+2.0's `trigger-sampling-request-async`): a client with a task store answers with a `CreateTaskResult`, which the node
+sealed as the answer, and the server then fetched the real answer with `tasks/result`, which the node relayed unread and
+whose response it sent as it came, the LLM's completion of the sealed prompt in plaintext (M3 review round 4,
+r4-hiring-4). Decision, the reviewer's first option and both guards: the node opens a sealed input request without its
+`task`, so a stock client answers at once and the answer goes sealed (server-everything accepts a synchronous answer);
+a task as the answer to a sealed input request is refused; and on a sealed session the node relays no server request
+but `ping`, `roots/list` and the input requests it opens, so a server's `tasks/get` or `tasks/result` to the client
+never reaches it and, by D260, no response to one is sent ([`ext-sealed.md`](../spec/ext-sealed.md) §2, §5 rule 4;
+`sealing` hiring.go `openInput`, `sealAnswer`, `mcpMessage`; `TestReview4HiringTaskAugmentedInputRequest`,
+`TestReview4TSClientTaskAugmentedSampling`).
+
+### D262. A loopback `--listen` binds both loopback families — **decided under the owner's standing instruction, 28 Oct** (amends D229)
+
+The node binds `127.0.0.1:7777` and sends its clients to `localhost:7777` (its cards, the README, ext-sealed §5),
+which a stock Linux resolves to `::1` first: another local user could bind `[::1]:7777` while the node ran and receive
+every local client's plaintext A2A messages and MCP arguments; D229's same-user check guards only the node's own
+socket (M3 review round 4, r4-hiring-5). Decision, the reviewer's first proposal: a loopback `--listen` binds the port
+on `127.0.0.1` and `[::1]` (`hiring.Listen`), and a port another process holds on either family stops the start; a
+family the machine does not have is skipped, since no one can bind it either. This keeps every client that follows
+`localhost` on the node, whatever its resolver prefers, where naming `127.0.0.1` in the cards would have left the
+clients a user configured by hand. §9 states that before the node binds another user can, and that `--local-token`
+is the remedy on a shared machine ([`tunnel.md`](../spec/tunnel.md) §9; `hiring` peer.go `Listen`; `node` run.go;
+`TestReview4HiringBindsBothLoopbackFamilies`).
+
+### D263. The rest of an `initialize` exchange that declared sealing is the sealed session's — **decided under the owner's standing instruction, 28 Oct** (amends D219)
+
+On the `initialize` exchange the hiring node relayed every message after the result unread, a service pinned sealed
+included: the gate's own `elicitation/create` there, right after a result that declares sealing, reached the local
+client as the sealed service's question, and its answer went unsealed on the now sealed session (M3 review round 4,
+r4-hiring-6). Decision, the reviewer's proposal: once the result recorded a sealed session, the rest of the exchange
+is read as any exchange of that session (an input request there has no call it can belong to, and is dropped), and a
+server request before the result is dropped whatever the sealing, since no session is known yet to check its answer
+on ([`ext-sealed.md`](../spec/ext-sealed.md) §5 rule 4c; `sealing` hiring.go `mcpMessage`;
+`TestReview4HiringInitializeExchange`, `TestReview4TSInitStreamElicitation`).
+
+### D264. On a sealed job the hiring node hands no text only the gate can have written as the service's — **decided under the owner's standing instruction, 28 Oct** (amends D220, D244)
+
+The hosting node writes `"sealed"` for a sealed task's `statusMessage` and drops an artifact's `name` and `description`
+on a sealed job (§2, D220), so any other text there is the gate's; the hiring node handed it to the local client
+unchecked, in a `CreateTaskResult`, a `tasks/get` or `tasks/list` answer and a `notifications/tasks/status`, and in an
+A2A artifact (M3 review round 4, r4-hiring-7). Decision, the reviewer's proposal: on a sealed session every task's
+`statusMessage` (any case variant) is handed as `"sealed"`, every task of a sealed session being a sealed call's (so no
+list of the session's tasks is needed), and on a sealed A2A job an artifact's `name` and `description` (any case) are
+dropped ([`ext-sealed.md`](../spec/ext-sealed.md) §2, §5 rule 4a; `sealing` hiring.go `sealStatusMessages`,
+`openAnswer`, `openA2A`; `TestReview4HiringForgedStatusMessage`, `TestReview4HiringArtifactNameDropped`).
+
+### D265. A `POST`'s stream is not resumable through the gate, and a `GET`'s carries no response — **decided under the owner's standing instruction, 28 Oct** (amends D196, D197)
+
+The gate meters a `tools/call` on its `POST` exchange only, and writes `is_error` true when the stream ends before the
+response (D196). The TypeScript SDK resumes any cut `POST` stream that carried an event id with a `GET`
+`Last-Event-ID`, and a stock server with an event store (server-everything@1.0.0 sends a priming event on every `POST`
+stream) replays the response there, which the gate relayed unmetered: an honest client on a network blip got its
+result while the row said error, and a buyer that dropped every call's stream after its first event had every
+successful call metered an error. A seller could skew it the other way with a response on the `GET` stream, which both
+stock clients take (M3 review round 4, r4-relay-1). Decision, the reviewer's simpler alternative: the gate relays a
+`POST`'s event stream without the upstream's event ids, so no stock client resumes it and the client sees the failure
+the row records, and it ends a `GET`'s stream before a response, which MCP has a server send there only on such a
+resume. The row is then always what the client reads; tracking pending rows across replicas and settling them from a
+resumed `GET`, the first proposal, would keep resumability for plain calls at the cost of state in Postgres for every
+cut call. Gate-written streams keep their `k.` ids (§11.7) ([`relay.md`](../spec/relay.md) §11.2, §11.4; `mcprelay`
+exchange.go `relaySSE`, `relayJSON`, stream.go `dropID`; `TestReview4CallStreamIsNotResumable`,
+`TestReview4GETCarriesNoResponse`).
+
+## From M3's second pentest run (29 Oct)
+
+### D266. The pentest ran again after the review rounds, under a project and an image of its own — **decided under the owner's standing instruction, 29 Oct** (amends D186, D190)
+
+The review rounds (D191–D265) changed sealing, the hiring endpoint, the MCP session cap and the envelope after the
+pentest of D190, which therefore no longer covered the branch, and some of its controls no longer held for the reason
+they probe: the session cap (D231) refused buyer A's fifth `vaultmcp` session, and the hiring endpoint binds both
+loopback families (D262). Another checkout (M4's) also runs its own pentest on this host's Docker, under D186's project
+`m3pentest` and image `kontra-gate:m3`: a run under the same names would tear down the other's stack, or run the
+other's gate. Decision: the harness probes what the rounds added (each named in [`pentest-m3.md`](pentest-m3.md):
+D195, D197, D207, D208, D217, D218, D221, D223, D224, D226, D227, D228, D229, D231, D235, D236, D237, D239, D247, D249,
+D252, D259, D262, D265), its controls are corrected (a client ends its MCP sessions; the listener check expects both
+families), and the run is repeated on the committed tree. `KONTRA_PENTEST_PROJECT` and `KONTRA_PENTEST_IMAGE` name the
+run's project (its network `<project>_net`) and the gate's image, D186's names by default, in the harness, the
+`Makefile` and `compose.pentest.yaml`; the second run used `m3pentest2` and `kontra-gate:m3-pentest2`. The session
+cap's eviction probe backdates its sessions' `last_seen_at` in the gate's database instead of waiting two minutes, the
+only write a probe makes to the gate's state. The second run (`33f06a8`): 232 probes held, no finding, and two
+observations recorded, D223's accepted residual (a forged `kid`-only seller signature, where a gate names no seller
+key set, leaves an unverified `kid:` pin unchanged) and the dual-era client of D177 (`test/pentest`; `pentest-m3.md`).
+
+## The merge (29 Oct)
+
+### D267. M3 merges after four review rounds; the dishonest-gate review of sealing continues as follow-up work — **decided under the owner's standing instruction, 29 Oct**
+
+Four adversarial review rounds of the branch confirmed 30, 19, 23 and 15 findings, every one fixed or recorded as a
+residual (D191–D265), and each round's fixes carry regression tests that fail before them. The findings of the last two
+rounds are in the dishonest-gate model alone (a gate that splices, replays, cuts or re-routes a sealed exchange to read
+it), and each round still found new ones there: the review does not converge to an empty round on this surface in a
+bounded time, while M4 and M5 wait on this merge. Decision: M3 merges on a bar it meets: M3's named tests
+(`sealed_no_plaintext`, `sealed_replay`, `sealed_unsealed_part`, `mcp_session_cross_node`, `mcp_tool_denied`,
+`mcp_task_resume`) and the full suites (`check-go`, `test-integration`, `test-e2e`) green on the final tree, the PRD §12
+pentest rerun on it with no finding (D266), and every confirmed finding of the four rounds fixed or recorded. The
+review of sealing against a dishonest gate continues after the merge on its own branch, rounds of review, verify and
+fix until a round confirms no blocker or major, starting with a review of round 4's fixes (D252–D265); it is tracked in
+an issue that lists the open residuals of [`ext-sealed.md`](../spec/ext-sealed.md) §7 (D227, D251, D252, D253, D255,
+D256). Sealing stays opt-in, and §7 states what it does not yet withstand.

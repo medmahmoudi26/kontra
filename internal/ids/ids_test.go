@@ -164,3 +164,38 @@ func TestNewReplicaID(t *testing.T) {
 		t.Errorf("two starts on one host got the same replica id %q", a)
 	}
 }
+
+// NodeBuyer is UUIDv5(gate namespace ‖ key_id) (spec/relay.md §2.3), fixed forever like the other buyers: the
+// value was computed independently with Python's uuid.uuid5 and Derive's recipe, kind "node".
+func TestNodeBuyer(t *testing.T) {
+	const kid = "k1_abcdefghijklmnopqrstuvwxyz"
+	b, err := NodeBuyer(Namespace, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.String() != "7333cc86-7e09-5473-9922-6e39f7551bed" || b.Version() != 5 {
+		t.Fatalf("NodeBuyer = %s (version %d)", b, b.Version())
+	}
+	if b != Derive("node", kid) {
+		t.Fatal("NodeBuyer(Namespace, k) is not Derive(\"node\", k)")
+	}
+	other, err := NodeBuyer(Namespace, "k1_bbcdefghijklmnopqrstuvwxyz")
+	if err != nil || other == b {
+		t.Fatalf("two keys share a buyer: %s %v", other, err)
+	}
+	if again, _ := NodeBuyer(Namespace, kid); again != b {
+		t.Fatal("NodeBuyer is not stable")
+	}
+	// Another namespace is another buyer; a key id of the wrong shape and no namespace are errors.
+	if o, _ := NodeBuyer(uuid.NameSpaceURL, kid); o == b {
+		t.Fatal("the namespace does not enter the id")
+	}
+	for _, bad := range []string{"", "k1_ABCDEFGHIJKLMNOPQRSTUVWXYZ", "k1_abc", "key:kk_x", "k1_abcdefghijklmnopqrstuvwxyz0"} {
+		if _, err := NodeBuyer(Namespace, bad); err == nil {
+			t.Errorf("NodeBuyer(%q) accepted", bad)
+		}
+	}
+	if _, err := NodeBuyer(uuid.Nil, kid); err == nil {
+		t.Error("NodeBuyer accepted no namespace")
+	}
+}

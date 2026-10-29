@@ -255,6 +255,18 @@ func (c *Client) SignalDispatched(ctx context.Context, taskID a2a.TaskID, n int)
 	return c.c.SignalWorkflow(ctx, WorkflowID(taskID), "", SignalDispatched, DispatchedSignal{N: n})
 }
 
+// SignalInputResponse sends kontra.input_response {seq} for an MCP task's input_response event at seq (spec
+// §11.5 step 5, §14.1): it updates workflow state only; the running dispatch, which tails the log, writes the
+// answer upstream. A workflow that does not exist (any more) is not an error.
+func (c *Client) SignalInputResponse(ctx context.Context, taskID a2a.TaskID, seq int64) error {
+	err := c.c.SignalWorkflow(ctx, WorkflowID(taskID), "", SignalInputResponse, InputResponseSignal{Seq: seq})
+	var nf *serviceerror.NotFound
+	if errors.As(err, &nf) {
+		return nil
+	}
+	return err
+}
+
 // WorkflowExists reports whether the task's workflow exists, running or closed, for the orphan sweep
 // (spec §14.5).
 func (c *Client) WorkflowExists(ctx context.Context, taskID a2a.TaskID) (bool, error) {

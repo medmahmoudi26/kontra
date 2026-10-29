@@ -39,6 +39,36 @@ func (r *Registry) Backend(id uuid.UUID, svc store.ServiceRef) (upstream.Backend
 	return upstream.NewTunnel(svc.Name, kind, &sessionOpener{s: s, service: svc.Name, kind: kind})
 }
 
+// MCPBackend returns the upstream.Backend of an MCP exchange on session id for the tenant's service (relay.md
+// §11.2, §6.1): an upstream.Tunnel whose streams carry the preamble {"v": 1, "op": "http", "service", "kind":
+// "mcp", "mcp_session", "mcp_request_id"}, the MCP fields taken from the exchange's context (upstream.WithMCP).
+// Unlike Backend it reads a session that has just closed too, so its refusal says why: an error wrapping
+// ErrRevoked when the key or binding was revoked (the pinned row closes revoked), ErrSessionGone (and
+// upstream.ErrTunnelLost) when the session is gone or another tenant's, and ErrCheckUnavailable when the key's
+// state cannot be read. Every stream the backend opens is checked again (Session.OpenExchange).
+func (r *Registry) MCPBackend(id, tenantID uuid.UUID, service string) (upstream.Backend, error) {
+	s := r.lookup(id)
+	if s == nil {
+		return nil, fmt.Errorf("%w: %w: this replica holds no session %s", upstream.ErrTunnelLost, ErrSessionGone, id)
+	}
+	s.mu.Lock()
+	registered := s.registered
+	s.mu.Unlock()
+	switch {
+	case !registered:
+		return nil, fmt.Errorf("%w: %w: session %s is not registered", upstream.ErrTunnelLost, ErrSessionGone, id)
+	case s.TenantID != tenantID:
+		return nil, fmt.Errorf("%w: %w: session %s is another tenant's", upstream.ErrTunnelLost, ErrSessionGone, id)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), allowsReadTimeout)
+	err := s.allows(ctx, service, tunnel.KindMCP)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", upstream.ErrTunnelLost, err)
+	}
+	return upstream.NewTunnel(service, tunnel.KindMCP, &sessionOpener{s: s, service: service, kind: tunnel.KindMCP})
+}
+
 // sessionOpener opens the exchange streams of one service on one session.
 type sessionOpener struct {
 	s       *Session
@@ -53,6 +83,9 @@ func (o *sessionOpener) OpenExchange(ctx context.Context) (net.Conn, error) {
 	p := tunnel.Preamble{Op: tunnel.OpHTTP, Service: o.service, Kind: o.kind}
 	if t, ok := upstream.TaskFrom(ctx); ok {
 		p.Task, p.Context = t.TaskID, t.ContextID
+	}
+	if m, ok := upstream.MCPFrom(ctx); ok && o.kind == tunnel.KindMCP {
+		p.MCPSession, p.MCPRequestID = m.Session, m.RequestID
 	}
 	c, err := o.s.OpenExchange(ctx, p)
 	if err != nil {

@@ -38,7 +38,27 @@ const LockID int64 = 0x6b6f6e7472610100
 const (
 	EventAPIKeyMinted  = "api_key.minted"
 	EventAPIKeyRevoked = "api_key.revoked"
+	// EventSealedRejected is a hosting node's refusal of a sealed part (ext-sealed.md §6: 400 with Kontra-Node:
+	// sealed_rejected): the task fails sealed_rejected and is not retried. Its row names the task, the service, the
+	// attempt and where it ran, and the node's reason when it named one of §6's (SealedRejected).
+	EventSealedRejected = "sealed.rejected"
 )
+
+// Beginner opens a transaction (a *pgxpool.Pool, a *pgx.Conn).
+type Beginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// SealedRejected appends EventSealedRejected in a transaction of its own: the rejection is the node's, recorded
+// when the gate learns it, beside the task's failure (ext-sealed.md §5 "Gate", §6; relay.md §6.4). f names the
+// task (task_id, tenant_id, service, protocol, attempt) and the node's reason (reason, "" when it named none of
+// §6's), never a part's bytes.
+func SealedRejected(ctx context.Context, db Beginner, f Fields) error {
+	return pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
+		_, err := Append(ctx, tx, EventSealedRejected, f)
+		return err
+	})
+}
 
 // Fields are an event's facts. Values are strings, booleans, nil, integers (int, int64), uuid.UUID,
 // time.Time and *time.Time (RFC 3339 in UTC with microseconds, nil as null), []string, []any and nested

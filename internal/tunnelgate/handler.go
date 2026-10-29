@@ -4,14 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -70,6 +68,10 @@ type HandlerConfig struct {
 	// keepalive must stay off (D33). Either way each session gets its own copy, whose Logger is the
 	// session's (its LogOutput and Logger are replaced), so yamux's lines say which session they are about.
 	Yamux *yamux.Config
+	// NodeStreams serves the streams nodes open (hiring §9, blobs §8.3). Nil serves them with a NodeStreams
+	// that has no router and no bucket: every hiring request is 404 and every ref not_found (the e2e FakeGate's
+	// default); the in-flight cap is the same.
+	NodeStreams *NodeStreams
 }
 
 // Handler serves GET /v1/tunnel (relay.md §2.1). Mounted on the edge router, it is behind the edge's
@@ -112,6 +114,14 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 	if cfg.Draining == nil {
 		cfg.Draining = func() bool { return false }
 	}
+	if cfg.NodeStreams == nil {
+		cfg.NodeStreams = &NodeStreams{}
+	}
+	if cfg.NodeStreams.Logger == nil {
+		ns := *cfg.NodeStreams
+		ns.Logger = cfg.Logger.With("component", "tunnel")
+		cfg.NodeStreams = &ns
+	}
 	h := &Handler{cfg: cfg, origin: origin, log: cfg.Logger.With("component", "tunnel"), ping: cfg.PingEvery}
 	if h.ping <= 0 {
 		h.ping = tunnel.PingEvery
@@ -123,7 +133,7 @@ func NewHandler(cfg HandlerConfig) (*Handler, error) {
 // off), runs the handshake within tunnel.HandshakeTimeout with a 16 KiB read limit (§4): hello, the
 // origin check, challenge (a UUIDv7 session id, a gate nonce, cb, enc and enc_old), proof, Admit, then
 // welcome; or error with close status 4000 + i. After welcome: yamux.Server, the control stream as the
-// first stream, the ping loop, the accept loop for node-opened streams (refused in M2, and capped), and
+// first stream, the ping loop, the accept loop for node-opened streams (served by NodeStreams, and capped), and
 // Registry.Add. It returns when the session ends.
 //
 // Order. welcome goes before Registry.Add, which the M2 plan put the other way round: a registered
@@ -384,6 +394,7 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 		log.Warn("tunnel control stream did not open", "err", err)
 		return
 	}
+	ns := h.cfg.NodeStreams
 	s := &Session{
 		ID:            a.session,
 		KeyID:         dec.Key.KeyID,
@@ -395,13 +406,19 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 		mux:           mux,
 		served:        make(map[string]string, len(dec.Served)),
 		control:       control,
+		hire:          dec.Hire,
+		hiring:        ns,
 	}
 	for _, sv := range dec.Served {
 		s.served[sv.Name] = sv.Kind
 	}
+	// The hiring API key is watched by every re-read of the revocation cache while the session lives (§12).
+	if s.hire != nil && ns.Keys != nil {
+		defer ns.Keys.Hold(*s.hire)()
+	}
 
 	// Anonymous sessions (§6, M4) will take tunnel.GateMaxInflightAnonymous.
-	go acceptNodeStreams(mux, tunnel.GateMaxInflight, log)
+	go acceptNodeStreams(ctx, s, mux, ns, log)
 	live := make(chan error, 1)
 	go func() { live <- tunnel.KeepAlive(ctx, mux, h.ping, tunnel.PingFailures) }()
 
@@ -450,61 +467,6 @@ func openControl(mux *yamux.Session) (net.Conn, error) {
 	}
 	_ = st.SetWriteDeadline(time.Time{})
 	return st, nil
-}
-
-// acceptNodeStreams accepts node-opened streams promptly (§7: an un-accepted stream holds the node's
-// open, and its data, until the backlog fills) and refuses them (refuseNodeStream): hiring (§9) and blob
-// fetches (§8.3) are M3. It returns when the session ends.
-//
-// In flight. Closing a stream ends only the gate's half of it. yamux keeps the stream, and buffers up to a
-// window (tunnel.MaxStreamWindowSize) of what the node still sends on it, until the node closes its half,
-// resets it, or StreamCloseTimeout (5 min) passes; nothing else frees it, since yamux v0.1.2 has no
-// stream reset. So a node-opened stream is in flight from Accept until it has ended on both sides, and at
-// most limit are (§7: each side enforces its own in-flight cap after Accept; §14: 32 per session).
-// Without the cap a node that never closes its streams pins a window of data (about half a MiB of heap)
-// per stream it opens, as many as it likes, since prompt Accept leaves yamux's backlog nothing to bound
-// (M2 review of WP-03).
-//
-// SPEC-CONFLICT: §14 answers a node-opened stream over the cap with 429 and keeps the session. M2 serves
-// no hiring, so the gate refuses every node-opened stream at once and has no 429 to write; and a refusal,
-// a 429 included, frees nothing while the node keeps its half open. The closest faithful behaviour is to
-// count the refused streams the node has not closed, and to close the session when one more than limit
-// would be in flight: what a node pins is then at most limit windows (8 MiB of data at 32) plus the
-// backlog's. A node that closes each stream once the gate has (it reads EOF) stays far below the cap; one
-// that keeps them open loses its session and redials. M3's 429 still needs this count, kept until both
-// halves end, and a bound on the 429'd streams the node keeps open; the owner may want §14 to say so.
-func acceptNodeStreams(mux *yamux.Session, limit int, log *slog.Logger) {
-	var inFlight atomic.Int64
-	for {
-		st, err := mux.AcceptStream()
-		if err != nil {
-			return
-		}
-		n := inFlight.Add(1)
-		if n > int64(limit) {
-			log.Warn("tunnel session closed: the node keeps more streams open than the gate allows", "limit", limit, "stream", st.StreamID())
-			_ = mux.Close()
-			return
-		}
-		log.Debug("node-opened stream refused: hiring is not served before M3", "stream", st.StreamID(), "in_flight", n)
-		go func() {
-			refuseNodeStream(st)
-			// Counted down before the line, so that a test that saw the line sees the count.
-			inFlight.Add(-1)
-			log.Debug("node-opened stream ended", "stream", st.StreamID())
-		}()
-	}
-}
-
-// refuseNodeStream closes the gate's half of a node-opened stream (FIN: the gate writes nothing on it) and
-// discards what the node sends on it until the stream has ended: the node's FIN (EOF), a reset, the
-// stream's close timeout (StreamCloseTimeout after the gate's FIN), or the session's end. Reading is the
-// only way yamux tells the gate a stream ended (it has no close notification), and what the node can
-// make the gate read there is at most what it sends, discarded as it arrives, on at most the cap's
-// streams for at most StreamCloseTimeout each.
-func refuseNodeStream(st *yamux.Stream) {
-	_ = st.Close()
-	_, _ = io.Copy(io.Discard, st)
 }
 
 // WriteControl writes one control line on the session's control stream (§13), within

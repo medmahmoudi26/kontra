@@ -5,11 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
@@ -48,8 +52,9 @@ const (
 // keeps serving the streams the gate opens on it until the gate closes it, and is never redialed. So is a
 // session whose key another process has rotated (the new key's session is dialed at once, with rotate_from)
 // and one whose stream ids are nearly exhausted (§14: the node reconnects; yamux allows about 2³¹ opens per
-// side, and only the gate opens streams in M2, so the node watches the ids it accepts and dials a new
-// session before the gate's run out).
+// side): the node watches both the ids it accepts and its own (hiring, the key set and blob fetches open streams
+// from the node since M3, session.open), and dials a new session before either side's run out, or as soon as an
+// open of its own is refused ErrStreamsExhausted.
 //
 // It returns nil when ctx ends, ErrRevoked when the gate revokes the key, a *tunnel.HandshakeError for a
 // refusal that is not retried, ErrChannelBindingRequired, or an error reading the key file.
@@ -59,6 +64,32 @@ func (n *Node) Run(ctx context.Context) error {
 	defer n.closeAll()
 	tick := time.NewTicker(n.maintainEvery)
 	defer tick.Stop()
+
+	// Hiring (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
+	// stops kontra connect at once; its requests wait for a session. --listen off binds nothing: a node that only
+	// hosts offers its hiring principal to no local process, and a second node on the host needs no port of its own
+	// (D208).
+	if n.cfg.Listen == hiring.ListenOff {
+		fmt.Fprintln(n.out, "kontra connect: hiring is off (--listen off): this node only hosts")
+		n.logger.Info("hiring: off (--listen off)")
+	} else {
+		ln, err := hiring.Listen(n.cfg.Listen) // a loopback --listen on both loopback families (D262)
+		if err != nil {
+			return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>, "+
+				"or --listen off for a node that only hosts)", n.cfg.Listen, err)
+		}
+		hdone := make(chan struct{})
+		go func() {
+			defer close(hdone)
+			if err := n.hire.Serve(ctx, ln); err != nil {
+				n.logger.Error("the local hiring endpoint stopped", "err", err)
+			}
+		}()
+		defer func() { cancel(); <-hdone }()
+		_, port, _ := net.SplitHostPort(ln.Addr().String())
+		fmt.Fprintf(n.out, "kontra connect: hiring at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
+		n.logger.Info("hiring: serving local clients", "listen", ln.Addr().String())
+	}
 
 	var wait time.Duration
 	for {
@@ -98,7 +129,9 @@ func (n *Node) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Serve the current session until it closes, or a new one must be dialed while it goes on.
+		// Serve the current session until it closes, or a new one must be dialed while it goes on. Hiring
+		// streams go on it (OpenHire) until then.
+		n.setCurrent(s)
 	watch:
 		for {
 			select {
@@ -107,6 +140,7 @@ func (n *Node) Run(ctx context.Context) error {
 			case <-n.revoked:
 				return ErrRevoked
 			case <-s.mux.CloseChan():
+				n.clearCurrent(s)
 				lived := time.Since(s.opened)
 				n.backoff.SessionEnded(lived)
 				if s.replaced.Load() {
@@ -251,7 +285,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 				return nil, nextAgain, nil
 			}
 		}
-		s, err := n.startSession(ctx, d, w, id)
+		s, err := n.startSession(ctx, d, w, id, h.Auth)
 		if err != nil {
 			log.Warn("the tunnel session did not start", "err", err)
 			return nil, nextRetry, err
@@ -282,10 +316,14 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 				"code", herr.Code, "message", herr.Message)
 			return nil, nextFatal, err
 		}
-		if herr.Code == tunnel.CodeUnknownKey {
+		switch {
+		case herr.Code == tunnel.CodeUnknownKey && len(h.Services) == 0:
+			log.Error("the gate does not know this node's key: a node that only hires is admitted on an --api-key with "+
+				"the hire scope (spec/tunnel.md §9)", "message", herr.Message)
+		case herr.Code == tunnel.CodeUnknownKey:
 			log.Error("the gate does not know this node's key: enroll it with --enroll <token> (kontra-gate enroll <service>)",
 				"message", herr.Message)
-		} else {
+		default:
 			log.Warn("the gate refused the handshake; retrying", "code", herr.Code, "message", herr.Message)
 		}
 		return nil, nextRetry, err
@@ -364,6 +402,25 @@ func (n *Node) welcomed(kid string, h *tunnel.Hello, w *tunnel.Welcome, probe bo
 		}
 	}
 	return err
+}
+
+// servicePaths are the welcome's services as the gate's URL paths name them (spec/relay.md §2.1, D221):
+// "<tenant>/<name>" when the service's URL ends with /agents/<tenant>/<name> (or /mcp/…), a multi-tenant gate's, else
+// "<name>". Only the tenant is the gate's to say: the name is the service's own, which the node serves.
+func servicePaths(w *tunnel.Welcome) map[string]string {
+	out := make(map[string]string, len(w.Services))
+	for _, ws := range w.Services {
+		root := "/agents/"
+		if ws.Kind == tunnel.KindMCP {
+			root = "/mcp/"
+		}
+		out[ws.Name] = ws.Name
+		if u, err := url.Parse(ws.URL); err == nil && w.Tenant != "" &&
+			strings.HasSuffix(strings.TrimRight(u.Path, "/"), root+w.Tenant+"/"+ws.Name) {
+			out[ws.Name] = w.Tenant + "/" + ws.Name
+		}
+	}
+	return out
 }
 
 // servesAll reports whether the welcome lists every declared service.
@@ -496,8 +553,9 @@ func hashes(tokens []string) []string {
 }
 
 // startSession starts the yamux client over the welcomed connection (§7), and the session's accept loop,
-// ping loop and control stream reader; it prints the welcome's service URLs.
-func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, id *nodekey.Identity) (*session, error) {
+// ping loop and control stream reader; it prints the welcome's service URLs. auth is the API key the hello
+// carried.
+func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, id *nodekey.Identity, auth string) (*session, error) {
 	sctx, cancel := context.WithCancel(ctx)
 	log := n.logger.With(obs.KeyTunnelSession, w.Session, obs.KeyReplica, w.Replica, "key_id", id.KeyID())
 	cfg := tunnel.YamuxConfig(log)
@@ -515,6 +573,15 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	for _, ws := range w.Services {
 		served = append(served, ws.Name)
 	}
+	if n.hosting != nil {
+		// A sealed header names its service as the gate's URL path does (D221): the hosting node's own, from the welcome.
+		n.hosting.SetServicePaths(servicePaths(w))
+	}
+	// The gate's cap of node-opened streams in flight (§14, §6.2): the node keeps under it (session.open).
+	limit := tunnel.GateMaxInflight
+	if w.Anonymous != nil {
+		limit = tunnel.GateMaxInflightAnonymous
+	}
 	s := &session{
 		n:       n,
 		id:      w.Session,
@@ -525,9 +592,15 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 		log:     log,
 		events:  make(chan event, 4),
 		ctx:     sctx,
+		auth:    auth,
+		slots:   make(chan struct{}, limit),
 	}
 	s.proxy = n.proxy.forSession(served, log)
 	s.proxy.onControl = s.readControl
+	// The kontra-blob: parts of what the gate forwards are fetched on this session's own blob streams (§8.3):
+	// the gate serves a ref to the session one of whose attempts holds its task. They share the session's slots
+	// with hiring (§14).
+	s.proxy.setBlobOpener(func(ctx context.Context) (net.Conn, error) { return s.open(ctx, nil) })
 	n.mu.Lock()
 	n.sessions[s] = struct{}{}
 	n.mu.Unlock()
@@ -552,6 +625,8 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	go func() {
 		<-mux.CloseChan()
 		cancel()
+		// The stdio children of the MCP sessions opened on this session: the gate ends those sessions with it.
+		s.proxy.release()
 		n.mu.Lock()
 		delete(n.sessions, s)
 		n.mu.Unlock()
@@ -584,6 +659,7 @@ func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 // ceiling left from failures before that session.
 func (n *Node) retire(s *session, why string) {
 	s.retired.Store(true)
+	n.clearCurrent(s) // §13: no new hiring streams on a draining session
 	n.backoff.SessionEnded(time.Since(s.opened))
 	s.log.Info(why)
 }
@@ -599,7 +675,8 @@ func (n *Node) closeAll() {
 	for _, s := range sessions {
 		_ = s.mux.Close()
 	}
-	n.proxy.closeIdle()
+	// Every stdio child and its process group (stdin closed, SIGTERM, SIGKILL: tunnel.md §10, D184).
+	n.proxy.close()
 }
 
 // keyRevoked is {"t": "revoked"} on a session's control stream (§12): the node stops when it is the key
@@ -620,6 +697,29 @@ func (n *Node) keyRevoked(s *session) {
 	}
 	s.log.Error("the gate revoked this node's key: kontra connect stops and does not redial (§12)")
 	n.revokeOnce.Do(func() { close(n.revoked) })
+}
+
+// authRevoked is {"t": "auth_revoked"} on a session's control stream (§12, §13): the gate revoked the API key the
+// session's hello carried, its hiring principal. The session's hiring requests are 401 from now on, and its
+// hosting goes on. The key is dropped from this origin's credentials (when it is still the one stored) and so
+// from every later hello: otherwise the next handshake (a network blip, a replica's restart, the make-before-break
+// dial of a drain) would carry it and be refused auth_invalid, which §4 makes final, and kontra connect would stop
+// hosting. Later sessions hire as node:<key_id> (§9); a key that only hires is refused until its operator gives a
+// new --api-key (enroll.Admit).
+func (n *Node) authRevoked(s *session) {
+	s.log.Error("the gate revoked the session's hiring API key (auth_revoked): hiring requests on this session are refused 401 "+
+		"and hosting goes on; the key is removed from the credentials file and no later hello carries it (spec/tunnel.md §12)",
+		"path", n.creds.Path())
+	if s.auth == "" {
+		return
+	}
+	if err := n.updateCredential(func(c *Credential) {
+		if c.APIKey == s.auth {
+			c.APIKey = ""
+		}
+	}); err != nil {
+		s.log.Error("the credentials file could not be updated", "err", err)
+	}
 }
 
 // bindingRevoked is {"t": "revoked", "service"} on a session's control stream (§12): the gate revoked the
@@ -659,6 +759,10 @@ func (n *Node) maintain(cur *session) bool {
 	now := n.now()
 	if now.Sub(n.lastPrune) >= pruneEvery {
 		n.prune(now)
+	}
+	if now.Sub(n.lastSealSweep) >= sweepSealingEvery {
+		n.lastSealSweep = now
+		n.sweepSealing(now)
 	}
 	id, err := nodekey.Load(n.cfg.KeyPath)
 	if err != nil {

@@ -149,7 +149,18 @@ type APIKeys struct {
 	mu       sync.Mutex
 	cache    map[[32]byte]*cachedKey
 	lastUsed map[uuid.UUID]time.Time // when this replica last wrote, or tried to write, last_used_at
+	held     map[uuid.UUID]*heldKey  // the hiring API keys of tunnel sessions (Hold)
 	writes   sync.WaitGroup
+}
+
+// heldKey is a key a tunnel session hires with (Hold): every re-read of the revocation cache checks it, as it
+// checks the keys in cache, and one found ended stays ended while it is held.
+type heldKey struct {
+	n         int // the sessions holding it
+	ended     bool
+	p         Principal  // as last read from its row; valid when loaded
+	expiresAt *time.Time // the key's, or its tenant's when earlier
+	loaded    bool
 }
 
 type cachedKey struct {
@@ -171,6 +182,7 @@ func NewAPIKeys(db *pgxpool.Pool, revoked *RevocationCache) *APIKeys {
 		lastUsedEvery: LastUsedEvery,
 		cache:         map[[32]byte]*cachedKey{},
 		lastUsed:      map[uuid.UUID]time.Time{},
+		held:          map[uuid.UUID]*heldKey{},
 	}
 	if revoked != nil {
 		revoked.track(k)
@@ -300,23 +312,28 @@ func (k *APIKeys) forget(h [32]byte) {
 // forgetKey drops every cached entry of one key id (a revocation on this replica).
 func (k *APIKeys) forgetKey(id uuid.UUID) { k.dropKeys([]uuid.UUID{id}) }
 
-// cachedKeyIDs lists the keys that may be answered from memory (those within the TTL), for the revocation
-// cache's re-read.
+// cachedKeyIDs lists the keys that may be answered from memory (those within the TTL, and the held keys not
+// ended), for the revocation cache's re-read.
 func (k *APIKeys) cachedKeyIDs() []uuid.UUID {
 	now := k.now()
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	ids := make([]uuid.UUID, 0, len(k.cache))
+	ids := make([]uuid.UUID, 0, len(k.cache)+len(k.held))
 	for _, c := range k.cache {
 		if c.p.KeyID != nil && now.Sub(c.loaded) < k.ttl {
 			ids = append(ids, *c.p.KeyID)
+		}
+	}
+	for id, h := range k.held {
+		if !h.ended {
+			ids = append(ids, id)
 		}
 	}
 	return ids
 }
 
 // dropKeys drops every cached entry of these key ids (a revocation on this replica, or keys a re-read
-// found ended).
+// found ended), and marks those of them that are held ended.
 func (k *APIKeys) dropKeys(ids []uuid.UUID) {
 	drop := make(map[uuid.UUID]bool, len(ids))
 	for _, id := range ids {
@@ -329,6 +346,132 @@ func (k *APIKeys) dropKeys(ids []uuid.UUID) {
 			delete(k.cache, h)
 		}
 	}
+	for id := range drop {
+		if h := k.held[id]; h != nil {
+			h.ended = true
+		}
+	}
+}
+
+// Hold keeps the key of p, a principal Authenticate returned (a tunnel session's hiring API key, spec/tunnel.md
+// §9), under the revocation cache's watch until release is called: every re-read checks its row, as it checks
+// the keys answered from memory, so Revalidate can answer from memory while the cache is fresh, and a key found
+// revoked, expired or deleted stays refused while it is held, however long ago that happened. A principal that
+// is not an API key's holds nothing. release is safe to call more than once.
+func (k *APIKeys) Hold(p Principal) (release func()) {
+	if p.Kind != KindKey || p.KeyID == nil {
+		return func() {}
+	}
+	id := *p.KeyID
+	k.mu.Lock()
+	h := k.held[id]
+	if h == nil {
+		h = &heldKey{}
+		k.held[id] = h
+	}
+	h.n++
+	k.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			if h := k.held[id]; h != nil {
+				if h.n--; h.n <= 0 {
+					delete(k.held, id)
+				}
+			}
+		})
+	}
+}
+
+// Revalidate re-validates p, a principal Authenticate returned earlier (a tunnel session's hiring API key), and
+// returns it as the key's row says now (its scopes, tenant and buyer): spec/relay.md §2.3's "revocation is
+// checked on every request", for the requests a node opens with the key its handshake carried (spec/tunnel.md
+// §12). A key revoked (by NOTIFY or a re-read), expired, deleted, or of a tenant that ended is
+// ErrUnauthenticated; any other error is the gate's own (Postgres unreachable).
+//
+// A held key (Hold) is answered from memory while the revocation cache is fresh, after one read of its row;
+// otherwise, and for a key not held, its row is read.
+func (k *APIKeys) Revalidate(ctx context.Context, p Principal) (Principal, error) {
+	if p.Kind != KindKey || p.KeyID == nil {
+		return Principal{}, ErrUnauthenticated
+	}
+	id := *p.KeyID
+	now := k.now()
+	if k.revoked != nil && k.revoked.APIKeyRevoked(id) {
+		k.dropKeys([]uuid.UUID{id})
+		return Principal{}, ErrUnauthenticated
+	}
+	k.mu.Lock()
+	h := k.held[id]
+	var (
+		ended, fromMemory bool
+		mem               Principal
+	)
+	if h != nil {
+		ended = h.ended
+		if !ended && h.loaded && k.revoked != nil && k.revoked.Fresh() && !expired(h.expiresAt, now) {
+			fromMemory, mem = true, clonePrincipal(h.p)
+		}
+	}
+	k.mu.Unlock()
+	switch {
+	case ended:
+		return Principal{}, ErrUnauthenticated
+	case fromMemory:
+		return mem, nil
+	}
+
+	var (
+		tenantID, buyer       uuid.UUID
+		slug, prefix          string
+		scopes                []string
+		expiresAt, tenantEnds *time.Time
+		revokedAt             *time.Time
+		reads                 uint64
+	)
+	if k.revoked != nil {
+		reads = k.revoked.started() // before the row is read, as remember does
+	}
+	err := k.db.QueryRow(ctx, `
+		select k.tenant_id, t.slug, k.buyer_id, k.prefix, k.scopes, k.expires_at, t.expires_at, k.revoked_at
+		from kontra.api_keys k join kontra.tenants t on t.id = k.tenant_id
+		where k.id = $1 and t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`,
+		id).Scan(&tenantID, &slug, &buyer, &prefix, &scopes, &expiresAt, &tenantEnds, &revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		k.dropKeys([]uuid.UUID{id})
+		return Principal{}, ErrUnauthenticated
+	}
+	if err != nil {
+		return Principal{}, fmt.Errorf("auth: api key re-read: %w", err)
+	}
+	if tenantEnds != nil && (expiresAt == nil || tenantEnds.Before(*expiresAt)) {
+		expiresAt = tenantEnds
+	}
+	if revokedAt != nil || expired(expiresAt, now) || (k.revoked != nil && k.revoked.APIKeyRevoked(id)) {
+		k.dropKeys([]uuid.UUID{id})
+		return Principal{}, ErrUnauthenticated
+	}
+	out := Principal{
+		Kind:       KindKey,
+		ID:         string(KindKey) + ":" + prefix,
+		TenantID:   &tenantID,
+		TenantSlug: slug,
+		BuyerID:    buyer,
+		Via:        ViaAPIKey,
+		KeyID:      &id,
+	}
+	for _, s := range scopes {
+		out.Scopes = append(out.Scopes, Scope(s))
+	}
+	k.mu.Lock()
+	if h := k.held[id]; h != nil && !h.ended && k.revoked != nil && k.revoked.started() == reads {
+		h.p, h.expiresAt, h.loaded = clonePrincipal(out), expiresAt, true
+	}
+	k.mu.Unlock()
+	k.touch(id, now)
+	return out, nil
 }
 
 // touch writes last_used_at for id unless this replica wrote (or tried to) within lastUsedEvery. The
@@ -553,8 +696,8 @@ func (k *APIKeys) Revoke(ctx context.Context, id uuid.UUID, actor string) (bool,
 		}
 		return false, fmt.Errorf("auth: revoke %s: %w", id, err)
 	}
-	if k.revoked != nil {
-		k.revoked.markAPIKey(id)
+	if k.revoked != nil && k.revoked.markAPIKey(id) {
+		k.revoked.emit([]uuid.UUID{id})
 	}
 	k.forgetKey(id)
 	return changed, nil
@@ -594,7 +737,19 @@ func NewAuthenticator(keys *APIKeys) *Authenticator {
 // credential (not exactly one `Bearer <token>`, an unknown, revoked or expired key, or a token that is
 // not an API key, such as an OIDC JWT, which M1 does not accept) is ErrUnauthenticated even on an
 // anonymous service. Any other error is the gate's own.
+//
+// A request a node opened on its tunnel session (HireSourceFrom) takes the session's principal and nothing
+// else: Authorization is not read (spec/tunnel.md §9: a local client never sends a credential to the node, and
+// the gate never lets a node's request choose its principal), and a session whose hiring API key was revoked is
+// ErrUnauthenticated, the 401 of every later stream it opens (§12).
 func (a *Authenticator) Authenticate(r *http.Request, anonymousBuyer uuid.UUID) (p Principal, authenticated bool, err error) {
+	if src, ok := HireSourceFrom(r.Context()); ok {
+		p, err := src.HirePrincipal(r.Context())
+		if err != nil {
+			return Principal{}, false, err
+		}
+		return p, true, nil
+	}
 	token, present, err := BearerToken(r.Header)
 	if !present {
 		return Anonymous(anonymousBuyer), false, nil

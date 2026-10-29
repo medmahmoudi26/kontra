@@ -1,0 +1,8 @@
+{
+  "name": "kontra-example-mcp-everything",
+  "private": true,
+  "description": "server-everything@1.0.0 streamableHttp on loopback, hosted by kontra connect (examples/mcp/everything/README.md)",
+  "dependencies": {
+    "@modelcontextprotocol/server-everything": "1.0.0"
+  }
+}

@@ -16,7 +16,13 @@ type Input struct {
 	// QuoteExpiresAt is set for a task created quoted (spec §13.2): the workflow waits for kontra.approval
 	// until then. Nil for a task created submitted.
 	QuoteExpiresAt *time.Time `json:"quoteExpiresAt,omitempty"`
+	// Protocol is tasks.protocol: ProtocolMCP for a gate-owned MCP task, whose kontra.cancel follows spec §11.6
+	// (D57); empty for an A2A task, as every input recorded before M3 is.
+	Protocol string `json:"protocol,omitempty"`
 }
+
+// ProtocolMCP is Input.Protocol of a gate-owned MCP task (tasks.protocol mcp, spec §11.5).
+const ProtocolMCP = "mcp"
 
 // HooksSnapshot is the hook configuration in force when the task started (spec §13.3, D46).
 type HooksSnapshot struct {
@@ -243,6 +249,7 @@ type (
 	SubmitInput struct {
 		TaskID         string         `json:"taskId"`
 		Metadata       map[string]any `json:"metadata,omitempty"`
+		MCPMeta        map[string]any `json:"mcpMeta,omitempty"` // an MCP task keeps it (spec §13.2, §13.3)
 		TimeoutSeconds int64          `json:"timeoutSeconds"`
 	}
 	// SubmitResult is submit's result: tasks.deadline, fixed by the store at the transition (spec §5.2).

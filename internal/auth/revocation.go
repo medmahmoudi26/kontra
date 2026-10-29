@@ -41,6 +41,7 @@ type RevocationCache struct {
 	lastOK    time.Time               // this process's clock at the start of the last successful read
 	seq       uint64                  // re-reads started
 	caches    []keyCache              // the verified-key caches each re-read checks
+	subs      []func(uuid.UUID)       // told of each API key revocation learned (Subscribe)
 	kick      chan struct{}
 	readMu    sync.Mutex // one read at a time
 }
@@ -124,10 +125,35 @@ func (c *RevocationCache) Run(ctx context.Context) error {
 	}
 }
 
+// Subscribe calls fn with the id of each API key revocation the cache learns, from a NOTIFY or a re-read, once
+// per revocation while the cache holds it (spec/tunnel.md §12: the replica tells the tunnel sessions hiring with
+// the key {"t": "auth_revoked"}). fn runs on the goroutine that learned it (the LISTEN connection's, or Run's)
+// and must not wait on the network or the database. Subscribe before Run.
+func (c *RevocationCache) Subscribe(fn func(id uuid.UUID)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.subs = append(c.subs, fn)
+}
+
+// emit tells the subscribers of newly learned revocations; it is called without c.mu.
+func (c *RevocationCache) emit(ids []uuid.UUID) {
+	if len(ids) == 0 {
+		return
+	}
+	c.mu.Lock()
+	subs := slices.Clone(c.subs)
+	c.mu.Unlock()
+	for _, id := range ids {
+		for _, fn := range subs {
+			fn(id)
+		}
+	}
+}
+
 // Notify applies one kontra_revoke payload (pg.Listener.OnChannel). "apikey:<id>" marks the key revoked
-// at once (the NOTIFY is delivered only when the revoking transaction commits) and asks Run for a re-read.
-// Node-key and binding payloads are the tunnel's (M2) and are ignored here; anything else is ignored too
-// (the table is the truth).
+// at once (the NOTIFY is delivered only when the revoking transaction commits), tells the subscribers, and
+// asks Run for a re-read. Node-key and binding payloads are the tunnel's (enroll.Revocations) and are ignored
+// here; anything else is ignored too (the table is the truth).
 func (c *RevocationCache) Notify(payload string) {
 	switch {
 	case strings.HasPrefix(payload, revokeAPIKey):
@@ -136,7 +162,9 @@ func (c *RevocationCache) Notify(payload string) {
 			c.log.Debug("revocation cache: unreadable payload", "payload", payload)
 			return
 		}
-		c.markAPIKey(id)
+		if c.markAPIKey(id) {
+			c.emit([]uuid.UUID{id})
+		}
 		select {
 		case c.kick <- struct{}{}:
 		default:
@@ -175,8 +203,8 @@ func (c *RevocationCache) Fresh() bool {
 
 // markAPIKey records a revocation learned without a read (a NOTIFY, or Revoke on this replica). Its time
 // is the database clock of the last read, or this process's clock before any; it only decides when the
-// entry is dropped.
-func (c *RevocationCache) markAPIKey(id uuid.UUID) {
+// entry is dropped. It reports whether the revocation is new to the cache.
+func (c *RevocationCache) markAPIKey(id uuid.UUID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	at := c.watermark
@@ -185,7 +213,9 @@ func (c *RevocationCache) markAPIKey(id uuid.UUID) {
 	}
 	if _, ok := c.revoked[id]; !ok {
 		c.revoked[id] = at
+		return true
 	}
+	return false
 }
 
 // refresh reads the API keys revoked since the previous read (less the overlap), or within retain on the
@@ -255,8 +285,11 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	var learned []uuid.UUID
 	for id, at := range found {
+		if _, ok := c.revoked[id]; !ok && now.Sub(at) <= retain {
+			learned = append(learned, id)
+		}
 		c.revoked[id] = at
 	}
 	for id, at := range c.revoked {
@@ -266,6 +299,8 @@ func (c *RevocationCache) refresh(ctx context.Context) error {
 	}
 	c.watermark = now
 	c.lastOK = started
+	c.mu.Unlock()
+	c.emit(learned)
 	return nil
 }
 

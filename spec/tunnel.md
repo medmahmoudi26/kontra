@@ -1,8 +1,10 @@
 # Tunnel
 
 Status: **approved by the owner** (25 Oct 2026, revision 3 after M1 planning). Revision 4 brings the text in line
-with the M2 code (D123–D157), decided under the owner's standing instruction on 26 Oct. Normative. RFC 2119
-key words.
+with the M2 code (D123–D157), decided under the owner's standing instruction on 26 Oct. Revision 5 (26–28 Oct)
+includes the M3 decisions: those of the M3 planning and its audit (D161, D162, D164, D172, D173, D179–D182, D184),
+and those that bring the text in line with the M3 code and its review (D199, D206–D213, D224, D229), decided under
+the owner's standing instruction. Normative. RFC 2119 key words.
 
 The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
 node, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the node sends
@@ -70,7 +72,17 @@ When the node hires a sealed service, it mints an X25519 key for that job (an A2
 session for plain calls) and keeps it at `~/.kontra/jobs/<gate host>/<job id>.key` (0600). It is what replies
 are sealed to ([`ext-sealed.md`](ext-sealed.md)). It is deleted when the job is terminal and, if the task's
 metadata carries the operator's `kontra.keyRetainUntil` (a review window, [`relay.md`](relay.md) §13.3), that
-time has passed; an MCP session's key when the session closes and every task created in it is done.
+time has passed; an MCP session's key when the session closes and every task created in it is done. The node
+learns that the gate closed a session from a `404` for it, and deletes the key of a session that has had no
+exchange for the service's `session_idle_s` once its tasks are done: the gate closes an idle session on its own, and
+states that bound in the `initialize` result's `_meta["sh.kontra/session_idle_s"]` ([`relay.md`](relay.md) §11.2,
+D224). The node keeps it with the job; a value that is not a whole number of seconds from 1 to 30 days, or none,
+counts as a day. A session the node no longer knows (a gate that keeps sessions longer than 30 days, every sealed
+session after the node restarts) is answered `404` by the node, on a `GET` as on a `POST`, without forwarding
+anything, and the client initializes again. While an exchange of a session is open (a `GET` stream, a call in
+flight) its key stays, whatever the sweep or a `404` on another exchange says, and goes once the last ends (D241);
+a session the client left without a `DELETE` and in which no sealed call was made is forgotten once idle that long
+too (D242).
 
 ### 2.4 Credentials
 
@@ -240,10 +252,14 @@ the proof. A service the gate creates during a handshake gets `allow: [org:<its 
   is `enroll_invalid` and is not consumed (D132).
 - A declared service the key was never enrolled for, and is not enrolling in this handshake, is `service_denied`,
   and nothing is enrolled (the handshake is all-or-nothing); an unknown key that nothing in its hello enrolls is
-  `unknown_key`, whatever else the hello carries (D133). A declared service whose binding
-  was revoked (`key_services.revoked_at` set) is left out of `welcome.services` and `tunnels.services`; the
-  handshake still succeeds for the others. Only a service or tenant token in the hello enrolls it again, never the
-  `auth` API key's `enroll:` scope (D130).
+  `unknown_key`, whatever else the hello carries (D133), except a node that only hires: a hello that declares no
+  service and carries an `auth` API key with the `hire` scope (and no token) admits its key hire-only, a
+  `tunnel_keys` row in the API key's tenant with no binding, without `tunnel.enroll_with_api_key`. A known key with
+  no binding at all is admitted only on such a hello, or one that enrolls it, so a hire-only key never hires as
+  `node:<key_id>` (§9) once its API key is revoked (D206). A declared service whose binding was revoked
+  (`key_services.revoked_at` set) is left out of `welcome.services` and `tunnels.services`; the handshake still
+  succeeds for the others. Only a service or tenant token in the hello enrolls it again, never the `auth` API key's
+  `enroll:` scope (D130).
 - **The service a session serves comes from `key_services`, never from a request** ([`relay.md`](relay.md)
   §6.1). The `services` in M1 only narrow it.
 - Every enrollment, revocation and rotation is a row in `audit`.
@@ -321,8 +337,8 @@ The gate first writes one line, at most 4096 bytes, terminated by `\n`:
 | `op` | `http` (an exchange) or `control` (§13, once per session) |
 | `service`, `kind` | Which hosted service this exchange is for. The node refuses (`404` with `Kontra-Node: not_hosted` or `kind_mismatch`) a service it is not hosting on this session or a kind that does not match. |
 | `task`, `context` | Present when the exchange belongs to a gate task: the node needs the gate's ids to check sealed headers ([`ext-sealed.md`](ext-sealed.md)). |
-| `mcp_session` | For MCP exchanges: the lowercase hex SHA-256 of the client's gate `Mcp-Session-Id`. For every exchange of a durable MCP task (the dispatch's own `initialize`, `tools/call`, `tasks/*`, input responses) it is the hash of the client session that created the task. |
-| `mcp_request_id` | For a `tools/call` exchange (plain or the dispatch of a durable task): the client's original JSON-RPC id, as a string. |
+| `mcp_session` | For MCP exchanges: the lowercase hex SHA-256 of the client's gate `Mcp-Session-Id`. For every exchange of a durable MCP task (the dispatch's own `initialize`, `tools/call`, `tasks/*`, input responses) it is the hash of the client session that created the task. Absent on an exchange for a 2026-07-28 request and on every exchange of a task a 2026-07-28 request created: they have no session, and a node must not rely on the field there (a sealed service never receives one, D162, D180). |
+| `mcp_request_id` | For a `tools/call` exchange (plain or the dispatch of a durable task), and every other exchange of a durable task: the client's original JSON-RPC id of that `tools/call`, as a string. Absent where `mcp_session` is. |
 
 Unknown fields are ignored. The node never forwards the preamble.
 
@@ -340,8 +356,9 @@ The node is a **fixed-target reverse proxy**, not a SOCKS proxy (`sidecar_not_a_
 - It percent-decodes and cleans the request path (`.`, `..`, `//`), forwards a path already under the target's
   base path as it is and prefixes any other with the base (the gate's paths come from the upstream card's
   interface, which already holds the base, [`relay.md`](relay.md) §6.2), and answers `400` if the result is not
-  under that base path. Until the node forwards by this rule, `kontra connect` refuses a `--serve` target with a
-  path: M2 serves every target at its root (D123).
+  under that base path. An MCP target may name its endpoint path (MCP has one endpoint; `server-everything`
+  serves `/mcp`), and the gate's `/`, where it sends every MCP exchange, goes to that endpoint exactly as
+  `--serve` names it; `kontra connect` still refuses an A2A target with a path (D123, D210).
 - `Host` is set to the target's host. `Origin` is removed (MCP servers on loopback refuse a foreign `Host` and
   may refuse a browser `Origin`).
 - Hop-by-hop headers are removed. `CONNECT` and requests with `Upgrade` are refused with `400`. `TRACE` is
@@ -349,6 +366,12 @@ The node is a **fixed-target reverse proxy**, not a SOCKS proxy (`sidecar_not_a_
 - `Forwarded`/`X-Forwarded-*` are removed, not added: the service sees a local client.
 - Response bodies stream as they come: `text/event-stream` is flushed per event, never buffered or compressed.
 - The node's own server for tunnel streams sets a header read timeout only, never a write timeout (SSE).
+- For an MCP service, stdio or URL, the node answers the server's `roots/list` itself and keeps the client's
+  roots from the server (§10, D173).
+- Two services whose targets share an upstream (one origin, any loopback name for a loopback host, and the base
+  path of one the other's or under it, the root covering every path) reach the same server, so the node keeps their
+  sealed state as one: an exchange of either is guarded by the sealed jobs of both ([`ext-sealed.md`](ext-sealed.md)
+  §5, D236). A stdio service runs children of its own and shares nothing.
 
 **Responses the node writes itself** carry a `Kontra-Node` header, so the gate never mistakes them for the
 service's own ([`relay.md`](relay.md) §6.4): `not_hosted` (404), `kind_mismatch` (404), `full` (503),
@@ -362,66 +385,147 @@ HTTP response, or while the session is closing, is `tunnel_lost` to the gate.
 
 A part larger than 256 KiB reaches a node as a `url` part whose URL is `kontra-blob:<ref>`
 ([`relay.md`](relay.md) §10.4). The node fetches it by opening a stream with the preamble `{"v": 1, "op":
-"blob", "ref": "<ref>"}`; the gate checks that the ref belongs to a task this session is serving or this
-session's hiring principal owns, and streams the object, announcing its size first. The node refuses more bytes
-than announced (at most 64 MiB) and, for a sealed part, authenticates the whole age file before acting on it.
-**A node never dials a URL taken from a part** (D56).
+"blob", "ref": "<ref>"}`. The gate resolves the ref through its `blobs` row and checks that the row's task is one
+this session is serving (an attempt of it is on the session) or one whose buyer is this session's hiring
+principal's. It then writes one JSON line, `{"size": <n>}` followed by exactly `n` bytes of the object, or
+`{"error": "not_found" | "forbidden" | "too_large"}` (`too_large`: an object over 64 MiB), and closes the stream
+(D181). The node refuses an announced size over 64 MiB and more bytes than announced, and, for a sealed part,
+authenticates the whole age file before acting on it. **A node never dials a URL taken from a part** (D56).
+
+A blob stream over the session's cap (§14) is closed unanswered, as is one whose object the bucket stops sending
+for 30 s. A hosting exchange whose `kontra-blob:` part cannot be fetched answers as §8.2's own refusals do: `400`
+without `Kontra-Node` when asking again would fail alike (a refused ref, a bad answer, more bytes than announced),
+and `503` with `Kontra-Node: full`, which the gate retries, when it may succeed (D209).
 
 ## 9. Hiring: streams the node opens
 
-The node serves `127.0.0.1:7777` (`--listen`) to local clients and forwards each request on a stream it opens
-(D34), with the preamble `{"v": 1, "op": "http"}`, followed by the request with its path unchanged:
-`/agents/…`, `/mcp/…`, `/mcp`, `/.well-known/…`. Anything else is refused by the node with `404`.
+The node serves `127.0.0.1:7777` (`--listen`) to local clients, a node that only hosts too, unless `--listen off`
+turns the hiring endpoint off: such a node binds no local port and hires for no one, and `--local-token` and
+`--allow-origin`, which guard `--listen`, are refused beside it, as is `--listen off` without a `--serve` (D208). A
+loopback `--listen` binds the port on both loopback families, `127.0.0.1` and `[::1]`: the node sends its clients to
+`localhost` (the cards it serves, its documentation), which a stock Linux resolves to `::1` first, so a port it left
+free on either family would be one another local user could bind and serve its clients from. A port another process
+holds on either family stops the start; a family the machine does not have (no IPv6) is one no one else can bind
+either (D262). Before the node binds (at its start, or a restart), another user can bind the port: on a machine
+shared with other users, `--local-token` is the remedy. It forwards each request on a stream it opens (D34), with the preamble `{"v": 1, "op": "http"}`, followed by the
+request with its path unchanged: `/agents/…`, `/mcp/…`, `/mcp`, `/.well-known/…`. Anything else is refused by the
+node with `404`.
 
 **Local requests are checked first** (DNS rebinding and other local users, MCP's Origin rule):
 
 - The node answers `403` (a JSON-RPC error without id on MCP paths) to any request whose `Host` is not
-  `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` of its own `--listen`, and to any request carrying an
-  `Origin` not listed by `--allow-origin` (default: none). It answers no CORS preflight (`OPTIONS` is `405`) and
+  `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` of its own `--listen` (or, when `--listen` names one
+  specific non-loopback address, never `0.0.0.0` or `::`, that address and port, D207), and to any request carrying
+  an `Origin` not listed by `--allow-origin` (default: none). It answers no CORS preflight (`OPTIONS` is `405`) and
   forwards `Origin` only when it was allowed.
 - `--listen` on a non-loopback address requires `--local-token <file>`; every request must then carry
   `Authorization: Bearer <local token>`, which the node strips before forwarding.
-- The read-only console on `:7778` follows the same rules (`local_rebinding`).
+- On a loopback `--listen` without `--local-token`, the node serves only its own user: on Linux it reads the
+  owner of each connection's client socket from the kernel's socket table (`/proc/self/net/tcp`, `tcp6`), for
+  every connection whatever its source address (a local process may bind any address of the machine), and closes
+  a connection of another user, or one it cannot attribute: a socket no process holds any more (inode 0, which the
+  kernel lists as uid 0), the overflow uid of a user namespace, or a table it cannot read, about which it warns at
+  start. Only where that table does not exist (not Linux) is the check not made: on a machine shared with other
+  users, set `--local-token`, which then serves any user that presents it (D207, D229).
+- The node serves no other local port: there is no local console (D164).
 
 On the gate the forwarded request is served by the same handler as a request from the network, with three
 differences:
 
 - Its principal is the session's: the API key from M1's `auth` when present, else `node:<key_id>` with the key's
   tenant ([`relay.md`](relay.md) §2.3), for anonymous sessions too. A local client never sends a credential to the
-  node.
-- Its edge limits are the session's (§6.2 for anonymous sessions; otherwise the API key's).
-- Card URLs: the node rewrites `supportedInterfaces[].url` in cards it serves locally to its own
-  `http://localhost:7777/…` URLs, after verifying the gate's card signature with a `jku` equal to
+  node. So every local client of the node shares one principal's MCP session cap on each service,
+  `max_sessions_per_principal` ([`relay.md`](relay.md) §11.2, D231), as every user of one API key does: a client
+  beyond it is refused `429` while the node's other sessions of the service are in use.
+- Its edge limits are the session's (§6.2 for anonymous sessions), counted with the session as the client:
+  `limits.body` and the body timeout as on the network, `rps_per_ip` per session, and in flight the session's
+  stream cap (§14), not shared with the same API key's requests from the network (D207).
+- Card URLs: the node rewrites every `supportedInterfaces[].url` in a card it serves locally to its own
+  `http://localhost:7777{svc}`, the service the card was read for, whatever path the gate's names (the node seals by
+  path: a gate's card that pointed a client at another path, `{svc}/.well-known/x`, `/agents//x`, `/mcp` or another
+  service's, would have its messages go unsealed), after verifying the gate's card signature with a `jku` equal to
   `{the origin it dialed}/.well-known/jwks.json` ([`relay.md`](relay.md) §3). A card whose gate signature does not
-  verify is not served locally.
+  verify is not served locally. A request other than a `GET` (or `HEAD`) to `/.well-known/…`, or to an `/agents/…`
+  path that names no service, is refused `404` here: the gate has no such route (D247). A client builds its endpoint
+  from more than the `url`, so a served interface keeps `url`, `protocolBinding` and `protocolVersion` only (an A2A
+  client joins an interface's `tenant` into the path), the 0.3 members a compatibility parser reads an endpoint from
+  (`url`, `preferredTransport`, `additionalInterfaces` at the top) are left out, and a card with a lone case variant
+  of a member a client reads there (`supportedInterfaces`, an interface's `url`, `protocolBinding`,
+  `protocolVersion` or `tenant`) is not served (D259).
+
+**The node reads the gate's answers before a local client does**, whatever the service's sealing:
+
+- Redirects: the node never relays a `3xx` of the gate's, on any path: the client gets the node's own `502` (an A2A
+  or MCP error body) and no `Location`. The gate has no hiring route that redirects, and a stock client follows a
+  `307` or `308` with its own request body to whatever `Location` names, the gate's origin or a local path the node
+  does not seal (D258).
+- MCP sessions: an answer names the session only on an `initialize` (the node removes `Mcp-Session-Id` from every
+  other answer, since a stock client takes the header of any answer for its session), and a session id is used for
+  the service it was initialized for only: a request on it to another path, or on an unsealed session to a service
+  whose pin says sealed, is `404`, and the client initializes again (D260).
 
 Sealing and unsealing for hired jobs happen in the node, around this forwarding ([`ext-sealed.md`](ext-sealed.md)).
 
-## 10. stdio MCP servers
+## 10. MCP servers on the node: stdio and roots
 
 `--serve mcp:fs=stdio:<command line>` makes the node own the server process; the gate sees a Streamable HTTP
 target like any other.
 
 - The command line is one argument (quote it in the shell); the node splits it with POSIX shell word rules,
   expands a leading `~/` and runs it without a shell, with a scrubbed environment (`PATH`, `HOME`, `LANG` and
-  variables named with `--env`). Its stderr goes to the node's log, capped at 1 MiB a minute. The node never
-  stops reading the child's stdout.
+  variables named with `--env`). An unquoted `|`, `&`, `;`, `<`, `>`, `(`, `)`, `$` or backtick, or a `#` that
+  starts a word, is a usage error, since no shell gives it its meaning; quoted, it passes (D211). Its stderr goes
+  to the node's log, capped at 1 MiB a minute. The node never stops reading the child's stdout.
 - **One child per MCP session** (MCP 2025-11-25 has one `initialize` per process): an `initialize` without a
   session id spawns a child, forwards the message, and returns a node-minted `Mcp-Session-Id`.
 - **Routing.** A response goes to the POST that carried its id. A message carrying the `progressToken` of a
   pending request goes to that request's POST stream. A message carrying
   `_meta["io.modelcontextprotocol/related-task"]` goes to that task's open `tasks/result` POST, if there is one.
-  Everything else, every server-to-client request included (`roots/list`, `sampling/createMessage`,
-  `elicitation/create`), goes to the session's `GET` stream. While no `GET` is open, the bridge queues those
-  messages (at most 256 messages or 1 MiB per session; overflow drops the oldest and logs it) and flushes them in
-  order when one opens. Events carry ids `<child start>-<n>`, and a `GET` with `Last-Event-ID` replays the queue
-  after that id. (A stock server that asks `roots/list` right after `initialized`, before any `GET` exists, is
-  answered as soon as the client opens its stream: `stdio_roots`.)
-- `DELETE` closes the child's stdin and sends `SIGTERM` after 5 s; a child idle for `--session-idle` (default 1
-  h, at least the gate's `session_idle_s`) is stopped the same way and its session answers `404`; a crashed
-  child's session answers `404`. At most 8 children per service (`--max-sessions`); an `initialize` beyond that
-  is `503` with `Kontra-Node: full`.
+  Everything else, every other server-to-client request included (`sampling/createMessage`,
+  `elicitation/create`), goes to the session's `GET` stream; `roots/list` never leaves the node (below). While no
+  `GET` is open, the bridge queues those messages (at most 256 messages or 1 MiB per session; overflow drops the
+  oldest and logs it) and flushes them in order when one opens. Events carry ids `<child start>-<n>`, and a `GET`
+  whose `Last-Event-ID` names an event of the `GET` stream replays the queue after it (a `POST` stream's id
+  replays nothing: the bridge resumes no `POST` stream); a `GET` that opens while another is open takes its
+  place, and the older one ends (D211).
+- The child runs in its own process group. `DELETE` closes the child's stdin, sends the group `SIGTERM` after 5 s
+  and `SIGKILL` 5 s after that, so a launcher such as `npx` leaves no process behind (D184); a child idle for
+  `--session-idle` (default 1 h, at least the gate's `session_idle_s`) is stopped the same way and its session
+  answers `404`; a crashed child's session answers `404`, and its group is stopped the same way. At most 8
+  children per service (`--max-sessions`), counting a stopping child until its group is gone. Every principal of
+  the service, and every durable task's own session, shares these children, so a full bridge makes room (D213): an
+  `initialize` beyond `--max-sessions` waits for a child that is stopping already (the gate closed one of a
+  principal's sessions idle for 2 minutes for that principal's new one, with a `DELETE`, [`relay.md`](relay.md)
+  §11.2, D249), and otherwise stops the longest-idle child, when it has had no exchange (none open, an open `GET` stream
+  counting) for at least 5 minutes, and waits for its group to be gone. With no such child it is `503` with
+  `Kontra-Node: full`.
 - The bridge is an in-process handler on tunnel streams; it listens on no port.
+- **Legacy only in v4.0.** The bridge speaks 2025-11-25 and 2025-06-18. A request without a session id that is not
+  `initialize` (a 2026-07-28 request among them) is answered `400` with the legacy body of
+  [`relay.md`](relay.md) §11.12 rule 3, so a dual-era client falls back to `initialize` (D161).
+
+**Roots stay on the node (D173).** For every MCP server the node hosts, stdio or `mcp:<name>=<url>`, the node is
+the server's only source of roots: a server such as `server-filesystem@1.0.0` replaces the directories it was
+started with by the client's roots, so roots from the remote client, or from the gate, would decide what the
+node's filesystem exposes.
+
+- `--roots <name>=<dir>` names one root of the service `<name>`: an absolute path to a directory that exists when
+  `kontra connect` starts. The flag is repeatable, one directory per flag (`--roots fs=/a --roots fs=/b`),
+  and a service's roots are those of every flag naming it, in order; a name that no `--serve mcp:` serves is a
+  usage error. None by default.
+- In the `initialize` it forwards, the node replaces the client's `capabilities.roots` with its own: `{}` (no
+  `listChanged`) when roots are configured, absent otherwise.
+- It answers the server's `roots/list` itself, with the configured directories as `file://` URIs (an empty list
+  when there are none), and never relays it to the remote client. It drops the client's
+  `notifications/roots/list_changed`, and every client response that does not answer a server-to-client
+  request it relayed on that session and has not seen answered, a result carrying `roots` whatever its id, and
+  every response on a 2026-07-28 exchange, with `202` (D212).
+- On a 2026-07-28 exchange (a URL service only: the bridge is legacy only) it removes `roots` from the forwarded
+  `_meta["io.modelcontextprotocol/clientCapabilities"]`, every `params.inputResponses` entry that carries `roots`,
+  and every `roots/list` entry of an upstream `inputRequests`. Configured roots are offered to 2025-11-25 and
+  2025-06-18 sessions only: a stateless modern exchange gives the node no point at which to answer.
+- It reads these messages with exact keys, as [`relay.md`](relay.md) §11.1 does, and answers one with a repeated
+  or case-variant key `400` with `-32600`.
 
 ## 11. Liveness and the registry
 
@@ -436,11 +540,17 @@ target like any other.
   that finds a newer session of its key on a replica that is not draining inserts nothing and closes (D139). The
   replica that supersedes a session another replica holds tells it with `NOTIFY kontra_tunnel, 'session:<id>'` in
   the same transaction; an admission's transaction sends `'enrolled:<key_id>/<tenant_id>/<service>'` on the same
-  channel, for §5's `{"t": "enrolled"}` (D138). Only during make-before-break (a drain, §13, or a rotation, §12)
-  are two kept. Several nodes may serve one service, each with its own key.
+  channel, for §5's `{"t": "enrolled"}` (D138). On the same channel a replica sends
+  `'mcp:<tenant_id>/<service>/<replica_id>'` when a node of an MCP service connects to it or leaves it, and
+  `'tools:<tenant_id>/<service>'` after an upstream's `notifications/tools/list_changed`, so that every replica
+  drops the service's era and tools list ([`relay.md`](relay.md) §11.3, §11.12; D199). Only during
+  make-before-break (a drain, §13, or a rotation, §12) are two kept. Several nodes may serve one service, each
+  with its own key.
 - Each replica upserts `gate_replicas.last_seen_at` every 10 s, and every 10 s deletes the rows of replicas silent
-  for more than 30 s (cascading to their `tunnels` rows) and closes the `mcp_sessions` pinned to them
-  (`tunnel_lost`). The relay never selects a session on a replica silent for 30 s ([`relay.md`](relay.md) §6.1).
+  for more than 30 s (cascading to their `tunnels` rows) and closes the `mcp_sessions` whose tunnel sessions they
+  held (`mcp_sessions.replica_id`, `tunnel_lost`). A session whose client reached a dead replica while a live
+  one holds its tunnel stays open ([`relay.md`](relay.md) §11.2, D179). The relay never selects a session on a
+  replica silent for 30 s ([`relay.md`](relay.md) §6.1).
 
 ## 12. Revocation and rotation
 
@@ -515,7 +625,7 @@ an hour (D36).
 | Handshake message | 16 KiB; handshake 10 s |
 | Preamble | 4096 bytes |
 | Inbound streams in flight per session (node) | 64 (`--max-inflight`); over it the node answers `503` with `Kontra-Node: full` |
-| Node-opened streams in flight per session (gate) | 32, 8 for anonymous sessions; over it `429`. M2, which serves no hiring, closes the session instead (D137) |
+| Node-opened streams in flight per session (gate) | 32, 8 for anonymous sessions, a stream counting from its accept until both halves end; over it `429`, and a node that keeps more than that many refused streams open loses its session (D137, D182) |
 | Gate-opened streams the gate has closed and the node has not (gate) | 256; over it the gate closes the session (D157) |
 | Ping SYNs from a node (gate) | 16 at once, then one every 500 ms; over it the gate closes the session (D155) |
 | Blob size per fetch | 64 MiB |
@@ -533,6 +643,7 @@ A stream is in flight until both its halves have ended, on either side (D137, D1
 | The node is not a proxy | §8.2: fixed target, path confined to it, no CONNECT or Upgrade; §8.3: never dials a URL from a part (`sidecar_not_a_proxy`) |
 | A key cannot be impersonated at another gate by a gate it dialed | §4.1 origin binding (and channel binding); §2.4 credentials go only to their own origin |
 | The node's local endpoint cannot be driven by a web page | §9 Host and Origin checks (`local_rebinding`) |
+| A remote client or the gate cannot widen what a hosted MCP server exposes | §10: the node answers `roots/list` from its own `--roots`; a client's roots never reach the server (`stdio_roots`) |
 | The gate holds no private key and learns nothing that opens a part | §2, §4.1 |
 | A stolen identity key | Revoke (§12) ends the session and every future handshake of that key, not of a key it was rotated to, which is revoked in turn (D128). It does **not** protect parts already sealed to it: age has no forward secrecy, so whoever holds the key and the ciphertext (a database or bucket breach) reads them. Retention ([`relay.md`](relay.md) §5.4) bounds that. |
 
@@ -548,5 +659,5 @@ M2 runs `tunnel_kill`, `sidecar_not_a_proxy` and `key_scope`, with [`relay.md`](
 | `key_scope` | §5, §8.1; [`relay.md`](relay.md) §6.1 |
 | `replica_kill` | §11; [`relay.md`](relay.md) §14.2 |
 | `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`; a 5th declared service is `service_denied`; a 5th concurrent task is `429`; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |
-| `local_rebinding` | §9: `Host: evil.example:7777` or `Origin: http://evil.example:7777` on `/mcp/…`, `/agents/…` and the console gets `403` and opens no stream |
-| `stdio_roots` | §10: a client that declares roots gets its first `tools/call` to `server-filesystem@1.0.0` answered in under 2 s, using the client's roots |
+| `local_rebinding` | §9: `Host: evil.example:7777` or `Origin: http://evil.example:7777` on `/mcp/…`, `/agents/…` and `/.well-known/…` gets `403` and opens no stream |
+| `stdio_roots` | §10: `server-filesystem@1.0.0` over stdio, started with one directory and served with `--roots` naming another; a client that declares roots of `file:///` gets its first `tools/call` answered in under 2 s and never receives `roots/list`; the server's `list_allowed_directories` names only the node's configured root, and a read of `~/.kontra/identity.key` is refused (D173) |

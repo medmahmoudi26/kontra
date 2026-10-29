@@ -1,21 +1,41 @@
 // Package node is `kontra connect` (spec/tunnel.md; note 2 §1–§2): one outbound WebSocket to a gate the
-// node chose, over which the gate sends HTTP requests to services on the node's localhost (hosting).
+// node chose, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the
+// node sends local clients' requests to the gate (hiring).
 //
-// M2 builds hosting A2A services only:
+//	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
+//	               [--roots <name>=<dir> …] [--env NAME …] [--session-idle 1h] [--max-sessions 8]
+//	               [--key PATH] [--enroll TOKEN|@file|-]… [--api-key KEY|@file|-] [--name NAME] [--rotate]
+//	               [--require-channel-binding] [--max-inflight 64] [--listen 127.0.0.1:7777 | off]
+//	               [--local-token FILE] [--allow-origin ORIGIN]… [--log json]
 //
-//	kontra connect [--gate URL] --serve a2a:<name>=<url> [--serve …] [--key PATH] [--enroll TOKEN|@file|-]…
-//	               [--api-key KEY|@file|-] [--name NAME] [--rotate] [--require-channel-binding]
-//	               [--max-inflight 64] [--log json]
+// Hosting (§8): the node is a fixed-target reverse proxy, not a SOCKS proxy (§8.2, sidecar_not_a_proxy): a
+// stream's preamble names a hosted service, and its one request goes to that service's --serve target and
+// nowhere else. The kontra-blob: parts of an A2A request are fetched on blob streams inside the node's own
+// tunnel and inlined (§8.3); a URL taken from a part is never dialed (D56).
 //
-// The hiring side (127.0.0.1:7777, --listen, --local-token, --allow-origin, §9), blob streams (§8.3),
-// sealing and per-job keys (§2.3) are M3, with `kontra proxy`'s deliverables (PRD §14 M3 row); MCP hosting,
-// `mcp:<name>=<url>` and `mcp:<name>=stdio:<cmd>` (§10), is M3; anonymous sessions and `--public` (§6),
-// and the console on :7778, are M4.
+// Hiring (§9, internal/hiring): the node serves --listen (default 127.0.0.1:7777) to local clients and forwards
+// each request on a stream it opens on its current session, never on a draining one (§13), keeping at most the
+// gate's cap of node-opened streams in flight per session (§14); --listen off turns hiring off, for a node that only
+// hosts (D208). A node with no --serve only hires; its key is
+// admitted on its --api-key (hire scope) alone, on every hello, and the gate refuses it once that key is revoked.
 //
-// The node is a fixed-target reverse proxy, not a SOCKS proxy (§8.2, sidecar_not_a_proxy): a stream's
-// preamble names a hosted service, and its one request goes to that service's --serve target and nowhere
-// else. It holds no task state: after any close but `revoked` it redials with the same key, backing off
-// from 1 s to 60 s with full jitter, reset after a session that lived 60 s (§13).
+// MCP hosting (§10, M3 WP-05): `mcp:<name>=<url>` goes through the same fixed-target proxy, which forwards MCP
+// exchanges unchanged except for roots (mcp.go; a URL target may name the server's endpoint path, which the gate's
+// "/" goes to); `mcp:<name>=stdio:<cmd>` is bridged in-process (internal/stdiobridge): one child per MCP session,
+// at most --max-sessions per service (a durable task holds one too, D22), stopped after --session-idle, in a
+// scrubbed environment (PATH, HOME, LANG and the --env names). For every MCP service the node answers the server's
+// roots/list itself from --roots and never relays the client's roots (D173, internal/mcproots). Anonymous sessions
+// and `--public` (§6) are M4. There is no local console (D164).
+//
+// Sealing (spec/ext-sealed.md, M3 WP-08; internal/sealing): as a hosting node it opens the sealed parts the gate
+// forwards to a hosted service and seals what the service answers, keeping its durable job state under
+// ~/.kontra/hosted/<gate host>/ (--sealed-max-age, --sealed-required); as a hiring node it seals what local clients
+// send to a sealed service and opens what comes back, with a per-job key under ~/.kontra/jobs/<gate host>/ (§2.3),
+// after checking the service's pin in ~/.kontra/pins (--pin-recipients, --accept-change), whose recipient key ids
+// and seller key thumbprints it prints on stderr and in its log on a first sight and on every change (D187).
+//
+// The node holds no task state: after any close but `revoked` it redials with the same key, backing off from 1 s
+// to 60 s with full jitter, reset after a session that lived 60 s (§13).
 //
 // Environment. KONTRA_KEY (the key file, as --key, §2.1) is the only variable kontra connect reads, with
 // HOME for ~/.kontra. The PRD's KONTRA_GATE, KONTRA_AGENT, KONTRA_TO and KONTRA_ENROLL (PRD §6) mirrored
@@ -23,7 +43,8 @@
 // none of them, so they are not honoured (M2 plan audit, the PRD's environment mirrors): a container passes
 // flags, as note 2's compose sidecar does, and a secret as --enroll @/run/secrets/<file>.
 //
-// Work packages: WP-03 (dial.go: the dial and the node's half of the handshake), WP-06 (the rest).
+// Work packages: M2 WP-03 (dial.go: the dial and the node's half of the handshake), M2 WP-06 (the rest), M3
+// WP-03 (hiring, blob streams), M3 WP-05 (MCP hosting).
 package node
 
 import (
@@ -32,6 +53,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -44,7 +66,11 @@ import (
 
 	"github.com/hashicorp/yamux"
 
+	"kontra.sh/kontra/internal/hiring"
+	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/nodekey"
+	"kontra.sh/kontra/internal/sealing"
+	"kontra.sh/kontra/internal/stdiobridge"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -59,11 +85,31 @@ type Config struct {
 	Rotate                bool     // --rotate (§12)
 	RequireChannelBinding bool     // --require-channel-binding: refuse cb none (§4.1)
 	MaxInflight           int      // --max-inflight, default tunnel.NodeMaxInflight
+	Listen                string   // --listen, default hiring.DefaultListen (§9); hiring.ListenOff binds nothing (D208)
+	LocalToken            string   // --local-token <file>, read: required when Listen is not loopback
+	AllowOrigins          []string // --allow-origin, repeatable
 	LogJSON               bool     // --log json; human-readable on stderr otherwise
-	CredentialsPath       string   // ~/.kontra/credentials (§2.4)
-	Version               string   // for hello.agent and the User-Agent
+	// MCP hosting (§10): --roots per service, and for stdio services --env, --session-idle and --max-sessions.
+	Roots           map[string]*mcproots.Roots // --roots <name>=<dir>, repeatable; only names --serve mcp: serves
+	Env             []string                   // --env NAME, repeatable
+	SessionIdle     time.Duration              // --session-idle, default stdiobridge.DefaultSessionIdle
+	MaxSessions     int                        // --max-sessions, default stdiobridge.DefaultMaxSessions
+	CredentialsPath string                     // ~/.kontra/credentials (§2.4)
+	Version         string                     // for hello.agent and the User-Agent
+	// Sealing (spec/ext-sealed.md §5, §7): --sealed-max-age (hosting rule 1's max_age, default 25 h),
+	// --sealed-required <service> (the hosting node refuses an unsealed request to it), --pin-recipients and
+	// --accept-change <service> (the hiring node's pins).
+	SealedMaxAge   time.Duration
+	SealedRequired []string
+	PinRecipients  bool
+	AcceptChange   []string
+	// Home is the directory ~/.kontra is under (the job state, the per-job keys, the pins).
+	Home string
 	// Out receives the welcome's service URLs (the CLI's stdout); nil discards them.
 	Out io.Writer
+	// Err receives the pins' lines (D187: recipient key ids and seller key thumbprints on a first sight and on every
+	// change; the CLI's stderr); nil writes them to the log only.
+	Err io.Writer
 }
 
 // UsageError is a command line ParseArgs refused; it wraps flag.ErrHelp for -h.
@@ -93,8 +139,9 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	fs := flag.NewFlagSet("kontra connect", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
-		serves, enrolls []string
-		apiKey          *string
+		serves, enrolls, origins, roots, envs []string
+		sealedRequired, acceptChange          []string
+		apiKey                                *string
 	)
 	gate := fs.String("gate", tunnel.DefaultGate, "")
 	key := fs.String("key", "", "")
@@ -103,7 +150,18 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	requireCB := fs.Bool("require-channel-binding", false, "")
 	maxInflight := fs.Int("max-inflight", tunnel.NodeMaxInflight, "")
 	logFormat := fs.String("log", "text", "")
+	listen := fs.String("listen", hiring.DefaultListen, "")
+	localToken := fs.String("local-token", "", "")
 	fs.Func("serve", "", func(v string) error { serves = append(serves, v); return nil })
+	fs.Func("roots", "", func(v string) error { roots = append(roots, v); return nil })
+	fs.Func("env", "", func(v string) error { envs = append(envs, v); return nil })
+	sessionIdle := fs.Duration("session-idle", stdiobridge.DefaultSessionIdle, "")
+	maxSessions := fs.Int("max-sessions", stdiobridge.DefaultMaxSessions, "")
+	fs.Func("allow-origin", "", func(v string) error { origins = append(origins, v); return nil })
+	sealedMaxAge := fs.Duration("sealed-max-age", sealing.DefaultMaxAge, "")
+	fs.Func("sealed-required", "", func(v string) error { sealedRequired = append(sealedRequired, v); return nil })
+	pinRecipients := fs.Bool("pin-recipients", false, "")
+	fs.Func("accept-change", "", func(v string) error { acceptChange = append(acceptChange, v); return nil })
 	fs.Func("enroll", "", func(v string) error { enrolls = append(enrolls, v); return nil })
 	fs.Func("api-key", "", func(v string) error {
 		if apiKey != nil {
@@ -129,12 +187,19 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	}
 	cfg.Gate = u
 
-	if len(serves) == 0 {
-		return Config{}, usage("--serve a2a:<name>=<url> is required: an M2 node hosts services (hiring through 127.0.0.1:7777 is M3)")
+	home := getenv("HOME")
+	if home == "" {
+		if home, err = os.UserHomeDir(); err != nil || home == "" {
+			return Config{}, usage("no home directory for ~/%s/%s: set HOME", nodekey.DirName, CredentialsFile)
+		}
 	}
+
+	// No --serve: the node only hires (§4: a hello may declare no services; its key is admitted on its
+	// --api-key alone).
 	seen := map[string]bool{}
+	mcp := map[string]bool{}
 	for _, v := range serves {
-		s, err := ParseServe(v)
+		s, err := parseServe(v, home)
 		if err != nil {
 			return Config{}, &UsageError{Err: err}
 		}
@@ -142,8 +207,55 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 			return Config{}, usage("--serve: the service %q is named twice", s.Name)
 		}
 		seen[s.Name] = true
+		mcp[s.Name] = s.Kind == tunnel.KindMCP
 		cfg.Serves = append(cfg.Serves, s)
 	}
+	// MCP hosting (§10).
+	if cfg.Roots, err = mcproots.Parse(roots); err != nil {
+		return Config{}, &UsageError{Err: err}
+	}
+	for _, name := range slices.Sorted(maps.Keys(cfg.Roots)) {
+		if !mcp[name] {
+			return Config{}, usage("--roots %s=…: no --serve mcp:%s=… serves %q", clipValue(name), clipValue(name), clipValue(name))
+		}
+	}
+	for _, e := range envs {
+		if err := stdiobridge.CheckEnvName(e); err != nil {
+			return Config{}, &UsageError{Err: err}
+		}
+		if !slices.Contains(cfg.Env, e) {
+			cfg.Env = append(cfg.Env, e)
+		}
+	}
+	// Sealing (ext-sealed.md §5, §7).
+	if *sealedMaxAge <= 0 {
+		return Config{}, usage("--sealed-max-age %v: want a positive duration (default 25h)", *sealedMaxAge)
+	}
+	cfg.SealedMaxAge, cfg.PinRecipients = *sealedMaxAge, *pinRecipients
+	for _, name := range sealedRequired {
+		if !seen[name] {
+			return Config{}, usage("--sealed-required %s: no --serve serves %q", clipValue(name), clipValue(name))
+		}
+		if !slices.Contains(cfg.SealedRequired, name) {
+			cfg.SealedRequired = append(cfg.SealedRequired, name)
+		}
+	}
+	for _, name := range acceptChange {
+		if name == "" || strings.ContainsAny(name, " \t\n") {
+			return Config{}, usage("--accept-change %q: want a service name", clipValue(name))
+		}
+		if !slices.Contains(cfg.AcceptChange, name) {
+			cfg.AcceptChange = append(cfg.AcceptChange, name)
+		}
+	}
+	cfg.Home = home
+	if *sessionIdle <= 0 {
+		return Config{}, usage("--session-idle %v: want a positive duration, such as 1h (at least the gate's session_idle_s)", *sessionIdle)
+	}
+	if *maxSessions < 1 {
+		return Config{}, usage("--max-sessions %d: want 1 or more", *maxSessions)
+	}
+	cfg.SessionIdle, cfg.MaxSessions = *sessionIdle, *maxSessions
 
 	stdinUsed := false
 	secret := func(flagName, v string) (string, error) {
@@ -182,12 +294,6 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	if cfg.KeyPath, err = nodekey.Resolve(*key, getenv); err != nil {
 		return Config{}, &UsageError{Err: err}
 	}
-	home := getenv("HOME")
-	if home == "" {
-		if home, err = os.UserHomeDir(); err != nil || home == "" {
-			return Config{}, usage("no home directory for ~/%s/%s: set HOME", nodekey.DirName, CredentialsFile)
-		}
-	}
 	cfg.CredentialsPath = filepath.Join(home, nodekey.DirName, CredentialsFile)
 
 	if *name == "" {
@@ -206,6 +312,23 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 		return Config{}, usage("--max-inflight %d: want 1 or more", *maxInflight)
 	}
 	cfg.MaxInflight = *maxInflight
+	if *localToken != "" {
+		if cfg.LocalToken, err = hiring.ReadLocalToken(*localToken); err != nil {
+			return Config{}, &UsageError{Err: err}
+		}
+	}
+	if err := hiring.CheckListen(*listen, cfg.LocalToken); err != nil {
+		return Config{}, &UsageError{Err: err}
+	}
+	cfg.Listen = *listen
+	if cfg.Listen == hiring.ListenOff && len(cfg.Serves) == 0 {
+		return Config{}, usage("--listen off with no --serve: the node would neither host nor hire (D208)")
+	}
+	if _, err := hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: origins, Gate: cfg.Gate},
+		noOpener{}, nil); err != nil {
+		return Config{}, &UsageError{Err: err}
+	}
+	cfg.AllowOrigins = origins
 	switch *logFormat {
 	case "json":
 		cfg.LogJSON = true
@@ -262,6 +385,9 @@ type Node struct {
 	muxConfig     *yamux.Config
 	maintainEvery time.Duration
 	backoff       Backoff
+	// slotWait is how long a node-opened stream waits for one of its session's slots (§14) before the open
+	// gives up (hiring: 429; a hosted exchange's blob fetch: 503 full); tests shorten it.
+	slotWait time.Duration
 
 	creds  *Credentials
 	credMu sync.Mutex // serializes updateCredential
@@ -276,9 +402,17 @@ type Node struct {
 	// stamp could not be written (connect's SPEC-CONFLICT on §12).
 	skipRotation string
 	sessions     map[*session]struct{}
-	lastPrune    time.Time
-	revoked      chan struct{} // closed when the gate revoked the active key
-	revokeOnce   sync.Once
+	// current is the session hiring streams go on (setCurrent); currentCh is closed whenever it changes.
+	current    *session
+	currentCh  chan struct{}
+	hire       *hiring.Server
+	hosting    *sealing.Hosting // the hosting node's sealing (job state under ~/.kontra/hosted/<gate host>)
+	hiringSeal *sealing.Hiring  // the hiring node's sealing (per-job keys under ~/.kontra/jobs/<gate host>, pins)
+	lastPrune  time.Time
+	// lastSealSweep is when sealing's state was last swept (sweepSealing).
+	lastSealSweep time.Time
+	revoked       chan struct{} // closed when the gate revoked the active key
+	revokeOnce    sync.Once
 }
 
 // New loads (or creates) the identity key, refuses a group- or other-readable key file, resolves the
@@ -308,9 +442,6 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("--gate: %w", err)
 	}
-	if len(cfg.Serves) == 0 {
-		return nil, errors.New("node: no --serve")
-	}
 	seen := map[string]bool{}
 	for _, s := range cfg.Serves {
 		if err := checkServe(s); err != nil {
@@ -320,6 +451,11 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 			return nil, fmt.Errorf("--serve: the service %q is named twice", s.Name)
 		}
 		seen[s.Name] = true
+	}
+	for name := range cfg.Roots {
+		if !slices.ContainsFunc(cfg.Serves, func(s Serve) bool { return s.Name == name && s.Kind == tunnel.KindMCP }) {
+			return nil, fmt.Errorf("--roots %s=…: no --serve mcp:%s=… serves it", clipValue(name), clipValue(name))
+		}
 	}
 	if err := checkName(cfg.Name); err != nil {
 		return nil, err
@@ -340,18 +476,36 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		out = io.Discard
 	}
 	log := logger.With("component", "node", "gate", origin)
+	proxy, err := NewMCPProxy(cfg.Serves, cfg.MaxInflight, MCPOptions{Env: cfg.Env, SessionIdle: cfg.SessionIdle,
+		MaxSessions: cfg.MaxSessions, Roots: cfg.Roots}, log)
+	if err != nil {
+		return nil, err
+	}
 	n := &Node{
 		cfg:           cfg,
 		logger:        log,
 		out:           out,
 		origin:        origin,
 		dialer:        Dialer{UserAgent: UserAgent(cfg.Version)},
-		proxy:         NewProxy(cfg.Serves, cfg.MaxInflight, log),
+		proxy:         proxy,
 		now:           time.Now,
 		maintainEvery: maintainEvery,
+		slotWait:      defaultSlotWait,
 		declared:      slices.Clone(cfg.Serves),
 		sessions:      map[*session]struct{}{},
+		currentCh:     make(chan struct{}),
 		revoked:       make(chan struct{}),
+	}
+	if cfg.Listen == "" {
+		cfg.Listen = hiring.DefaultListen
+		n.cfg.Listen = cfg.Listen
+	}
+	if n.hire, err = hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: cfg.AllowOrigins, Gate: gate},
+		n, log); err != nil {
+		return nil, err
+	}
+	if err := n.setupSealing(gate, origin, log); err != nil {
+		return nil, err
 	}
 	now := n.now()
 

@@ -13,7 +13,12 @@
 # $TMPDIR/kontra-e2e-<session> (test/e2e TempRoot): after the run this script looks for all four, and for
 # any process still running a binary built there (a kontra connect or a gate, whatever its environment),
 # removes what it finds (a test binary that died, a go test -timeout panic or a crash, cannot clean up), and
-# fails the run if there was anything. Extra arguments go to `go test` (e.g. -run TestRelayResume -v).
+# fails the run if there was anything. M3 (D184, D185): the stock MCP servers the harness starts (npm, under
+# $TMPDIR/kontra-e2e-<session>) and the nodes' stdio children carry the run's marker variables too (a node passes them
+# with --env), as does the harness's own `npm ci`, and every process in the process group of a leftover is one as
+# well (a stdio child runs in a group of its own, which its own children share), as is any process whose command
+# line names the run's directory or whose working directory is under it (an npm install the harness started there).
+# Extra arguments go to `go test` (e.g. -run TestRelayResume -v).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 GO="${GO:-go}"
@@ -37,24 +42,49 @@ what() {
   case "$cmd" in
     *kontra-gate\ serve*) echo "a gate replica" ;;
     *kontra\ connect*) echo "a node (kontra connect)" ;;
+    *server-everything*|*server-filesystem*|*node_modules*|*npm*) echo "a stock MCP server (npm) or a node's stdio child" ;;
+    *stdioserver*) echo "a node's stdio child" ;;
     *helloworld*|*__main__.py*|*uv\ run*) echo "the helloworld seller" ;;
     *temporal*) echo "the Temporal server" ;;
     *) echo "a process" ;;
   esac
 }
+# pgid of a process, "" when it is gone.
+pgid() { awk '{ sub(/^.*\) /, ""); print $3 }' "/proc/$1/stat" 2>/dev/null || true; }
+self_pgid="$(pgid $$)"
+declare -A found=() groups=()
 for environ in /proc/[0-9]*/environ; do
   pid="${environ#/proc/}"
   pid="${pid%/environ}"
   [[ "$pid" == "$$" ]] && continue
   env="$({ tr '\0' '\n' <"$environ"; } 2>/dev/null || true)" # a process may end while the loop runs
   exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
+  cmd="$({ tr '\0' ' ' <"/proc/$pid/cmdline"; } 2>/dev/null || true)"
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
   if { grep -q '^KONTRA_E2E_RUN=' <<<"$env" && grep -qx "KONTRA_E2E_SESSION=$KONTRA_E2E_SESSION" <<<"$env"; } ||
-    [[ "$exe" == "$dir/"* ]]; then
-    cmd="$({ tr '\0' ' ' <"/proc/$pid/cmdline"; } 2>/dev/null | cut -c1-160)"
-    echo "test-e2e: $(what "$cmd") outlived the run (pid $pid): $cmd" >&2
-    kill -9 "$pid" 2>/dev/null || true
-    leaked=1
+    [[ "$exe" == "$dir/"* ]] || [[ "$cmd" == *"$dir/"* ]] || [[ "$cwd" == "$dir" || "$cwd" == "$dir/"* ]]; then
+    found[$pid]=1
+    g="$(pgid "$pid")"
+    # A leftover that leads its own group (every process the harness starts, and every stdio child, D184) names
+    # that group; this script's group never counts.
+    [[ -n "$g" && "$g" == "$pid" && "$g" != "$self_pgid" ]] && groups[$g]=1
   fi
+done
+if [[ ${#groups[@]} -gt 0 ]]; then
+  for stat in /proc/[0-9]*/stat; do
+    pid="${stat#/proc/}"
+    pid="${pid%/stat}"
+    [[ "$pid" == "$$" || -n "${found[$pid]:-}" ]] && continue
+    g="$(pgid "$pid")"
+    [[ -n "$g" && -n "${groups[$g]:-}" ]] && found[$pid]=1
+  done
+fi
+for pid in "${!found[@]}"; do
+  cmd="$({ tr '\0' ' ' <"/proc/$pid/cmdline"; } 2>/dev/null | cut -c1-160)"
+  [[ -z "$cmd" ]] && continue # it ended meanwhile
+  echo "test-e2e: $(what "$cmd") outlived the run (pid $pid): $cmd" >&2
+  kill -9 "$pid" 2>/dev/null || true
+  leaked=1
 done
 if command -v docker >/dev/null 2>&1; then
   while read -r name; do

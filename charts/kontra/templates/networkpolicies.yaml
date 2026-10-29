@@ -29,6 +29,15 @@ spec:
       ports:
         - {protocol: TCP, port: {{ $.Values.gate.metricsPort }}}
     {{- end }}
+    {{- if .Values.gate.peer.enabled }}
+    # The peer hop (spec/relay.md §11.2, D183): the release's gate pods only.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- $gate | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.gate.peer.port }}}
+    {{- end }}
   egress:
     {{- with $np.dns }}
     - to:
@@ -67,6 +76,15 @@ spec:
         {{- toYaml $np.gate.temporalTo | nindent 8 }}
       ports:
         - {protocol: TCP, port: {{ $np.gate.temporalPort }}}
+    {{- end }}
+    {{- if .Values.gate.peer.enabled }}
+    # The peer hop to the release's other gate pods.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- $gate | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.gate.peer.port }}}
     {{- end }}
     {{- with $np.gate.sellers }}
     {{- toYaml . | nindent 4 }}

@@ -757,6 +757,12 @@ func TestTargetPath(t *testing.T) {
 		{"/base", "/../base", "/base", true},
 		{"/base", "/../basement", "", false},
 		{"/base", "/a/../../b", "", false},
+		// §8.2 as D123 amended it: a path already under the base is forwarded as it is.
+		{"/base", "/base/rpc", "/base/rpc", true},
+		{"/base", "/base", "/base", true},
+		{"/base", "/base/", "/base/", true},
+		{"/base", "/base/../x", "/base/x", true},
+		{"/base", "/basement", "/base/basement", true},
 	} {
 		got, ok := targetPath(x.base, x.path)
 		if got != x.want || ok != x.ok {

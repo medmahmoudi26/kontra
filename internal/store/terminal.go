@@ -162,22 +162,11 @@ func (l *Log) WriteTerminal(ctx context.Context, w TerminalWrite) (int64, error)
 		if row.State.Terminal() {
 			return terminalSeq(ctx, l.db, w.TaskID)
 		}
-		ev, err := w.event(row.Snapshot)
+		wr, err := l.terminalWrite(ctx, l.db, row, w)
 		if err != nil {
 			return 0, err
 		}
-		next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
-		if err != nil {
-			return 0, fmt.Errorf("store: terminal write to task %s: %w", w.TaskID, err)
-		}
-		payload, err := json.Marshal(a2a.StreamResponse{Event: ev})
-		if err != nil {
-			return 0, err
-		}
-		a, err := l.Append(ctx, nil, Write{
-			TaskID: w.TaskID, PrevVersion: row.Version, Kind: KindStatus, State: w.State,
-			StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
-		})
+		a, err := l.Append(ctx, nil, wr)
 		if err == nil {
 			return a.Seq, nil
 		}
@@ -187,6 +176,30 @@ func (l *Log) WriteTerminal(ctx context.Context, w TerminalWrite) (int64, error)
 		last = err
 	}
 	return 0, last
+}
+
+// terminalWrite is the terminal event w describes for row, in the row's protocol: an A2A status event, or an MCP
+// task's status row with its calls row (spec §11.8 cases 2 and 3, mcpTerminal).
+func (l *Log) terminalWrite(ctx context.Context, q querier, row *TaskRow, w TerminalWrite) (Write, error) {
+	if row.Protocol == ProtocolMCP {
+		return l.mcpTerminal(ctx, q, row, w)
+	}
+	ev, err := w.event(row.Snapshot)
+	if err != nil {
+		return Write{}, err
+	}
+	next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
+	if err != nil {
+		return Write{}, fmt.Errorf("store: terminal write to task %s: %w", w.TaskID, err)
+	}
+	payload, err := json.Marshal(a2a.StreamResponse{Event: ev})
+	if err != nil {
+		return Write{}, err
+	}
+	return Write{
+		TaskID: w.TaskID, PrevVersion: row.Version, Kind: KindStatus, State: w.State,
+		StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
+	}, nil
 }
 
 // ApplyMetadata logs one metadata event merging patch into the task's metadata at the top level (an
@@ -199,7 +212,17 @@ func (l *Log) WriteTerminal(ctx context.Context, w TerminalWrite) (int64, error)
 // Spec §13.3 "Ordering" already rules it out: patches and annotations that arrive while a dispatch, abort
 // or forward_cancel is in flight are held in workflow state and applied when it returns.
 func (l *Log) ApplyMetadata(ctx context.Context, taskID uuid.UUID, patch map[string]any) (int64, error) {
-	payload, err := json.Marshal(metadataRow{Metadata: patch})
+	return l.ApplyPatch(ctx, taskID, patch, nil)
+}
+
+// ApplyPatch is ApplyMetadata with the patch's mcpMeta too (spec §13.3): an MCP task keeps it in its projection
+// (MetaMCPMeta), merged key by key, and renders it into the _meta of tasks/get and tasks/result; an A2A task keeps
+// none, and a patch of mcpMeta alone writes nothing to it. Both maps together are at most MaxPatchBytes.
+func (l *Log) ApplyPatch(ctx context.Context, taskID uuid.UUID, patch, mcpMeta map[string]any) (int64, error) {
+	if patch == nil {
+		patch = map[string]any{}
+	}
+	payload, err := json.Marshal(metadataRow{Metadata: patch, MCPMeta: mcpMeta})
 	if err != nil {
 		return 0, fmt.Errorf("store: encode metadata patch: %w", err)
 	}
@@ -214,12 +237,22 @@ func (l *Log) ApplyMetadata(ctx context.Context, taskID uuid.UUID, patch map[str
 		if err != nil {
 			return 0, err
 		}
-		if len(patch) == 0 {
+		mm := mcpMeta
+		if row.Protocol != ProtocolMCP {
+			mm = nil
+		}
+		if len(patch) == 0 && len(mm) == 0 {
 			return row.Version, nil
+		}
+		p := payload
+		if len(mm) == 0 && len(mcpMeta) > 0 {
+			if p, err = json.Marshal(metadataRow{Metadata: patch}); err != nil {
+				return 0, err
+			}
 		}
 		a, err := l.Append(ctx, nil, Write{
 			TaskID: taskID, PrevVersion: row.Version, Kind: KindMetadata,
-			Snapshot: mergeMetadata(row.Snapshot, patch), Payload: payload, AfterTerminalOK: true,
+			Snapshot: mergeMCPMeta(mergeMetadata(row.Snapshot, patch), mm), Payload: p, AfterTerminalOK: true,
 		})
 		if err == nil {
 			return a.Seq, nil

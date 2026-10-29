@@ -160,6 +160,18 @@ type ServiceRef struct {
 	Timeout   time.Duration
 	Retries   int
 	Retention time.Duration
+	// Sealed is services.sealed when the service is sealed: "optional" or "required"; "" when it is off
+	// (ext-sealed.md §1, §5). The gate's interceptors refuse an unsealed part to a required service and mark one to an
+	// optional service. Off is written "" everywhere, so that a ServiceRef built without it equals one read back.
+	Sealed string
+}
+
+// SealedRef is services.sealed as ServiceRef.Sealed holds it: "" for off.
+func SealedRef(sealed string) string {
+	if sealed == "off" {
+		return ""
+	}
+	return sealed
 }
 
 // Owner is the authenticated caller a scoped read or write acts for (spec §2.3).

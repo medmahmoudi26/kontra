@@ -1,0 +1,7 @@
+# Temporal's dynamic configuration for the compose team gate (compose.yaml, D43): temporalio/server does not start
+# without one. The two settings spec/relay.md §14.2 asks of the gate's server, so that an activity's cancellation
+# reaches a dispatch worker without waiting for its next heartbeat (D44).
+frontend.WorkerCommandsEnabled:
+  - value: true
+system.enableCancelActivityWorkerCommand:
+  - value: true

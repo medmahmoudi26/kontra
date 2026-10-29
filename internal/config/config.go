@@ -35,8 +35,8 @@ import (
 type Config struct {
 	Listen    string `yaml:"listen"`     // public listener, default ":8080"
 	PublicURL string `yaml:"public_url"` // the URL callers use; the served card carries it (spec §3)
-	// SigningKey is the card-signing key (file:… or a KMS reference). Unused in M1: cards are rewritten
-	// but not signed until M3 (PRD §14).
+	// SigningKey is the card-signing key: file:<path> of a PEM file of ECDSA P-256 private keys, the first signs
+	// and every key is in the JWKS (spec §3, D166). Required off loopback when A2A services are configured.
 	SigningKey string   `yaml:"signing_key"`
 	TLS        TLS      `yaml:"tls"`
 	Edge       Edge     `yaml:"edge"`
@@ -52,6 +52,7 @@ type Config struct {
 	OperatorMetadataPrefixes []string `yaml:"operator_metadata_prefixes"` // §13.2
 	Push                     Push     `yaml:"push"`
 	MCP                      MCP      `yaml:"mcp"`
+	Peer                     *Peer    `yaml:"peer"` // spec §11.2, D163; M3 WP-04
 	Hooks                    Hooks    `yaml:"hooks"`
 	DrainTimeout             Duration `yaml:"drain_timeout"` // §14.3 and D76, default 10m
 	Tunnel                   Tunnel   `yaml:"tunnel"`        // spec/tunnel.md; M2
@@ -186,6 +187,15 @@ type MCP struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
+// Peer is the replica-to-replica hop for MCP requests whose tunnel session another replica holds (spec
+// §11.2, D163). Absent, only this replica's tunnel sessions serve MCP requests, which is all one replica needs.
+// M3 WP-04 validates and serves it.
+type Peer struct {
+	Listen    string `yaml:"listen"`     // host:port or :port; never the public listener
+	Advertise string `yaml:"advertise"`  // what other replicas dial; default Listen, or the default route's address
+	SecretEnv string `yaml:"secret_env"` // the variable holding the shared HMAC secret, at least 32 bytes
+}
+
 // Hooks selects the built-in or remote hook implementations (spec §13, D26).
 type Hooks struct {
 	Admission *AdmissionHook `yaml:"admission"` // nil: built in
@@ -200,7 +210,8 @@ type AdmissionHook struct {
 	Operations []string `yaml:"operations"` // default [task]
 }
 
-// LifecycleHook is the remote Lifecycle (spec §13.3): the five activities by type name on that queue. M5.
+// LifecycleHook is the remote Lifecycle (spec §13.3): the five activities by type name on that queue. Accepted
+// since M3 (D186); the remote Admission hook stays refused until M5.
 type LifecycleHook struct {
 	TaskQueue string `yaml:"task_queue"`
 }
@@ -233,6 +244,20 @@ type Service struct {
 	Task        TaskPolicy `yaml:"task"`
 	Listed      bool       `yaml:"listed"`
 	Annotations JSON       `yaml:"annotations"` // a JSON object (§13.4), never interpreted; default {}
+
+	// MaxSessionsPerPrincipal caps the open MCP sessions one principal other than anonymous holds on a tunnel
+	// service (mcp only, spec §11.2, D213, D231, D249): an initialize beyond it closes the principal's sessions
+	// idle for 2 minutes (mcprelay.EvictIdle), the longest idle first, or is refused 429 when too few are. nil is
+	// DefaultMaxSessionsPerPrincipal.
+	MaxSessionsPerPrincipal *int `yaml:"max_sessions_per_principal"`
+}
+
+// SessionsPerPrincipal is max_sessions_per_principal, its default when unset.
+func (s Service) SessionsPerPrincipal() int {
+	if s.MaxSessionsPerPrincipal == nil {
+		return DefaultMaxSessionsPerPrincipal
+	}
+	return *s.MaxSessionsPerPrincipal
 }
 
 // Kinds of service.
@@ -586,6 +611,17 @@ func WithListen(addr string) Option { return func(c *Config) { c.Listen = addr }
 // WithMetricsListen overrides metrics.listen.
 func WithMetricsListen(addr string) Option { return func(c *Config) { c.Metrics.Listen = addr } }
 
+// WithPeerListen overrides peer.listen (spec §11.2), so the replicas of one host can share one kontra.yaml. A file
+// without peer: gets one with this listen only, which validation refuses until it names peer.secret_env.
+func WithPeerListen(addr string) Option {
+	return func(c *Config) {
+		if c.Peer == nil {
+			c.Peer = &Peer{}
+		}
+		c.Peer.Listen = addr
+	}
+}
+
 // Load reads and validates kontra.yaml, applying the defaults. Relative file paths in it (tls.cert,
 // tls.key, tls.acme.cache_dir, signing_key file:…) are relative to the file's directory.
 func Load(path string, opts ...Option) (*Config, error) {
@@ -678,9 +714,9 @@ func (e *ValidationError) Error() string {
 // names matching ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$, TLS required when public_url is not a localhost
 // origin (or terminated by a declared front proxy, D69), https backend URLs unless allow_private (D67),
 // URL ports from 1 to 65535, kind-only keys, allow: entries that can match (D68), durations and seconds
-// that fit the integer columns of services, listen and metrics.listen on different ports, and no key
-// this build would ignore by failing open (sealed on any backend, seller_keys on a direct a2a backend or
-// a tunnel service, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
+// that fit the integer columns of services, listen and metrics.listen on different ports, a signing_key
+// off loopback when A2A services are configured (D166), and no key this build would ignore by failing open
+// (sealed on a direct backend, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
 // Defaults must have been applied (Parse and Load do).
 func (c *Config) Validate() error {
 	v := &validator{}
@@ -688,6 +724,7 @@ func (c *Config) Validate() error {
 	c.validateListeners(v)
 	pub := c.validatePublicURL(v)
 	c.validateTLS(v, pub)
+	c.validateSigningKey(v, pub)
 	c.validateEdge(v)
 	c.validateLimits(v)
 	c.validateBackends(v)

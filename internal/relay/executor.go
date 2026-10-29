@@ -9,11 +9,14 @@ package relay
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -25,6 +28,8 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/audit"
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/obs"
@@ -43,11 +48,17 @@ type ExecutorOptions struct {
 	// which counts toward GetTaskGrace. 10 s, and at most GetTaskGrace.
 	GetTaskTimeout time.Duration
 	// TaskBytes caps the bytes stored per task (limits.task_bytes, 256 MiB, §6.6): every logged event's
-	// whole encoding, not only its parts (overLimit).
+	// whole encoding, not only its parts (overLimit), and every object the task holds in the bucket (storePart).
 	TaskBytes int64
 	// MaxPart is the largest part stored inline: without a bucket, an upstream part over it fails the
 	// task upstream_error (§10.4).
 	MaxPart int64
+	// Bucket is the claim-check bucket (blobs:, spec §10.4, D167): an upstream part over MaxPart is stored in it
+	// and logged as a url part kontra-blob:<ref>. Nil: no bucket.
+	Bucket blob.Store
+	// Render renders kontra-blob: parts as presigned GETs in the message a dispatch sends to a direct backend
+	// (spec §10.4: "direct backends get presigned URLs, like callers"); a tunnel dispatch keeps the refs.
+	Render *blob.Renderer
 	// RecordBackoff is the first wait before the attempt's first upstream task id is recorded again after
 	// the gate's store failed to record it, doubling to 5 s (recordFirst). 250 ms.
 	RecordBackoff time.Duration
@@ -222,6 +233,8 @@ type run struct {
 	// task id (nodeFull); resendFull asks send to send the turn's message again.
 	full       fullRetry
 	resendFull bool
+	// digests are the SHA-256 of the objects this run stored or read, by ref (sameObjects).
+	digests map[blob.Ref][sha256.Size]byte
 }
 
 func (r *run) execute(ctx context.Context) {
@@ -244,6 +257,17 @@ func (r *run) execute(ctx context.Context) {
 	}
 	r.proj = r.ec.StoredTask
 	r.bytes = taskBytes(r.proj)
+	if r.e.opts.Bucket != nil {
+		// The task's objects count too (storePart): the caller's large parts and every earlier turn's.
+		objects, err := r.e.log.BlobBytes(ctx, id)
+		if err != nil {
+			// Nothing was sent: the workflow retries or re-attaches, as for an attempt it could not read.
+			d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return
+		}
+		r.bytes += objects
+	}
 	attempt, err := r.e.log.GetAttempt(ctx, id, d.n)
 	if err != nil {
 		// Nothing was sent: the workflow re-reads the attempt and retries or re-attaches.
@@ -399,6 +423,51 @@ func (r *run) fail(reason store.FailureReason, text string) {
 	r.emit(Failed(r.proj, string(reason), upstream.Cap(text)))
 }
 
+// sealedRejected is a hosting node's refusal of a sealed part (ext-sealed.md §6; spec §6.4's row): an audit row
+// names the task, the attempt and the node's reason, and the task fails sealed_rejected, never retried, before or
+// after the first upstream task id (the attempt's outcome is sealed_rejected, store.TerminalOutcome). An audit row
+// that cannot be written is logged; the failure is the task's all the same.
+func (r *run) sealedRejected(ctx context.Context, f upstream.Failure) {
+	reason := r.ex.SealedReject()
+	fields := audit.Fields{
+		"task_id": r.taskUUID, "tenant_id": r.d.svc.TenantID, "service": r.d.svc.Name, "protocol": string(store.ProtocolA2A),
+		"attempt": r.d.n, "reason": reason,
+	}
+	if r.attempt != nil {
+		if r.attempt.ReplicaID != "" {
+			fields["replica_id"] = r.attempt.ReplicaID
+		}
+		if r.attempt.TunnelSession != nil {
+			fields["tunnel_session"] = r.attempt.TunnelSession.String()
+		}
+		if r.attempt.KeyID != "" {
+			fields["key_id"] = r.attempt.KeyID
+		}
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := audit.SealedRejected(actx, r.e.log.DB(), fields); err != nil {
+		r.logger.Error("a sealed-part rejection was not written to the audit chain", "error", err)
+	}
+	r.logger.Warn("the hosting node refused a sealed part: the task fails sealed_rejected (not retried)", "reason", reason)
+	r.fail(store.ReasonSealedRejected, f.Message)
+}
+
+// failureText is f's message as the gate logs it and stores it in the task's log: for a sealed service, never the
+// service's own words (an A2A error's message or details, a malformed body's text), which may quote the sealed input
+// it refused (a validation error echoing a card number), but the gate's: ext-sealed.md §7 promises that the gate's
+// database and logs hold ciphertext only, and Temporal's history already gets the code only (D59). The hosting node
+// replaces a sealed job's error text too (sealing.Hosting.errorResponse); this holds whatever the node does.
+func (r *run) failureText(f upstream.Failure) string {
+	if r.e.svc.Sealed == "" || f.Class != upstream.Protocol {
+		return f.Message
+	}
+	if status, _ := r.ex.Status(); status >= 300 {
+		return fmt.Sprintf("the service answered HTTP %d (its text is not kept for a sealed service)", status)
+	}
+	return "the service returned an error (its text is not kept for a sealed service)"
+}
+
 // retry ends the turn without a terminal event: the workflow starts a new attempt (§6.4).
 func (r *run) retry(reason store.FailureReason, wait time.Duration, cause error) {
 	r.d.running.SetOutcome(lifecycle.DispatchRetryable, reason)
@@ -411,6 +480,7 @@ func (r *run) retry(reason store.FailureReason, wait time.Duration, cause error)
 // upstreamFailed applies §6.4's table to a failed upstream call.
 func (r *run) upstreamFailed(ctx context.Context, err error) {
 	f := upstream.Classify(ctx, err, r.ex)
+	f.Message = r.failureText(f)
 	first := r.ids.UpstreamTaskID != ""
 	r.logger.Info("upstream call failed", "class", int(f.Class), "first_upstream_id", first, "error", f.Message)
 	switch f.Class {
@@ -447,7 +517,7 @@ func (r *run) upstreamFailed(ctx context.Context, err error) {
 		// The node never forwarded the message (a full answer proves it): send it again (nodeFull).
 		r.resendFull = r.nodeFull(ctx, f)
 	case upstream.ClassSealedRejected:
-		r.fail(store.ReasonSealedRejected, f.Message)
+		r.sealedRejected(ctx, f)
 	default:
 		if r.resent && !r.answered {
 			r.refusedResend(ctx, f)
@@ -499,6 +569,11 @@ func (r *run) nodeFull(ctx context.Context, f upstream.Failure) bool {
 // send is a turn's first dispatch: the caller's message upstream, streaming first.
 func (r *run) send(ctx context.Context) {
 	msg, err := r.upstreamMessage(ctx)
+	if err == nil && r.attempt.Backend == store.BackendDirect {
+		// A direct backend gets presigned GETs for the parts in the bucket, as a caller does; a node keeps
+		// kontra-blob:<ref> and fetches each through its own tunnel (spec §10.4, tunnel.md §8.3).
+		msg, err = r.e.opts.Render.Message(ctx, r.taskUUID, msg)
+	}
 	if err != nil {
 		r.d.running.SetOutcome(lifecycle.DispatchContextLost, "")
 		r.finish(nil, err)
@@ -783,6 +858,7 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 			Message: "the service did not answer GetTask within " + r.e.opts.GetTaskTimeout.String()}
 	} else {
 		f = upstream.Classify(ctx, err, r.ex)
+		f.Message = r.failureText(f)
 	}
 	switch f.Class {
 	case upstream.Unreachable, upstream.Throttled:
@@ -797,7 +873,7 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 		r.fail(store.ReasonTunnelLost, f.Message)
 		return nil
 	case upstream.ClassSealedRejected:
-		r.fail(store.ReasonSealedRejected, f.Message)
+		r.sealedRejected(ctx, f)
 		return nil
 	case upstream.Limit:
 		r.fail(store.ReasonUpstreamError, f.Message)
@@ -996,11 +1072,27 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		r.fail(store.ReasonUpstreamError, "the service sent an event for another task")
 		return true
 	}
+	if CheckReserved(gate) != nil {
+		r.fail(store.ReasonUpstreamError, "the service sent a url part in the gate's reserved kontra-blob: scheme")
+		return true
+	}
+	if CheckSealedForm(gate) != nil {
+		// ext-sealed.md §3: a part with the envelope media type is the raw form or nothing.
+		r.fail(store.ReasonUpstreamError, "the service sent a part with the sealed envelope media type in a form other than raw")
+		return true
+	}
 	gate = wirePrecision(gate)
 	// Only a Task that is the attempt's very first upstream event is logged whole; any later one (after
 	// events, from polling, after a re-attach) logs its difference from the projection.
 	first := isTask && r.firstTask
 	r.firstTask = false
+	if t, ok := gate.(*a2a.Task); ok && !first {
+		if gate, err = r.sameObjects(ctx, t); err != nil {
+			r.d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return true
+		}
+	}
 	evs, err := Translate(gate, r.proj, first)
 	if err != nil {
 		r.fail(store.ReasonUpstreamError, "the service sent a malformed event: "+err.Error())
@@ -1024,6 +1116,20 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		evs = slices.DeleteFunc(evs, func(e a2a.Event) bool { _, st := e.(*a2a.TaskStatusUpdateEvent); return st })
 	}
 	for _, out := range evs {
+		out, err := r.externalize(ctx, out)
+		if errors.Is(err, errOverTaskBytes) {
+			r.fail(store.ReasonUpstreamError, fmt.Sprintf("the task's stored bytes exceed limits.task_bytes (%d bytes)", r.e.opts.TaskBytes))
+			return true
+		}
+		if err != nil {
+			// The bucket refused the object: nothing of the event is logged, and a dispatch that cannot store
+			// what the upstream sent hands the turn back like a lost store (D42): before the first upstream
+			// task id it is retried, after it a later dispatch re-attaches.
+			r.logger.Warn("an upstream part over the inline limit could not be stored in the bucket", "error", err)
+			r.d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return true
+		}
 		if msg, ok := r.overLimit(out); ok {
 			r.fail(store.ReasonUpstreamError, msg)
 			return true
@@ -1153,8 +1259,10 @@ func (r *run) recordFirst(ctx context.Context, upTask a2a.TaskID, upCtx string) 
 	return true
 }
 
-// overLimit checks what an event would store against §6.6 and §10.4: one part over MaxPart, or the task's
-// stored bytes over TaskBytes, fails the task upstream_error.
+// overLimit checks what an event would store against §6.6 and §10.4: one part over MaxPart (left by externalize
+// only without a bucket), or the task's stored bytes over TaskBytes, fails the task upstream_error. The bytes
+// counted here are the logged event's, where a part in the bucket is its url part; its object was counted when
+// it was stored (storePart).
 //
 // SPEC-CONFLICT (D103): §6.6's table names limits.task_bytes as "Parts stored per task", while its rule is that
 // "nothing an upstream sends is unbounded", and task_bytes is the only bound on what one task accumulates.
@@ -1198,23 +1306,205 @@ func encodedSize(v any) int64 {
 	return int64(len(b))
 }
 
-// partSize is a part's decoded size: text and URL bytes, raw bytes before base64, data as JSON.
-func partSize(p *a2a.Part) int64 {
-	if p == nil {
-		return 0
+// partSize is a part's decoded size: text and URL bytes, raw bytes before base64, data as JSON (blob.PartSize).
+func partSize(p *a2a.Part) int64 { return blob.PartSize(p) }
+
+// externalize stores every part of ev over MaxPart in the bucket and returns ev with each replaced by its url
+// part kontra-blob:<ref> (spec §10.4, D167): the logged event, which overLimit then counts; each object counts
+// toward limits.task_bytes as it is stored (storePart), and one that would cross it is errOverTaskBytes. The
+// objects' rows are pending on the dispatch's context and written by the append that logs ev (blob.Pending,
+// store.Log.Append). Without a bucket ev is returned as it is, and overLimit fails the task. ev is not modified.
+func (r *run) externalize(ctx context.Context, ev a2a.Event) (a2a.Event, error) {
+	if r.e.opts.Bucket == nil {
+		return ev, nil
 	}
-	switch c := p.Content.(type) {
-	case a2a.Text:
-		return int64(len(c))
-	case a2a.Raw:
-		return int64(len(c))
-	case a2a.URL:
-		return int64(len(c))
-	case a2a.Data:
-		b, _ := json.Marshal(c.Value)
-		return int64(len(b))
+	// parts returns ps with each part over MaxPart stored, or nil when none is.
+	parts := func(ps a2a.ContentParts) (a2a.ContentParts, error) {
+		var out a2a.ContentParts
+		for i, p := range ps {
+			if partSize(p) <= r.e.opts.MaxPart {
+				continue
+			}
+			np, err := r.storePart(ctx, p)
+			if err != nil {
+				return nil, err
+			}
+			if out == nil {
+				out = append(a2a.ContentParts(nil), ps...)
+			}
+			out[i] = np
+		}
+		return out, nil
 	}
-	return 0
+	switch e := ev.(type) {
+	case *a2a.TaskArtifactUpdateEvent:
+		if e.Artifact == nil {
+			return ev, nil
+		}
+		ps, err := parts(e.Artifact.Parts)
+		if err != nil || ps == nil {
+			return ev, err
+		}
+		cp, art := *e, *e.Artifact
+		art.Parts = ps
+		cp.Artifact = &art
+		return &cp, nil
+	case *a2a.TaskStatusUpdateEvent:
+		if e.Status.Message == nil {
+			return ev, nil
+		}
+		ps, err := parts(e.Status.Message.Parts)
+		if err != nil || ps == nil {
+			return ev, err
+		}
+		cp, msg := *e, *e.Status.Message
+		msg.Parts = ps
+		cp.Status.Message = &msg
+		return &cp, nil
+	}
+	return ev, nil
+}
+
+// errOverTaskBytes is an upstream part whose object would take the task's stored bytes over limits.task_bytes:
+// the task fails upstream_error, and the object is never written.
+var errOverTaskBytes = errors.New("relay: the task's stored bytes would exceed limits.task_bytes")
+
+// storePart stores one part's content as an object of this task and returns its url part. The object counts
+// toward limits.task_bytes, checked before it is written: one that would cross it is errOverTaskBytes.
+//
+// SPEC-CONFLICT (D194; §6.6 with §10.4): §6.6's table counts in limits.task_bytes "each logged event's whole
+// encoding" (D103), and the M3 plan counted a part moved to the bucket only as its logged url part. But §6.6's rule
+// is that "nothing an upstream sends is unbounded", and §10.4 says of the bucket "the gate stores bytes it does not
+// interpret; per-task totals are bounded (§6.6)". Counting the url part only bounded a task's objects in number
+// (task_bytes over a url part's few hundred bytes), each up to an SSE event's 4 MiB: thousands of times
+// task_bytes in bytes. The closest faithful behaviour: task_bytes bounds everything the gate stores
+// for the task, each logged event's whole encoding plus each object in the bucket (blobs.size); a dispatch starts
+// from the projection and the task's blobs rows, the caller's objects included, as D103 counts the caller's
+// history.
+func (r *run) storePart(ctx context.Context, p *a2a.Part) (*a2a.Part, error) {
+	size := partSize(p)
+	if size > blob.MaxObject {
+		return nil, fmt.Errorf("relay: an upstream part of %d bytes is over the bucket's %d", size, blob.MaxObject)
+	}
+	if r.bytes+size > r.e.opts.TaskBytes {
+		return nil, errOverTaskBytes
+	}
+	np, row, err := blob.Externalize(ctx, r.e.opts.Bucket, r.d.task.TenantID, r.taskUUID, p)
+	if err != nil {
+		return nil, err
+	}
+	r.bytes += row.Size
+	if pending := blob.PendingFrom(ctx); pending != nil {
+		pending.Add(row)
+	} else {
+		return nil, errors.New("relay: a dispatch without a pending set cannot record its objects")
+	}
+	if b, _, err := blob.Content(p); err == nil {
+		r.digest(row.Ref, sha256.Sum256(b))
+	}
+	return np, nil
+}
+
+func (r *run) digest(ref blob.Ref, sum [sha256.Size]byte) {
+	if r.digests == nil {
+		r.digests = map[blob.Ref][sha256.Size]byte{}
+	}
+	r.digests[ref] = sum
+}
+
+// sameObjects returns a later upstream Task (polled, or the first after a re-attach) with each artifact part
+// that the projection already holds as an object of this task replaced by the projection's url part, when the
+// part's content is that object's (the same bytes, by SHA-256) and its media type, filename and metadata are
+// what the logged part kept. Translate then logs only what changed (a2aevent.Recover compares parts whole):
+// without it, every poll of a task with a large artifact would store it and log it again. A ref's digest is the
+// one this run computed when it stored the object, or that of the object read back from the bucket once. t is
+// not modified.
+func (r *run) sameObjects(ctx context.Context, t *a2a.Task) (*a2a.Task, error) {
+	if r.e.opts.Bucket == nil || r.proj == nil || len(t.Artifacts) == 0 {
+		return t, nil
+	}
+	var out *a2a.Task
+	for ai, a := range t.Artifacts {
+		if a == nil {
+			continue
+		}
+		pi := slices.IndexFunc(r.proj.Artifacts, func(p *a2a.Artifact) bool { return p != nil && p.ID == a.ID })
+		if pi < 0 {
+			continue
+		}
+		prev := r.proj.Artifacts[pi].Parts
+		var parts a2a.ContentParts
+		for i, p := range a.Parts {
+			if i >= len(prev) || prev[i] == nil || p == nil || partSize(p) <= r.e.opts.MaxPart {
+				continue
+			}
+			u, ok := prev[i].Content.(a2a.URL)
+			if !ok {
+				continue
+			}
+			ref, ok := blob.RefOf(string(u))
+			if !ok {
+				continue
+			}
+			b, mt, err := blob.Content(p)
+			if err != nil {
+				continue
+			}
+			want := &a2a.Part{Content: u, Filename: p.Filename, MediaType: mt, Metadata: p.Metadata}
+			if !reflect.DeepEqual(want, prev[i]) {
+				continue
+			}
+			sum, err := r.objectDigest(ctx, ref)
+			if err != nil {
+				return nil, err
+			}
+			if sum != sha256.Sum256(b) {
+				continue
+			}
+			if parts == nil {
+				parts = append(a2a.ContentParts(nil), a.Parts...)
+			}
+			parts[i] = prev[i]
+		}
+		if parts == nil {
+			continue
+		}
+		if out == nil {
+			cp := *t
+			cp.Artifacts = append([]*a2a.Artifact(nil), t.Artifacts...)
+			out = &cp
+		}
+		art := *a
+		art.Parts = parts
+		out.Artifacts[ai] = &art
+	}
+	if out == nil {
+		return t, nil
+	}
+	return out, nil
+}
+
+// objectDigest is the SHA-256 of one of this task's objects: remembered, or read back from the bucket.
+func (r *run) objectDigest(ctx context.Context, ref blob.Ref) ([sha256.Size]byte, error) {
+	if sum, ok := r.digests[ref]; ok {
+		return sum, nil
+	}
+	rc, _, err := r.e.opts.Bucket.Open(ctx, blob.Key{Tenant: r.d.task.TenantID, Task: r.taskUUID, Ref: ref})
+	if errors.Is(err, blob.ErrNotFound) {
+		return [sha256.Size]byte{}, nil // gone: never the same content
+	}
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("relay: read object %s back: %w", ref, err)
+	}
+	defer rc.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(rc, blob.MaxObject)); err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("relay: read object %s back: %w", ref, err)
+	}
+	var sum [sha256.Size]byte
+	h.Sum(sum[:0])
+	r.digest(ref, sum)
+	return sum, nil
 }
 
 // taskBytes is what the projection already stores: its status, metadata, artifacts and history, each

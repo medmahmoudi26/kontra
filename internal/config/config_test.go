@@ -36,8 +36,8 @@ services:
     backend: { tunnel: {} }
 `
 
-// mcpDirect is minimal with a direct MCP service: MCP services are not built and have no card, so
-// seller_keys on it fails closed and loads with a warning.
+// mcpDirect is minimal with a direct MCP service: an MCP service has no card, so seller_keys on it verify nothing
+// and load with a note.
 const mcpDirect = `
 public_url: http://localhost:8080
 postgres: postgres://kontra@localhost:5432/kontra
@@ -120,6 +120,7 @@ func TestDefaultsApplied(t *testing.T) {
 		{"services.hello.sealed", s.Sealed.Mode, SealedOff},
 		{"services.hello.seller_keys", s.SellerKeys.IsZero(), true},
 		{"services.hello.session_idle_s", s.SessionIdle.D(), 3600 * time.Second},
+		{"services.hello.max_sessions_per_principal", s.SessionsPerPrincipal(), 4},
 		{"services.hello.task.timeout", s.Task.Timeout.D(), time.Hour},
 		{"services.hello.task.retries", s.Task.RetryCount(), 2},
 		{"services.hello.task.retention", s.Task.Retention.D(), 7 * 24 * time.Hour},
@@ -229,27 +230,98 @@ func TestSealedShapes(t *testing.T) {
 	}
 }
 
-// Sealing and seller-key verification are not built (M3). A key this build would ignore on a service it
-// serves fails open, so it is refused: sealed on a direct backend (which can never be sealed: no node
-// unseals for it), sealed on a tunnel service (served since M2: its parts would be relayed in plaintext),
-// and seller_keys on a direct a2a backend or a tunnel service (its card would be served unverified).
+// sealed: on a direct backend is refused (D91: no node unseals for it, so it would fail open). Sealing is built
+// since M3 WP-08, which lifts D144's refusal on tunnel services: sealed: true and {required: false} load on tunnel
+// a2a and mcp services, with seller_keys or without, and with no warning. Seller card signatures are verified (M3
+// WP-02 lifts D90 and the seller_keys half of D144): seller_keys loads on direct and tunnel a2a services, with no
+// warning, and on MCP services with a note (no card to verify).
 func TestFailOpenKeysRefused(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{
 		{"sealed on a direct a2a backend", minimal + "    sealed: true\n", "services.hello.sealed: sealing needs backend tunnel"},
 		{"optional sealing on a direct a2a backend", minimal + "    sealed: { required: false }\n", "sealing needs backend tunnel"},
 		{"sealed on a direct mcp backend", minimal + "  fs:\n    kind: mcp\n    backend: { mcp: { url: \"https://mcp.example.com\" } }\n    sealed: true\n", "services.fs.sealed: sealing needs backend tunnel"},
-		{"seller_keys on a direct a2a backend", minimal + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.seller_keys: seller card signatures are not verified in this release"},
-		{"sealed on a tunnel service", tunnelled + "    sealed: true\n", "services.hello.sealed: sealing is not built in this release (M3), and this build serves tunnel services"},
-		{"optional sealing on a tunnel service", tunnelled + "    sealed: { required: false }\n", "services.hello.sealed: sealing is not built"},
-		{"sealed on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    sealed: true\n", "services.fs.sealed: sealing is not built"},
-		{"seller_keys on a tunnel service", tunnelled + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.hello.seller_keys: seller card signatures are not verified in this release"},
-		{"seller_keys on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "services.fs.seller_keys: seller card signatures are not verified"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := parseErr(t, tc.yaml); !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q\nwant it to contain %q", err, tc.want)
 			}
 		})
+	}
+	for _, tc := range []struct {
+		name, yaml, svc string
+		want            SealedMode
+	}{
+		{"sealed on a tunnel service", tunnelled + "    sealed: true\n", "hello", SealedRequired},
+		{"optional sealing on a tunnel service", tunnelled + "    sealed: { required: false }\n", "hello", SealedOptional},
+		{"sealed on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    sealed: true\n", "fs", SealedRequired},
+		{"sealed with seller_keys on a tunnel service", tunnelled + "    sealed: true\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello", SealedRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := parse(t, tc.yaml)
+			if got := c.Services[tc.svc].Sealed.Mode; got != tc.want {
+				t.Errorf("sealed loads as %q, want %q", got, tc.want)
+			}
+			for _, w := range c.Warnings {
+				if strings.Contains(w, "sealed") {
+					t.Errorf("a warning about sealed: %q", w)
+				}
+			}
+		})
+	}
+	const inline = "    seller_keys: { keys: [ { kty: EC, crv: P-256, x: \"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\", y: \"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\" } ] }\n"
+	for _, tc := range []struct{ name, yaml, svc string }{
+		{"seller_keys {url} on a direct a2a backend", minimal + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello"},
+		{"inline seller_keys on a direct a2a backend", minimal + inline, "hello"},
+		{"seller_keys {url} on a tunnel service", tunnelled + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello"},
+		{"inline seller_keys on a tunnel service", tunnelled + inline, "hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := parse(t, tc.yaml)
+			if c.Services[tc.svc].SellerKeys.IsZero() || len(c.Warnings) != 0 {
+				t.Errorf("seller_keys %s, warnings %q", c.Services[tc.svc].SellerKeys, c.Warnings)
+			}
+		})
+	}
+	c := parse(t, minimal+"  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n")
+	if !slices.ContainsFunc(c.Warnings, func(w string) bool {
+		return strings.HasPrefix(w, "services.fs.seller_keys: an MCP service has no card")
+	}) {
+		t.Errorf("seller_keys on a tunnel mcp service: warnings %q", c.Warnings)
+	}
+	// An inline set the gate cannot verify with is refused at load, not left to fail every fetch.
+	if err := parseErr(t, minimal+"    seller_keys: { keys: [ { kty: RSA, n: abc, e: AQAB } ] }\n"); !strings.Contains(err.Error(), "no EC P-256 signing key") {
+		t.Errorf("an RSA-only set: %v", err)
+	}
+	if err := parseErr(t, minimal+"    seller_keys: { keys: [ { kty: EC, crv: P-256, x: AAAA, y: AAAA } ] }\n"); !strings.Contains(err.Error(), "services.hello.seller_keys") {
+		t.Errorf("a malformed key: %v", err)
+	}
+}
+
+// signing_key (spec §3, D166): file:<path> only; required when public_url is not a loopback origin and the
+// configuration serves A2A services, naming D166 and the services; not required on loopback (the gate mints a key
+// at start) or for a gate without A2A services.
+func TestSigningKey(t *testing.T) {
+	const public = "public_url: https://agents.acme.io\npostgres: postgres://k@db/k\ntls: { terminated_by_proxy: true }\n"
+	const a2aSvc = "services:\n  hello:\n    kind: a2a\n    backend: { tunnel: {} }\n  book:\n    kind: a2a\n    backend: { a2a: { url: \"https://seller.example.com\" } }\n"
+	const mcpSvc = "services:\n  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n"
+	err := parseErr(t, public+a2aSvc)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "signing_key: required (D166)") ||
+		!strings.Contains(ve.Problems[0], "(book, hello)") {
+		t.Fatalf("a public gate with A2A services and no signing_key: %v", err)
+	}
+	c := parse(t, public+"signing_key: file:/etc/kontra/signing/kontra.key\n"+a2aSvc)
+	if c.SigningKey != "file:/etc/kontra/signing/kontra.key" {
+		t.Errorf("signing_key %q", c.SigningKey)
+	}
+	parse(t, public+mcpSvc) // no A2A service: no card to sign
+	parse(t, public)        // no service at all (Cloud: the operator writes rows)
+	parse(t, minimal)       // loopback: a key is minted at start
+	parse(t, strings.Replace(minimal, "http://localhost:8080", "http://127.0.0.1:8080", 1))
+	for _, bad := range []string{"signing_key: kms:scaleway/key-1\n", "signing_key: \"file:\"\n", "signing_key: ./kontra.key\n"} {
+		if err := parseErr(t, minimal+bad); !strings.Contains(err.Error(), "signing_key: want file:<path>") {
+			t.Errorf("%s: %v", strings.TrimSpace(bad), err)
+		}
 	}
 }
 
@@ -335,6 +407,9 @@ func TestLoadErrors(t *testing.T) {
 		{"sub-second timeout", svc("    kind: a2a\n    backend: { tunnel: {} }\n    task: { timeout: 1500ms }\n"), "whole number of seconds"},
 		{"zero timeout", svc("    kind: a2a\n    backend: { tunnel: {} }\n    task: { timeout: 0s }\n"), "must be positive"},
 		{"zero session idle", svc("    kind: a2a\n    backend: { tunnel: {} }\n    session_idle_s: 0\n"), "positive whole number of seconds"},
+		{"sessions per principal on a2a", svc("    kind: a2a\n    backend: { tunnel: {} }\n    max_sessions_per_principal: 3\n"), "max_sessions_per_principal: mcp services only"},
+		{"zero sessions per principal", svc("    kind: mcp\n    backend: { tunnel: {} }\n    max_sessions_per_principal: 0\n"), "max_sessions_per_principal 0: want 1 to 10000"},
+		{"too many sessions per principal", svc("    kind: mcp\n    backend: { tunnel: {} }\n    max_sessions_per_principal: 10001\n"), "max_sessions_per_principal 10001: want 1 to 10000"},
 		{"seller_keys both", svc("    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: { url: https://x.example.com/jwks, keys: [{kty: EC}] }\n"), "keys and url are exclusive"},
 		{"seller_keys http url", svc("    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: { url: http://x.example.com/jwks }\n"), "want https://"},
 		{"annotations not a map", svc("    kind: a2a\n    backend: { tunnel: {} }\n    annotations: [1]\n"), "annotations: want a mapping"},
@@ -366,6 +441,9 @@ func TestLoadErrors(t *testing.T) {
 		{"postgres bad pool size", "public_url: http://localhost:8080\npostgres: \"postgres://k@db/k?pool_max_conns=many\"\n", "pool_max_conns"},
 		{"postgres misspelt pool parameter", "public_url: http://localhost:8080\npostgres: \"postgres://k@db/k?pool_max_conn=3\"\n", "unknown pool parameter \"pool_max_conn\""},
 		{"blobs not s3", head + "blobs: https://bucket.example.com\n", "want s3://"},
+		{"blobs with an unknown parameter", head + "blobs: \"s3://parts?bucket=x\"\n", "unknown parameter \"bucket\""},
+		{"blobs with an endpoint path", head + "blobs: \"s3://parts?endpoint=https://s3.example.com/x\"\n", "endpoint"},
+		{"blobs with a bad bucket name", head + "blobs: s3://Parts\n", "not an S3 bucket name"},
 		{"listen without port", head + "listen: localhost\n", "listen \"localhost\""},
 		{"metrics on the public listener", head + "listen: :8080\nmetrics: { listen: \":8080\" }\n", "must differ from listen"},
 		{"metrics on the public port, wildcard spelt out", head + "listen: :8080\nmetrics: { listen: \"0.0.0.0:8080\" }\n", "must differ from listen"},
@@ -394,9 +472,17 @@ func TestLoadErrors(t *testing.T) {
 		{"tls-exporter without TLS", head + "tunnel: { channel_binding: tls-exporter }\n", "needs the gate to terminate TLS"},
 		{"remote admission hook (M5)", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT } }\n", "remote Admission hook is not built"},
 		{"admission over http to a public host", head + "hooks: { admission: { url: http://cp.example.com/admit, secret_env: ADMIT } }\n", "https:// unless the host is loopback"},
-		{"remote lifecycle hook (M5)", head + "hooks: { lifecycle: { task_queue: cloud-lifecycle } }\n", "remote Lifecycle hook is not built"},
+		{"remote lifecycle hook without a queue", head + "hooks: { lifecycle: {} }\n", "hooks.lifecycle.task_queue: required"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
+		// peer: (spec §11.2, §17; D163, D179).
+		{"peer without secret_env", head + "peer: { listen: \"127.0.0.1:8444\" }\n", "peer.secret_env"},
+		{"peer secret_env not a variable name", head + "peer: { listen: \"127.0.0.1:8444\", secret_env: \"peer-secret\" }\n", "peer.secret_env"},
+		{"peer without listen", head + "peer: { secret_env: PEER }\n", "peer.listen: required"},
+		{"peer on the public listener's port", head + "listen: \":9000\"\npeer: { listen: \"127.0.0.1:9000\", secret_env: PEER }\n", "the peer listener is never the public one"},
+		{"peer on the metrics port", head + "metrics: { listen: \"127.0.0.1:9100\" }\npeer: { listen: \":9100\", secret_env: PEER }\n", "must differ from metrics.listen"},
+		{"peer listen not host:port", head + "peer: { listen: \"8444\", secret_env: PEER }\n", "peer.listen"},
+		{"peer advertise without a host", head + "peer: { listen: \":8444\", advertise: \":8444\", secret_env: PEER }\n", "peer.advertise"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := parseErr(t, tc.yaml)
@@ -541,8 +627,15 @@ postgres: "postgres://k@db/k?pool_max_conns=7&pool_max_conn_lifetime=1h"
 			if c.Services["fs"].Tasks != TasksPassthrough {
 				t.Errorf("tasks = %q", c.Services["fs"].Tasks)
 			}
-			if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "services.fs: MCP services are not built") {
-				t.Errorf("warnings = %q", c.Warnings)
+			if len(c.Warnings) != 0 {
+				t.Errorf("MCP services are built since M3 WP-04; warnings = %q", c.Warnings)
+			}
+		}},
+		{"peer hop (M3 WP-04)", minimal + `
+peer: { listen: ":8444", advertise: "gate-0.gate.kontra.svc:8444", secret_env: KONTRA_PEER_SECRET }
+`, func(t *testing.T, c *Config) {
+			if c.Peer == nil || c.Peer.Listen != ":8444" || c.Peer.SecretEnv != "KONTRA_PEER_SECRET" || len(c.Warnings) != 0 {
+				t.Errorf("peer %+v, warnings %q", c.Peer, c.Warnings)
 			}
 		}},
 	} {
@@ -562,6 +655,28 @@ func TestRemoteAdmissionRefusedAsUnbuilt(t *testing.T) {
 	var ve *ValidationError
 	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "remote Admission hook is not built") {
 		t.Errorf("error = %v, want only the not-built refusal", err)
+	}
+}
+
+// The remote Lifecycle hook loads (D186, M3 WP-10): its queue is kept as written, the file gives no other
+// problem, and a remote Admission hook beside it is still refused as unbuilt (C3: hooks.admission stays M5's).
+func TestRemoteLifecycleAccepted(t *testing.T) {
+	c := parse(t, minimal+"hooks: { lifecycle: { task_queue: m3pentest-lifecycle } }\n")
+	if c.Hooks.Lifecycle == nil || c.Hooks.Lifecycle.TaskQueue != "m3pentest-lifecycle" {
+		t.Fatalf("hooks.lifecycle = %+v, want task_queue m3pentest-lifecycle", c.Hooks.Lifecycle)
+	}
+	if c.Hooks.Admission != nil {
+		t.Errorf("hooks.admission = %+v, want the built-in", c.Hooks.Admission)
+	}
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "lifecycle") {
+			t.Errorf("a warning names the accepted hook: %q", w)
+		}
+	}
+	err := parseErr(t, minimal+"hooks: { lifecycle: { task_queue: q }, admission: { url: \"http://127.0.0.1:7000/admit\", secret_env: ADMIT } }\n")
+	var ve *ValidationError
+	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "remote Admission hook is not built") {
+		t.Errorf("error = %v, want only the Admission refusal", err)
 	}
 }
 
@@ -631,7 +746,8 @@ func TestParseAllowEntry(t *testing.T) {
 }
 
 // Fail-closed keys this build ignores are reported as warnings, so an operator is not surprised. A tunnel
-// service is served (M2): it gets none.
+// service is served (M2): it gets none; neither do blobs: and signing_key, built in M3 WP-02, nor MCP services and
+// peer:, built in M3 WP-04.
 func TestUnbuiltWarnings(t *testing.T) {
 	c := parse(t, minimal+`
   remote:
@@ -645,9 +761,9 @@ blobs: s3://kontra-parts
 signing_key: file:./kontra.key
 auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
 tunnel: { anonymous: true }
+peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 `)
-	want := []string{"auth.oidc", "blobs", "signing_key", "services.files: MCP services", "services.files.seller_keys",
-		"tunnel.anonymous"}
+	want := []string{"auth.oidc", "services.files.seller_keys", "tunnel.anonymous"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
@@ -768,17 +884,40 @@ func TestTunnelExamplesLoad(t *testing.T) {
 	}
 }
 
+// The sealed variants of the tunnel examples (M3, examples/sealing/README.md) load as the plain ones do, with
+// sealed: required and no warning.
+func TestSealedExamplesLoad(t *testing.T) {
+	for path, name := range map[string]string{
+		"../../examples/sellers/hello-exec/kontra-sealed.yaml": "hello",
+		"../../examples/sellers/booking/kontra-sealed.yaml":    "booking",
+	} {
+		c, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		s := c.Services[name]
+		if len(c.Services) != 1 || s.Kind != KindA2A || s.Backend.Tunnel == nil || s.Sealed.Mode != SealedRequired || len(c.Warnings) != 0 {
+			t.Errorf("%s: services.%s = %+v, warnings %q", path, name, s, c.Warnings)
+		}
+	}
+}
+
 // The schema's fixture is also a configuration the gate loads, with the values it says, but for sealing:
 // its two tunnel services set sealed, which this build refuses until M3 (M2 serves tunnel services and
 // does not seal; D91 as amended for M2). The fixture is refused for exactly those two keys, and loads
 // without them.
 func TestTeamFixtureLoads(t *testing.T) {
 	const path = "../../spec/schema/examples/config.team.json"
-	_, err := Load(path)
-	var ve *ValidationError
-	if !errors.As(err, &ve) || len(ve.Problems) != 2 || !strings.HasPrefix(ve.Problems[0], "services.fs.sealed: sealing is not built") ||
-		!strings.HasPrefix(ve.Problems[1], "services.recon.sealed: sealing is not built") {
-		t.Fatalf("Load(%s) = %v, want the two sealed refusals only", path, err)
+	// Sealing is built (M3 WP-08 lifts D144): the team fixture, with its sealed tunnel services, loads as it is.
+	team, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%s) = %v", path, err)
+	}
+	if team.Services["recon"].Sealed.Mode != SealedRequired || team.Services["fs"].Sealed.Mode != SealedOptional {
+		t.Errorf("the fixture's sealed services load as %q and %q", team.Services["recon"].Sealed.Mode, team.Services["fs"].Sealed.Mode)
+	}
+	if n := team.Services["fs"].SessionsPerPrincipal(); n != 2 {
+		t.Errorf("the fixture's fs service caps a principal's sessions at %d, want 2 (D213)", n)
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -900,4 +1039,31 @@ func TestSchemaInStep(t *testing.T) {
 		}
 	}
 	walk("config", reflect.TypeFor[Config](), schema)
+}
+
+// The MCP examples' gates (M3 WP-05) load as their READMEs describe: one MCP tunnel service each, the dangerous
+// tools denied (D185 for server-everything; the write tools for server-filesystem), with no warning.
+func TestMCPExamplesLoad(t *testing.T) {
+	for path, want := range map[string]struct {
+		name string
+		deny []string
+	}{
+		"../../examples/mcp/fs-stdio/kontra.yaml":   {"fs", []string{"write_file", "edit_file", "create_directory", "move_file"}},
+		"../../examples/mcp/everything/kontra.yaml": {"everything", []string{"get-env", "gzip-file-as-resource"}},
+	} {
+		c, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		s, ok := c.Services[want.name]
+		if len(c.Services) != 1 || !ok || s.Kind != KindMCP || s.Backend.Tunnel == nil || s.Backend.Direct() != nil {
+			t.Fatalf("%s: services %v, want the MCP tunnel service %s", path, slices.Sorted(maps.Keys(c.Services)), want.name)
+		}
+		if s.Tools == nil || !slices.Equal(s.Tools.Deny, want.deny) || !slices.Equal(s.Allow, []string{"org:default"}) {
+			t.Errorf("%s: services.%s = %+v (tools %+v)", path, want.name, s, s.Tools)
+		}
+		if c.PublicURL != "http://localhost:8080" || !c.Auth.APIKeys || len(c.Warnings) != 0 {
+			t.Errorf("%s: public_url %q auth %+v warnings %q", path, c.PublicURL, c.Auth, c.Warnings)
+		}
+	}
 }

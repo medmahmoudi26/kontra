@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"kontra.sh/kontra/internal/blob"
 )
 
 // WorkItemKind is work_items.kind.
@@ -41,23 +43,54 @@ const (
 // follow-up turn's own rows from the previous turn's without reading the log's payloads (TurnStatusLogged,
 // D81). It is kept in work_items.payload under a Kontra key and read in Go only (D49); 0 for an item stored
 // without it.
+//
+// AnswersDelivered are, for an MCP task's work item, the input_response seqs its dispatches wrote upstream
+// (MarkAnswerDelivered): a re-attach does not write them again (spec §11.5 step 5, D42). They are kept in the
+// payload under a Kontra key too, read in Go only (D49).
 type WorkItem struct {
-	ID          uuid.UUID
-	TaskID      uuid.UUID
-	Kind        WorkItemKind
-	Payload     WorkPayload
-	CreatedAt   time.Time
-	ConsumedAt  *time.Time
-	DeliveredAt *time.Time
-	TaskVersion int64
+	ID               uuid.UUID
+	TaskID           uuid.UUID
+	Kind             WorkItemKind
+	Payload          WorkPayload
+	CreatedAt        time.Time
+	ConsumedAt       *time.Time
+	DeliveredAt      *time.Time
+	TaskVersion      int64
+	AnswersDelivered []int64
 }
 
 // WorkPayload is the sanitized copy of a2a-go's workqueue.Payload: the request, and the call context with
-// every service parameter removed except A2A-Version and A2A-Extensions (no Authorization, no cookies).
+// every service parameter removed except A2A-Version and A2A-Extensions (no Authorization, no cookies). An MCP
+// task's work item holds MCP instead of an A2A request (spec/relay.md §11.5 step 2).
 type WorkPayload struct {
 	Request     *a2a.SendMessageRequest `json:"request"`
 	CallContext map[string]any          `json:"callContext"`
 	Owner       Owner                   `json:"owner"`
+	MCP         *MCPWork                `json:"mcp,omitempty"`
+}
+
+// MCPWork is what a gate-owned MCP task's work item stores (spec/relay.md §11.5 step 2, §11.12 step 3): the
+// tools/call as the client sent it (after §2.5's scrub), never in Temporal history; the creating client
+// session's hash and the call's JSON-RPC id, which every exchange of the dispatch carries in its preamble
+// (tunnel.md §8.1) and which the upstream tools/call reuses; the capabilities the client declared, whose
+// elicitation and sampling the dispatch's own initialize declares (D22); and the era of the request.
+//
+// Request is kept as bytes (base64 in the payload's JSON), so the call reaches the upstream as the client wrote it
+// except for params.task: a json.RawMessage would be compacted and HTML-escaped by encoding/json.
+type MCPWork struct {
+	Request   []byte          `json:"request"`
+	Tool      string          `json:"tool"`
+	RequestID json.RawMessage `json:"requestId"`
+	// Session is the lowercase hex SHA-256 of the creating Mcp-Session-Id; for a task a 2026-07-28 request created, its
+	// virtual session's (D160), named by the task's calls row only and never by a preamble (D180).
+	Session            string          `json:"session,omitempty"`
+	Version            string          `json:"version"` // the creating request's protocol version
+	ClientCapabilities json.RawMessage `json:"clientCapabilities,omitempty"`
+	Sealed             bool            `json:"sealed,omitempty"` // the service's sealed flag when the task was created (D174)
+	// Headers are a 2026-07-28 call's Mcp-Param-* headers as the client sent them (spec §11.12; M3 WP-07): an
+	// upstream requires them beside the arguments they mirror, so the modern dispatch sends them with every tools/call
+	// it makes. Like Request, they never enter Temporal history.
+	Headers map[string][]string `json:"headers,omitempty"`
 }
 
 // MarshalPayload encodes the payload for work_items.payload (json, not jsonb, D49).
@@ -73,6 +106,12 @@ func MarshalPayload(p WorkPayload) (json.RawMessage, error) {
 }
 
 func (p WorkPayload) check() error {
+	if p.MCP != nil {
+		if len(p.MCP.Request) == 0 || p.MCP.Tool == "" || len(p.MCP.RequestID) == 0 {
+			return errors.New("store: an MCP work item needs its tools/call, its tool and its JSON-RPC id")
+		}
+		return nil
+	}
 	if p.Request == nil || p.Request.Message == nil {
 		return errors.New("store: a work item needs the request and its message")
 	}
@@ -88,17 +127,22 @@ func UnmarshalPayload(b []byte) (WorkPayload, error) {
 	return p, nil
 }
 
-// storedPayload is work_items.payload as stored: the payload, and the item's WorkItem.TaskVersion under a
-// key of Kontra's own (decoded in Go, never read in SQL, D49).
+// storedPayload is work_items.payload as stored: the payload, and the item's WorkItem.TaskVersion and
+// WorkItem.AnswersDelivered under keys of Kontra's own (decoded in Go, never read in SQL, D49).
 type storedPayload struct {
 	WorkPayload
-	TaskVersion int64 `json:"kontraTaskVersion,omitempty"`
+	TaskVersion      int64   `json:"kontraTaskVersion,omitempty"`
+	AnswersDelivered []int64 `json:"kontraAnswersDelivered,omitempty"`
 }
+
+// answersDeliveredKey is storedPayload.AnswersDelivered's key.
+const answersDeliveredKey = "kontraAnswersDelivered"
 
 // InsertWorkItem stores wi in tx (the same transaction that pre-creates a new task, or that reads a
 // follow-up's position), or on its own when tx is nil. CreatedAt, ConsumedAt and DeliveredAt are the
 // table's; TaskVersion is the task's version read before the insert in the same transaction (wi's is
-// ignored). A task that does not exist is a2a.ErrTaskNotFound.
+// ignored). The blobs rows pending on ctx for the parts the request names are written in the same
+// transaction (blob.Pending). A task that does not exist is a2a.ErrTaskNotFound.
 func (l *Log) InsertWorkItem(ctx context.Context, tx pgx.Tx, wi WorkItem) error {
 	if wi.ID == uuid.Nil || wi.TaskID == uuid.Nil {
 		return errors.New("store: a work item needs its id and task")
@@ -124,9 +168,14 @@ func (l *Log) InsertWorkItem(ctx context.Context, tx pgx.Tx, wi WorkItem) error 
 		if err != nil {
 			return fmt.Errorf("store: encode work item payload: %w", err)
 		}
-		_, err = q.Exec(ctx, `insert into kontra.work_items (id, task_id, kind, payload) values ($1, $2, $3, $4::json)`,
-			wi.ID, wi.TaskID, string(wi.Kind), payload)
-		return err
+		if _, err = q.Exec(ctx, `insert into kontra.work_items (id, task_id, kind, payload) values ($1, $2, $3, $4::json)`,
+			wi.ID, wi.TaskID, string(wi.Kind), payload); err != nil {
+			return err
+		}
+		// A follow-up's large parts are in the bucket already (the relay's interceptors stored them): their rows
+		// go in the item's transaction, since the message's own event is logged later, by its dispatch (spec
+		// §10.4, D167).
+		return blob.Insert(ctx, q, blob.PendingRows(ctx, wi.TaskID, payload))
 	}
 	var err error
 	if tx != nil {
@@ -164,7 +213,7 @@ func (l *Log) LoadWorkItem(ctx context.Context, id, taskID uuid.UUID) (*WorkItem
 	if err := json.Unmarshal(payload, &sp); err != nil {
 		return nil, fmt.Errorf("store: decode work item payload: %w", err)
 	}
-	wi.Payload, wi.TaskVersion = sp.WorkPayload, sp.TaskVersion
+	wi.Payload, wi.TaskVersion, wi.AnswersDelivered = sp.WorkPayload, sp.TaskVersion, sp.AnswersDelivered
 	return &wi, nil
 }
 

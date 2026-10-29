@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"kontra.sh/kontra/internal/audit"
+	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -119,6 +120,13 @@ func (a *admission) rotate(ctx context.Context) (*Key, error) {
 		"replica_id":       a.req.ReplicaID,
 	}); err != nil {
 		return nil, err
+	}
+	// tunnel.md §12: a sealed service's recipients are republished at once without the old key (and with the new
+	// one): every replica re-reads the services the rotation copied.
+	for _, name := range copied {
+		if _, err := a.tx.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelServices), a.old.Tenant+"/"+name); err != nil {
+			return nil, err
+		}
 	}
 	old := *a.old
 	old.RevokedReason, old.RotatedTo, old.OverlapUntil = ReasonRotated, newID, &overlap

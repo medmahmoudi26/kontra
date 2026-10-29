@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -14,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
@@ -40,27 +45,41 @@ type ReviewMessenger interface {
 
 // Interceptors builds the call interceptors of one service, in order (spec §15):
 //
+//  0. Egress rendering (spec §10.4, D167, D181): on the way out, every answer's kontra-blob:<ref> parts become
+//     presigned GETs for the task they belong to (blob.Renderer); first in the chain, so its After runs last,
+//     on every answer, the early ones included.
 //  1. Identity: CallContext.User from the edge's principal (Name = buyer id, attributes: principal, via,
 //     tenant), so the store scopes reads and the identity crosses the work queue. A key without the hire
 //     scope may call no service (§2.3).
 //  2. Anonymous refusals (spec §2.3): ListTasks and push configs (inline ones included) are
 //     UnsupportedOperationError for the anonymous principal.
 //  3. Caller keys (spec §2.5): every kontra. key leaves message, part and request metadata, except the
-//     sealing keys and caller_metadata. A part over 256 KiB is InvalidParams ("part too large: configure
+//     sealing keys and caller_metadata. A url part in the gate's reserved kontra-blob: scheme is
+//     InvalidRequest (D181), and so is a part claiming the sealed envelope type in another form than raw
+//     (ext-sealed.md §3); a sealed: required service refuses an unsealed part with InvalidRequest
+//     (sealed_unsealed_part), and an optional one marks it metadata["kontra.sealed"] = false (§5). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
 //     blobs", §10.4), and so is a contextId or messageId over 256 characters (§4), before any task row.
 //  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow in M1. The pre-minted task
 //     id and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
 //  5. Follow-up checks (spec §7): a message with a taskId is refused UnsupportedOperationError unless the
 //     task is input-required; a taskId/contextId disagreement is InvalidParams; a terminal task is
 //     UnsupportedOperationError (a2a-go itself answers InvalidParams there); a review-window message is
-//     stored as a work item and sent as kontra.review_message, answered here as an early response.
+//     stored as a work item and sent as kontra.review_message, answered here as an early response (its large
+//     parts are stored with its work item, and deleted again when the window does not take it).
 //  6. Push URLs (spec §10.1): an inline config's URL, and a CreateTaskPushNotificationConfig's, is
 //     checked now (push.CheckURL), so a refused URL is a synchronous InvalidParams and nothing is stored;
 //     the work queue saves an inline config with the task. A follow-up's inline config is checked only
 //     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
 //     is never refused for a DNS change.
-//  7. CancelInterceptor.
-//  8. GetExtendedAgentCard is UnsupportedOperationError (spec §3: capabilities.extendedAgentCard false).
+//  7. Large parts (spec §10.4, D167; largeParts): with a bucket, each part over 256 KiB of a new task's first
+//     message (an object of the pre-minted task) or of an input-required task's follow-up is stored and replaced
+//     by its url part kontra-blob:<ref>; the rows are pending on the context for the transaction that creates
+//     the task or stores the follow-up's work item. Last of the interceptors that can refuse a message, so none
+//     of them leaves an object behind; once the request is over, the objects no record of the task names (a2a-go
+//     or the work queue refused it, or answered it with another task) are deleted, rows and all (spec §5.4:
+//     objects go with their task, and a refused request has none).
+//  8. CancelInterceptor.
+//  9. GetExtendedAgentCard is UnsupportedOperationError (spec §3: capabilities.extendedAgentCard false).
 //
 // After them, on the way out, a blocking SendMessage that a2a-go answered eventqueue.ErrQueueClosed gets the
 // stored task instead (finishedTurn).
@@ -75,8 +94,13 @@ type Interceptors struct {
 	Reviews ReviewMessenger
 	// PushPolicy is push.allow_private: inline and created push config URLs are checked against it.
 	PushPolicy ssrf.Policy
-	// MaxPart is the largest caller part without a bucket (256 KiB, §10.4); zero takes upstream.MaxPart.
+	// MaxPart is the largest caller part stored inline (256 KiB, §10.4); zero takes upstream.MaxPart.
 	MaxPart int64
+	// Bucket is the claim-check bucket (blobs:); nil without one, and a caller part over MaxPart is then
+	// InvalidParams (§10.4).
+	Bucket blob.Store
+	// Render renders the kontra-blob: parts of every answer as presigned GETs; nil renders nothing.
+	Render *blob.Renderer
 }
 
 // interceptor adapts a Before function to a2asrv.CallInterceptor.
@@ -97,6 +121,7 @@ func (i *Interceptors) Chain() []a2asrv.CallInterceptor {
 	ii := *i
 	ii.Admit = admit
 	return []a2asrv.CallInterceptor{
+		&renderAnswers{render: ii.Render},
 		interceptor(ii.identity),
 		&finishedTurn{i: &ii},
 		interceptor(ii.anonymous),
@@ -104,6 +129,7 @@ func (i *Interceptors) Chain() []a2asrv.CallInterceptor {
 		interceptor(ii.admission),
 		interceptor(ii.followUp),
 		interceptor(ii.pushURLs),
+		&largeParts{i: &ii},
 		&CancelInterceptor{Svc: ii.Svc, Log: ii.Log, Canceler: ii.Canceler},
 		interceptor(extendedCard),
 	}
@@ -171,12 +197,31 @@ func (i *Interceptors) callerKeys(ctx context.Context, cc *a2asrv.CallContext, r
 			return ctx, nil, invalid("messageId is over 256 characters")
 		}
 		for _, part := range msg.Parts {
-			if partSize(part) > i.maxPart() {
+			if part == nil {
+				continue
+			}
+			if u, ok := part.Content.(a2a.URL); ok && blob.Reserved(string(u)) {
+				// D181: only the gate writes kontra-blob: parts, so every one in the log names its own task's object.
+				return ctx, nil, a2a.NewError(a2a.ErrInvalidRequest, "a url part may not use the gate's reserved kontra-blob: scheme")
+			}
+			switch size := partSize(part); {
+			case size <= i.maxPart():
+			case i.Bucket == nil:
 				return ctx, nil, invalid("part too large: configure blobs")
+			case size > blob.MaxObject:
+				return ctx, nil, invalid(fmt.Sprintf("part too large: at most %d bytes", blob.MaxObject))
 			}
 		}
 		msg.Metadata = i.Rules.StripCaller(msg.Metadata)
 		msg.Parts = i.stripParts(msg.Parts)
+		// The sealed extension (ext-sealed.md §3, §5 "Gate"): a part claiming the envelope type in another form than
+		// raw is InvalidRequest; a sealed: required service refuses an unsealed part (sealed_unsealed_part), before
+		// any task row or stream; an optional one marks it kontra.sealed = false.
+		parts, err := sealedCallerParts(i.Svc.Sealed, msg.Parts)
+		if err != nil {
+			return ctx, nil, err
+		}
+		msg.Parts = parts
 		cp := *p
 		cp.Message = &msg
 		cp.Metadata = i.Rules.StripCaller(p.Metadata)
@@ -307,6 +352,179 @@ func codeForError(err error) int {
 	return -32603
 }
 
+// largeParts is the interceptor that stores large parts (spec §10.4, D167): with a bucket, each part over MaxPart
+// of a new task's first message becomes an object of the task Admission pre-minted, and each of an input-required
+// task's follow-up an object of that task, replaced in the request by its url part kontra-blob:<ref>; the rows are
+// pending on the returned context, and the transaction that creates the task (store.Log.CreateTask) or stores the
+// follow-up's work item (store.Log.InsertWorkItem) writes them. For a new task, the request's hash as the caller
+// sent it goes with them (store.WithRequestHash), so a resend is still recognized whatever refs its parts were
+// given (spec §15); a resend is recognized here first, and stores nothing.
+//
+// It comes after every interceptor that can refuse a message, so none of them leaves an object behind. a2a-go
+// (a message without an id, a task that ended meanwhile) and the work queue (a refused follow-up, a failed write,
+// the later of two identical requests, answered with the earlier one's task) still can: After settles what the
+// request stored once it is over, deleting the objects no record of their task names, with their rows (spec §5.4:
+// a task's objects go with it, and a request that made no task, or whose message was not taken, has none).
+type largeParts struct {
+	a2asrv.PassthroughCallInterceptor
+	i *Interceptors
+}
+
+// followUpKey carries the task row the followUp interceptor read for a follow-up it lets through.
+type followUpKey struct{}
+
+// storedKey carries what largeParts stored for the request.
+type storedKey struct{}
+
+func (l *largeParts) Before(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	i := l.i
+	if i.Bucket == nil || (cc.Method() != "SendMessage" && cc.Method() != "SendStreamingMessage") {
+		return ctx, nil, nil
+	}
+	r, ok := req.Payload.(*a2a.SendMessageRequest)
+	if !ok || r == nil || r.Message == nil || !slices.ContainsFunc(r.Message.Parts, i.large) {
+		return ctx, nil, nil
+	}
+	var tenant, task uuid.UUID
+	if r.Message.TaskID != "" {
+		row, ok := ctx.Value(followUpKey{}).(*store.TaskRow)
+		if !ok {
+			// followUp lets a follow-up through only once it read the caller's task, input-required.
+			return ctx, nil, a2a.NewError(a2a.ErrInternalError, "the follow-up's task was not read")
+		}
+		tenant, task = row.TenantID, row.ID
+	} else {
+		adm, ok := hooks.AdmittedFrom(ctx)
+		if !ok {
+			return ctx, nil, nil // the work queue refuses a new task without Admission's decision
+		}
+		var err error
+		if task, err = ids.ParseTaskID(adm.TaskID); err != nil {
+			return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		}
+		hash, err := store.RequestHash(r)
+		if err != nil {
+			return ctx, nil, err
+		}
+		ctx = store.WithRequestHash(ctx, hash)
+		o, err := CallerOwner(ctx)
+		if err != nil {
+			return ctx, nil, err
+		}
+		prev, err := i.Log.FindResend(ctx, i.Svc, o, r.Message.ID, hash, time.Now().Add(-lifecycle.ResendWindow))
+		if err != nil {
+			return ctx, nil, err
+		}
+		if prev != nil {
+			return ctx, nil, nil // a resend: the work queue answers it with its task, and nothing is stored
+		}
+		tenant = i.Svc.TenantID
+	}
+	ctx, msg, st, err := i.externalize(ctx, r.Message, tenant, task)
+	if err != nil {
+		return ctx, nil, err
+	}
+	cp := *r
+	cp.Message = msg
+	req.Payload = &cp
+	return context.WithValue(ctx, storedKey{}, st), nil, nil
+}
+
+// After settles the request's objects once it is over: the first answer (a blocking SendMessage's, a stream's
+// first event) or its error, after the work queue's Write returned.
+func (l *largeParts) After(ctx context.Context, _ *a2asrv.CallContext, _ *a2asrv.Response) error {
+	if st, ok := ctx.Value(storedKey{}).(*storedParts); ok {
+		st.once.Do(func() { l.i.settle(ctx, st) })
+	}
+	return nil
+}
+
+// large reports whether a part goes to the bucket.
+func (i *Interceptors) large(p *a2a.Part) bool { return partSize(p) > i.maxPart() }
+
+// storedParts is what one request stored in the bucket: the objects of its message's large parts, all of one
+// task.
+type storedParts struct {
+	tenant, task uuid.UUID
+	rows         []blob.Row
+	once         sync.Once
+}
+
+func (s *storedParts) refs() []blob.Ref {
+	out := make([]blob.Ref, 0, len(s.rows))
+	for _, r := range s.rows {
+		out = append(out, r.Ref)
+	}
+	return out
+}
+
+// settleTimeout bounds the settling of one request's objects, which runs detached from the caller's cancellation:
+// a caller that went away must not leave them behind.
+const settleTimeout = 30 * time.Second
+
+// externalize stores every part of msg over MaxPart in the bucket as an object of task and returns a copy of msg
+// with each replaced by its url part kontra-blob:<ref> (spec §10.4, D167), and what it stored. The objects' rows
+// are pending on the returned context, for the transaction that stores the message. A bucket that refuses an
+// object is the caller's -32603: the objects already stored for msg are deleted, and nothing is stored for it.
+func (i *Interceptors) externalize(ctx context.Context, msg *a2a.Message, tenant, task uuid.UUID) (context.Context, *a2a.Message, *storedParts, error) {
+	pending := blob.PendingFrom(ctx)
+	if pending == nil {
+		pending = blob.NewPending()
+		ctx = blob.WithPending(ctx, pending)
+	}
+	out := *msg
+	out.Parts = append(a2a.ContentParts(nil), msg.Parts...)
+	st := &storedParts{tenant: tenant, task: task}
+	for n, p := range out.Parts {
+		if !i.large(p) {
+			continue
+		}
+		np, row, err := blob.Externalize(ctx, i.Bucket, tenant, task, p)
+		if err != nil {
+			slog.Default().Warn("relay: a caller part over the inline limit could not be stored in the bucket", "task", task, "error", err)
+			i.deleteObjects(ctx, st, st.refs())
+			return ctx, nil, nil, a2a.NewError(a2a.ErrInternalError, "the part could not be stored")
+		}
+		pending.Add(row)
+		st.rows = append(st.rows, row)
+		out.Parts[n] = np
+	}
+	return ctx, &out, st, nil
+}
+
+// settle deletes the objects st holds that no record of their task names now that the request is over, with their
+// blobs rows (store.Log.DropUnnamedBlobs): those of a new task whose row was never written, or of a message whose
+// work item was deleted (refused). A message the work queue or the review window may still take keeps its work
+// item, and so its objects, which retention deletes with the task otherwise (D66).
+func (i *Interceptors) settle(ctx context.Context, st *storedParts) {
+	if st == nil || len(st.rows) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	gone, err := i.Log.DropUnnamedBlobs(ctx, st.task, st.refs())
+	if err != nil {
+		slog.Default().Warn("relay: the objects of a request that was not taken could not be settled", "task", st.task, "error", err)
+		return
+	}
+	i.deleteObjects(ctx, st, gone)
+}
+
+// deleteObjects deletes objects of st's task by key, best effort: one left is logged (retention deletes it with
+// its task, when the task exists).
+func (i *Interceptors) deleteObjects(ctx context.Context, st *storedParts, refs []blob.Ref) {
+	if len(refs) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), settleTimeout)
+	defer cancel()
+	for _, ref := range refs {
+		if err := i.Bucket.Delete(ctx, blob.Key{Tenant: st.tenant, Task: st.task, Ref: ref}); err != nil {
+			slog.Default().Warn("relay: an object of a request that was not taken could not be deleted", "task", st.task, "ref", ref, "error", err)
+		}
+	}
+}
+
 func (i *Interceptors) followUp(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if cc.Method() != "SendMessage" && cc.Method() != "SendStreamingMessage" {
 		return ctx, nil, nil
@@ -332,7 +550,8 @@ func (i *Interceptors) followUp(ctx context.Context, cc *a2asrv.CallContext, req
 	}
 	switch row.State {
 	case store.StateInputRequired:
-		return ctx, nil, nil
+		// The follow-up may be taken: largeParts stores its large parts once pushURLs has checked it.
+		return context.WithValue(ctx, followUpKey{}, row), nil, nil
 	case store.StateSubmitted, store.StateWorking:
 		return ctx, nil, unsupported("the task is running; it takes no input until it asks for some")
 	case store.StateAuthRequired:
@@ -366,6 +585,17 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	}
 	stored := *r
 	msg := *r.Message
+	var parts *storedParts
+	if i.Bucket != nil && slices.ContainsFunc(msg.Parts, i.large) {
+		// The work item holds the message as the window's append will log it, so its large parts go to the bucket
+		// now, their rows with the item (spec §10.4, D167); a message the window does not take has them deleted
+		// with its item (settle).
+		var m *a2a.Message
+		if ctx, m, parts, err = i.externalize(ctx, &msg, row.TenantID, row.ID); err != nil {
+			return nil, err
+		}
+		msg = *m
+	}
 	msg.TaskID, msg.ContextID = a2a.TaskID(row.ID.String()), row.ContextID
 	stored.Message = &msg
 	if r.Config != nil && r.Config.PushConfig != nil {
@@ -382,6 +612,7 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	if err := i.Log.InsertWorkItem(ctx, nil, store.WorkItem{
 		ID: wid, TaskID: row.ID, Kind: store.WorkExecute, Payload: store.WorkPayload{Request: &stored, Owner: o},
 	}); err != nil {
+		i.settle(ctx, parts)
 		return nil, err
 	}
 	res, err := i.Reviews.ReviewMessage(ctx, a2a.TaskID(row.ID.String()), lifecycle.ReviewMessageUpdate{
@@ -390,12 +621,15 @@ func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequ
 	switch {
 	case errors.Is(err, a2a.ErrUnsupportedOperation):
 		i.deleteItem(ctx, wid, row.ID)
+		i.settle(ctx, parts)
 		return nil, unsupported("the task is completed and no review window is open")
 	case err != nil:
-		// Not accepted (or not completed) within 10 s: the item is kept, the workflow may still take it (D66).
+		// Not accepted (or not completed) within 10 s: the item is kept, the workflow may still take it (D66), and
+		// so are its objects.
 		return nil, notInTime("the review message was not accepted in time", err)
 	case !res.Accepted:
 		i.deleteItem(ctx, wid, row.ID)
+		i.settle(ctx, parts)
 		return nil, unsupported("the review message was not accepted")
 	}
 	after, err := i.Log.LoadScoped(ctx, i.Svc, o, row.ID)
@@ -528,6 +762,54 @@ func upstreamText(e *lifecycle.UpstreamError, fallback string) string {
 		return fallback
 	}
 	return upstream.Cap(e.Message)
+}
+
+// renderAnswers is egress rendering for a2a-go's answers (spec §10.4, D167, D181): on the way out, every
+// kontra-blob:<ref> part of a task, a message, a list of tasks or a streamed event becomes a presigned GET valid
+// 15 minutes, for the task its blobs row names only (blob.Renderer). It is first in the chain, so its After
+// runs last and sees every answer, the interceptors' early ones (a cancel's task, a review message's, the
+// stored task finishedTurn answers) included. A request that arrived on a hiring node's stream keeps the refs
+// (blob.WithKeepRefs, M3 WP-03).
+type renderAnswers struct {
+	a2asrv.PassthroughCallInterceptor
+	render *blob.Renderer
+}
+
+func (a *renderAnswers) After(ctx context.Context, _ *a2asrv.CallContext, resp *a2asrv.Response) error {
+	if a.render == nil || resp.Payload == nil {
+		return nil
+	}
+	var (
+		out any
+		err error
+	)
+	switch p := resp.Payload.(type) {
+	case *a2a.Task:
+		out, err = a.render.Task(ctx, p)
+	case *a2a.ListTasksResponse:
+		if p == nil {
+			return nil
+		}
+		cp := *p
+		cp.Tasks = make([]*a2a.Task, len(p.Tasks))
+		for n, t := range p.Tasks {
+			if cp.Tasks[n], err = a.render.Task(ctx, t); err != nil {
+				break
+			}
+		}
+		out = &cp
+	case a2a.Event:
+		out, err = a.render.Event(ctx, p)
+	default:
+		return nil
+	}
+	if err != nil {
+		slog.Default().Warn("relay: an answer's parts could not be rendered", "error", err)
+		resp.Payload, resp.Err = nil, a2a.NewError(a2a.ErrInternalError, "the task's parts could not be rendered")
+		return nil
+	}
+	resp.Payload = out
+	return nil
 }
 
 // finishedTurn works around a race in a2a-go v2.7.0's remote subscription (contract test P15): when a turn

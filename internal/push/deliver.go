@@ -20,6 +20,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/ssrf"
@@ -88,6 +89,10 @@ type DelivererOptions struct {
 	// Waker wakes an idle activity when the task's log grows (pg.Listener). Without one it re-reads every
 	// IdlePoll.
 	Waker store.TaskWaker
+	// Render renders a snapshot's kontra-blob: parts as presigned GETs (spec §10.4: push receivers get them, as
+	// callers do), again at every attempt, so a retry hours later carries URLs that are still valid. Nil renders
+	// nothing.
+	Render *blob.Renderer
 	// Logger receives delivery failures and give-ups; it never receives a URL, a token or credentials.
 	Logger *slog.Logger
 
@@ -366,7 +371,19 @@ func (r *run) run(ctx context.Context) (lifecycle.PushResult, error) {
 			if err != nil {
 				return lifecycle.PushResult{}, fmt.Errorf("push_webhook: encode the snapshot of task %s at %d: %w", r.taskID, ev.Seq, err)
 			}
-			stopped, err := r.deliver(ctx, ev.Seq, body)
+			encode := func(context.Context) ([]byte, error) { return body, nil }
+			if bytes.Contains(body, []byte(blob.URIScheme)) {
+				// Parts in the bucket: rendered for each attempt, the folded task copied only where it changes.
+				seq := ev.Seq
+				encode = func(ctx context.Context) ([]byte, error) {
+					t, err := r.d.opts.Render.Task(ctx, f.Task())
+					if err != nil {
+						return nil, fmt.Errorf("push_webhook: render the snapshot of task %s at %d: %w", r.taskID, seq, err)
+					}
+					return json.Marshal(a2a.StreamResponse{Event: t})
+				}
+			}
+			stopped, err := r.deliver(ctx, ev.Seq, encode)
 			if err != nil {
 				return lifecycle.PushResult{}, err
 			}
@@ -467,9 +484,10 @@ func (r *run) wait(ctx context.Context, d time.Duration) (string, error) {
 	return "", nil
 }
 
-// deliver POSTs body, the snapshot at seq, until it is delivered, the config is deleted, or the seq's budget
-// runs out. It returns "" when delivered (delivered_seq written), else StoppedDeleted or StoppedFailed.
-func (r *run) deliver(ctx context.Context, seq int64, body []byte) (string, error) {
+// deliver POSTs the snapshot at seq, as encode writes it for each attempt, until it is delivered, the config is
+// deleted, or the seq's budget runs out. It returns "" when delivered (delivered_seq written), else
+// StoppedDeleted or StoppedFailed.
+func (r *run) deliver(ctx context.Context, seq int64, encode func(context.Context) ([]byte, error)) (string, error) {
 	wait := r.d.opts.RetryMin
 	if r.prog.failing() && r.prog.FailingSeq <= seq && r.prog.Wait > 0 {
 		wait = r.prog.Wait
@@ -490,6 +508,10 @@ func (r *run) deliver(ctx context.Context, seq int64, body []byte) (string, erro
 		host := destination(cfg.cfg.URL)
 		if stopped, err := r.rate(ctx, host); err != nil || stopped != "" {
 			return stopped, err
+		}
+		body, err := encode(ctx)
+		if err != nil {
+			return "", r.ctxErr(ctx, err)
 		}
 		status, perr := r.d.post(ctx, cfg.cfg, body)
 		if ctx.Err() != nil {

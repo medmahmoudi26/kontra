@@ -8,18 +8,48 @@ import (
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// sessionPrefix starts NOTIFY kontra_tunnel's (pg.ChannelTunnel) payload for a superseded session; the
-// enrollment's is enroll.EnrolledPayload. Both are gate-internal: see Registry.
-const sessionPrefix = "session:"
+// sessionPrefix starts NOTIFY kontra_tunnel's (pg.ChannelTunnel) payload for a superseded session, mcpPrefix
+// its payload for a change in the nodes serving an MCP service; the enrollment's is enroll.EnrolledPayload. All
+// are gate-internal: see Registry.
+const (
+	sessionPrefix = "session:"
+	mcpPrefix     = "mcp:"
+)
 
 // SessionPayload is NOTIFY kontra_tunnel's payload for a superseded session, "session:<session_id>": the
 // replica holding it closes it (its row is already deleted).
 func SessionPayload(id uuid.UUID) string { return sessionPrefix + id.String() }
+
+// MCPChangedPayload is NOTIFY kontra_tunnel's payload for a session serving an MCP service that became a candidate
+// on replica, or was removed there: "mcp:<tenant_id>/<service>/<replica_id>". Every other replica runs its
+// OnMCPChange callbacks for the service (the MCP relay drops the service's era, relay.md §11.12, D177: through the
+// peer hop every replica uses the nodes another one holds); the sending replica ran them already.
+func MCPChangedPayload(tenantID uuid.UUID, service, replica string) string {
+	return mcpPrefix + tenantID.String() + "/" + service + "/" + replica
+}
+
+// parseMCPChanged reads an MCPChangedPayload; ok is false for anything else, a malformed one included.
+func parseMCPChanged(payload string) (tenantID uuid.UUID, service, replica string, ok bool) {
+	rest, ok := strings.CutPrefix(payload, mcpPrefix)
+	if !ok {
+		return uuid.Nil, "", "", false
+	}
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) != 3 || !config.NameRE.MatchString(parts[1]) || parts[2] == "" {
+		return uuid.Nil, "", "", false
+	}
+	tid, err := uuid.Parse(parts[0])
+	if err != nil {
+		return uuid.Nil, "", "", false
+	}
+	return tid, parts[1], parts[2], true
+}
 
 // Revoked applies one revocation (enroll.Revocations.Subscribe), §12. It runs on the goroutine that learned
 // the revocation and does not wait on the network or the database: what does is done on goroutines of its
@@ -53,6 +83,9 @@ func (r *Registry) revokeKey(s *Session, reason string) {
 	if reason == enroll.ReasonRotated {
 		why, tell = "its key's rotation overlap ended (§12)", false
 	}
+	// Either way a pinned MCP session closes revoked (relay.md §6.1: "the key or binding is revoked or the key is
+	// past its rotation overlap"), and a stream refused from now on says so (ErrRevoked).
+	s.markRevoked()
 	if !s.shut(why) {
 		return
 	}
@@ -64,13 +97,15 @@ func (r *Registry) revokeKey(s *Session, reason string) {
 				log.Debug("tunnel session: {t: revoked} not delivered", "error", err)
 			}
 		}
-		r.closeMCP(s.ID, "")
+		if s.hostedMCP() {
+			r.closeMCP(s.ID, "", mcpRevoked)
+		}
 		_ = s.close(why, false)
 	})
 }
 
 func (r *Registry) revokeBinding(s *Session, service string) {
-	why := fmt.Errorf("%w: the binding of key %s to %s was revoked (§12)", ErrSessionGone, s.KeyID, service)
+	why := fmt.Errorf("%w: the binding of key %s to %s was revoked (§12)", ErrRevoked, s.KeyID, service)
 	if !s.dropService(service, why) {
 		return
 	}
@@ -86,24 +121,45 @@ func (r *Registry) revokeBinding(s *Session, service string) {
 			}
 			cancel()
 		}
-		r.closeMCP(s.ID, service)
+		r.closeMCP(s.ID, service, mcpRevoked)
 		if err := s.WriteControl(tunnel.Control{T: tunnel.CtlRevoked, Service: service}); err != nil {
 			log.Debug("tunnel session: {t: revoked, service} not delivered", "error", err)
 		}
 	})
 }
 
-// closeMCP closes the open mcp_sessions rows pinned to a session (and service, when not empty) as revoked
-// (§12). MCP hosting is M3, so in M2 there are none; the statement keeps §12's order for when there are.
-func (r *Registry) closeMCP(session uuid.UUID, service string) {
+// APIKeyRevoked applies an API key revocation (auth.RevocationCache.Subscribe: NOTIFY kontra_revoke
+// 'apikey:<id>', or the re-read that found it), §12: every session of this replica hiring with that key gets 401
+// on each later stream it opens, and is told {"t": "auth_revoked"} on its control stream. Hosting on the
+// sessions is unaffected. It does not wait on the network (the message goes out on a goroutine of its own).
+func (r *Registry) APIKeyRevoked(id uuid.UUID) {
+	for _, s := range r.all() {
+		if s.hire != nil && s.hire.KeyID != nil && *s.hire.KeyID == id {
+			s.authRevoked(r.log)
+		}
+	}
+}
+
+// mcp_sessions.close_reason values the registry writes (relay.md §11.2).
+const (
+	mcpRevoked    = "revoked"
+	mcpTunnelLost = "tunnel_lost"
+)
+
+// closeMCP closes the open mcp_sessions rows pinned to a session (and service, when not empty) with reason:
+// revoked on a key or binding revocation (§12, before the node is told), tunnel_lost when the session closes for
+// any other reason (relay.md §11.2: a pinned session dies with its tunnel). Closing a closed row changes nothing,
+// so the revocation's reason stands when the session's own close follows it.
+func (r *Registry) closeMCP(session uuid.UUID, service, reason string) {
 	if r.cfg.DB == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
 	defer cancel()
-	if _, err := r.cfg.DB.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = 'revoked'
-		where tunnel_session = $1 and closed_at is null and ($2 = '' or service = $2)`, session, service); err != nil {
-		r.log.Warn("mcp_sessions pinned to a revoked tunnel session not closed", obs.KeyTunnelSession, session, "service", service, "error", err)
+	if _, err := r.cfg.DB.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = $3
+		where tunnel_session = $1 and closed_at is null and ($2 = '' or service = $2)`, session, service, reason); err != nil {
+		r.log.Warn("mcp_sessions pinned to a tunnel session not closed", obs.KeyTunnelSession, session, "service", service,
+			"reason", reason, "error", err)
 	}
 }
 
@@ -126,8 +182,10 @@ func (r *Registry) Enrolled(b enroll.Binding) {
 // the replica whose handshake superseded a session held here, closes it (its row is gone already);
 // 'enrolled:<key_id>/<tenant_id>/<service>' (enroll.EnrolledPayload), sent by the admission that committed
 // the binding, is told to this replica's sessions hosting the service (§5), on every replica, the admitting
-// one included. Anything else is ignored. It never waits on the database (pg.Listener runs every channel's
-// callbacks on one goroutine).
+// one included; 'mcp:<tenant_id>/<service>/<replica_id>' (MCPChangedPayload), sent by a replica where a node of
+// the MCP service connected or disconnected, runs the OnMCPChange callbacks here, unless this replica sent it (it
+// ran them when the change happened). Anything else is ignored. It never waits on the database (pg.Listener runs
+// every channel's callbacks on one goroutine).
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): see Registry; this channel is not tunnel wire
 // protocol.
@@ -143,6 +201,10 @@ func (r *Registry) Notify(payload string) {
 			s.rowGone = true // the superseding transaction deleted it
 			s.mu.Unlock()
 			r.goAsync(func() { _ = s.Close("superseded by a newer session of its key on another replica (§11)") })
+		}
+	case strings.HasPrefix(payload, mcpPrefix):
+		if tenantID, service, from, ok := parseMCPChanged(payload); ok && from != r.cfg.ReplicaID {
+			r.runMCP(tenantID, []string{service})
 		}
 	default:
 		if b, ok := enroll.ParseEnrolledPayload(payload); ok {

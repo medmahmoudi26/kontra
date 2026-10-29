@@ -1,6 +1,7 @@
 {{- include "kontra.validate" . }}
-# The gate: one replica, replaced with Recreate (the ACME cache volume is one replica's, D70). The init
-# container applies the migrations; the gate then serves and, on SIGTERM, drains (spec/relay.md §14.3).
+# The gate: gate.replicas (one by default), replaced with Recreate while the ACME cache volume is one replica's
+# (D70); several replicas reach each other's tunnel sessions through the peer port (spec/relay.md §11.2, D183).
+# The init container applies the migrations; the gate then serves and, on SIGTERM, drains (spec/relay.md §14.3).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -9,10 +10,14 @@ metadata:
   labels:
     {{- include "kontra.labels" (dict "ctx" . "component" "gate") | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ int .Values.gate.replicas }}
   revisionHistoryLimit: 3
   strategy:
+    {{- if .Values.persistence.enabled }}
     type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "kontra.selectorLabels" (dict "ctx" . "component" "gate") | nindent 6 }}
@@ -71,6 +76,15 @@ spec:
           args: [serve, -f, /etc/kontra/kontra.yaml]
           env:
             {{- include "kontra.gateEnv" . | nindent 12 }}
+            {{- if .Values.gate.peer.enabled }}
+            # The peer hop's shared secret (spec/relay.md §11.2, D183): kontra.yaml's peer.secret_env names it. The
+            # gate container only: the migrations do not use it.
+            - name: {{ .Values.gate.peer.secretEnv }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gate.peer.secret.existingSecret }}
+                  key: {{ .Values.gate.peer.secret.key }}
+            {{- end }}
           {{- with .Values.gate.envFrom }}
           envFrom:
             {{- toYaml . | nindent 12 }}
@@ -82,6 +96,11 @@ spec:
             - name: metrics
               containerPort: {{ .Values.gate.metricsPort }}
               protocol: TCP
+            {{- if .Values.gate.peer.enabled }}
+            - name: peer
+              containerPort: {{ .Values.gate.peer.port }}
+              protocol: TCP
+            {{- end }}
           {{- with .Values.gate.readinessProbe }}
           readinessProbe:
             {{- toYaml . | nindent 12 }}
@@ -104,6 +123,11 @@ spec:
               mountPath: /var/lib/kontra-gate
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.signingKey.existingSecret }}
+            - name: signing-key
+              mountPath: /etc/kontra/signing
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           secret:
@@ -121,3 +145,13 @@ spec:
           {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- if .Values.signingKey.existingSecret }}
+        # The card-signing key (D166, D183): kontra.yaml's signing_key: file:/etc/kontra/signing/kontra.key.
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.signingKey.existingSecret }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.signingKey.key }}
+                path: kontra.key
+        {{- end }}

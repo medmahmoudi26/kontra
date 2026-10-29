@@ -663,3 +663,105 @@ func TestRevokedBeforeStart(t *testing.T) {
 		t.Errorf("revoked a day ago: %v", err)
 	}
 }
+
+// Revalidate is the per-request check of a tunnel session's hiring API key (spec/relay.md §2.3, spec/tunnel.md
+// §12). A held key is answered from memory after one read while the cache is fresh, and every re-read checks
+// its row: a revocation stamped a day ago (no NOTIFY, outside the cache's window) is refused after the next
+// re-read and stays refused while the key is held. Revoke on the replica tells the subscribers once.
+func TestRevalidateHeldKey(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	rc := NewRevocationCache(e.pool)
+	var told []uuid.UUID
+	rc.Subscribe(func(id uuid.UUID) { told = append(told, id) })
+	rc.Catchup()
+	keys := NewAPIKeys(e.pool, rc)
+	m := e.mint(t, keys, MintRequest{Name: "hirer"})
+	p, err := keys.Authenticate(ctx, m.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := keys.Hold(p)
+	defer release()
+	got, err := keys.Revalidate(ctx, p)
+	if err != nil || got.ID != p.ID || got.BuyerID != m.BuyerID || !got.MayHire() || got.TenantSlug != "default" {
+		t.Fatalf("Revalidate = %+v, %v", got, err)
+	}
+	// From memory: a revocation behind the replica's back is not seen before a re-read.
+	if _, err := e.pool.Exec(ctx, `update kontra.api_keys set revoked_at = now() - interval '1 day' where id = $1`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.Revalidate(ctx, p); err != nil {
+		t.Fatalf("before any re-read the held key is answered from memory: %v", err)
+	}
+	rc.Catchup()
+	if _, err := keys.Revalidate(ctx, p); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("after a re-read: %v, want ErrUnauthenticated", err)
+	}
+	// Un-revoking the row behind its back does not bring the held key back: it ended while held.
+	if _, err := e.pool.Exec(ctx, `update kontra.api_keys set revoked_at = null where id = $1`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	rc.Catchup()
+	if _, err := keys.Revalidate(ctx, p); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("an ended held key came back: %v", err)
+	}
+
+	// A key that is not held is read from its row on every call.
+	m2 := e.mint(t, keys, MintRequest{Name: "other"})
+	p2, err := keys.Authenticate(ctx, m2.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.Revalidate(ctx, p2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `update kontra.api_keys set expires_at = now() - interval '1 second' where id = $1`, m2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keys.Revalidate(ctx, p2); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("an expired key that is not held: %v", err)
+	}
+
+	// Revoke on this replica: refused at once, and the subscribers are told once (the NOTIFY that follows
+	// adds nothing).
+	m3 := e.mint(t, keys, MintRequest{Name: "third"})
+	p3, err := keys.Authenticate(ctx, m3.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keys.Hold(p3)()
+	told = nil
+	if _, err := keys.Revoke(ctx, m3.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	rc.Notify(RevokePayload(m3.ID))
+	rc.Catchup()
+	if len(told) != 1 || told[0] != m3.ID {
+		t.Fatalf("subscribers told %v, want %s once", told, m3.ID)
+	}
+	if _, err := keys.Revalidate(ctx, p3); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("a key revoked on this replica: %v", err)
+	}
+	keys.Wait()
+}
+
+// A re-read that finds a revocation tells the subscribers (a NOTIFY that never arrived).
+func TestRevocationSubscribeFromReRead(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	rc := NewRevocationCache(e.pool)
+	var told []uuid.UUID
+	rc.Subscribe(func(id uuid.UUID) { told = append(told, id) })
+	rc.Catchup()
+	keys := NewAPIKeys(e.pool, nil)
+	m := e.mint(t, keys, MintRequest{Name: "demo"})
+	if _, err := e.pool.Exec(ctx, `update kontra.api_keys set revoked_at = now() where id = $1`, m.ID); err != nil {
+		t.Fatal(err)
+	}
+	rc.Catchup()
+	rc.Catchup()
+	if len(told) != 1 || told[0] != m.ID {
+		t.Fatalf("subscribers told %v, want %s once", told, m.ID)
+	}
+}

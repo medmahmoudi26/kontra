@@ -26,6 +26,16 @@ import (
 // and no stream is opened.
 var ErrSessionGone = errors.New("tunnelgate: the tunnel session is gone or no longer serves the service")
 
+// ErrRevoked wraps ErrSessionGone for a session whose key or binding was revoked, or whose key is past its
+// rotation's overlap (relay.md §6.1: a pinned MCP session's row then closes revoked, not tunnel_lost, M3 WP-04).
+// For A2A it is a lost session like any other.
+var ErrRevoked = fmt.Errorf("%w: its key or binding was revoked", ErrSessionGone)
+
+// ErrCheckUnavailable wraps ErrSessionGone for a key_scope check that could not read the key's revocation state
+// (the view not fresh and Postgres not answering): the stream is refused (fail closed), but nothing says the
+// session is gone, so a pinned MCP session's row is left open.
+var ErrCheckUnavailable = fmt.Errorf("%w: the key's revocation state cannot be read", ErrSessionGone)
+
 // Timing of the registry.
 const (
 	// CardWait bounds the card fetch through a session that has just connected, before its tunnels row
@@ -67,12 +77,14 @@ type RegistryConfig struct {
 // across replicas they follow the replicas' clocks (NTP), so a skew larger than the time between two
 // handshakes of one key can order them wrongly: the wrongly refused session closes, and its node redials.
 //
-// SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to act
-// on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
+// SPEC-CONFLICT (D138, D199; M2 plan, confirmed conflict on §11 and §5): tunnel.md names no way for one replica to
+// act on a session another replica holds (a supersede, an "enrolled" notice): kontra_revoke's payloads cover keys,
 // bindings and API keys only. The closest faithful behaviour is a gate-internal NOTIFY channel between
-// replicas, pg.ChannelTunnel ('session:<id>', 'enrolled:<key_id>/<tenant_id>/<service>'): Postgres between
-// replicas, not tunnel wire protocol, and no migration. Without it a superseded session on another replica
-// would serve sticky follow-ups until that replica's 60 s row check; the row check stays as the fallback.
+// replicas, pg.ChannelTunnel ('session:<id>', 'enrolled:<key_id>/<tenant_id>/<service>', and since M3
+// 'mcp:<tenant_id>/<service>/<replica_id>', a node of an MCP service connecting or disconnecting, which drops the
+// service's era on every replica, relay.md §11.12, D177): Postgres between replicas, not tunnel wire protocol, and no
+// migration. Without it a superseded session on another replica would serve sticky follow-ups until that replica's
+// 60 s row check; the row check stays as the fallback.
 type Registry struct {
 	cfg   RegistryConfig
 	log   *slog.Logger
@@ -84,6 +96,7 @@ type Registry struct {
 	drained   bool // Drain ran: a session added later is told at once
 	closing   bool // CloseAll ran: Add refuses
 	onConnect []func(ctx context.Context, tenantID uuid.UUID, service string)
+	onMCP     []func(tenantID uuid.UUID, service string)
 
 	async sync.WaitGroup // control messages and revocation writes in flight
 }
@@ -131,9 +144,11 @@ var errClosing = errors.New("tunnelgate: the replica is shutting down its tunnel
 //     rows of the key's older sessions whose replica is not draining are deleted (superseded), with NOTIFY
 //     kontra_tunnel 'session:<id>' for those of other replicas; and the tunnels row (session_id, key_id,
 //     tenant_id, replica_id, services, hire_principal, cli_version) is inserted.
-//  5. After the commit: the superseded sessions of this replica are closed, whatever became of s meanwhile
-//     (their rows are gone); then s, if it closed while its row went in, has its row deleted again; and a
-//     session added after Drain is told {"t": "drain"} (§13).
+//  5. After the commit: s is registered (Get finds it) at once, since its row is a candidate on every replica from
+//     the commit on; then the superseded sessions of this replica are closed, whatever became of s meanwhile
+//     (their rows are gone; closing one closes its pinned MCP sessions in Postgres, relay.md §11.2, which s's
+//     registration does not wait for); then s, if it closed while its row went in, has its row deleted again; and
+//     a session added after Drain is told {"t": "drain"} (§13).
 //
 // The enrollments of the session's handshake are not Add's to announce: Admit's transaction sends NOTIFY
 // kontra_tunnel 'enrolled:…' (enroll.EnrolledPayload), which every replica applies, this one included (§5),
@@ -152,6 +167,9 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 		for _, sv := range served {
 			s.served[sv.Name] = sv.Kind
 		}
+	}
+	for _, kind := range s.served {
+		s.hostsMCP = s.hostsMCP || kind == tunnel.KindMCP
 	}
 	s.mu.Unlock()
 
@@ -188,6 +206,10 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 	if err != nil {
 		return fail(err)
 	}
+	s.mu.Lock()
+	s.registered = true
+	closed := s.closed
+	s.mu.Unlock()
 	// The commit deleted their rows: they close whatever becomes of s.
 	for _, id := range superseded {
 		if old := r.lookup(id); old != nil {
@@ -197,10 +219,6 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 			_ = old.Close("superseded by session " + s.ID.String() + " of its key (§11)")
 		}
 	}
-	s.mu.Lock()
-	s.registered = true
-	closed := s.closed
-	s.mu.Unlock()
 	r.mu.Lock()
 	closing, drained := r.closing, r.drained
 	r.mu.Unlock()
@@ -221,7 +239,63 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 	if drained {
 		r.tellDrain(s)
 	}
+	r.mcpChanged(s)
 	return nil
+}
+
+// OnMCPChange registers fn to run, once per MCP service of the session, when a session serving MCP services becomes a
+// candidate (Add) and when it is removed, on this replica and on every other one (NOTIFY kontra_tunnel
+// MCPChangedPayload): the MCP relay drops what it learned of those services' upstreams (their era, relay.md §11.12,
+// D177), since another node may answer next, and through the peer hop every replica uses the nodes another one holds.
+// fn must not block.
+func (r *Registry) OnMCPChange(fn func(tenantID uuid.UUID, service string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onMCP = append(r.onMCP, fn)
+}
+
+// mcpChanged runs the OnMCPChange callbacks for each MCP service s serves, then tells the other replicas (NOTIFY
+// kontra_tunnel 'mcp:…', which this replica's Notify does not apply a second time). A NOTIFY that is not sent, or
+// lost with a replica's LISTEN connection, leaves that replica's era stale for at most its period (RefreshTools);
+// the gate drops every era on a LISTEN reconnect.
+func (r *Registry) mcpChanged(s *Session) {
+	s.mu.Lock()
+	var names []string
+	for name, kind := range s.served {
+		if kind == tunnel.KindMCP {
+			names = append(names, name)
+		}
+	}
+	s.mu.Unlock()
+	if len(names) == 0 {
+		return
+	}
+	r.runMCP(s.TenantID, names)
+	if r.cfg.DB == nil {
+		return
+	}
+	payloads := make([]string, 0, len(names))
+	for _, name := range names {
+		payloads = append(payloads, MCPChangedPayload(s.TenantID, name, r.cfg.ReplicaID))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+	defer cancel()
+	if _, err := r.cfg.DB.Exec(ctx, `select pg_notify($1, p) from unnest($2::text[]) as p`, string(pg.ChannelTunnel), payloads); err != nil {
+		r.log.Warn("the other replicas were not told of a change in an MCP service's nodes; their eras stay until they expire",
+			obs.KeyTunnelSession, s.ID, "error", err)
+	}
+}
+
+// runMCP runs the OnMCPChange callbacks for each of the tenant's services.
+func (r *Registry) runMCP(tenantID uuid.UUID, services []string) {
+	r.mu.Lock()
+	fns := slices.Clone(r.onMCP)
+	r.mu.Unlock()
+	for _, name := range services {
+		for _, fn := range fns {
+			fn(tenantID, name)
+		}
+	}
 }
 
 // insert is Add's transaction; it returns the superseded sessions of this replica.
@@ -458,24 +532,48 @@ func (r *Registry) forget(s *Session) {
 func (r *Registry) remove(s *Session, reason string, logged bool) error {
 	r.forget(s)
 	s.mu.Lock()
-	del := !s.rowGone
-	s.rowGone = true
+	changed := s.hostsMCP && !s.mcpGone
+	s.mcpGone = s.mcpGone || s.hostsMCP
 	s.mu.Unlock()
 	if logged {
 		r.log.Info("tunnel session closed", obs.KeyTunnelSession, s.ID, "key_id", s.KeyID, "reason", reason)
 	}
-	if !del {
+	// The MCP sessions pinned to it die with it (relay.md §11.2): revoked when a revocation closed it (its own
+	// statement ran first, Revoked), tunnel_lost otherwise. Only a session that hosted an MCP service can have any.
+	// The OnMCPChange hooks run for its first removal only (a close and the multiplexer's end both remove it).
+	if s.hostedMCP() {
+		r.closeMCP(s.ID, "", s.closeReason())
+	}
+	if changed {
+		r.mcpChanged(s)
+	}
+	return r.dropRow(s)
+}
+
+// dropRow deletes a removed session's tunnels row unless this replica already has (or knows it gone). A session is
+// removed more than once, at the same time: Close shuts its multiplexer, which wakes Add's watcher, and both remove
+// it. They take rowMu in turn, so neither returns while the other's delete is in flight: Close's promise that the
+// row is gone when it returns holds whichever of them ran the delete, and a delete that failed is tried again by the
+// next remove. (A flag claimed before the delete let the second return at once, the row still there: CI's race job
+// saw Close return with it, TestRegistryRowsAndLastPing.)
+func (r *Registry) dropRow(s *Session) error {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	s.mu.Lock()
+	gone := s.rowGone
+	s.mu.Unlock()
+	if gone {
 		return nil
 	}
 	if err := r.deleteRow(s.ID); err != nil {
 		// The session itself is closed; Run's row check deletes the row once it has gone two rounds without
 		// a last_ping_at.
 		r.log.Warn("tunnel session closed but its tunnels row was not deleted", obs.KeyTunnelSession, s.ID, "error", err)
-		s.mu.Lock()
-		s.rowGone = false
-		s.mu.Unlock()
 		return fmt.Errorf("tunnelgate: delete the tunnels row of session %s: %w", s.ID, err)
 	}
+	s.mu.Lock()
+	s.rowGone = true
+	s.mu.Unlock()
 	return nil
 }
 
@@ -594,6 +692,11 @@ func (r *Registry) CloseAll(ctx context.Context) {
 	if r.cfg.DB != nil {
 		if _, err := r.cfg.DB.Exec(ctx, `delete from kontra.tunnels where replica_id = $1`, r.cfg.ReplicaID); err != nil {
 			r.log.Warn("tunnel sessions closed but their rows were not deleted; other replicas reap them with this replica's row", "error", err)
+		}
+		// The MCP sessions pinned to them die with them (relay.md §11.2); replica_id names the holder (D179).
+		if _, err := r.cfg.DB.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = 'tunnel_lost'
+			where replica_id = $1 and closed_at is null`, r.cfg.ReplicaID); err != nil {
+			r.log.Warn("mcp_sessions pinned to this replica's tunnel sessions not closed; the reaper closes them with its row", "error", err)
 		}
 	}
 	done := make(chan struct{})

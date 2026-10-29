@@ -2,6 +2,7 @@ package node
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -18,7 +19,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"kontra.sh/kontra/internal/a2awire"
+	"kontra.sh/kontra/internal/blob"
+	"kontra.sh/kontra/internal/mcproots"
+	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/sealed"
+	"kontra.sh/kontra/internal/sealing"
+	"kontra.sh/kontra/internal/stdiobridge"
+	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -49,7 +58,18 @@ var errSteered = errors.New("node: a dial to an address other than the --serve t
 //   - Kontra-Node and Kontra-Sealed-Reject are removed from the service's responses; a target that does not
 //     answer is 502 with Kontra-Node: target_unreachable.
 //
-// A url part in a body is never dialed: the node does not read bodies (D56).
+// MCP services (§10, M3 WP-05): a stdio service's exchanges go to its internal/stdiobridge Bridge, which runs the
+// server, one child per MCP session, and dials nothing; a URL service's go to its target like an A2A service's, the
+// gate's "/" to the target's endpoint path, through the roots filter of mcp.go (D173): the node reads an MCP body
+// with exact keys, answers the server's roots/list itself and never relays the client's roots; nothing else in an
+// MCP message is changed.
+//
+// A url part in a body is never dialed (D56). The node reads the JSON body of a request to an A2A service only to
+// find the parts the gate wrote as kontra-blob:<ref> (relay.md §10.4: a part over 256 KiB reaches a node so), and
+// replaces each with a raw part holding the object, fetched on a blob stream it opens in the same session
+// (§8.3; at most 64 MiB each, spilled to a temporary file over 8 MiB), so that a stock agent never sees the
+// scheme. A request whose part cannot be fetched is 400 and never reaches the service. Nothing else in a body is
+// read or changed.
 //
 // The target's transport never uses a proxy from the environment (HTTP_PROXY would otherwise carry a
 // non-loopback target's traffic to that proxy), dials only the target's own host:port whatever address it
@@ -83,14 +103,47 @@ type Proxy struct {
 	errLog     *log.Logger                // net/http's own lines about a stream
 	// onControl serves the session's control stream (op control, §13); nil refuses it.
 	onControl func(stream net.Conn, br *bufio.Reader)
+	// inline fetches the kontra-blob: parts of a request on the session's blob streams (setBlobOpener); nil
+	// forwards bodies as they came.
+	inline *a2awire.Inliner
+	// bridges serve the stdio MCP services (internal/stdiobridge), mcp the URL MCP services' roots filter (mcp.go);
+	// both per service, shared by forSession's proxies. A proxy is the owner of the stdio sessions opened through it
+	// (its tunnel session's, release).
+	bridges map[string]*stdiobridge.Bridge
+	mcp     map[string]*mcpURL
+	// seal is the hosting node's sealing (internal/sealing, ext-sealed.md §5): it opens the sealed parts of what the
+	// gate forwards and seals what the service answers; nil seals nothing. Shared by forSession's proxies.
+	seal *sealing.Hosting
 
 	mu       sync.Mutex
 	served   map[string]bool
 	inflight atomic.Int64
 }
 
-// NewProxy returns a proxy for the services the session serves.
+// MCPOptions configure the MCP services a proxy hosts (spec/tunnel.md §10): the stdio children's --env names,
+// --session-idle and --max-sessions, and each service's --roots.
+type MCPOptions struct {
+	Env         []string
+	SessionIdle time.Duration
+	MaxSessions int
+	Roots       map[string]*mcproots.Roots
+	// LookupEnv reads the node's environment for the children; nil is os.LookupEnv.
+	LookupEnv func(string) (string, bool)
+}
+
+// NewProxy returns a proxy for the services the session serves, its MCP services with MCPOptions' defaults.
 func NewProxy(serves []Serve, maxInflight int, logger *slog.Logger) *Proxy {
+	p, err := NewMCPProxy(serves, maxInflight, MCPOptions{}, logger)
+	if err != nil {
+		p.logger.Error("a hosted MCP service cannot be served", "err", err)
+	}
+	return p
+}
+
+// NewMCPProxy returns a proxy for the services the session serves, its MCP services configured by opts: a bridge per
+// stdio service (no child runs before an initialize) and a roots filter per URL service. On an error it still
+// returns the proxy, without the service that failed.
+func NewMCPProxy(serves []Serve, maxInflight int, opts MCPOptions, logger *slog.Logger) (*Proxy, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -104,15 +157,32 @@ func NewProxy(serves []Serve, maxInflight int, logger *slog.Logger) *Proxy {
 		transports:  make(map[string]*http.Transport, len(serves)),
 		errLog:      slog.NewLogLogger(logger.With("component", "node-http").Handler(), slog.LevelWarn),
 		served:      make(map[string]bool, len(serves)),
+		bridges:     map[string]*stdiobridge.Bridge{},
+		mcp:         map[string]*mcpURL{},
 	}
+	var errs []error
 	for _, s := range serves {
 		p.serves[s.Name] = s
 		p.served[s.Name] = true
 		if s.Target != nil {
 			p.transports[s.Name] = targetTransport(s.Target)
 		}
+		if s.Kind != tunnel.KindMCP {
+			continue
+		}
+		if s.Command == nil {
+			p.mcp[s.Name] = newMCPURL(s.Name, opts.Roots[s.Name], logger.With(obs.KeyService, s.Name))
+			continue
+		}
+		b, err := stdiobridge.New(stdiobridge.Config{Service: s.Name, Command: s.Command, Env: opts.Env, LookupEnv: opts.LookupEnv,
+			SessionIdle: opts.SessionIdle, MaxSessions: opts.MaxSessions, Roots: opts.Roots[s.Name]}, logger)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("--serve mcp:%s: %w", s.Name, err))
+			continue
+		}
+		p.bridges[s.Name] = b
 	}
-	return p
+	return p, errors.Join(errs...)
 }
 
 // forSession is a proxy for one session over the same targets and transports, serving served (the
@@ -128,15 +198,50 @@ func (p *Proxy) forSession(served []string, logger *slog.Logger) *Proxy {
 		transports:  p.transports,
 		errLog:      slog.NewLogLogger(logger.With("component", "node-http").Handler(), slog.LevelWarn),
 		served:      map[string]bool{},
+		bridges:     p.bridges,
+		mcp:         p.mcp,
+		seal:        p.seal,
 	}
 	q.SetServed(served)
 	return q
+}
+
+// setBlobOpener makes the proxy inline the kontra-blob: parts of A2A requests, fetched on blob streams that open
+// opens (the session's own, §8.3).
+func (p *Proxy) setBlobOpener(open func(ctx context.Context) (net.Conn, error)) {
+	p.inline = &a2awire.Inliner{Fetch: func(ctx context.Context, ref blob.Ref, w io.Writer) (int64, error) {
+		st, err := open(ctx)
+		if err != nil {
+			return 0, err
+		}
+		return blob.Fetch(ctx, st, ref, w)
+	}}
 }
 
 // closeIdle closes the targets' idle connections (the node is stopping).
 func (p *Proxy) closeIdle() {
 	for _, t := range p.transports {
 		t.CloseIdleConnections()
+	}
+}
+
+// close stops every stdio child and its process group (the node is stopping) and closes the targets' idle
+// connections.
+func (p *Proxy) close() {
+	var wg sync.WaitGroup
+	for _, b := range p.bridges {
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = b.Close() }()
+	}
+	wg.Wait()
+	p.closeIdle()
+}
+
+// release stops the stdio children of the MCP sessions opened through p, a session's proxy, whose tunnel session
+// closed: the gate ends those MCP sessions with it (relay.md §11.2), so nothing could reach them again.
+func (p *Proxy) release() {
+	for _, b := range p.bridges {
+		b.CloseOwner(p)
 	}
 }
 
@@ -154,11 +259,17 @@ func (p *Proxy) SetServed(names []string) {
 	}
 }
 
-// Drop removes one service from the served set (a binding the gate revoked, §12).
+// Drop removes one service from the served set (a binding the gate revoked, §12), and stops the stdio children of
+// the MCP sessions opened for it through p, with D184's sequence: the gate closed those sessions as revoked, and
+// nothing could reach the children again, which would otherwise hold their processes and --max-sessions places
+// until --session-idle. Another session's children are its own (a rotated key's revocation stops one session, D129).
 func (p *Proxy) Drop(name string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	delete(p.served, name)
+	p.mu.Unlock()
+	if b := p.bridges[name]; b != nil {
+		b.CloseOwner(p)
+	}
 }
 
 // Served is the served set, for a log line.
@@ -273,11 +384,102 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 			nodeAnswer(w, http.StatusBadRequest, "", "kontra connect refuses protocol upgrades")
 			return
 		}
+		if sv.Kind == tunnel.KindMCP && sv.Command != nil {
+			// A stdio MCP service: the bridge is the server's endpoint, whatever the path (§10); nothing is dialed.
+			b := p.bridges[sv.Name]
+			if b == nil {
+				nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, "kontra connect: the stdio service is not running")
+				return
+			}
+			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
+			ctx := stdiobridge.WithOwner(r.Context(), p)
+			var sx *sealing.MCPExchange
+			if p.seal != nil {
+				sx = p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
+				defer sx.Release() // what a message the child never got holds in flight (ext-sealed.md §5)
+				ctx = stdiobridge.WithFilter(ctx, sx)
+			}
+			b.ServeHTTP(sw, r.WithContext(ctx))
+			if r.Method == http.MethodDelete && (sw.status/100 == 2 || sw.status == http.StatusNotFound) {
+				sx.SessionGone() // the child's session ended: a sealed job's hold on it goes (D255)
+			}
+			log.Debug("tunnel exchange (stdio)", "method", r.Method, "status", sw.status, "duration_ms", time.Since(start).Milliseconds())
+			return
+		}
 		out, ok := targetPath(basePath(sv.Target), r.URL.Path)
+		if sv.Kind == tunnel.KindMCP && (r.URL.Path == "/" || r.URL.Path == "") {
+			// SPEC-CONFLICT (D210; spec/tunnel.md §8.2 with relay.md §11, M3 WP-05): the gate sends every MCP exchange
+			// of a tunnel service to "/" (upstream.Tunnel.Base), and §8.2 prefixes a path not under the base with it,
+			// which sends "/" to "<base>/": a server whose one endpoint is /mcp (a Go ServeMux pattern "/mcp") would
+			// answer 404 there. The closest faithful behaviour: the gate's root is the target itself, its endpoint
+			// exactly as --serve names it (ParseServe); every other path follows §8.2's rule.
+			out, ok = sv.Target.Path, true
+		}
 		if !ok {
 			log.Warn("tunnel exchange refused: the request target is not a path under the target's base path")
 			nodeAnswer(w, http.StatusBadRequest, "", "the request target is not a path under the service's base path")
 			return
+		}
+		if sv.Kind == tunnel.KindA2A && p.inline != nil {
+			done, ok := p.inlineBody(w, r, log)
+			if !ok {
+				return
+			}
+			defer done()
+		}
+		modify := stripResponse
+		release := func() {} // what the exchange holds in flight, dropped when the node answers it itself
+		// end is the exchange's end when the gate's context ended before the service answered: a sealed A2A request the
+		// node had handed whole to the service is recorded then, as an accepted one (ext-sealed.md §5, D227).
+		end := func() { release() }
+		if sv.Kind == tunnel.KindA2A && p.seal != nil {
+			// Sealing (ext-sealed.md §5): after the kontra-blob: parts were fetched, so a sealed part is opened once its
+			// whole age file is read; a refusal is the node's own answer (§6) and nothing reaches the service. It reads
+			// the route the service gets (out, cleaned), never the gate's spelling of it (D235).
+			r.URL.Path, r.URL.RawPath = out, ""
+			r2, sx, err := p.seal.Request(r.Context(), pre, r)
+			if err != nil {
+				reason, _ := sealed.ReasonOf(err)
+				log.Warn("tunnel exchange refused: a sealed request (ext-sealed.md §6)", "reason", string(reason))
+				sealing.WriteReject(w, sx.ID(), err)
+				return
+			}
+			r = r2
+			release = sx.Release
+			end = sx.End
+			modify = func(res *http.Response) error {
+				if err := stripResponse(res); err != nil {
+					return err
+				}
+				out, err := p.seal.Response(r.Context(), sx, res)
+				if err != nil {
+					return err
+				}
+				*res = *out
+				return nil
+			}
+		}
+		if f := p.mcp[sv.Name]; sv.Kind == tunnel.KindMCP && f != nil {
+			var sx *sealing.MCPExchange
+			if p.seal != nil {
+				sx = p.seal.MCPOn(pre, r.Header.Get(mcpwire.HeaderSessionID))
+				defer sx.Release()
+				release = sx.Release
+				// A message the node handed whole to the server, whose exchange the gate ended before the server's answer
+				// (a URL server that answers JSON sends its headers with its result), is recorded as an accepted one, as
+				// an A2A request is (ext-sealed.md §5, D227, D233).
+				end = sx.End
+			}
+			x, ok := f.request(w, r, log, p.answerRoots(sv, out, log), sx)
+			if !ok {
+				return
+			}
+			modify = func(res *http.Response) error {
+				if err := stripResponse(res); err != nil {
+					return err
+				}
+				return x.response(res)
+			}
 		}
 		target := sv.Target
 		rp := &httputil.ReverseProxy{
@@ -295,10 +497,21 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 						delete(h, k)
 					}
 				}
+				if sv.Kind == tunnel.KindMCP {
+					// The node reads an MCP service's answers before the gate does (roots, mcp.go), so it asks for
+					// identity encoding: the gate's tunnel transport asks for gzip on every exchange, and a target
+					// that honours it would send the node bytes it cannot read.
+					h.Set("Accept-Encoding", "identity")
+				}
 			},
 			Transport:      p.transports[sv.Name],
-			ModifyResponse: stripResponse,
+			ModifyResponse: modify,
 			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+				if r.Context().Err() != nil {
+					end() // the gate went: a request the service had whole is recorded (D227)
+				} else {
+					release() // the node answers: nothing the request holds in flight is recorded (ext-sealed.md §5)
+				}
 				if sw, ok := w.(*stripWriter); ok {
 					w = sw.ResponseWriter // the node's own answer keeps its Kontra-Node header
 				}
@@ -318,15 +531,105 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 	}
 }
 
-// targetPath is the path a request goes to (§8.2): the request path, which net/http has percent-decoded
-// into URL.Path once, prefixed with the target's base path (without its trailing slash, "" for the root),
-// then cleaned (., .., //); ok is false when the result is not under the base. A trailing slash is kept, as
-// the service's routes may tell "/a/" from "/a". The decoded path is what is sent: an encoded '/' (%2F)
-// becomes a separator, so no segment can hide a '..' from the clean.
+// inlineBody replaces the request's body with one whose kontra-blob: parts are inlined (§8.3, relay.md §10.4),
+// when it is JSON and holds the scheme; done releases what the inlining holds once the exchange is over. A
+// request whose parts cannot be fetched never reaches the service, and ok is false:
 //
-// The prefix comes before the clean, so that a '..' climbing out of a non-root base is refused (400) and
-// not silently folded into it; with the root base every cleaned path is under it and is confined to the
-// target (M2 plan audit).
+//   - for good (inlineFinal: the gate refused a ref, the gate's answer breaks §8.3, the body is not an A2A body
+//     with exact keys, too much in all): 400 without Kontra-Node (D151: the gate fails the task upstream_error);
+//   - for now (a blob stream that found no slot of the session within its wait, could not be opened, failed in
+//     transit or ended unanswered, as the gate ends one over its cap of node-opened streams): 503 with Kontra-Node:
+//     full, which the gate retries (on another session before the first upstream task id, with backoff after it,
+//     relay.md §6.4).
+//
+// SPEC-CONFLICT (D209; spec/tunnel.md §8.2, §8.3, §14): §8.3 has the node refuse an announced size over 64 MiB and
+// more bytes than announced, and §8.2 closes the list of reasons a node's own answer carries; neither says what the
+// exchange whose part cannot be fetched answers. The closest faithful behaviour: a refusal that would come again is
+// D151's 400 without Kontra-Node, final, like the node's other 400s; a fetch that may succeed if asked again is
+// §8.2's full (503), the reason the gate already retries, since the node then had no room for the exchange's
+// stream: the node keeps its node-opened streams under the gate's cap (§14) and waits for a slot first. full
+// otherwise names the node's own in-flight cap (--max-inflight); D209 gives it no reason of its own.
+func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Logger) (done func(), ok bool) {
+	none := func() {}
+	if r.Body == nil || r.Body == http.NoBody {
+		return none, true
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" && !a2awire.IsJSON(ct) {
+		return none, true
+	}
+	b, err := io.ReadAll(io.LimitReader(r.Body, a2awire.MaxBody+1))
+	if err != nil {
+		nodeAnswer(w, http.StatusBadRequest, "", "kontra connect: the request's body could not be read")
+		return nil, false
+	}
+	if len(b) > a2awire.MaxBody {
+		r.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(b), r.Body), r.Body}
+		return none, true
+	}
+	if !a2awire.HasRefs(b) {
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		return none, true
+	}
+	body, err := p.inline.Inline(r.Context(), b)
+	if err != nil {
+		if !inlineFinal(err) {
+			log.Warn("tunnel exchange refused for now: a kontra-blob: part could not be fetched; the gate retries it", "err", err)
+			nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull,
+				"kontra connect: a part of the request could not be fetched from the gate now; try again")
+			return nil, false
+		}
+		log.Warn("tunnel exchange refused: a kontra-blob: part could not be fetched", "err", err)
+		nodeAnswer(w, http.StatusBadRequest, "", "kontra connect: a part of the request could not be fetched from the gate")
+		return nil, false
+	}
+	pr, pw := io.Pipe()
+	wrote := make(chan struct{})
+	go func() {
+		defer close(wrote)
+		_, err := body.WriteTo(pw)
+		_ = pw.CloseWithError(err)
+	}()
+	r.Body = pr
+	r.ContentLength = body.Len()
+	r.Header.Del("Content-Length")
+	r.TransferEncoding = nil
+	log.Debug("tunnel exchange: kontra-blob: parts inlined", "bytes", body.Len())
+	return func() {
+		_ = pr.Close()
+		<-wrote
+		_ = body.Close()
+	}, true
+}
+
+// inlineFinal reports an inlining that would fail again if asked again: a ref the gate refused (*blob.FetchError:
+// not_found, forbidden, too_large), an answer that breaks §8.3 (blob.ErrBadAnswer: a malformed size line, a size
+// over 64 MiB, more bytes than announced), a body that is not an A2A body with exact keys (a2awire.ErrShape,
+// *strictjson.KeyError), a kontra-blob: url that names no ref (a2awire.ErrReservedURL), more than the inlining's
+// total (a2awire.ErrTooMuch). Anything else is the stream's: its slot, its open, its transit.
+func inlineFinal(err error) bool {
+	var (
+		fe *blob.FetchError
+		ke *strictjson.KeyError
+	)
+	return errors.As(err, &fe) || errors.As(err, &ke) || errors.Is(err, blob.ErrBadAnswer) || errors.Is(err, a2awire.ErrShape) ||
+		errors.Is(err, a2awire.ErrReservedURL) || errors.Is(err, a2awire.ErrTooMuch) || errors.Is(err, strictjson.ErrNotObject)
+}
+
+// targetPath is the path a request goes to (§8.2): the request path, which net/http has percent-decoded into
+// URL.Path once, cleaned (., .., //); a path already under the target's base path (without its trailing slash, ""
+// for the root) is forwarded as it is, any other is prefixed with the base and cleaned again; ok is false when the
+// result is not under the base. A trailing slash is kept, as the service's routes may tell "/a/" from "/a". The
+// decoded path is what is sent: an encoded '/' (%2F) becomes a separator, so no segment can hide a '..' from the
+// clean.
+//
+// The prefix comes before the second clean, so that a '..' climbing out of a non-root base is refused (400) and
+// not silently folded into it; with the root base every cleaned path is under it and is confined to the target (M2
+// plan audit). The "already under the base" rule is §8.2's as D123 amended it: the gate's A2A paths come from the
+// upstream card's interface, which already holds the base, and an MCP URL target is its endpoint (exchange maps the
+// gate's "/" to it).
 func targetPath(base, reqPath string) (string, bool) {
 	if reqPath == "" {
 		reqPath = "/"
@@ -334,11 +637,18 @@ func targetPath(base, reqPath string) (string, bool) {
 	if reqPath[0] != '/' {
 		return "", false // "*" (OPTIONS *) and other non-paths
 	}
-	cleaned := path.Clean(base + reqPath)
-	if strings.HasSuffix(reqPath, "/") && cleaned != "/" {
-		cleaned += "/"
+	under := func(p string) bool { return base == "" || p == base || strings.HasPrefix(p, base+"/") }
+	keepSlash := func(c string) string {
+		if strings.HasSuffix(reqPath, "/") && c != "/" {
+			return c + "/"
+		}
+		return c
 	}
-	if base == "" || cleaned == base || strings.HasPrefix(cleaned, base+"/") {
+	if c := keepSlash(path.Clean(reqPath)); base != "" && under(c) {
+		return c, true
+	}
+	cleaned := keepSlash(path.Clean(base + reqPath))
+	if under(cleaned) {
 		return cleaned, true
 	}
 	return "", false
@@ -454,6 +764,32 @@ func (w *stripWriter) Flush() { _ = http.NewResponseController(w.ResponseWriter)
 
 // Unwrap lets http.ResponseController reach the stream's writer.
 func (w *stripWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// statusWriter records the status of a response it passes on unchanged.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	if code >= 200 && w.status == 0 {
+		w.status = code
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(b []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush sends what was written (the bridge's event streams are flushed per event).
+func (w *statusWriter) Flush() { _ = http.NewResponseController(w.ResponseWriter).Flush() }
+
+// Unwrap lets http.ResponseController reach the stream's writer.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // targetTransport is the transport of one --serve target: no proxy from the environment, every dial to the
 // target's own host:port (an address other than it is refused), no compression added, no redirect followed

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -347,5 +348,100 @@ func TestRememberAfterAReReadBegan(t *testing.T) {
 	k.dropKeys([]uuid.UUID{id})
 	if ids := k.cachedKeyIDs(); len(ids) != 0 {
 		t.Errorf("dropKeys left %v", ids)
+	}
+}
+
+// hireSource is a tunnel session's principal source (internal/tunnelgate's), for the Authenticator's tests.
+type hireSource struct {
+	p   Principal
+	err error
+	n   int
+}
+
+func (h *hireSource) HirePrincipal(context.Context) (Principal, error) {
+	h.n++
+	return h.p, h.err
+}
+
+// A request a node opened on its tunnel session takes the session's principal (spec/tunnel.md §9): a credential
+// it carries is never read, not even one that would be refused, nor one that would authenticate as someone
+// else; a session whose hiring key was revoked is 401 (§12).
+func TestAuthenticatorHiringRequest(t *testing.T) {
+	a := NewAuthenticator(nil) // no API keys: every bearer credential of the network is refused
+	node := Principal{Kind: KindNode, ID: "node:k1_abcdefghijklmnopqrstuvwxyz", TenantID: &acmeTenant, TenantSlug: "acme",
+		BuyerID: buyer1, Via: ViaNode}
+	src := &hireSource{p: node}
+	for _, authz := range []string{"", "Bearer kk_acme_x", "Basic Zm9vOmJhcg=="} {
+		r := httptest.NewRequest("POST", "/agents/hello", nil)
+		if authz != "" {
+			r.Header.Set("Authorization", authz)
+		}
+		r = r.WithContext(WithHireSource(r.Context(), src))
+		p, authed, err := a.Authenticate(r, uuid.Nil)
+		if err != nil || !authed || p.ID != node.ID || p.Via != ViaNode || p.BuyerID != buyer1 {
+			t.Errorf("Authorization %q: %+v %v %v, want the session's principal", authz, p, authed, err)
+		}
+	}
+	if !mustList(t, "org:acme").Admits(node) || !mustList(t, "node:k1_abcdefghijklmnopqrstuvwxyz").Admits(node) ||
+		mustList(t, "org:other").Admits(node) {
+		t.Error("allow: lists admit a node principal wrongly")
+	}
+	src.err = ErrUnauthenticated
+	r := httptest.NewRequest("GET", "/agents/hello", nil)
+	r = r.WithContext(WithHireSource(r.Context(), src))
+	if _, _, err := a.Authenticate(r, uuid.Nil); !errors.Is(err, ErrUnauthenticated) {
+		t.Errorf("a revoked hiring key: %v, want ErrUnauthenticated", err)
+	}
+	if _, ok := HireSourceFrom(httptest.NewRequest("GET", "/", nil).Context()); ok {
+		t.Error("a network request carries a hire source")
+	}
+}
+
+// Subscribe tells each API key revocation once, from a NOTIFY (and from a re-read, in the Postgres tests).
+func TestRevocationSubscribe(t *testing.T) {
+	c := NewRevocationCache(nil)
+	var got []uuid.UUID
+	c.Subscribe(func(id uuid.UUID) { got = append(got, id) })
+	c.Notify("key:k1_abcdefghijklmnopqrstuvwxyz")
+	c.Notify(RevokePayload(keyID1))
+	c.Notify(RevokePayload(keyID1)) // the same revocation again
+	if len(got) != 1 || got[0] != keyID1 {
+		t.Fatalf("subscribers told %v, want %s once", got, keyID1)
+	}
+}
+
+// Hold and Revalidate without Postgres: a held key a re-read found ended is refused for as long as it is held,
+// and Hold of a principal that is not an API key's holds nothing.
+func TestHoldEndedKey(t *testing.T) {
+	rc := NewRevocationCache(nil)
+	k := NewAPIKeys(nil, rc)
+	p := keyPrincipal("kk_a_12345678", "acme", acmeTenant)
+	release := k.Hold(p)
+	again := k.Hold(p)
+	if ids := k.cachedKeyIDs(); len(ids) != 1 || ids[0] != keyID1 {
+		t.Fatalf("a held key is not among the keys every re-read checks: %v", ids)
+	}
+	k.dropKeys([]uuid.UUID{keyID1}) // a re-read found it ended
+	if _, err := k.Revalidate(context.Background(), p); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("an ended held key: %v", err)
+	}
+	if ids := k.cachedKeyIDs(); len(ids) != 0 {
+		t.Fatalf("an ended key is still checked: %v", ids)
+	}
+	release()
+	release() // twice is once
+	if _, ok := k.held[keyID1]; !ok {
+		t.Fatal("one release freed a key two sessions hold")
+	}
+	again()
+	if len(k.held) != 0 {
+		t.Fatalf("held after every release: %v", k.held)
+	}
+	k.Hold(Principal{Kind: KindNode, ID: "node:k1_abcdefghijklmnopqrstuvwxyz"})()
+	if len(k.held) != 0 {
+		t.Fatal("a node principal is held")
+	}
+	if _, err := k.Revalidate(context.Background(), Principal{Kind: KindNode}); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Revalidate of a node principal: %v", err)
 	}
 }
