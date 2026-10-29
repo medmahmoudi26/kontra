@@ -57,7 +57,7 @@
 // servers and every other server the harness starts listen on 127.0.0.1 only, which each test asserts at its end
 // (D185, CheckLoopback).
 //
-// M4's (DM4-15, DM4-30; m4_test.go lists them and each test's tenancy): the six gate_mcp_* tests and anon_limits,
+// M4's (D282, D297; m4_test.go lists them and each test's tenancy): the six gate_mcp_* tests and anon_limits,
 // anon_lifecycle and login_converts. For them the harness also runs a multi-tenant gate (Options.Multi: no services:
 // block; tenants, services and API keys are rows it writes, followed by NOTIFY kontra_services, tenants.go, D116), with
 // tunnel.anonymous compressed in the test's own configuration (Options.Anonymous) and tunnel.enroll_with_api_key; the
@@ -616,7 +616,7 @@ func (h *Harness) gateEnv() []string {
 		env = append(env, AdmissionSecretEnv+"="+a.Secret)
 	}
 	if as := h.opts.AuthServer; as != nil {
-		// The replicas' operator client trusts the authorization server's throwaway CA (spec §10.3, DM4-17).
+		// The replicas' operator client trusts the authorization server's throwaway CA (spec §10.3, D284).
 		env = append(slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "SSL_CERT_FILE=") }),
 			"SSL_CERT_FILE="+as.CAFile)
 	}

@@ -109,8 +109,8 @@ GOOD = f"""
 {OPS}::test_refused[http_json]  # D20: refused
 {OPS}::test_should[jsonrpc]  # a2a-tck#234: the TCK xfails it itself
 {OPS}::test_should[http_json]  # a2a-tck#234: the TCK xfails it itself
-{OPS}::test_must_requirement[REQ-1-jsonrpc]  # DM4-12: REQ-1
-{OPS}::test_must_requirement[REQ-1-http_json]  # DM4-12: REQ-1
+{OPS}::test_must_requirement[REQ-1-jsonrpc]  # D279: REQ-1
+{OPS}::test_must_requirement[REQ-1-http_json]  # D279: REQ-1
 tests/compatibility/jsonrpc/test_only.py::test_jsonrpc_only  # a2a-tck#1: jsonrpc only, by its directory
 {ERRORS}::TestCoreInputValidation::test_malformed_request_rejected_rest  # a2a-tck#999: http_json only, by its name
 # the stand-in's skips
@@ -239,7 +239,7 @@ SECTIONED = GOOD.replace(f"skip {OPS}::test_setup_refused[jsonrpc]  # D20: its p
 
 [auth]
 skip {OPS}::test_setup_refused[jsonrpc]  # D20: the auth variant skips it
-{OPS}::test_ok[jsonrpc]  # DM4-12: only the auth variant
+{OPS}::test_ok[jsonrpc]  # D279: only the auth variant
 """
 
 
@@ -262,14 +262,14 @@ def test_sections_apply_to_their_variants(tck) -> None:
     pytest.param(f"{OPS}::test_refused[jsonrpc]\n", None, "has no reason", id="no-reason"),
     pytest.param(f"{OPS}::test_refused[jsonrpc]  #\n", None, "has no reason", id="empty-reason"),
     pytest.param(f"{OPS}::test_refused[jsonrpc]  # refused by the gate\n", None,
-                 "cites no a2a-tck#<n>, D<n> or DM4-<n>", id="no-reference"),
+                 "cites no a2a-tck#<n> or D<n>", id="no-reference"),
     pytest.param(f"{OPS}::test_refused[jsonrpc]  # D20: a\n{OPS}::test_refused[jsonrpc]  # D20: b\n", None,
                  "is listed already", id="twice"),
     pytest.param("test_refused[jsonrpc]  # D20: a\n", None, "is not a pytest node id", id="not-a-node-id"),
     pytest.param("skip  # D20: a\n", None, "is not a pytest node id", id="skip-without-node-id"),
     pytest.param(f"skips {OPS}::test_refused[jsonrpc]  # D20: a\n", None, "is not a pytest node id", id="skips"),
     pytest.param(f"skip {OPS}::test_refused[jsonrpc]\n", None, "has no reason", id="skip-without-reason"),
-    pytest.param(f"skip {OPS}::test_refused[jsonrpc]  # refused\n", None, "cites no a2a-tck#<n>, D<n> or DM4-<n>",
+    pytest.param(f"skip {OPS}::test_refused[jsonrpc]  # refused\n", None, "cites no a2a-tck#<n> or D<n>",
                  id="skip-without-reference"),
     pytest.param(f"{OPS}::test_refused[jsonrpc]  # D20: a\nskip {OPS}::test_refused[jsonrpc]  # D20: b\n", None,
                  "is listed already", id="a-failure-and-a-skip"),
@@ -332,7 +332,7 @@ def test_an_unlisted_skip_of_a_test_of_every_binding_fails_the_run(tck, pytester
     assert r.ret == pytest.ExitCode.TESTS_FAILED
     r.stdout.fnmatch_lines(["tests/compatibility/core_operations/test_plain.py::test_prerequisite: skipped "
                             "(Expected task state INPUT_REQUIRED), but not listed *"])
-    r = tck(GOOD + "skip tests/compatibility/core_operations/test_plain.py::test_prerequisite  # DM4-24: x\n",
+    r = tck(GOOD + "skip tests/compatibility/core_operations/test_plain.py::test_prerequisite  # D291: x\n",
             "--transport=http_json")
     assert r.ret == pytest.ExitCode.OK, r.stdout.str()
 

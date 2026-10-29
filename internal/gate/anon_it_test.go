@@ -91,7 +91,7 @@ func (e *gateEnv) seedAnonymousServiceAt(base, slug, name, upstream string) uuid
 	return id
 }
 
-// spec/tunnel.md §6.2 (DM4-10, DM4-20) through a multi-tenant gate with tunnel.anonymous: an anonymous tenant's
+// spec/tunnel.md §6.2 (D277, D287) through a multi-tenant gate with tunnel.anonymous: an anonymous tenant's
 // concurrent tasks as host are at most tasks; one more SendMessage is HTTP 429 with Retry-After on JSON-RPC (-32600
 // "rate limited"), on its streaming method and on HTTP+JSON, and creates no task; once a task ends there is room again.
 // A caller's message that would take the tenant's stored bytes past parts_bytes is InvalidParams "anonymous storage

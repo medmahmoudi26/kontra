@@ -1,5 +1,5 @@
 #cloud-config
-# The throwaway droplet of scripts/team-gate-vps.sh (DM4-14, DM4-31; the M4 plan's gate run C): Ubuntu 24.04 with
+# The throwaway droplet of scripts/team-gate-vps.sh (D281, D298; the M4 plan's gate run C): Ubuntu 24.04 with
 # Docker, Compose v2 and buildx from Ubuntu's own packages, and nothing else. The script ships the repository and runs
 # compose.yaml with deploy/compose/kontra.vps.yaml over ssh.
 #

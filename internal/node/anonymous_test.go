@@ -23,7 +23,7 @@ func anonymousDecision(req enroll.Request, end time.Time) *enroll.Decision {
 	return d
 }
 
-// DM4-18: kontra connect asks for an anonymous session (hello.anonymous, with --public's names in hello.public) only
+// D285: kontra connect asks for an anonymous session (hello.anonymous, with --public's names in hello.public) only
 // when this origin's credentials hold no API key and no pending or consumed token and the command line gave neither
 // --enroll nor --api-key; otherwise the hello carries neither field, and --public is only warned about. A welcome
 // with anonymous prints the anonymous URLs, which ones are public, and the session's end (§6.1).
@@ -91,7 +91,7 @@ func TestAnonymousHelloOnlyWithoutCredentials(t *testing.T) {
 	}
 }
 
-// DM4-18: the lost-welcome probe never asks for an anonymous session, even from a node that would otherwise ask (its
+// D285: the lost-welcome probe never asks for an anonymous session, even from a node that would otherwise ask (its
 // tokens are pending then).
 func TestProbeNeverAsksAnonymous(t *testing.T) {
 	g := newTestGate(t, nil)
@@ -191,7 +191,7 @@ func TestParsePublic(t *testing.T) {
 	}
 }
 
-// §6.1, DM4-25 (M4 WP-03 review): the node tells the gate's end of its anonymous session from a revocation of its key
+// §6.1, D292 (M4 WP-03 review): the node tells the gate's end of its anonymous session from a revocation of its key
 // whatever its own clock says. A node whose clock runs 5 minutes behind the gate's still exits with
 // ErrAnonymousExpired when the gate sends {"t": "revoked"} at the session's end (welcome.anonymous.expires_at is the
 // gate's time), and does not redial.

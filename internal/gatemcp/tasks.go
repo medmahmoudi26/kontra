@@ -88,7 +88,7 @@ func NewHireTasks(cfg HireTasksConfig) (*HireTasks, error) {
 }
 
 // Reader is who reads a task and what it declared: the reader's era and, for §12.4, whether its session (legacy)
-// or its request (modern) declared form elicitation (DM4-7).
+// or its request (modern) declared form elicitation (D274).
 type Reader struct {
 	Principal       auth.Principal
 	Era             mcpwire.Era
@@ -156,7 +156,7 @@ func (t *HireTasks) Get(ctx context.Context, rd Reader, taskID uuid.UUID) (json.
 	return res, nil, err
 }
 
-// modernGet is a modern tasks/get of a hire task (§12.5, §11.12's table, DM4-7): resultType "complete" and the Task
+// modernGet is a modern tasks/get of a hire task (§12.5, §11.12's table, D274): resultType "complete" and the Task
 // as modernView presents it; a question the reader's request may get as a form (a text-only question, form
 // elicitation declared) is input_required with inputRequests holding that one elicitation/create under the gate id
 // k.<taskId>.<asked> of the event that asked it (asked is read with row: the key never pairs one question's text with
@@ -403,7 +403,7 @@ func notCancelable(s store.State) *mcpwire.Error {
 // ackComplete is the empty result of a modern tasks/update and tasks/cancel (the tasks extension).
 var ackComplete = json.RawMessage(`{"resultType":"complete"}`)
 
-// Update answers a modern tasks/update (§12.4, §12.5, §11.12's table, DM4-7; M4 WP-05): params.inputResponses must be
+// Update answers a modern tasks/update (§12.4, §12.5, §11.12's table, D274; M4 WP-05): params.inputResponses must be
 // an object (else -32602), and the task a hire task of the reader's buyer (else -32602, as an unknown one). The one
 // key that can be answered is the gate id k.<taskId>.<seq> of the question outstanding now, as the reader's own request
 // would see it in tasks/get's inputRequests (follow): its accept {action: "accept", content: {reply: string}} becomes
@@ -415,7 +415,7 @@ var ackComplete = json.RawMessage(`{"resultType":"complete"}`)
 // end was accepted first, the task moved on or ended: a2a.ErrUnsupportedOperation, §7). Any other refusal is not
 // acknowledged, since the extension tells the client never to answer a key twice: the answer would be lost while the
 // task waits on. A follow-up the lifecycle did not accept in time is 503 with -32603, an anonymous tenant's limit 429,
-// another A2A refusal (the anonymous storage limit, a required extension, DM4-27) its JSON-RPC error, and a failure of
+// another A2A refusal (the anonymous storage limit, a required extension, D294) its JSON-RPC error, and a failure of
 // the gate's own 503 with -32603 (*followUpRefused, answered by writeTaskAnswer as hire and reply are), so the client
 // answers again.
 func (t *HireTasks) Update(ctx context.Context, rd Reader, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {

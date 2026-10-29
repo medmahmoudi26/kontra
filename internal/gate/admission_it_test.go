@@ -81,7 +81,7 @@ func (d *admissionDouble) requests() ([]hooks.AdmitRequest, []string) {
 	return append([]hooks.AdmitRequest(nil), d.reqs...), append([]string(nil), d.auth...)
 }
 
-// The remote Admission hook through a whole replica (M4 WP-01; spec §13.1, §13.2; DM4-8, DM4-17): an A2A SendMessage
+// The remote Admission hook through a whole replica (M4 WP-01; spec §13.1, §13.2; D275, D284): an A2A SendMessage
 // to a service whose Admission quotes creates the task quoted, with kontra.approve.url equal to the hook's URL and the
 // decision's metadata, under the pre-minted id the hook was shown, and dispatches nothing; kontra.approval {accepted:
 // true}, sent through Temporal as a control plane would, moves it to submitted and it completes. A hook that is down,
@@ -142,7 +142,7 @@ hooks:
 		t.Fatalf("after the caller's message tasks.state = %s, want quoted", st)
 	}
 	// A resend of the request that created it (spec §15) is answered at once with the quoted task as it stands
-	// (DM4-23: the replica gives the interceptors the service's work queue, which re-issues the start first).
+	// (D290: the replica gives the interceptors the service's work queue, which re-issues the start first).
 	again := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
 	again.ID = task.History[0].ID
 	rctx, rcancel := context.WithTimeout(ctx, 8*time.Second)

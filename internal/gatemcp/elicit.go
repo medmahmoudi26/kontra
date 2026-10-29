@@ -14,7 +14,7 @@ import (
 )
 
 // CodeURLElicitationRequired is URLElicitationRequiredError (MCP 2025-11-25), hire's answer to a legacy client that
-// declared elicitation.url when Admission quotes (§12.3, D21). Never on a modern request (D24, DM4-2).
+// declared elicitation.url when Admission quotes (§12.3, D21). Never on a modern request (D24, D269).
 const CodeURLElicitationRequired = -32042
 
 // MethodElicitationComplete is the notification a session gets when the task of a URL elicitation it received
@@ -23,7 +23,7 @@ const MethodElicitationComplete = "notifications/elicitation/complete"
 
 // Elicitations keeps the URL elicitations hire sent: (elicitationId, task, session) in tasks.elicitation_id and
 // tasks.elicitation_session (§12.3), and writes notifications/elicitation/complete on one GET stream of the session
-// (DM4-21).
+// (D288).
 type Elicitations struct {
 	log    *store.Log
 	waker  store.TaskWaker
@@ -50,7 +50,7 @@ func (e *Elicitations) Record(ctx context.Context, taskID uuid.UUID, session [32
 	return e.log.RecordElicitation(ctx, taskID, uuid.NewString(), session)
 }
 
-// Stream serves a legacy session's GET stream (§12.3, DM4-21): keep-alives every 15 s (§2.2) and, for each task
+// Stream serves a legacy session's GET stream (§12.3, D288): keep-alives every 15 s (§2.2) and, for each task
 // whose -32042 went to this session, once it leaves quoted (while the stream is open, or less than RetryWindow before
 // it opened), one notifications/elicitation/complete {elicitationId}, written on this stream only if this stream's
 // claim (tasks.elicitation_notified_at) won: a message goes on one stream of the session, on whichever replica, never

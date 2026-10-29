@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// MCPResourceServer is the OAuth 2.1 resource server of the MCP routes (spec/relay.md §12.1, DM4-9;
+// MCPResourceServer is the OAuth 2.1 resource server of the MCP routes (spec/relay.md §12.1, D276;
 // internal/oidc's ResourceServer, set on the Authenticator when auth.mcp_oauth is configured). It applies to /mcp and
 // every /mcp/{svc} and to nothing else: the A2A routes answer a JWT 401 until their OIDC principals (M5).
 type MCPResourceServer interface {
@@ -26,7 +26,7 @@ const MaxJWT = 16 << 10
 // LooksLikeJWT reports whether a bearer token has the shape of a JWS compact serialization: three base64url segments
 // separated by dots, the first not empty, at most MaxJWT bytes. An MCP route with a resource server verifies such a
 // token as a JWT and looks any other up as an API key: a key the gate mints is kk_ and base62 (spec §2.3), and an
-// operator's own key (D37) with two dots between base64url segments is not a credential anyone writes (DM4-29).
+// operator's own key (D37) with two dots between base64url segments is not a credential anyone writes (D296).
 func LooksLikeJWT(token string) bool {
 	if strings.Count(token, ".") != 2 || len(token) > MaxJWT {
 		return false
@@ -49,7 +49,7 @@ func LooksLikeJWT(token string) bool {
 func (a *Authenticator) SetMCPResourceServer(rs MCPResourceServer) { a.mcp = rs }
 
 // MCPOAuth reports whether the MCP routes are a resource server: a request without a credential is then 401 with the
-// route's challenge wherever an anonymous caller would not be served (DM4-29).
+// route's challenge wherever an anonymous caller would not be served (D296).
 func (a *Authenticator) MCPOAuth() bool { return a.mcp != nil }
 
 // AuthenticateMCP is Authenticate on the MCP route svc ("" for /mcp, else name or tenant/name, as the route's path

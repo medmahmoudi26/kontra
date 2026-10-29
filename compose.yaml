@@ -7,7 +7,7 @@
 # Two configurations, chosen with KONTRA_CONFIG (each file says what to edit):
 #   - deploy/compose/kontra.yaml (the default): TLS from a certificate you provide, in deploy/compose/tls/;
 #   - deploy/compose/kontra.vps.yaml: built-in ACME (TLS-ALPN-01, D82) for a fresh VPS with a DNS name and no
-#     certificate yet (DM4-14). Publish it on port 443 (KONTRA_PORT=443): the CA validates there. The certificate
+#     certificate yet (D281). Publish it on port 443 (KONTRA_PORT=443): the CA validates there. The certificate
 #     and the ACME account key stay in the named volume acme, mounted at /var/lib/kontra-gate (the image creates that
 #     directory owned by the gate's uid, 65532, so a new volume is writable).
 #

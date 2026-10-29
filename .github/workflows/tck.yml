@@ -1,5 +1,5 @@
 # The pinned A2A TCK against the gate (`make tck`, scripts/tck.sh; spec/relay.md §0, §16 tck_jsonrpc, tck_rest,
-# tck_behind_caddy; D18, DM4-12): a2aproject/a2a-tck at d4d6fae, fetched and verified, under uv 0.11.7 and Python
+# tck_behind_caddy; D18, D279): a2aproject/a2a-tck at d4d6fae, fetched and verified, under uv 0.11.7 and Python
 # 3.12 from its own uv.lock, against a gate built from this checkout, the seller examples/sellers/tck, a Temporal
 # development server from the pinned CLI and Postgres 17, one job per variant: direct and tunnel (the bare gate on
 # the direct and the tunnel backend) and caddy (behind examples/front/caddy, Caddy 2.11.7 from its release

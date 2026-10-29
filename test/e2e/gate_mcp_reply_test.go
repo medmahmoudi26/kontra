@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// gate_mcp_reply (spec/relay.md §16; §12.4; DM4-5, DM4-7). Single tenant. The booking seller (examples/sellers/booking,
+// gate_mcp_reply (spec/relay.md §16; §12.4; D272, D274). Single tenant. The booking seller (examples/sellers/booking,
 // one question, then the booking) and the in-test seller (a slow exec) are hosted by a node whose tunnel is on
 // replica B; the sessions are on replica A: F declared form elicitation, R did not. Asserted:
 //

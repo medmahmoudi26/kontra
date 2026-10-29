@@ -21,12 +21,12 @@ import (
 //     would answer 503 from then on); tasks/list still works;
 //   - a hire of a service whose served card marks an extension required: true (an operator's card_extensions entry,
 //     §13.4) is isError naming the A2A route, with no task row and nothing sent to the seller, as the A2A route
-//     refuses a SendMessage without A2A-Extensions with -32008 (§2.4, DM4-27);
+//     refuses a SendMessage without A2A-Extensions with -32008 (§2.4, D294);
 //   - an API key with only enroll: scopes, sharing the buyer of a hire key (§2.3), is 403 on /mcp: initialize, and
 //     tasks/list, tasks/get, tasks/result and tasks/cancel on the hire key's session; the hire key's task is not
 //     cancelled;
 //   - a 2025-06-18 session decides by its own version: a request naming 2025-11-25 in MCP-Protocol-Version is 400,
-//     tasks/* are -32601 and hire has no execution (DM4-26).
+//     tasks/* are -32601 and hire has no execution (D293).
 func TestGateMCPReviewFixes(t *testing.T) {
 	e := newGateEnv(t)
 	ctx := context.Background()

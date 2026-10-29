@@ -1,5 +1,5 @@
 // Package gatemcp is the gate's own MCP server at {public_url}/mcp (spec/relay.md §12): four tools (search,
-// describe, hire, reply) and the MCP Tasks of the tasks hire creates, in both MCP eras (§12.5, D24, DM4-2).
+// describe, hire, reply) and the MCP Tasks of the tasks hire creates, in both MCP eras (§12.5, D24, D269).
 //
 // It is not a tunnelled service and has no upstream. §11.1's transport rules apply (one message per POST, strict
 // decoding with internal/mcpwire, Origin, versions) and §11.12's classification of a request's era (rules 1–5):
@@ -7,23 +7,23 @@
 //   - Legacy (2025-11-25, 2025-06-18): initialize opens a session, an mcp_sessions row whose service is NULL and
 //     whose tenant is the principal's (internal/mcprelay's Sessions). Nothing is pinned and nothing hops: any replica
 //     serves any request of a session. The session's GET stream carries notifications/elicitation/complete (§12.3,
-//     DM4-21) and nothing else; it has no event ids and is not resumed.
+//     D288) and nothing else; it has no event ids and is not resumed.
 //   - Modern (2026-07-28): the gate answers server/discover itself, advertising the tasks extension; a hire whose
 //     request declares it becomes a task answered as §11.12 step 4, and tasks/get, tasks/update and tasks/cancel
-//     serve hire tasks. No virtual session is opened and Admission's session operation is not consulted (DM4-2).
+//     serve hire tasks. No virtual session is opened and Admission's session operation is not consulted (D269).
 //
 // /mcp has no anonymous principal: a request without a credential is 401, with §12.1's challenge when the MCP
-// OAuth resource server is configured (internal/oidc, DM4-3, DM4-9), which also makes a JWT for /mcp's canonical URI a
+// OAuth resource server is configured (internal/oidc, D270, D276), which also makes a JWT for /mcp's canonical URI a
 // principal (oidc:sub:<sub>, via mcp). Through a node, the session's principal applies (spec/tunnel.md §9).
 //
 // hire creates an ordinary A2A gate task (protocol a2a, dispatched as §6) through the A2A service's own handler
-// and work queue (Hirer, internal/relay), marked tasks.hired (DM4-5); Admission (operation task) decides first, and
+// and work queue (Hirer, internal/relay), marked tasks.hired (D272); Admission (operation task) decides first, and
 // a quote leads to URL elicitation (-32042, legacy clients that declared elicitation.url) or to the approve URL in
 // the answer (D21). The URL is the operator's (Cloud: https://app.kontra.sh/#/t/<taskId>, D188); the gate never
 // builds it, and nothing a client sends approves a quote (D38, D45): a reply, a client response to a gate request
 // id and a retried hire all leave a quoted task quoted, and the gate never sends a URL-mode elicitation/create.
 //
-// /mcp writes no calls rows: a hire is accounted as the A2A task it creates (DM4-22).
+// /mcp writes no calls rows: a hire is accounted as the A2A task it creates (D289).
 //
 // Work packages: M4 WP-04 (the legacy era, the four tools, -32042, MCP Tasks over hire tasks), M4 WP-05 (the
 // 2026-07-28 era), M4 WP-06 (the OAuth resource server in front of it).
@@ -64,7 +64,7 @@ var Versions = []string{mcpwire.V20251125, mcpwire.V20250618}
 // Deps are the handler's collaborators, wired by internal/gate.
 type Deps struct {
 	PublicURL      string
-	Multi          bool                // tenancy: multi: refs are <tenant>/<name> (§12.2, DM4-4)
+	Multi          bool                // tenancy: multi: refs are <tenant>/<name> (§12.2, D271)
 	Auth           *auth.Authenticator // API keys, node principals, and the MCP OAuth resource server's JWTs (§12.1)
 	Sessions       *mcprelay.Sessions  // legacy sessions: mcp_sessions rows with service NULL
 	Catalog        *Catalog            // search, describe, and the service a hire names
@@ -148,7 +148,7 @@ func (rq *request) id() json.RawMessage {
 }
 
 // version is the legacy protocol version the request's session negotiated (initialize): it decides what the session
-// has (tasks/*, hire's execution, task-augmented calls; DM4-26). A request whose MCP-Protocol-Version names another
+// has (tasks/*, hire's execution, task-augmented calls; D293). A request whose MCP-Protocol-Version names another
 // version is refused before (session). A modern request's is 2026-07-28, which CheckModern held equal to its _meta.
 func (rq *request) version() string {
 	if rq.modern {
@@ -161,7 +161,7 @@ func (rq *request) version() string {
 }
 
 // reader is the request's Reader: its principal, its era, and what its session (legacy) or the request itself
-// (modern: its per-request clientCapabilities, DM4-7) declared.
+// (modern: its per-request clientCapabilities, D274) declared.
 func (rq *request) reader() Reader {
 	if rq.modern {
 		return Reader{Principal: rq.p, Era: mcpwire.EraModern,
@@ -197,7 +197,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p, authenticated, err := h.deps.Auth.AuthenticateMCP(r, uuid.Nil, "")
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated) || (err == nil && !authenticated):
-		// DM4-3: /mcp has no anonymous principal.
+		// D270: /mcp has no anonymous principal.
 		w.Header().Set("WWW-Authenticate", h.deps.Auth.MCPChallenge("", err != nil))
 		if post {
 			writeError(w, http.StatusUnauthorized, nil, codeUnauthenticated, "unauthenticated", nil)
@@ -212,7 +212,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Spec §2.3: an API key with only enroll: scopes enrolls nodes and nothing else. The A2A routes refuse it every
 		// request (their allow: check and the identity interceptor); /mcp, whose every tool and task surface is hiring,
 		// refuses it whole, before a session exists, so no task of the buyer it shares with a hire key is read or
-		// cancelled through it (DM4-26).
+		// cancelled through it (D293).
 		if post {
 			writeError(w, http.StatusForbidden, nil, mcpwire.CodeInvalidRequest, MsgMayNotHire, nil)
 		} else {
@@ -284,7 +284,7 @@ func (h *Handler) refuseParse(rq *request, m *mcpwire.Message, err error) {
 	}
 }
 
-// initialize opens a legacy session (§12, DM4-2): the version the client asked for when /mcp speaks it, else the
+// initialize opens a legacy session (§12, D269): the version the client asked for when /mcp speaks it, else the
 // newest; capabilities tools, and on 2025-11-25 tasks (list, cancel, requests.tools.call, §12.5); an mcp_sessions row
 // whose service is NULL and whose tenant is the principal's, keeping the client's capabilities (its elicitation
 // modes decide -32042 and §12.4's form); the gate's Mcp-Session-Id. No Admission is asked: /mcp is not a service,
@@ -352,7 +352,7 @@ func (h *Handler) session(rq *request) {
 	if v := rq.r.Header.Get(mcpwire.HeaderProtocolVersion); v != "" && v != sess.ProtocolVersion {
 		// MCP 2025-11-25 transports: a request carries the version the session negotiated, and a server answers an
 		// invalid or unsupported one 400. Classify has refused a version /mcp does not speak; this is one the session did
-		// not negotiate (a 2025-06-18 session naming 2025-11-25 would otherwise get tasks, DM4-26). Both values are
+		// not negotiate (a 2025-06-18 session naming 2025-11-25 would otherwise get tasks, D293). Both values are
 		// among Versions, so the answer names them.
 		writeError(rq.w, http.StatusBadRequest, rq.id(), mcpwire.CodeUnsupportedVersion, "Unsupported protocol version",
 			map[string]any{"supported": []string{sess.ProtocolVersion}, "requested": v})
@@ -416,7 +416,7 @@ func (h *Handler) session(rq *request) {
 // toolsCall serves tools/call of the four tools; any other name is -32602 "Unknown tool: <name>" (§11.3's answer).
 // A task-augmented call (params.task, 2025-11-25 sessions) is hire's only: the other tools are -32601, as for a
 // tool whose execution.taskSupport is absent (§11.5 step 0). A modern request has no per-request opt-in: a hire
-// whose request declares the tasks extension may become a task, the gate deciding (§11.12, D159, DM4-2), and every
+// whose request declares the tasks extension may become a task, the gate deciding (§11.12, D159, D269), and every
 // other tool call, and a modern params.task (a 2025-11-25 field), is a plain call.
 func (h *Handler) toolsCall(rq *request) {
 	m := rq.msg
@@ -494,7 +494,7 @@ func (h *Handler) describeTool(rq *request, args json.RawMessage) {
 // to a POST carrying Mcp-Session-Id tells a Streamable HTTP client its session is gone (it would initialize again).
 // The closest faithful behaviour: the same one answer for a ref that is malformed, unknown, disabled, of an ended
 // tenant or not admitted, as a CallToolResult with isError and the text "unknown service" (MCP 2025-11-25 answers an
-// input validation error as a tool execution error). Proposal: §12.2 says so (DM4-26).
+// input validation error as a tool execution error). Proposal: §12.2 says so (D293).
 func (h *Handler) toolError(rq *request, err error) {
 	var ae *argError
 	switch {

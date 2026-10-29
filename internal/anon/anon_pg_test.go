@@ -104,7 +104,7 @@ func (e *pgEnv) tenantOf(keyID string) uuid.UUID {
 	return scalar[uuid.UUID](e.t, e.pool, `select tenant_id from kontra.tunnel_keys where key_id = $1`, keyID)
 }
 
-// T §6.2 (DM4-10, DM4-20): 3 live anonymous tenants per IPv4 /24 and per IPv6 /48, the 4th refused
+// T §6.2 (D277, D287): 3 live anonymous tenants per IPv4 /24 and per IPv6 /48, the 4th refused
 // ErrTooManyTenants (rate_limited); another network is not counted; an expired tenant no longer counts; the network
 // is stored as a CIDR, never the address.
 func TestOpenCountsNetworks(t *testing.T) {
@@ -154,7 +154,7 @@ func TestOpenCountsNetworks(t *testing.T) {
 	}
 }
 
-// T §6.2 (DM4-20): the live anonymous tenants gate-wide are at most max_tenants; one more is ErrUnavailable
+// T §6.2 (D287): the live anonymous tenants gate-wide are at most max_tenants; one more is ErrUnavailable
 // (anonymous_unavailable), whatever its network.
 func TestOpenMaxTenants(t *testing.T) {
 	e := newPGEnv(t)
@@ -215,7 +215,7 @@ func enabled(m map[string]svcRow) []string {
 	return out
 }
 
-// T §6.1, §6.2 (DM4-20): at most services services, counted per tenant: a hello declaring a 5th is
+// T §6.1, §6.2 (D287): at most services services, counted per tenant: a hello declaring a 5th is
 // ErrTooManyServices with nothing written; the services get allow [org:<slug>], plus anonymous when public, and the
 // gate's anonymous card extension; the same key before expiry gets the same tenant (Resumed, the same end); a resumed
 // hello disables and unbinds what it no longer declares, enables again what it declares, and applies public anew, so
@@ -309,7 +309,7 @@ func TestOpenServicesPerTenant(t *testing.T) {
 	}
 }
 
-// T §6.1 (DM4-20): a slug that exists, a tombstone included, is drawn again.
+// T §6.1 (D287): a slug that exists, a tombstone included, is drawn again.
 func TestOpenDrawsAFreeSlug(t *testing.T) {
 	e := newPGEnv(t)
 	taken := "anon-00000000000000aa"
@@ -375,7 +375,7 @@ func (e *pgEnv) listen() (stop func() []string) {
 	}
 }
 
-// T §6.1, §12 (DM4-10, DM4-20): at expires_at the tenant's services are disabled and the key's bindings revoked, with
+// T §6.1, §12 (D277, D287): at expires_at the tenant's services are disabled and the key's bindings revoked, with
 // NOTIFY kontra_services, kontra_revoke 'binding:…' and kontra_tunnel 'expired:<tenant>' (the holder closes the
 // session); the key is not revoked, and its next Open opens a new tenant with a new slug, the key moved there with its
 // old bindings deleted. Expire is idempotent.
@@ -460,7 +460,7 @@ func (e *pgEnv) insertTask(tenant uuid.UUID, service, state, principal string) u
 	return id
 }
 
-// T §6.1 (DM4-20): purge_after after expiry the purge deletes the keys still in the tenant (their bindings and
+// T §6.1 (D287): purge_after after expiry the purge deletes the keys still in the tenant (their bindings and
 // tunnels), its MCP sessions (the gate's own /mcp ones, service NULL, included), calls, tasks (events and blobs),
 // services, enrollment tokens and in-flight call rows, the bucket objects first; it keeps only the tenant row, a
 // tombstone with deleted_at and created_from a CIDR. A bucket that fails keeps everything for the next pass.
@@ -590,7 +590,7 @@ func (e *pgEnv) contend(n int, lockSQL string, lockArgs []any, fn func(i int) er
 	return errs
 }
 
-// T §6.2 (DM4-10): concurrent tasks are at most tasks as host (the tenant's services' non-terminal tasks, whoever
+// T §6.2 (D277): concurrent tasks are at most tasks as host (the tenant's services' non-terminal tasks, whoever
 // called) and as hirer (the non-terminal tasks whose principal is a key of the tenant): the 5th is ErrTooManyTasks
 // (429), a terminal task does not count, a team tenant is not counted, and two creators at 3 never both pass.
 func TestCapsTask(t *testing.T) {
@@ -668,7 +668,7 @@ func TestCapsTask(t *testing.T) {
 	}
 }
 
-// T §6.2 (DM4-20): plain MCP calls in flight to an anonymous tenant's services are at most calls, gate-wide in
+// T §6.2 (D287): plain MCP calls in flight to an anonymous tenant's services are at most calls, gate-wide in
 // anon_calls: the next is ErrTooManyCalls (429), a release frees a slot, and a replica that dies takes its slots with
 // it; a team tenant's service takes none.
 func TestCapsCall(t *testing.T) {
@@ -714,7 +714,7 @@ func TestCapsCall(t *testing.T) {
 	}
 }
 
-// T §6.2, relay §6.6 (DM4-20): a caller's message that would take the tenant's stored bytes (its tasks' events and
+// T §6.2, relay §6.6 (D287): a caller's message that would take the tenant's stored bytes (its tasks' events and
 // objects) past parts_bytes is ErrStorageFull; a dispatch counts the tenant's other tasks and its limit is
 // min(task_bytes + others, parts_bytes); a team service is never counted.
 func TestCapsStorage(t *testing.T) {

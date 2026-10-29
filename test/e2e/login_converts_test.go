@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// login_converts (spec/tunnel.md §16; §6.3, §6.1; DM4-11, DM4-19, DM4-29). Multi-tenant, tunnel.anonymous on,
+// login_converts (spec/tunnel.md §16; §6.3, §6.1; D278, D286, D296). Multi-tenant, tunnel.anonymous on,
 // tunnel.enroll_with_api_key, auth.mcp_oauth at the in-repository authorization server, whose token endpoint issues a kk_
 // key of the account tenant acme (hire, enroll:*). Asserted:
 //

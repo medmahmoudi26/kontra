@@ -42,7 +42,7 @@ const (
 	MaxSessionsPerPrincipal        = 10000
 )
 
-// tunnel.anonymous's defaults (spec/tunnel.md §6.2, DM4-10, DM4-20).
+// tunnel.anonymous's defaults (spec/tunnel.md §6.2, D277, D287).
 const (
 	DefaultAnonTTL               = 2 * time.Hour
 	DefaultAnonTenantsPerNetwork = 3

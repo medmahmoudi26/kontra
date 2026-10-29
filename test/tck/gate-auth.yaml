@@ -1,4 +1,4 @@
-# The TCK's gate for the nightly auth run (M4 plan audit, confirmedConflicts 10; DM4-12): the direct backend behind
+# The TCK's gate for the nightly auth run (M4 plan audit, confirmedConflicts 10; D279): the direct backend behind
 # test/tck/front-auth.Caddyfile, a loopback front that adds `Authorization: Bearer <key>` to every request, the key
 # minted by `kontra-gate enroll --api-key tck --prefix tck`. The TCK then runs as that key's principal, so the
 # gate's ListTasks and push configs and deliveries, which the anonymous principal is refused (D20), run through the

@@ -1,6 +1,6 @@
 # Caddy in front of a Kontra gate: Caddy terminates TLS and proxies everything to the gate's plaintext listener
 # (spec/relay.md §2.2). `make tck VARIANT=caddy` runs the pinned A2A TCK through this file unchanged
-# (tck_behind_caddy, DM4-12). The environment fills it in (Caddy substitutes {$VAR} when it reads the file):
+# (tck_behind_caddy, D279). The environment fills it in (Caddy substitutes {$VAR} when it reads the file):
 #
 #   KONTRA_FRONT_SITE  the site: the host of the gate's public_url (gateway.example.com), or a full https:// address
 #   KONTRA_GATE        the gate's listen address (127.0.0.1:8080)

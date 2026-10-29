@@ -75,7 +75,7 @@ const (
 //     exists is enroll_invalid; an old key stored with another public key is bad_proof, a revoked one
 //     revoked, a rotated one enroll_invalid;
 //  4. auth_invalid: an auth API key that is unknown, revoked or expired (or any, when the gate takes none);
-//     then anonymous sessions (spec/tunnel.md §6, DM4-18, DM4-19; anonymousSession): a hello asking for one
+//     then anonymous sessions (spec/tunnel.md §6, D285, D286; anonymousSession): a hello asking for one
 //     (anonymous: true, neither enroll nor auth) from an unknown key, or from a key of an anonymous tenant, opens or
 //     resumes it (anonymous_unavailable, rate_limited, service_denied, kind_mismatch from its limits), or
 //     anonymous_unavailable on a gate without tunnel.anonymous; a key of a live anonymous tenant presenting no
@@ -215,7 +215,7 @@ type admission struct {
 	// SPEC-CONFLICT).
 	hireOnly bool
 
-	// Anonymous sessions (spec/tunnel.md §6, DM4-18, DM4-19; anonymous.go). anonKey is the key's row when it belongs
+	// Anonymous sessions (spec/tunnel.md §6, D285, D286; anonymous.go). anonKey is the key's row when it belongs
 	// to an anonymous tenant, live or ended, and is neither revoked nor rotated: what the hello makes of it is decided
 	// after the rotation and API key checks (anonymousSession). moveFrom is such a key that §5's rules below enroll as
 	// if it were new: write moves it (anon.MoveKey) instead of inserting it; endTenant is the live anonymous tenant
@@ -270,7 +270,7 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	}
 	if key != nil {
 		if key.anonymous && key.RevokedAt == nil && key.RevokedReason != ReasonRotated && key.RotatedTo == "" && h.RotateFrom == nil {
-			// A key of an anonymous tenant: its tenant's end does not revoke it (§6.1, §12; DM4-10).
+			// A key of an anonymous tenant: its tenant's end does not revoke it (§6.1, §12; D277).
 			if err := a.lockAnonymousTenant(ctx, key); err != nil {
 				return nil, err
 			}
@@ -472,7 +472,7 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 		case !p.exists && p.via == viaTenantToken:
 			p.create = true
 		case !p.exists && p.via == viaAPIKey && a.converting && a.anonServes[p.svc.Name] == p.svc.Kind:
-			// §6.3 (DM4-11, DM4-29): a conversion creates the services the anonymous session serves that the account
+			// §6.3 (D278, D296): a conversion creates the services the anonymous session serves that the account
 			// does not have, under the same names; any other declared name is §5's (below).
 			p.create = true
 		case !p.exists:
@@ -715,7 +715,7 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 	newKey := a.key == nil
 	keyID := h.KID
 	if newKey && a.moveFrom != nil {
-		// A key of an anonymous tenant, enrolled here as §5 enrolls a new key: it moves (DM4-19), its old bindings
+		// A key of an anonymous tenant, enrolled here as §5 enrolls a new key: it moves (D286), its old bindings
 		// deleted first.
 		if err := anon.MoveKey(ctx, a.tx, keyID, a.tenant); err != nil {
 			return nil, err
@@ -846,7 +846,7 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			return nil, err
 		}
 	}
-	// §6.3 and DM4-19: a key of a live anonymous tenant that moved here converts it; that tenant ends at once (its URLs
+	// §6.3 and D286: a key of a live anonymous tenant that moved here converts it; that tenant ends at once (its URLs
 	// 404, its session told revoked), with the conversion's audit row.
 	if a.endTenant != uuid.Nil && a.endTenant != a.tenant {
 		cr := anon.ConvertRequest{KeyID: keyID, From: a.endTenant, To: a.tenant, ToSlug: a.slug, Via: anon.ViaAPIKey}

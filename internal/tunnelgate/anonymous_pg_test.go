@@ -12,7 +12,7 @@ import (
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// spec/tunnel.md §6.1, §12 (DM4-10, DM4-20) with the real admission and registry: an anonymous session's tenant
+// spec/tunnel.md §6.1, §12 (D277, D287) with the real admission and registry: an anonymous session's tenant
 // ended by the sweep (here before the session's own clock, as a sweep on a replica whose clock runs ahead would)
 // reaches the replica holding its session by NOTIFY kontra_tunnel: the node is told {"t": "revoked"} once, never
 // {"t": "revoked", "service"} for the bindings revoked with it, and the session closes and its tunnels row goes; the

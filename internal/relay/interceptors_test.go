@@ -338,7 +338,7 @@ func TestAdmissionRefusals(t *testing.T) {
 	if err := send(); !errors.Is(err, a2a.ErrInternalError) {
 		t.Errorf("a decision with a forbidden key: %v", err)
 	}
-	// A quote the gate may not create a task from, whatever Admission gave it (hooks.CheckQuote, DM4-17): -32603
+	// A quote the gate may not create a task from, whatever Admission gave it (hooks.CheckQuote, D284): -32603
 	// "admission unavailable", which the HTTP+JSON binding answers 503 (it carries lifecycle.ErrUnavailable).
 	soon := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	for name, q := range map[string]*hooks.QuoteTerms{

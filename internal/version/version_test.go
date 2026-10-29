@@ -37,7 +37,7 @@ func TestWithRevision(t *testing.T) {
 }
 
 // A binary built by `go install kontra.sh/kontra/cmd/kontra@<version>` has no VCS stamp; it reports the module's
-// version, whose pseudo-version names the commit (DM4-31). A local build ("(devel)") and a VCS stamp keep "dev[+rev]".
+// version, whose pseudo-version names the commit (D298). A local build ("(devel)") and a VCS stamp keep "dev[+rev]".
 func TestFromBuildInfo(t *testing.T) {
 	const pseudo = "v0.0.0-20261029101500-1a2b3c4d5e6f"
 	for _, tc := range []struct {

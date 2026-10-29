@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The pinned A2A TCK against the gate (spec/relay.md §0, §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, DM4-12):
+# The pinned A2A TCK against the gate (spec/relay.md §0, §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, D279):
 # `make tck VARIANT=direct|tunnel|caddy|auth`, or scripts/tck.sh <variant>.
 #
 #   direct  the `tck` service on the direct backend, the TCK talking to the gate itself (tck_jsonrpc, tck_rest)
@@ -18,7 +18,7 @@
 # plugins, the template fill, this script), and the TCK once per binding (--transport jsonrpc, then http_json), each
 # with test/tck/kontra_xfail.py enforcing test/tck/expected-failures.txt for the variant (TCK_VARIANT;
 # KONTRA_TCK_EXPECTED_FAILURES names another file, to try one) and test/tck/kontra_tck_ids.py giving each test fresh
-# TCK message ids (DM4-24). $KONTRA_TCK_DIR is the a2a-tck checkout at the pinned commit, its tracked files
+# TCK message ids (D291). $KONTRA_TCK_DIR is the a2a-tck checkout at the pinned commit, its tracked files
 # unmodified; the reports land in its reports/ directory: <variant>-<binding>.xml (JUnit), .html (pytest-html),
 # -compatibility.json/.html (the TCK's own), and <variant>-logs/ (the gate's, the seller's, the node's,
 # Caddy's and Temporal's logs).
@@ -270,7 +270,7 @@ wait_for "the card at $sut/.well-known/agent-card.json" 60 "$wait_pid" \
 echo "tck: $variant: the gate serves $sut (seller $seller, Temporal 127.0.0.1:$t_port)"
 
 # --- the TCK, in the environment synced above (D18), with the harness's plugins (test/tck): kontra_xfail enforces
-# the expected outcomes, kontra_tck_ids gives each test fresh TCK message ids (DM4-24) ---
+# the expected outcomes, kontra_tck_ids gives each test fresh TCK message ids (D291) ---
 export PYTHONPATH="$repo/test/tck"
 export TCK_EXPECTED_FAILURES="${KONTRA_TCK_EXPECTED_FAILURES:-$repo/test/tck/expected-failures.txt}"
 export TCK_VARIANT="$variant"

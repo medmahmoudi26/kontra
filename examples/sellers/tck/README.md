@@ -1,7 +1,7 @@
 # sellers/tck
 
 The seller the pinned A2A TCK runs against through the gate (`make tck`, [`test/tck`](../../../test/tck/README.md);
-spec/relay.md §16 `tck_*`, D18, DM4-12): a plain a2a-go v2.7.0 agent that does what the TCK's Gherkin scenarios ask
+spec/relay.md §16 `tck_*`, D18, D279): a plain a2a-go v2.7.0 agent that does what the TCK's Gherkin scenarios ask
 of a system under test (a2a-tck `d4d6fae`, `scenarios/core_operations.feature` and `scenarios/streaming.feature`).
 It imports nothing from Kontra and has no Kontra-specific endpoint (`examples_test.go` checks the import).
 

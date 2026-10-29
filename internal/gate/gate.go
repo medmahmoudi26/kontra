@@ -209,7 +209,7 @@ type Replica struct {
 	peerAddr    string
 	peerWarned  atomic.Bool
 
-	// admission is the configured Admission (spec §13.1, DM4-8) and admissionOps the operations that consult it
+	// admission is the configured Admission (spec §13.1, D275) and admissionOps the operations that consult it
 	// (hooks.admission.operations; none for the built-in).
 	admission    hooks.Admission
 	admissionOps []hooks.Operation
@@ -374,7 +374,7 @@ func (r *Replica) assemble() error {
 	// sessions hiring with that key: 401 on their later streams, {"t": "auth_revoked"} (tunnel.md §12).
 	r.revoked.Subscribe(r.tunnels.APIKeyRevoked)
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
-	// Anonymous sessions (spec/tunnel.md §6, DM4-10): opened by the admission, their limits checked where work is
+	// Anonymous sessions (spec/tunnel.md §6, D277): opened by the admission, their limits checked where work is
 	// created, their tenants ended and purged by every replica's sweeps. A gate without tunnel.anonymous has none.
 	var anonLimits *anon.Limits
 	if cfg.Tunnel.Anonymous.Enabled {
@@ -459,7 +459,7 @@ func (r *Replica) assemble() error {
 			return lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)
 		},
 		Interceptors: func(svc store.ServiceRef) []a2asrv.CallInterceptor {
-			// Starts: the service's work queue re-issues a quoted task's start before its resend is answered (DM4-23).
+			// Starts: the service's work queue re-issues a quoted task's start before its resend is answered (D290).
 			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Admit: r.admission, Canceler: r.lifecycle,
 				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log,
 				Starts: lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)}
@@ -532,7 +532,7 @@ func (r *Replica) assemble() error {
 	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
 		return err
 	}
-	// /mcp's hire is an A2A request (DM4-26): the A2A routes' reading of a served card's required extensions (§2.4) and
+	// /mcp's hire is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4) and
 	// the service's work queue re-issuing a retried quoted task's start (§14.5), as the A2A routes have them.
 	hirer := &relay.Hirer{Handlers: handlers, Log: r.storeLog,
 		RequiredExtensions: func(svc store.ServiceRef) []string {
@@ -640,7 +640,7 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 			}
 		})
 	}
-	// The configured Admission (spec §13.1, DM4-8): session at initialize, call at a plain tools/call, task at a
+	// The configured Admission (spec §13.1, D275): session at initialize, call at a plain tools/call, task at a
 	// task-augmented one, as hooks.admission.operations lists them.
 	deps := mcprelay.Deps{
 		ReplicaID: r.id, Services: r.services, Auth: authn, Multi: cfg.Tenancy == config.TenancyMulti,
@@ -657,7 +657,7 @@ func (r *Replica) assembleMCP(routes *edge.Router, authn *auth.Authenticator, sn
 		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Hooks: snapshot, Rules: rules, Logger: r.log,
 	}
 	if r.anonCaps != nil {
-		// An anonymous tenant's tasks, parts total and plain calls (spec/tunnel.md §6.2, DM4-20).
+		// An anonymous tenant's tasks, parts total and plain calls (spec/tunnel.md §6.2, D287).
 		tcfg.Caps = r.anonCaps
 		deps.Calls = r.anonCaps
 	}

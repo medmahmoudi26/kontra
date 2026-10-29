@@ -60,7 +60,7 @@ func (f *fakeCalls) counts() (inFlight, taken, released int) {
 	return f.inFlight, f.taken, f.released
 }
 
-// spec/tunnel.md §6.2 (DM4-20): a plain tools/call to an anonymous tenant's service takes one of its calls slots for
+// spec/tunnel.md §6.2 (D287): a plain tools/call to an anonymous tenant's service takes one of its calls slots for
 // as long as its answer is relayed; with none free it is 429 with -32600 "rate limited" and Retry-After, before
 // anything is forwarded or metered, in both eras. Other requests (tools/list) take no slot.
 func TestPlainCallsAreCapped(t *testing.T) {

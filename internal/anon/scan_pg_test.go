@@ -162,7 +162,7 @@ func (n *node) admit(t *testing.T, s *enroll.Store, client netip.Addr, services 
 	return d
 }
 
-// spec/tunnel.md §6.2, §16 anon_lifecycle (DM4-20, the M4 audit's address scan): no table holds a client's address
+// spec/tunnel.md §6.2, §16 anon_lifecycle (D287, the M4 audit's address scan): no table holds a client's address
 // in any form, while its anonymous session lives and after the purge; the network is stored as a CIDR. The scan reads
 // every text, varchar, text[], json, jsonb, bytea (escaped, and the address's bytes), inet and cidr column of schema
 // kontra, audit.row_jcs included, for the dotted, IPv4-mapped, compressed and expanded forms; a positive control

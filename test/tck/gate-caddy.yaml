@@ -1,4 +1,4 @@
-# The TCK's gate behind examples/front/caddy: tck_behind_caddy (spec/relay.md §2.2, §16; D18, DM4-12). A template
+# The TCK's gate behind examples/front/caddy: tck_behind_caddy (spec/relay.md §2.2, §16; D18, D279). A template
 # that scripts/tck.sh fills (@LISTEN@, @PUBLIC_URL@, @POSTGRES@, @TEMPORAL@, @SELLER@) and runs from a fresh
 # database: `make tck VARIANT=caddy`. Caddy terminates TLS for public_url (https, on loopback, with its local CA)
 # and proxies to the gate's plaintext listener; the TCK only ever talks to Caddy, whose URL the served card names.

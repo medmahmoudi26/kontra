@@ -1,5 +1,5 @@
 // Command tck is the seller the pinned A2A TCK runs against through the gate (spec/relay.md §0, §16 `tck_*`;
-// D18, DM4-12): a plain A2A agent, written with a2a-go v2.7.0, that does what the TCK's Gherkin scenarios
+// D18, D279): a plain A2A agent, written with a2a-go v2.7.0, that does what the TCK's Gherkin scenarios
 // (a2a-tck d4d6fae, scenarios/core_operations.feature and scenarios/streaming.feature) ask of a system under
 // test. The TCK signals the behaviour it wants in band, with the prefix of the message id: `tck-<scenario>-<8
 // hex digits>` (a2a-tck tck/requirements/base.py, tck_id), and the gate passes message ids upstream unchanged

@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// An operator-configured endpoint (spec §10.3, DM4-17) is dialed without the address check: an https:// server on
+// An operator-configured endpoint (spec §10.3, D284) is dialed without the address check: an https:// server on
 // 127.0.0.1, which NewClient refuses, answers; http:// to a loopback host answers too.
 func TestOperatorClientSkipsTheAddressCheck(t *testing.T) {
 	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "tls") }))

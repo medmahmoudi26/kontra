@@ -63,7 +63,7 @@ type Hirer struct {
 
 // ExtensionsRequiredError refuses a hire or a reply, before anything is stored or sent, to a service whose served
 // card marks extensions required: true (spec §2.4: a request missing one is refused before any task row exists). A
-// tool call of /mcp has no A2A-Extensions to activate them with, so it always misses them (DM4-27). It is
+// tool call of /mcp has no A2A-Extensions to activate them with, so it always misses them (D294). It is
 // ExtensionSupportRequiredError (-32008).
 type ExtensionsRequiredError struct {
 	URIs []string // the required URIs, in the card's order
@@ -128,7 +128,7 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 	}
 	if prev != nil {
 		// A retry of a quoted task (its first hire may have had its row committed and its start lost, and answered
-		// 503): re-issue the start, idempotent, so the person's approval has a workflow to reach (§14.5, DM4-23). A task
+		// 503): re-issue the start, idempotent, so the person's approval has a workflow to reach (§14.5, D290). A task
 		// that left quoted had its workflow (kontra.approval, or the quote's expiry, came through it).
 		if prev.State == store.StateQuoted && h.Starts != nil {
 			if err := h.Starts(req.Service).ReissueStart(ctx, prev); err != nil {

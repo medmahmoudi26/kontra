@@ -69,7 +69,7 @@ func realClock() *clock { return &clock{t: time.Now()} }
 
 var mcpAud = CanonicalURI(gateURL, "")
 
-// §12.1, DM4-9: ES256, RS256 and EdDSA tokens from the issuer, for the route's canonical URI, are accepted; the
+// §12.1, D276: ES256, RS256 and EdDSA tokens from the issuer, for the route's canonical URI, are accepted; the
 // principal is oidc:sub:<sub> with buyer UUIDv5(issuer ‖ sub), no tenant, via mcp.
 func TestVerifyAccepts(t *testing.T) {
 	as := newAS(t, oidctest.Config{})
@@ -124,7 +124,7 @@ func stripKid(t *testing.T, as *oidctest.Server, tk oidctest.Token) string {
 	return tok
 }
 
-// §12.1, DM4-9: every refusal is ErrInvalidToken (401): an expired token, nbf more than 60 s ahead, another issuer, an
+// §12.1, D276: every refusal is ErrInvalidToken (401): an expired token, nbf more than 60 s ahead, another issuer, an
 // audience without the route's canonical URI, alg none, HS256, a bad signature (each alg), a key type that does not
 // fit the alg, a kid the set does not hold, crit, a repeated or case-variant claim, no exp, no or an empty sub.
 func TestVerifyRefuses(t *testing.T) {
@@ -196,7 +196,7 @@ func TestVerifyRefuses(t *testing.T) {
 	}
 }
 
-// DM4-9: the key set is fetched once and cached 10 minutes; a kid it does not hold refetches it at most once a minute
+// D276: the key set is fetched once and cached 10 minutes; a kid it does not hold refetches it at most once a minute
 // (an unknown kid is refused after one refetch); a rotated key is found by the refetch that its kid triggers.
 func TestVerifyRefetchesAtMostOnceAMinute(t *testing.T) {
 	as := newAS(t, oidctest.Config{})
@@ -282,7 +282,7 @@ func TestVerifyFetchesOnceForConcurrentRequests(t *testing.T) {
 	}
 }
 
-// DM4-9, DM4-29: the metadata is RFC 8414's well-known URI (inserted before an issuer's path), else the OpenID
+// D276, D296: the metadata is RFC 8414's well-known URI (inserted before an issuer's path), else the OpenID
 // configuration; a document naming another issuer, a jwks_uri that is not an operator endpoint, a redirect and an
 // oversized body are failures of the issuer (ErrUnavailable, 503), never ErrInvalidToken; while the issuer fails, the
 // gate asks it again at most every 5 s, and a refetch that fails keeps the fresh set it had.

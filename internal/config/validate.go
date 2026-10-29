@@ -403,12 +403,12 @@ func (c *Config) validateAuth(v *validator, pub *url.URL) {
 		if err := checkHTTPSURL(m.Issuer, false); err != nil {
 			v.add("auth.mcp_oauth.issuer: %v", err)
 		}
-		// DM4-29: the resource server's RFC 9728 documents are at {public_url}/.well-known/oauth-protected-resource/mcp…,
+		// D296: the resource server's RFC 9728 documents are at {public_url}/.well-known/oauth-protected-resource/mcp…,
 		// which is where RFC 9728 §3.1 puts them (the well-known path inserted after the host) only for a public_url
 		// without a path; kontra login reads them there, at the gate's origin (spec/tunnel.md §6.3).
 		if pub != nil && strings.Trim(pub.EscapedPath(), "/") != "" {
 			v.add("public_url %q: auth.mcp_oauth needs a public_url without a path (its RFC 9728 documents are at the "+
-				"origin's /.well-known/oauth-protected-resource/mcp, RFC 9728 §3.1; spec §12.1, DM4-29)", redactURL(c.PublicURL))
+				"origin's /.well-known/oauth-protected-resource/mcp, RFC 9728 §3.1; spec §12.1, D296)", redactURL(c.PublicURL))
 		}
 	}
 }
@@ -486,11 +486,11 @@ func (c *Config) validateHooks(v *validator) {
 			}
 		}
 		// The MCP relay bounds a modern client's shared Admission session decision at 30 s; a longer timeout would be
-		// cut there, with nothing logged, and kept on A2A and legacy MCP (spec §13.1, DM4-17).
+		// cut there, with nothing logged, and kept on A2A and legacy MCP (spec §13.1, D284).
 		if h.Timeout.D() > MaxAdmissionWait {
 			v.add("hooks.admission.timeout %s: at most %s (spec §13.1)", h.Timeout, Duration(MaxAdmissionWait))
 		}
-		// Built in M4 (DM4-8). The replica reads the secret from secret_env at start and refuses to start without it,
+		// Built in M4 (D275). The replica reads the secret from secret_env at start and refuses to start without it,
 		// as it does peer.secret_env's, so that `kontra-gate migrate` and `enroll` load the same file without it.
 	}
 	// The remote Lifecycle hook is accepted (D186): the five activities are scheduled by type name on the operator's
@@ -512,7 +512,7 @@ func (c *Config) validateTunnel(v *validator) {
 	}
 	if a := c.Tunnel.Anonymous; a.Enabled {
 		if c.Tenancy != TenancyMulti {
-			v.add("tunnel.anonymous: needs tenancy: multi, since an anonymous service's URL names its tenant (tunnel.md §6, DM4-10)")
+			v.add("tunnel.anonymous: needs tenancy: multi, since an anonymous service's URL names its tenant (tunnel.md §6, D277)")
 		}
 		if a.HiringStreams > MaxAnonHiringStreams {
 			v.add("tunnel.anonymous.hiring_streams %d: at most %d, the gate's per-session stream cap (tunnel.md §14)", a.HiringStreams, MaxAnonHiringStreams)
@@ -794,7 +794,7 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
 // served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
 // M3 WP-04; sealed: on tunnel services since M3 WP-08; tunnel.anonymous since M4 WP-03; auth.mcp_oauth since M4 WP-06
-// (DM4-9).
+// (D276).
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }

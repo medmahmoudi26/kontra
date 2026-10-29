@@ -17,7 +17,7 @@ import (
 // (spec/tunnel.md §5: every enrollment and revocation is a row in audit).
 const EventAnonymous = "tunnel.anonymous_session"
 
-// anonymousSession decides what a hello does with anonymous sessions (spec/tunnel.md §6, DM4-18, DM4-19), after the
+// anonymousSession decides what a hello does with anonymous sessions (spec/tunnel.md §6, D285, D286), after the
 // key, rotation and API key checks (steps 1–4). It returns the decision of an anonymous session it opened or resumed;
 // nil to go on with §5's rules, with a key of an anonymous tenant then moved by write (moveFrom).
 //
@@ -26,12 +26,12 @@ const EventAnonymous = "tunnel.anonymous_session"
 //     tunnel.anonymous;
 //   - from a key of a live anonymous tenant: an auth key with enroll:* of an account converts it (§6.3, convert; with
 //     tunnel.enroll_with_api_key); otherwise resumed when the hello asks, or carries an auth API key that cannot
-//     convert it (a hire-only key, DM4-19: the session's hiring principal); a hello with neither (a probe, §2.4) is
+//     convert it (a hire-only key, D286: the session's hiring principal); a hello with neither (a probe, §2.4) is
 //     unknown_key, so that a node whose earlier hello converted nothing sends it again. On a gate without
 //     tunnel.anonymous only a hello that asks is anonymous_unavailable; any other goes through §5 as below (a probe is
 //     unknown_key);
 //   - enroll tokens from a key of an anonymous tenant: §5 enrolls the key into the tokens' tenant, moving it, and a
-//     live anonymous tenant ends at once (DM4-19);
+//     live anonymous tenant ends at once (D286);
 //   - any other hello from a key of an ended anonymous tenant goes through §5 as a new key would (moved if admitted).
 //
 // A team or account key's hello is §5's whatever it carries: the field is ignored.
@@ -58,7 +58,7 @@ func (a *admission) anonymousSession(ctx context.Context) (*Decision, error) {
 			// A gate without tunnel.anonymous (turned off while the tenant lives) resumes no anonymous session: any other
 			// hello is §5's, as a new key's (the M4 WP-03 review). The probe (§2.4) is then unknown_key, which tells the
 			// node that nothing committed; a hello §5 admits moves the key, and the tenant it leaves ends at once, as
-			// DM4-19's conversions end it.
+			// D286's conversions end it.
 			a.moveFrom = &k.Key
 			a.endTenant = k.TenantID
 			return nil, nil
@@ -85,7 +85,7 @@ func (a *admission) anonymousSession(ctx context.Context) (*Decision, error) {
 	return nil, nil
 }
 
-// convert is §6.3's conversion of a key of a live anonymous tenant (DM4-11): a hello whose auth is an API key with
+// convert is §6.3's conversion of a key of a live anonymous tenant (D278): a hello whose auth is an API key with
 // enroll:* of a tenant that is not anonymous (an account; or the team tenant), on a gate with
 // tunnel.enroll_with_api_key, whether or not the gate still opens anonymous sessions. It reports whether the hello
 // converts; if so the key goes on through §5's rules below as a new key of the API key's tenant, with two differences
@@ -93,7 +93,7 @@ func (a *admission) anonymousSession(ctx context.Context) (*Decision, error) {
 //
 //   - a declared service the account does not have is created there, under the same name, with allow [org:<account>],
 //     only when the anonymous session serves it (anonServes: an enabled service of the anonymous tenant of that name
-//     and kind, bound to the key; §6.1 "the services keep their names", DM4-29). Any other declared name is §5's: on
+//     and kind, bound to the key; §6.1 "the services keep their names", D296). Any other declared name is §5's: on
 //     §5's own path only a tenant token or the operator creates a service (M2's C10), and an anonymous session costs
 //     no credential, so it must not become a way for an enroll:* key to create services, or past §6.2's services
 //     limit. An existing account service of another kind is kind_mismatch, with nothing moved (the transaction rolls
@@ -116,7 +116,7 @@ func (a *admission) convert(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("enroll: the auth API key's tenant: %w", err)
 	}
 	if anonymous {
-		return false, nil // no account to convert into: the key hires as the session's principal (DM4-19)
+		return false, nil // no account to convert into: the key hires as the session's principal (D286)
 	}
 	// What the anonymous session serves: the only services a conversion creates. The tenant is locked already
 	// (lockAnonymousTenant); this reads, and locks nothing more.

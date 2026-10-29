@@ -23,7 +23,7 @@ to leak (D185).
 | `sellers/hello-exec` | `a2a server --exec 'echo Hello World'` (a2a-cli v0.3.1): the README demo seller, as a direct backend (`kontra.yaml`) and through `kontra connect` (`kontra-tunnel.yaml`) | M1 (direct), M2 (tunnel): built |
 | `sellers/helloworld` | a2a-samples helloworld at `6603ba3` (a2a-sdk 1.1.0, a 1.0 card), run unmodified by `run.sh` and hosted through `kontra connect`; `test/e2e` `TestHelloworldTunnel` runs it through two gate replicas. The 0.2.5 seller at `08dde55c070f` that `card_compat` names is not built: `card_compat` runs against `slowagent`'s stand-in for it (D122, D154) | M2: built |
 | `sellers/booking` | A small a2a-go v2.7.0 agent that asks for a date (`input-required`) and confirms, over JSON-RPC and HTTP+JSON: the `input-required` seller (`input_required_sticky`), directly or through `kontra connect` | M2: built |
-| `sellers/tck` | An a2a-go v2.7.0 seller that implements the pinned TCK's Gherkin scenarios (keyed on `messageId` prefixes): the target of `make tck` (`tck_*`, DM4-12), as a direct backend and through `kontra connect` | M4: built |
+| `sellers/tck` | An a2a-go v2.7.0 seller that implements the pinned TCK's Gherkin scenarios (keyed on `messageId` prefixes): the target of `make tck` (`tck_*`, D279), as a direct backend and through `kontra connect` | M4: built |
 | `sellers/temporal-harness` | An OpenAI Agents SDK agent in a Temporal workflow of the seller's own, served as A2A (PRD §16: survives as an example, not core) | M4 |
 | `sellers/adk` | A Google ADK agent served as A2A | M4 |
 | `sellers/claude-cli` | A `summarize` agent that runs the `claude` CLI as a subprocess, served as A2A | M4 |

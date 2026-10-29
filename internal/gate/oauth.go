@@ -19,9 +19,9 @@ func WithOperatorRoots(pool *x509.CertPool) Option {
 }
 
 // assembleMCPOAuth makes /mcp and every /mcp/{svc} an OAuth 2.1 resource server for auth.mcp_oauth.issuer (spec
-// §12.1, DM4-9; M4 WP-06): the authenticator verifies bearer JWTs on those routes for their canonical URIs, their 401s
+// §12.1, D276; M4 WP-06): the authenticator verifies bearer JWTs on those routes for their canonical URIs, their 401s
 // carry the challenge, and the RFC 9728 documents are served for every well-formed name. The issuer's metadata and key
-// set are §10.3's operator-configured endpoints (DM4-17). Without the setting it does nothing.
+// set are §10.3's operator-configured endpoints (D284). Without the setting it does nothing.
 func (r *Replica) assembleMCPOAuth(routes *edge.Router, authn *auth.Authenticator) error {
 	m := r.cfg.Auth.MCPOAuth
 	if m == nil {

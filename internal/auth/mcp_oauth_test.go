@@ -38,7 +38,7 @@ type sessionSource struct{ p Principal }
 
 func (s sessionSource) HirePrincipal(context.Context) (Principal, error) { return s.p, nil }
 
-// §12.1, DM4-29: on an MCP route with a resource server, a bearer shaped as a JWT is verified for that route; any
+// §12.1, D296: on an MCP route with a resource server, a bearer shaped as a JWT is verified for that route; any
 // other bearer is an API key, as on every route; the A2A routes' Authenticate never asks the resource server; a
 // request without a credential is the anonymous principal (the route decides); a node's request takes its session's.
 func TestAuthenticateMCP(t *testing.T) {

@@ -42,7 +42,7 @@ func anonHello(k *testKey, services ...tunnel.Service) *tunnel.Hello {
 	return h
 }
 
-// spec/tunnel.md §6, §6.1 (DM4-18): a hello asking for an anonymous session (anonymous: true, neither enroll nor auth)
+// spec/tunnel.md §6, §6.1 (D285): a hello asking for an anonymous session (anonymous: true, neither enroll nor auth)
 // from an unknown key opens a tenant anon-<16 hex> from the client's /24: the declared services at the multi-tenant
 // URLs, welcome.anonymous.expires_at, the hiring principal node:<key_id>, allow [org:<slug>] plus anonymous for the
 // public names, and an audit row; the client's address is never stored.
@@ -95,7 +95,7 @@ func TestAdmitAnonymousOpens(t *testing.T) {
 	}
 }
 
-// DM4-18, §6, §6.2: without anonymous: true an unknown key stays unknown_key on a gate with anonymous sessions (the
+// D285, §6, §6.2: without anonymous: true an unknown key stays unknown_key on a gate with anonymous sessions (the
 // lost-welcome probe relies on it), and so does a probe from a key holding an anonymous session; a gate without
 // tunnel.anonymous answers the field from an unknown key anonymous_unavailable; the limits' refusals are the
 // handshake's codes (rate_limited, anonymous_unavailable, service_denied with nothing enrolled, kind_mismatch).
@@ -155,7 +155,7 @@ func TestAdmitAnonymousRefusals(t *testing.T) {
 	})
 }
 
-// §6.1 (DM4-18, DM4-19): the same key before expiry gets its tenant back (with the field, or with a hire-only auth key
+// §6.1 (D285, D286): the same key before expiry gets its tenant back (with the field, or with a hire-only auth key
 // as its hiring principal, nothing converted); a probe from it (no field, no tokens, no auth) is unknown_key; at the
 // end its bindings are revoked, not the key, and its next hello asking for a session opens a new tenant with a new
 // slug, while one that does not ask is unknown_key.
@@ -216,7 +216,7 @@ func TestAdmitAnonymousResumeAndExpiry(t *testing.T) {
 	}
 }
 
-// DM4-19: enroll tokens from a key of a live anonymous tenant convert it into the tokens' tenant, bound as §5 says
+// D286: enroll tokens from a key of a live anonymous tenant convert it into the tokens' tenant, bound as §5 says
 // (the key moved, its anonymous bindings deleted first); the anonymous tenant ends at once (expires_at now, services
 // disabled, bindings revoked), and the enrollment's audit row names where the key came from.
 func TestAdmitEnrollFromAnAnonymousKeyConverts(t *testing.T) {
@@ -264,7 +264,7 @@ func TestAdmitEnrollFromAnAnonymousKeyConverts(t *testing.T) {
 	}
 }
 
-// DM4-20, migration 0003: an anon-… slug is refused for an account or a team tenant.
+// D287, migration 0003: an anon-… slug is refused for an account or a team tenant.
 func TestAnonymousSlugIsReserved(t *testing.T) {
 	e := newAnonEnv(t, nil)
 	for _, kind := range []string{"account", "team"} {
@@ -277,11 +277,11 @@ func TestAnonymousSlugIsReserved(t *testing.T) {
 	}
 }
 
-// §2.4, §6 (DM4-18; M4 WP-03 review): on a gate without tunnel.anonymous (the operator turned it off), a key of a
+// §2.4, §6 (D285; M4 WP-03 review): on a gate without tunnel.anonymous (the operator turned it off), a key of a
 // still-live anonymous tenant is no anonymous session's: a hello asking for one is anonymous_unavailable; any other is
 // §5's, as a new key's. So the probe (no field, no tokens, no auth) is unknown_key, which tells the node nothing
 // committed; a hire-only auth key with no service is admitted hire-only, the key moved into the API key's tenant and
-// the anonymous tenant ended (DM4-19's "converted"); one declaring services that nothing enrolls is unknown_key.
+// the anonymous tenant ended (D286's "converted"); one declaring services that nothing enrolls is unknown_key.
 func TestAdmitAnonymousKeyOnAGateWithoutAnonymous(t *testing.T) {
 	e := newAnonEnv(t, nil)
 	ctx := context.Background()
@@ -346,7 +346,7 @@ func (e *pgEnv) waitLockWaits(n int, lock string) {
 	}
 }
 
-// DM4-19, §6.1 (M4 WP-03 review, lock order): a conversion in flight (enroll tokens from a key of a live anonymous
+// D286, §6.1 (M4 WP-03 review, lock order): a conversion in flight (enroll tokens from a key of a live anonymous
 // tenant: the key moved, its anonymous bindings deleted, then the tenant ended) holds the anonymous tenant's row from
 // right after the key's, so the expiry sweep, when the tenant reaches its end meanwhile, skips it instead of waiting on
 // the conversion's bindings while the conversion waits on the tenant (a 40P01 before). The conversion then ends the
@@ -426,7 +426,7 @@ func TestConversionAndExpiryNeverWaitOnEachOther(t *testing.T) {
 	}
 }
 
-// DM4-19, §6.1 (M4 WP-03 review, lock order): the admission locks a key's anonymous tenant even once it has ended, as
+// D286, §6.1 (M4 WP-03 review, lock order): the admission locks a key's anonymous tenant even once it has ended, as
 // long as the expiry sweep has not run on it. Otherwise enroll tokens from such a key move it (its bindings deleted)
 // while an expiry batch that has already written an audit row (the global audit lock) waits on those bindings, and the
 // admission then waits on the audit lock. Here the admission is held after the move (the team service's row locked);

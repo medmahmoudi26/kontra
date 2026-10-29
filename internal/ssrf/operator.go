@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// Operator-configured endpoints (spec/relay.md §10.3, DM4-17): the Admission hook (hooks.admission.url), the MCP
+// Operator-configured endpoints (spec/relay.md §10.3, D284): the Admission hook (hooks.admission.url), the MCP
 // authorization server (auth.mcp_oauth.issuer, its RFC 8414 or OpenID metadata and the jwks_uri that metadata names)
 // and the bucket are the operator's own infrastructure, written in kontra.yaml and never derived from a request, a
 // card or a part. A team's control plane or IdP is often on a private network, so NewOperatorClient skips the

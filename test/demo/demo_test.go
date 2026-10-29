@@ -1,4 +1,4 @@
-// Package demo tests the README demo and its clean-laptop kit (DM4-13, DM4-15, DM4-31; the M4 plan's gate run B2):
+// Package demo tests the README demo and its clean-laptop kit (D280, D282, D298; the M4 plan's gate run B2):
 // README.md's block between the demo markers, scripts/demo-clean-laptop.sh against a stub docker (nothing is built or
 // run), and, with KONTRA_KIT_TESTS=1, the laptop image (test/demo/Dockerfile) and a rehearsal of the whole run against
 // a local multi-tenant gate with anonymous sessions, answering for gateway.kontra.run on a docker network.
@@ -78,7 +78,7 @@ func commands(b string) []string {
 
 var slugRE = regexp.MustCompile(`^anon-[0-9a-f]{16}$`)
 
-// The README's demo block (DM4-13; the M4 plan's WP-08 acceptance; the audit's gaps 12): the markers, the real a2a-cli
+// The README's demo block (D280; the M4 plan's WP-08 acceptance; the audit's gaps 12): the markers, the real a2a-cli
 // syntax (D15), the staging gate, --public, the go install at @latest, the slug as the documented placeholder, pinned
 // MCP packages; no Homebrew, no console on :7778 (D164), no short slug, no production gate in the block.
 func TestREADMEDemoBlock(t *testing.T) {

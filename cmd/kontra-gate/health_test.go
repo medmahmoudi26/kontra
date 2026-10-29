@@ -160,7 +160,7 @@ func composeHealthcheck(t *testing.T, port, cfg string) []string {
 	return args
 }
 
-// The compose ACME variant's healthcheck sends the gate's name (the M4 plan's audit, gaps 17; DM4-14): built-in ACME
+// The compose ACME variant's healthcheck sends the gate's name (the M4 plan's audit, gaps 17; D281): built-in ACME
 // refuses a handshake without a server name, so health without one fails; with --server-name, or with -f naming a
 // configuration whose public_url is that name, it succeeds, skipping verification on the loopback dial; and the
 // healthcheck compose.yaml runs, against kontra.vps.yaml as an operator edits it, succeeds.

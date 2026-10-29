@@ -286,7 +286,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		if rotateOld != "" && rotateOld != skip {
 			h.RotateFrom = &tunnel.KeyRef{KID: tunnel.KeyID(rotateOld), Recipient: rotateOld}
 		}
-		// DM4-18: an anonymous session is asked for only by a node with no credential at this gate; never by a probe.
+		// D285: an anonymous session is asked for only by a node with no credential at this gate; never by a probe.
 		if h.RotateFrom == nil && n.asksAnonymous(cred) {
 			h.Anonymous = true
 			h.Public = n.publicDeclared()
@@ -394,7 +394,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 	}
 }
 
-// asksAnonymous is DM4-18's rule: the hello asks for an anonymous session only when this origin's credentials hold no
+// asksAnonymous is D285's rule: the hello asks for an anonymous session only when this origin's credentials hold no
 // API key and no pending or consumed enrollment token (any key's), and the command line gave neither --enroll nor
 // --api-key. So a node that ever enrolled at this gate, or holds a token whose welcome it has not seen, never opens an
 // anonymous tenant in their place (a probe never asks either, §2.4).

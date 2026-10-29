@@ -21,7 +21,7 @@ import (
 	"kontra.sh/kontra/internal/store"
 )
 
-// ParseRef reads a ref as the gate's tenancy writes it (§12.2, DM4-4): <name> on a single-tenant gate,
+// ParseRef reads a ref as the gate's tenancy writes it (§12.2, D271): <name> on a single-tenant gate,
 // <tenant>/<name> on a multi-tenant one; anything else is the unknown-service error.
 func TestParseRef(t *testing.T) {
 	for _, tc := range []struct {
@@ -209,7 +209,7 @@ func renderOf(t *testing.T, task *a2a.Task, state store.State) rendered {
 	return r
 }
 
-// Render (§12.2, DM4-22): text parts as text; data parts as text (their JSON) and in structuredContent.data, message
+// Render (§12.2, D289): text parts as text; data parts as text (their JSON) and in structuredContent.data, message
 // first, then each artifact's, in order; file parts as resource blocks (raw bytes embedded with their media type, a
 // URL as a resource_link); structuredContent {taskId, state, data?} with the A2A state, data absent without data
 // parts; failed, rejected and canceled are isError with sh.kontra/failure or sh.kontra/canceled in _meta and their
@@ -297,7 +297,7 @@ func TestRender(t *testing.T) {
 	}
 }
 
-// Question (§12.4, D58, DM4-7): a text-only question to a reader that declared form elicitation is input_required
+// Question (§12.4, D58, D274): a text-only question to a reader that declared form elicitation is input_required
 // with the agent's text; every other case is the reply-tool text.
 func TestQuestion(t *testing.T) {
 	q := taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil)

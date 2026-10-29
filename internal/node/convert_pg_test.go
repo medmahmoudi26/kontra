@@ -14,7 +14,7 @@ import (
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// spec/tunnel.md §6.3 (DM4-11) with the real admission: a node that served an anonymous session, restarted once kontra
+// spec/tunnel.md §6.3 (D278) with the real admission: a node that served an anonymous session, restarted once kontra
 // login stored an account's API key for the gate (here written as login writes it), sends that key as auth and no
 // anonymous field, and its session converts: the welcome is the account's, and kontra connect prints the account's
 // URLs, without the anonymous session's end or its public note.

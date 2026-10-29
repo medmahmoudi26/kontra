@@ -1,4 +1,4 @@
-"""pytest plugin: fresh TCK message ids for every test (spec/relay.md §16 tck_*; DM4-24).
+"""pytest plugin: fresh TCK message ids for every test (spec/relay.md §16 tck_*; D291).
 
 Loaded into the pinned A2A TCK's own pytest with ``-p kontra_tck_ids`` (scripts/tck.sh), beside kontra_xfail; no TCK
 file is changed. The TCK names its messages ``tck_id(name)`` = ``tck-<name>-<_SESSION>`` (a2a-tck
@@ -29,6 +29,6 @@ MODULE = "tck.requirements.base"
 def kontra_fresh_tck_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     base = importlib.import_module(MODULE)
     if not isinstance(getattr(base, "_SESSION", None), str) or not callable(getattr(base, "tck_id", None)):
-        pytest.fail(f"kontra_tck_ids: {MODULE} has no _SESSION or tck_id: the pinned TCK changed (DM4-24)",
+        pytest.fail(f"kontra_tck_ids: {MODULE} has no _SESSION or tck_id: the pinned TCK changed (D291)",
                     pytrace=False)
     monkeypatch.setattr(base, "_SESSION", uuid.uuid4().hex[:8])

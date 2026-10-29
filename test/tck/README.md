@@ -1,7 +1,7 @@
 # test/tck
 
 The pinned A2A TCK against the gate (spec/relay.md §0, §16: `tck_jsonrpc`, `tck_rest`, `tck_behind_caddy`; D18,
-DM4-12, DM4-24): `make tck VARIANT=direct|tunnel|caddy|auth` ([`scripts/tck.sh`](../../scripts/tck.sh)), and the
+D279, D291): `make tck VARIANT=direct|tunnel|caddy|auth` ([`scripts/tck.sh`](../../scripts/tck.sh)), and the
 `tck` workflow ([`.github/workflows/tck.yml`](../../.github/workflows/tck.yml)) on pull requests that change the gate
 (direct, tunnel, caddy) and nightly (the four).
 
@@ -70,11 +70,11 @@ A2A §3.3.1 lets an agent detect duplicates by message id), so once an early tes
 session's `tck-input-required` task, the tests that need a fresh one skipped ("Expected task state … INPUT_REQUIRED
 but got COMPLETED"): CORE-CANCEL-001, CORE-MULTI-005, STREAM-SUB-001/002 and the history tests never ran through the
 gate. `kontra_tck_ids.py` gives `tck.requirements.base._SESSION` a fresh value for each test (an autouse fixture; no
-TCK file is changed), so each test's prerequisites are new tasks and those tests run (DM4-24); the ids the TCK's
+TCK file is changed), so each test's prerequisites are new tasks and those tests run (D291); the ids the TCK's
 requirement catalogue computed at import keep the session's value. The TCK found one gate defect through its
 resends: a blocking resend of a task at input-required waited for a turn that had ended, until the caller's timeout
-(DM4-23, fixed, `internal/relay` `TestBlockingResendAtTurnEnd`); WP-02's review found the same for a quoted task,
-which the TCK never creates (DM4-23, fixed, `TestBlockingResendOfAQuotedTask`).
+(D290, fixed, `internal/relay` `TestBlockingResendAtTurnEnd`); WP-02's review found the same for a quoted task,
+which the TCK never creates (D290, fixed, `TestBlockingResendOfAQuotedTask`).
 
 Re-pin when a2a-tck #200 (credentials), #232 (v1.0.1 codes), #243 (camelCase) and #197 (extensions) merge, and when
 the message ids are per call (then drop `kontra_tck_ids.py`); the strict XPASS of each entry, and "listed as a skip,

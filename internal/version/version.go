@@ -15,7 +15,7 @@ var Version = "dev"
 // toolchain stamped into the binary ("dev+1a2b3c4d5e6f", "-dirty" when the tree had changes), else the module's
 // version when the binary was built by `go install kontra.sh/kontra/cmd/kontra@<version>` (no VCS stamp then; a
 // pseudo-version such as v0.0.0-20261029101500-1a2b3c4d5e6f names the commit, which the README demo's post-merge run
-// checks, DM4-31), else "dev".
+// checks, D298), else "dev".
 func Get() string {
 	if Version != "dev" {
 		return Version

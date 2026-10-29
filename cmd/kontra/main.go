@@ -160,7 +160,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 	case "login":
-		// tunnel.md §6.3 (DM4-11): an API key from the gate's sign-in, kept for that gate only.
+		// tunnel.md §6.3 (D278): an API key from the gate's sign-in, kept for that gate only.
 		if err := login.Command(ctx, args[1:], stdout, stderr); err != nil {
 			fmt.Fprintln(stderr, "kontra login:", tunnel.Printable(err.Error()))
 			if errors.Is(err, login.ErrUsage) {

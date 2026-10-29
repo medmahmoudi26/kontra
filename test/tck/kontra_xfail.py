@@ -1,4 +1,4 @@
-"""pytest plugin: the pinned A2A TCK's expected outcomes, enforced (spec/relay.md §16 tck_*; D18, DM4-12, DM4-24).
+"""pytest plugin: the pinned A2A TCK's expected outcomes, enforced (spec/relay.md §16 tck_*; D18, D279, D291).
 
 Loaded into the TCK's own pytest with ``-p kontra_xfail`` and ``PYTHONPATH`` naming this directory. It reads the
 file ``$TCK_EXPECTED_FAILURES`` names (test/tck/expected-failures.txt), marks every expected failure of the run's
@@ -19,7 +19,7 @@ bindings ``xfail(strict=True)``, and fails the run (exit status 1) when the outc
 
 The file, one entry per line::
 
-    <pytest node id>  # <reason, citing a2a-tck#<n>, D<n> or DM4-<n>>
+    <pytest node id>  # <reason, citing a2a-tck#<n> or D<n>>
     skip <pytest node id>  # <reason, likewise>
 
 The first is an expected failure, the second an expected skip. Blank lines and lines starting with ``#`` are
@@ -50,7 +50,7 @@ import pytest
 BINDINGS = ("jsonrpc", "http_json", "grpc")
 
 # A reason must say where the failure is tracked: an a2a-tck issue or pull request, or a Kontra decision.
-_REFERENCE = re.compile(r"a2a-tck#\d+|\bDM4-\d+\b|\bD\d+\b")
+_REFERENCE = re.compile(r"a2a-tck#\d+|\bD\d+\b")
 _SECTION = re.compile(r"^\[(.*)\]$")
 _VARIANT = re.compile(r"^[a-z0-9_-]+$")
 # The binding of the TCK's unparametrized tests in its shared directories (core_operations/test_error_handling.py,
@@ -158,7 +158,7 @@ def load(path: str, variant: str | None) -> tuple[dict[str, Entry], dict[str, in
             problems.append(f"line {n}: {node!r} is not a pytest node id (or 'skip <node id>')")
             continue
         if not _REFERENCE.search(reason):
-            problems.append(f"line {n}: the reason of {node!r} cites no a2a-tck#<n>, D<n> or DM4-<n>")
+            problems.append(f"line {n}: the reason of {node!r} cites no a2a-tck#<n> or D<n>")
             continue
         listed.setdefault(node, n)
         if not applies:

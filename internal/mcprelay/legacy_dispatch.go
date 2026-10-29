@@ -977,7 +977,7 @@ func (r *legacyRun) ended(err error, reason string) (lifecycle.DispatchResult, b
 }
 
 // budget sets the dispatch's byte limit (spec §6.6): limits.task_bytes, or for a task of an anonymous tenant's
-// service its parts_bytes, counting the tenant's other tasks' bytes in r.bytes (spec/tunnel.md §6.2, DM4-20).
+// service its parts_bytes, counting the tenant's other tasks' bytes in r.bytes (spec/tunnel.md §6.2, D287).
 func (r *legacyRun) budget(ctx context.Context) error {
 	r.limit = r.d.taskBytes()
 	if r.d.Tenants == nil || r.row == nil {

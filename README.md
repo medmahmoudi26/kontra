@@ -33,7 +33,7 @@ and since M4:
 - comes up on a fresh VPS from `compose.yaml` with built-in ACME ([below](#a-team-gate-on-your-own-vps)).
 
 The demo below runs against the staging gate, `gateway.kontra.run`: the production gate, `gateway.kontra.sh`, opens no
-anonymous sessions until Cloud's M5 (DM4-1 and DM4-13 in [`docs/decisions.md`](docs/decisions.md)). Every built
+anonymous sessions until Cloud's M5 (D268 and D280 in [`docs/decisions.md`](docs/decisions.md)). Every built
 seller and server is listed in [`examples/`](examples/README.md); stock agents and MCP servers run unmodified.
 
 `docs/` is the design; `spec/` is the protocol specification written from it; code lands against both. Read in
@@ -100,7 +100,7 @@ other gate it says to use `--api-key`. Anonymous sessions are bounded per networ
 
 Any stock MCP client works where the inspector does: `{ "mcpServers": { "fs": { "url":
 "http://localhost:7777/mcp/anon-<…>/fs" } } }`. An MCP server over HTTP is `--serve mcp:name=http://localhost:8000/mcp`.
-`scripts/demo-clean-laptop.sh` runs this block, as written, in a fresh container (DM4-13).
+`scripts/demo-clean-laptop.sh` runs this block, as written, in a fresh container (D280).
 
 ## A team gate on your own VPS
 

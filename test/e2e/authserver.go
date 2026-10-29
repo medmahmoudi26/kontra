@@ -22,8 +22,8 @@ import (
 	"kontra.sh/kontra/internal/oidc/oidctest"
 )
 
-// M4 (WP-07): the operator's authorization server for the MCP resource server (spec/relay.md §12.1, DM4-9, DM4-29)
-// and kontra login (spec/tunnel.md §6.3, DM4-11): internal/oidc/oidctest over HTTPS on 127.0.0.1, with a throwaway
+// M4 (WP-07): the operator's authorization server for the MCP resource server (spec/relay.md §12.1, D276, D296)
+// and kontra login (spec/tunnel.md §6.3, D278): internal/oidc/oidctest over HTTPS on 127.0.0.1, with a throwaway
 // CA that the replicas and kontra login trust through SSL_CERT_FILE (a file under the run's directory). Its token
 // endpoint issues, by default, a kk_ API key of an account tenant of the gate's database with the scopes hire and
 // enroll:* (oidctest.DBMinter, once the test names the tenant with MintFor); with MintJWT it issues an ES256 JWT for

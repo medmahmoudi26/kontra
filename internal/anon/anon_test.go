@@ -51,7 +51,7 @@ func TestNetwork(t *testing.T) {
 	}
 }
 
-// NewSlug mints anon-<16 lowercase hex>, the shape migration 0003's CHECK reserves to anonymous tenants (DM4-20),
+// NewSlug mints anon-<16 lowercase hex>, the shape migration 0003's CHECK reserves to anonymous tenants (D287),
 // which IsSlug recognizes; slugs do not repeat.
 func TestNewSlug(t *testing.T) {
 	check := regexp.MustCompile(`^anon-[0-9a-f]{16}$`) // 0003's anonymous_slug

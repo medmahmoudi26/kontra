@@ -4,7 +4,7 @@
 # KONTRA_A2A_SAMPLES and run by TestHelloworldTunnel with uv (examples/sellers/helloworld/run.sh;
 # KONTRA_REQUIRE_HELLOWORLD makes a missing prerequisite fail that test instead of skipping it), and the M3 tests'
 # stock MCP servers on Node 22 (server-everything@1.0.0, server-filesystem@1.0.0, installed by npm from
-# examples/mcp's locks; D171, D185), and M4's (DM4-30) the example sellers examples/sellers/tck and booking, built by the
+# examples/mcp's locks; D171, D185), and M4's (D297) the example sellers examples/sellers/tck and booking, built by the
 # harness from this checkout. They take about half an hour. They run nightly, on demand, and on every pull request that changes the gate's
 # or the node's code, its migrations, these tests or the helloworld example: a pull_request workflow runs from
 # the pull request's own branch, so the M1 and M2 gates (relay_resume, replica_kill, tunnel_kill, …) run

@@ -16,7 +16,7 @@ import (
 	"kontra.sh/kontra/internal/oidc/oidctest"
 )
 
-// gate_mcp_oauth (spec/relay.md §16; §12.1; DM4-9, DM4-17, DM4-29). Single tenant. auth.mcp_oauth.issuer is the
+// gate_mcp_oauth (spec/relay.md §16; §12.1; D276, D284, D296). Single tenant. auth.mcp_oauth.issuer is the
 // in-repository authorization server (oidctest over HTTPS with a throwaway CA, which both replica processes trust
 // through SSL_CERT_FILE: their operator client uses the system roots). Asserted, on both replicas:
 //
@@ -158,7 +158,7 @@ func TestGateMCPOAuth(t *testing.T) {
 	}
 
 	// A rotated key: after the minute since each replica's fetch, a token with the new kid refetches the set once on
-	// each replica, however often it is used (DM4-29: at most once a minute after the last fetch).
+	// each replica, however often it is used (D296: at most once a minute after the last fetch).
 	if wait := time.Until(lastFetch.Add(61 * time.Second)); wait > 0 {
 		t.Logf("waiting %v for the key set's refetch window", wait.Round(time.Second))
 		time.Sleep(wait)

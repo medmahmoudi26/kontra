@@ -475,12 +475,12 @@ func TestLoadErrors(t *testing.T) {
 		{"admission with an unknown operation", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, operations: [settle] } }\n", "hooks.admission.operations"},
 		{"admission without a url", head + "hooks: { admission: { secret_env: ADMIT } }\n", "hooks.admission.url"},
 		{"admission with a zero timeout", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 0s } }\n", "must be positive"},
-		// The MCP relay cuts a modern client's shared session decision at 30 s (spec §13.1, DM4-17).
+		// The MCP relay cuts a modern client's shared session decision at 30 s (spec §13.1, D284).
 		{"admission with a timeout over 30s", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 31s } }\n", "hooks.admission.timeout 31s: at most 30s"},
 		{"admission with a timeout of days", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 2d } }\n", "hooks.admission.timeout 48h0m0s: at most 30s"},
-		// tunnel.anonymous (tunnel.md §6, §6.2; DM4-10, DM4-20).
-		{"anonymous on a single-tenant gate (DM4-10)", head + "tunnel: { anonymous: true }\n", "tunnel.anonymous: needs tenancy: multi"},
-		{"anonymous limits on a single-tenant gate (DM4-10)", head + "tunnel: { anonymous: { ttl: 1h } }\n", "DM4-10"},
+		// tunnel.anonymous (tunnel.md §6, §6.2; D277, D287).
+		{"anonymous on a single-tenant gate (D277)", head + "tunnel: { anonymous: true }\n", "tunnel.anonymous: needs tenancy: multi"},
+		{"anonymous limits on a single-tenant gate (D277)", head + "tunnel: { anonymous: { ttl: 1h } }\n", "D277"},
 		{"anonymous hiring_streams over 32", head + "tenancy: multi\ntunnel: { anonymous: { hiring_streams: 33 } }\n", "hiring_streams 33: at most 32"},
 		{"anonymous zero services", head + "tenancy: multi\ntunnel: { anonymous: { services: 0 } }\n", "tunnel.anonymous.services"},
 		{"anonymous negative tasks", head + "tenancy: multi\ntunnel: { anonymous: { tasks: -1 } }\n", "tunnel.anonymous.tasks"},
@@ -497,7 +497,7 @@ func TestLoadErrors(t *testing.T) {
 		{"remote lifecycle hook without a queue", head + "hooks: { lifecycle: {} }\n", "hooks.lifecycle.task_queue: required"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
-		// DM4-29 (the M4 WP-06 review): the RFC 9728 documents of a public_url with a path are not where RFC 9728 §3.1
+		// D296 (the M4 WP-06 review): the RFC 9728 documents of a public_url with a path are not where RFC 9728 §3.1
 		// and kontra login look for them.
 		{"mcp_oauth with a public_url path", "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/kontra\n" +
 			"auth: { mcp_oauth: { issuer: https://login.example.com } }\n", "auth.mcp_oauth needs a public_url without a path"},
@@ -521,7 +521,7 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
-// DM4-29: auth.mcp_oauth takes a public_url with no path or only "/", in any case and with an explicit default port
+// D296: auth.mcp_oauth takes a public_url with no path or only "/", in any case and with an explicit default port
 // (kontra login compares the resource as an origin); a path is refused only with auth.mcp_oauth.
 func TestMCPOAuthPublicURL(t *testing.T) {
 	for _, pub := range []string{"http://localhost:8080", "http://localhost:8080/", "http://LOCALHOST:8080", "http://localhost:80"} {
@@ -685,7 +685,7 @@ peer: { listen: ":8444", advertise: "gate-0.gate.kontra.svc:8444", secret_env: K
 	}
 }
 
-// The remote Admission hook loads (DM4-8 lifts the M1-M3 refusal): over https://, or http:// to a loopback host
+// The remote Admission hook loads (D275 lifts the M1-M3 refusal): over https://, or http:// to a loopback host
 // (spec §13.1, §10.3), with its secret_env, timeout and operations as written and their defaults otherwise, and no
 // warning. Its secret is read from the environment at start, not here: a file whose variable is unset still loads,
 // so that migrate and enroll need not hold it.
@@ -713,7 +713,7 @@ func TestRemoteAdmissionLoads(t *testing.T) {
 }
 
 // The remote Lifecycle hook loads (D186, M3 WP-10): its queue is kept as written, the file gives no other
-// problem, and a remote Admission hook beside it loads too (DM4-8).
+// problem, and a remote Admission hook beside it loads too (D275).
 func TestRemoteLifecycleAccepted(t *testing.T) {
 	c := parse(t, minimal+"hooks: { lifecycle: { task_queue: m3pentest-lifecycle } }\n")
 	if c.Hooks.Lifecycle == nil || c.Hooks.Lifecycle.TaskQueue != "m3pentest-lifecycle" {
@@ -1136,7 +1136,7 @@ func TestMCPExamplesLoad(t *testing.T) {
 	}
 }
 
-// tunnel.anonymous (tunnel.md §6, §6.2; relay.md §17; DM4-10, DM4-20) is false by default, true for §6.2's limits, or
+// tunnel.anonymous (tunnel.md §6, §6.2; relay.md §17; D277, D287) is false by default, true for §6.2's limits, or
 // the limits object, each absent key taking its default; the staging gate's fixture loads with its own.
 func TestTunnelAnonymous(t *testing.T) {
 	defaults := AnonymousSessions{Enabled: true, TTL: Duration(2 * time.Hour), TenantsPerNetwork: 3, Services: 4, Tasks: 4,
@@ -1175,10 +1175,10 @@ func TestTunnelAnonymous(t *testing.T) {
 		c.Tunnel.Anonymous.MaxTenants != 1 || c.Tunnel.Anonymous.PartsBytes != 512<<10 || c.Tunnel.Anonymous.TTL.D() != 2*time.Hour {
 		t.Errorf("the bounds = %+v", c.Tunnel.Anonymous)
 	}
-	// Refused on a single-tenant gate, naming DM4-10's rule, and nothing else is wrong with the file.
+	// Refused on a single-tenant gate, naming D277's rule, and nothing else is wrong with the file.
 	err := parseErr(t, minimal+"tunnel: { anonymous: true }\n")
 	var ve *ValidationError
-	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "needs tenancy: multi") || !strings.Contains(ve.Problems[0], "DM4-10") {
+	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "needs tenancy: multi") || !strings.Contains(ve.Problems[0], "D277") {
 		t.Errorf("a single-tenant gate with tunnel.anonymous: %v", err)
 	}
 	// A repeated key is refused by the YAML decoder itself; an unknown one by name.

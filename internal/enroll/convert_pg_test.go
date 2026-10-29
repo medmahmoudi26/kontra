@@ -55,7 +55,7 @@ func withAuth(k *testKey, key string, services ...tunnel.Service) *tunnel.Hello 
 	return h
 }
 
-// spec/tunnel.md §6.3 (DM4-11): a hello whose key belongs to a live anonymous tenant and whose auth is an account's API
+// spec/tunnel.md §6.3 (D278): a hello whose key belongs to a live anonymous tenant and whose auth is an account's API
 // key with enroll:* converts the key in the admission's transaction: the declared services the session serves are
 // created in the account where it has none (same names, allow [org:<account>]; an existing one is bound, not
 // recreated), the key moves to the account with bindings to them (its anonymous bindings gone), the anonymous tenant
@@ -193,7 +193,7 @@ func TestAdmitConversionKindMismatchMovesNothing(t *testing.T) {
 	}
 }
 
-// What does not convert (§6.3, DM4-19): a hire-only key, an enroll: scope for some services only, and an enroll:* key
+// What does not convert (§6.3, D286): a hire-only key, an enroll: scope for some services only, and an enroll:* key
 // on a gate without tunnel.enroll_with_api_key resume the anonymous session with the key as its hiring principal;
 // what does: a hello declaring no service (admitted hire-only in the account), the team tenant's enroll:* key, and an
 // enroll:* key on a gate that stopped opening anonymous sessions.
@@ -249,7 +249,7 @@ func TestAdmitConversionCases(t *testing.T) {
 		}
 	})
 	// The M4 WP-06 review: a conversion creates only what the anonymous session serves (§6.1 "the services keep their
-	// names", DM4-29). Any other declared name is §5's: an account service that exists is bound, one that does not is
+	// names", D296). Any other declared name is §5's: an account service that exists is bound, one that does not is
 	// service_denied "no such service", as for the same key on §5's own path, and nothing moves. An anonymous session
 	// costs no credential, so otherwise any enroll:* key could create services (M2's C10: only tenant tokens and the
 	// operator do), past §6.2's services limit too.

@@ -87,7 +87,7 @@ const (
 	// reach it.
 	changeMCPCancel = "mcp-cancel"
 	// changeHireMCPCancel: a kontra.cancel with Mode mcp (CancelModeMCP) on an A2A task, the /mcp tasks/cancel of a
-	// hire task (relay.md §12.2, DM4-5, DM4-26; M4 WP-04), follows changeMCPCancel's rule (§11.6, D57): canceled within
+	// hire task (relay.md §12.2, D272, D293; M4 WP-04), follows changeMCPCancel's rule (§11.6, D57): canceled within
 	// 10 s whatever the upstream answers, the upstream sent §8's CancelTask through forward_cancel. Before it, no
 	// Update carried a mode, and every A2A task's cancel followed §8's table, as it still does without one.
 	changeHireMCPCancel = "hire-mcp-cancel"

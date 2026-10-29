@@ -17,7 +17,7 @@ func newAnonymousGate(t *testing.T, lim anon.Limits, services ...string) *realGa
 	return newRealGateWith(t, func(o *enroll.Options) { o.Multi = true; o.Anonymous = &lim }, services...)
 }
 
-// DM4-18 (the M4 audit's confirmed conflict on §2.4 and §6): on a gate that opens anonymous sessions, the probe after
+// D285 (the M4 audit's confirmed conflict on §2.4 and §6): on a gate that opens anonymous sessions, the probe after
 // an enrollment that did not commit carries no anonymous field, so the real admission still answers it unknown_key,
 // and the node sends its token again: the key is enrolled for the team's service, no anonymous tenant is opened, and
 // the token is recorded consumed only by the welcome that enrolled it.
@@ -57,7 +57,7 @@ func TestRealAdmissionProbeOnAnAnonymousGate(t *testing.T) {
 	})
 }
 
-// §6, §6.1 (DM4-18) with the real admission: a node holding no credential for the gate asks for an anonymous session
+// §6, §6.1 (D285) with the real admission: a node holding no credential for the gate asks for an anonymous session
 // and is welcomed under anon-<16 hex>, its --public service public; a node of the same host given an --enroll token
 // does not ask, and is enrolled in the team as §5 says.
 func TestRealAdmissionOpensAnAnonymousSession(t *testing.T) {

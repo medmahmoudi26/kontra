@@ -10,7 +10,7 @@ import (
 )
 
 // buildAdmission is the replica's Admission (spec/relay.md §13.1): the built-in allow without hooks.admission, else
-// the remote hook (DM4-8), dialed as §10.3's operator-configured endpoint (DM4-17), with its bearer secret read from
+// the remote hook (D275), dialed as §10.3's operator-configured endpoint (D284), with its bearer secret read from
 // the variable secret_env names. A secret that is unset or empty refuses the start: falling back to the built-in would
 // admit what the operator's hook denies. The operations are those that consult it (hooks.admission.operations): the
 // A2A interceptors ask it about every new task and RemoteAdmission answers the operations it is not asked about as

@@ -12,7 +12,7 @@ import (
 	"kontra.sh/kontra/internal/hooks"
 )
 
-// The replica's Admission (spec §13.1, DM4-8): the built-in without hooks.admission; the remote hook with the secret
+// The replica's Admission (spec §13.1, D275): the built-in without hooks.admission; the remote hook with the secret
 // from secret_env and its operations; a secret that is unset or empty refuses the start, naming the variable and
 // never a value. The start log names the hook without its secret.
 func TestBuildAdmission(t *testing.T) {
@@ -52,7 +52,7 @@ func TestBuildAdmission(t *testing.T) {
 	if _, _, err := buildAdmission(hook("http://cp.example.com/admit"), rules, quiet); err == nil || strings.Contains(err.Error(), secret) {
 		t.Errorf("http:// off loopback: %v", err)
 	}
-	// So is a timeout past the bound, which the configuration and the hook state alike (spec §13.1, DM4-17).
+	// So is a timeout past the bound, which the configuration and the hook state alike (spec §13.1, D284).
 	if config.MaxAdmissionWait != hooks.MaxAdmissionTimeout {
 		t.Errorf("config.MaxAdmissionWait %v, hooks.MaxAdmissionTimeout %v", config.MaxAdmissionWait, hooks.MaxAdmissionTimeout)
 	}

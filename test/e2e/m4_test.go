@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// The M4 tests (spec/relay.md §16 gate_mcp_*, spec/tunnel.md §16 anon_*, login_converts; DM4-15, DM4-30): the gate's
+// The M4 tests (spec/relay.md §16 gate_mcp_*, spec/tunnel.md §16 anon_*, login_converts; D282, D297): the gate's
 // own /mcp, anonymous sessions, the MCP resource server and kontra login, through two gate replicas, Temporal and
 // Postgres, with the client on one replica and the tunnel on the other wherever the row allows. Each says its tenancy:
 //

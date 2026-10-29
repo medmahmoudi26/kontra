@@ -129,7 +129,7 @@ func (r *resendRig) send(h a2asrv.RequestHandler, what string, req *a2a.SendMess
 	return task, took
 }
 
-// TestBlockingResendAtTurnEnd (DM4-23; found by the pinned A2A TCK in M4 WP-02, whose message ids are per session,
+// TestBlockingResendAtTurnEnd (D290; found by the pinned A2A TCK in M4 WP-02, whose message ids are per session,
 // so its prerequisite input-required tasks after the first are resends): a blocking SendMessage that repeats a
 // request whose task already stands at input-required is answered at once with that task, as it stands (spec §9,
 // §15), instead of waiting at the log's tail for a turn that ended before it. The seller sees the message once; the
@@ -188,7 +188,7 @@ func (lostStarts) UpdateWithStartWorkflow(context.Context, client.UpdateWithStar
 	return nil, errors.New("the start was lost")
 }
 
-// TestBlockingResendOfAQuotedTask (DM4-23 as amended by M4 WP-02's review): a quoted task stands at input-required on
+// TestBlockingResendOfAQuotedTask (D290 as amended by M4 WP-02's review): a quoted task stands at input-required on
 // the wire (spec §5.1), and a blocking SendMessage returns on it (§9, A2A §3.1.1), so a resend of the request that
 // created it is answered at once with the task as it stands, approve URL and all, as D108 closes the stream of the same
 // resend. Before that the re-issued start of a quoted task is re-issued (§14.5): a task whose start was lost gets its

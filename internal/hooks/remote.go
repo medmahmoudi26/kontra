@@ -36,13 +36,13 @@ const MsgPricedTasks = "priced tasks need tasks: durable"
 // CodeInternalError is JSON-RPC's -32603, the code of every Admission refusal the gate itself makes.
 const CodeInternalError = -32603
 
-// MaxDecisionBytes bounds the hook's answer (spec §10.3, DM4-17: 64 KiB; metadata and mcpMeta are 16 KiB each).
+// MaxDecisionBytes bounds the hook's answer (spec §10.3, D284: 64 KiB; metadata and mcpMeta are 16 KiB each).
 const MaxDecisionBytes = 64 << 10
 
 // DefaultAdmissionTimeout is hooks.admission.timeout's default (spec §13.1).
 const DefaultAdmissionTimeout = 5 * time.Second
 
-// MaxAdmissionTimeout is hooks.admission.timeout's bound (spec §13.1, DM4-17): the MCP relay's shared Admission session
+// MaxAdmissionTimeout is hooks.admission.timeout's bound (spec §13.1, D284): the MCP relay's shared Admission session
 // decision for modern clients runs at most 30 s (mcprelay's admitFlightTimeout), so a longer hook timeout would be cut
 // there, silently, and not on A2A or legacy MCP.
 const MaxAdmissionTimeout = 30 * time.Second
@@ -55,7 +55,7 @@ type RemoteAdmissionConfig struct {
 	Timeout    time.Duration // default 5 s
 	Operations []Operation   // which of task, session, call consult the hook (default task)
 	Rules      KeyRules      // §13.2's key and size rules for metadata and mcpMeta
-	// Client dials the hook. Nil is §10.3's operator-configured endpoint client (ssrf.NewOperatorClient, DM4-17):
+	// Client dials the hook. Nil is §10.3's operator-configured endpoint client (ssrf.NewOperatorClient, D284):
 	// no address check, https:// or http:// to loopback, no redirects, no proxy, the timeout above. A client of the
 	// caller's (tests) gets no redirects all the same.
 	Client *http.Client
@@ -77,7 +77,7 @@ func (c RemoteAdmissionConfig) LogValue() slog.Value {
 		slog.Duration("timeout", c.Timeout), slog.Any("operations", c.Operations))
 }
 
-// RemoteAdmission is the remote Admission hook (§13.1; built in M4, DM4-8). It POSTs the AdmitRequest and reads a
+// RemoteAdmission is the remote Admission hook (§13.1; built in M4, D275). It POSTs the AdmitRequest and reads a
 // Decision, and fails closed: a timeout, a non-2xx, an unparsable answer, a key outside §13.2's rules or a map over
 // 16 KiB is a deny with -32603 "admission unavailable" (HTTP 503). A quote for any operation but task on a
 // gate-owned task (an A2A task, a hire, an MCP task with tasks: durable) is a deny with -32603 "priced tasks need
@@ -85,7 +85,7 @@ func (c RemoteAdmissionConfig) LogValue() slog.Value {
 //
 // The unavailable cases are returned as an error wrapping ErrAdmissionUnavailable (every caller maps an Admission
 // error to -32603 "admission unavailable", 503), never as a Decision, so that no caller can mistake one for the
-// operator's own deny. The hook is §10.3's operator-configured endpoint (DM4-17), and its answer is read as
+// operator's own deny. The hook is §10.3's operator-configured endpoint (D284), and its answer is read as
 // spec/schema/hooks.json's decision with exact keys (ParseDecision); a quote must name an absolute https:// URL
 // without userinfo and an RFC 3339 expiry in the future (CheckQuote). The approve URL is passed through untouched
 // (D188).
@@ -496,7 +496,7 @@ var ErrBadQuote = errors.New("hooks: the quote's terms are not usable")
 // failing closed. The ranges of the date and time fields are time.Parse's.
 var rfc3339 = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
 
-// CheckQuote checks a quote decision's terms (spec §13.1, DM4-17): approveUrl an absolute https:// URL (the scheme
+// CheckQuote checks a quote decision's terms (spec §13.1, D284): approveUrl an absolute https:// URL (the scheme
 // written in lowercase, as hooks.json's pattern says) with a host, no userinfo, a valid port and nothing but URI
 // characters; expiresAt an RFC 3339 time (rfc3339) after now. The URL is otherwise the operator's and passed through
 // untouched (D188).

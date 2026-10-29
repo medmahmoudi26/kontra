@@ -175,7 +175,7 @@ do $$ begin
     end if;
 end $$;
 
--- 0003 (R §12.2, DM4-5): a task is not hired unless the gate's /mcp marks it; hired tasks are indexed by buyer.
+-- 0003 (R §12.2, D272): a task is not hired unless the gate's /mcp marks it; hired tasks are indexed by buyer.
 insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version,
                    snapshot, status_at)
     values ('01900000-0000-7000-8000-0000000000e1', '01900000-0000-7000-8000-000000000001', 'hello', 'a2a',
@@ -190,7 +190,7 @@ do $$ begin
 end $$;
 update tasks set hired = true where id = '01900000-0000-7000-8000-0000000000e1';
 
--- 0003 (R §12.3, DM4-21): a notification is claimed once, and only for a task that sent a URL elicitation.
+-- 0003 (R §12.3, D288): a notification is claimed once, and only for a task that sent a URL elicitation.
 do $$ begin
     update tasks set elicitation_notified_at = now() where id = '01900000-0000-7000-8000-0000000000e1';
     raise exception 'FAIL: elicitation_notified_at without elicitation_id';
@@ -210,7 +210,7 @@ begin
     end if;
 end $$;
 
--- 0003 (T §6.1, DM4-20): a tenant is anonymous if and only if its slug is anon- and 16 lowercase hex digits.
+-- 0003 (T §6.1, D287): a tenant is anonymous if and only if its slug is anon- and 16 lowercase hex digits.
 insert into tenants (id, slug, kind, expires_at, created_from)
     values ('01900000-0000-7000-8000-0000000000f1', 'anon-0123456789abcdef', 'anonymous', now() + interval '2 hours', '198.51.100.0/24');
 do $$ begin
@@ -242,7 +242,7 @@ do $$ begin
     end if;
 end $$;
 
--- 0003 (T §6.2, DM4-20): an anonymous call's row goes with its replica (a replica that dies frees its slots) and with
+-- 0003 (T §6.2, D287): an anonymous call's row goes with its replica (a replica that dies frees its slots) and with
 -- its tenant.
 insert into gate_replicas (replica_id, version) values ('r-anon-calls', 'test');
 insert into anon_calls (id, tenant_id, replica_id)

@@ -1,4 +1,4 @@
-// Package vps tests the team gate's VPS kit (DM4-14, DM4-31; the M4 plan's gate run C): test/vps/cloud-init.yaml,
+// Package vps tests the team gate's VPS kit (D281, D298; the M4 plan's gate run C): test/vps/cloud-init.yaml,
 // scripts/team-gate-vps.sh against stubs of doctl, Cloudflare's API, ssh, docker and openssl (nothing is ever
 // created), and, with KONTRA_KIT_TESTS=1, compose.yaml's ACME variant brought up on this host and a rehearsal of the
 // script's steps 4 and 5 against it (rehearsal_test.go).
@@ -508,7 +508,7 @@ func TestTeamGateTeardownOnlyFailsClosed(t *testing.T) {
 	}
 }
 
-// --teardown-only deletes only the records with the run's comment (DM4-31): a record named the name with another
+// --teardown-only deletes only the records with the run's comment (D298): a record named the name with another
 // comment is reported and left, the reap fails, and the droplets are kept. The review's case, KONTRA_VPS_NAME naming the
 // staging gate, deletes nothing.
 func TestTeamGateReapsOnlyTheRunsRecords(t *testing.T) {
@@ -643,7 +643,7 @@ func assertListsOnlyByTag(t *testing.T, calls []string) {
 	}
 }
 
-// The ACME variant on this host (the M4 plan's audit, gaps 17; DM4-14): compose.yaml with kontra.vps.yaml as an
+// The ACME variant on this host (the M4 plan's audit, gaps 17; D281): compose.yaml with kontra.vps.yaml as an
 // operator edits it, the gate image built from the working tree, a fresh named volume. The gate, running as 65532 on a
 // read-only root filesystem, writes its ACME cache into the volume (the account key autocert writes before it asks the
 // CA, whose name resolves to 127.0.0.1 here, so nothing reaches Let's Encrypt); once the cache holds a certificate for

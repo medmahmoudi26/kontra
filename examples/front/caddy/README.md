@@ -3,7 +3,7 @@
 Caddy in front of a Kontra gate: Caddy terminates TLS (a certificate from an ACME CA for a public name, from its own
 local CA for a loopback or private address) and proxies every request to the gate's plaintext listener (spec/relay.md
 §2.2). [`Caddyfile`](Caddyfile) is the whole front; `make tck VARIANT=caddy` runs the pinned A2A TCK through it
-unchanged (`tck_behind_caddy`, DM4-12; [`test/tck`](../../../test/tck/README.md)). Pinned: Caddy 2.11.7 (the release
+unchanged (`tck_behind_caddy`, D279; [`test/tck`](../../../test/tck/README.md)). Pinned: Caddy 2.11.7 (the release
 tarball's sha256 is in `.github/workflows/tck.yml`).
 
 ## The gate's side

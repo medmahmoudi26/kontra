@@ -24,11 +24,11 @@ import (
 	"kontra.sh/kontra/internal/tenant"
 )
 
-// PageSize is search's page (DM4-4).
+// PageSize is search's page (D271).
 const PageSize = 50
 
 // DrainEvery bounds describe's background drain of a cold MCP tools cache: at most one per service per period,
-// never on the request's time (§12.2, §11.3, DM4-4).
+// never on the request's time (§12.2, §11.3, D271).
 const DrainEvery = 10 * time.Minute
 
 // Catalog answers search and describe for a principal from the services table, the tunnels registry and the
@@ -207,10 +207,10 @@ const searchBatch = 200
 // SearchExamine bounds the rows one search request reads (five queries of searchBatch): a page is filtered for the
 // principal after the read, so a principal who sees few of many services would otherwise make each request read the
 // whole table. A request that reaches it answers what it found, fewer than PageSize services or none, with nextCursor
-// at the last row it read (DM4-26).
+// at the last row it read (D293).
 const SearchExamine = 1000
 
-// Search answers search for p (DM4-4): the services visible to p whose ref, name or description contains query
+// Search answers search for p (D271): the services visible to p whose ref, name or description contains query
 // (case-insensitively), of kind, whose price_model annotation equals price ("free": none); ordered by ref (byte
 // order), PageSize a page, with an opaque keyset cursor; anonymous tenants never appear. One request reads at most
 // SearchExamine rows: past them the page ends early, its nextCursor at the last row read.
@@ -311,7 +311,7 @@ func (c *Catalog) matches(s *service, query, price string) bool {
 	return false
 }
 
-// describe is a service's description (DM4-4): the served card's (A2A), else the operator's search.description
+// describe is a service's description (D271): the served card's (A2A), else the operator's search.description
 // annotation, else the MCP upstream's serverInfo title or name as this replica's last background drain read it
 // (describe starts one; none is read on a request's time).
 func (c *Catalog) describe(s *service) string {

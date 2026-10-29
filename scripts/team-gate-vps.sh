@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The compose team gate on a clean VPS (DM4-14, DM4-15, DM4-31; the M4 plan's gate run C, the gate item "team gate up
+# The compose team gate on a clean VPS (D281, D282, D298; the M4 plan's gate run C, the gate item "team gate up
 # on a clean VPS"). It provisions a throwaway DigitalOcean droplet, names it under kontra.run through Cloudflare's API,
 # ships `git archive HEAD` to it, brings compose.yaml up with deploy/compose/kontra.vps.yaml (built-in ACME), checks it
 # from this host, enrolls a node from a team member's clean machine (the kontra-demo image, scripts/demo-clean-laptop.sh)

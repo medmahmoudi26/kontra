@@ -26,7 +26,7 @@ const DefaultHealthURL = "https://127.0.0.1:8443/healthz"
 // The TLS server name (SNI) it sends is --server-name, else the host of public_url in the configuration -f names,
 // else the URL's host (none for an IP address). Built-in ACME (autocert) answers a handshake without a server name,
 // or with one it does not issue for, with an alert, so the compose healthcheck of the ACME variant names the gate's
-// configuration (DM4-14; the M4 plan's audit, gaps 17). A provided certificate is served whatever the name.
+// configuration (D281; the M4 plan's audit, gaps 17). A provided certificate is served whatever the name.
 func health(ctx context.Context, args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("health", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)

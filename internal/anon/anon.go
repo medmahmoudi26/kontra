@@ -1,8 +1,8 @@
 // Package anon is anonymous sessions on a multi-tenant gate with tunnel.anonymous set (spec/tunnel.md §6; Cloud's
-// public gate, never a default; DM4-10, DM4-18, DM4-19, DM4-20).
+// public gate, never a default; D277, D285, D286, D287).
 //
 // A hello that carries anonymous: true and neither enroll nor auth, from a key that is unknown at the gate or belongs
-// to an anonymous tenant, opens or resumes one (DM4-18): internal/enroll's admission calls Open inside its
+// to an anonymous tenant, opens or resumes one (D285): internal/enroll's admission calls Open inside its
 // transaction, under its row lock on the key. Open creates (or finds again, for the same key before expiry) a tenant
 // anon-<16 lowercase hex> of kind anonymous with expires_at and created_from (the client's IPv4 /24 or IPv6 /48,
 // never the address), and the declared services under it with allow [org:anon-…], plus anonymous for those the hello
@@ -13,7 +13,7 @@
 // the session's replica sends {"t": "revoked"} and closes it, and Sweeper.Expire (End) revokes the key's bindings and
 // disables the services (404; a dispatch in flight is aborted as a revoked binding's is, tunnel.md §12: its task fails
 // tunnel_lost once an upstream task exists, else service_unavailable at its next dispatch, relay.md §6.4, §13.5;
-// tunnel.md §6.1, DM4-30) without revoking the key. Sweeper.Purge deletes what the tenant still holds purge_after later, bucket objects first, and keeps the
+// tunnel.md §6.1, D297) without revoking the key. Sweeper.Purge deletes what the tenant still holds purge_after later, bucket objects first, and keeps the
 // tenant row as a tombstone (tenants.deleted_at), so a slug is never reused.
 //
 // The runtime limits (§6.2) are checked where the work is created: Caps.Task when a task is created (as host and as
@@ -21,7 +21,7 @@
 // in internal/tunnelgate, the parts total with relay §6.6's byte accounting (Caps.Message before a task row,
 // Caps.Budget at each dispatch).
 //
-// kontra login's conversion (§6.3, DM4-11) and enroll tokens from an anonymous key (DM4-19) move the key in the
+// kontra login's conversion (§6.3, D278) and enroll tokens from an anonymous key (D286) move the key in the
 // admission's transaction (MoveKey, then §5's binding in internal/enroll) and end the tenant there (Convert).
 //
 // Work packages: M4 WP-03 (sessions, limits, sweeps, --public), M4 WP-06 (Convert).
@@ -54,7 +54,7 @@ import (
 	"kontra.sh/kontra/internal/pg"
 )
 
-// Limits are tunnel.anonymous's (spec/tunnel.md §6.2, relay.md §17; DM4-10, DM4-20).
+// Limits are tunnel.anonymous's (spec/tunnel.md §6.2, relay.md §17; D277, D287).
 type Limits struct {
 	TTL               time.Duration
 	TenantsPerNetwork int
@@ -358,7 +358,7 @@ func open(ctx context.Context, tx pgx.Tx, lim Limits, req OpenRequest) (*Tenant,
 	return t, nil
 }
 
-// MoveKey moves a key to another tenant in tx, which holds the key's row lock (§6.1, DM4-19): the key's key_services
+// MoveKey moves a key to another tenant in tx, which holds the key's row lock (§6.1, D286): the key's key_services
 // rows are deleted first, since their foreign key (key_id, tenant_id) has no ON UPDATE, then tunnel_keys.tenant_id
 // is set. It is every key move's: a new anonymous tenant after expiry, enroll from an anonymous key, §6.3's
 // conversion.
@@ -672,7 +672,7 @@ func (s *Sweeper) Expire(ctx context.Context) (int, error) {
 	}
 }
 
-// Purge deletes what the tenants expired purge_after ago still hold (§6.1, DM4-20): for each, the bucket objects of
+// Purge deletes what the tenants expired purge_after ago still hold (§6.1, D287): for each, the bucket objects of
 // every one of its tasks first, by prefix, whether or not the task has a blobs row (D167: an object stored for an event
 // that was then refused has none), then in one transaction the keys still in it (their bindings and tunnels go with
 // them), its MCP sessions (the gate's own /mcp sessions, service NULL, included), its calls, tasks, services, enrollment
@@ -792,7 +792,7 @@ func (s *Sweeper) purge(ctx context.Context, tenantID uuid.UUID) (bool, error) {
 			{`delete from kontra.tunnel_keys where tenant_id = $1`, &keys}, // key_services and their tunnels cascade
 			{`delete from kontra.tunnels where tenant_id = $1`, nil},       // a moved key's session row of this tenant
 			{`delete from kontra.mcp_sessions where tenant_id = $1`, nil},  // service NULL included (no foreign key)
-			{`delete from kontra.calls where tenant_id = $1`, nil},         // relay.md §13.5's exception (DM4-20)
+			{`delete from kontra.calls where tenant_id = $1`, nil},         // relay.md §13.5's exception (D287)
 			{`delete from kontra.tasks where tenant_id = $1`, nil},         // events, attempts, work items, push configs, blobs
 			{`delete from kontra.anon_calls where tenant_id = $1`, nil},
 			{`delete from kontra.enrollment_tokens where tenant_id = $1`, nil},
@@ -987,7 +987,7 @@ func (c *Caps) Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug
 // callTimeout bounds Call's statements, and the delete that releases a slot.
 const callTimeout = 5 * time.Second
 
-// Call takes one of the Calls slots of an anonymous service's tenant for a plain MCP call (§6.2, DM4-20), counted
+// Call takes one of the Calls slots of an anonymous service's tenant for a plain MCP call (§6.2, D287), counted
 // gate-wide in anon_calls under a lock on the tenant's row, and returns its release, which the caller runs when the
 // call's answer is relayed. A service of a tenant that is not anonymous takes no slot. ErrTooManyCalls when Calls are
 // in flight.
@@ -1066,7 +1066,7 @@ func (c *Caps) Stored(ctx context.Context, tenantID, except uuid.UUID) (int64, e
 }
 
 // Message checks a caller's message of n bytes to a service of tenant svcTenant (slug svcSlug) against parts_bytes
-// before any task row (§6.2, DM4-20): ErrStorageFull when it would take what the tenant stores past it. A service of a
+// before any task row (§6.2, D287): ErrStorageFull when it would take what the tenant stores past it. A service of a
 // tenant that is not anonymous passes.
 func (c *Caps) Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string, n int64) error {
 	if c == nil || !IsSlug(svcSlug) {
@@ -1089,12 +1089,12 @@ func (c *Caps) Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string,
 // whose dispatch counts its own bytes against taskBytes alone. Upstream bytes past the limit fail the task
 // upstream_error (§6.6).
 //
-// SPEC-CONFLICT (spec/tunnel.md §6.2, relay.md §6.6: parts_bytes "in all", DM4-20): an exact total across the
+// SPEC-CONFLICT (spec/tunnel.md §6.2, relay.md §6.6: parts_bytes "in all", D287): an exact total across the
 // tenant's tasks would read the other tasks' bytes, under a lock, at every event each dispatch logs. The closest
 // faithful behaviour: a dispatch counts the others' bytes as they stood when it started, so the tasks of one tenant
 // dispatched together may store up to tasks × the room left between them (with §6.2's defaults, 4 × 64 MiB, the
 // default task_bytes); each event of each is still bounded, a caller's message is checked against the total before
-// any task row (Message), and every later dispatch starts from the total. Proposal (DM4-25): keep it so, or re-read
+// any task row (Message), and every later dispatch starts from the total. Proposal (D292): keep it so, or re-read
 // the total at each externalized part only.
 func (c *Caps) Budget(ctx context.Context, svcTenant uuid.UUID, svcSlug string, task uuid.UUID, taskBytes int64) (others, limit int64, applies bool, err error) {
 	if c == nil {
@@ -1117,16 +1117,16 @@ func (c *Caps) Budget(ctx context.Context, svcTenant uuid.UUID, svcSlug string, 
 }
 
 // EventConverted is the audit row of a conversion: a key of a live anonymous tenant moved into an account (or the
-// enrollment tokens' tenant), and the anonymous tenant ended at once (spec/tunnel.md §6.3, DM4-11, DM4-19).
+// enrollment tokens' tenant), and the anonymous tenant ended at once (spec/tunnel.md §6.3, D278, D286).
 const EventConverted = "tunnel.anonymous_converted"
 
 // Conversion authorities (ConvertRequest.Via).
 const (
 	ViaAPIKey = "api_key"          // §6.3: the hello's auth, an API key with enroll:* (or one admitted hire-only)
-	ViaTokens = "enrollment_token" // DM4-19: the hello's enroll tokens
+	ViaTokens = "enrollment_token" // D286: the hello's enroll tokens
 )
 
-// ConvertRequest is a handshake that converted a key of a live anonymous tenant (§6.3, DM4-19): the key, the
+// ConvertRequest is a handshake that converted a key of a live anonymous tenant (§6.3, D286): the key, the
 // anonymous tenant it left, the tenant it moved into, by which authority, and the services it is bound to there.
 type ConvertRequest struct {
 	KeyID    string
@@ -1143,7 +1143,7 @@ type ConvertRequest struct {
 // with MoveKey and bound it in To as §5 binds a key: the services the anonymous session served created in the account
 // where missing, with allow [org:<account>], another kind kind_mismatch with nothing moved; internal/enroll). The tenant ends at once (End,
 // reason "converted": its services disabled and 404, a dispatch in flight aborted as at the tenant's end, tunnel.md
-// §6.1, DM4-30: tunnel_lost once an upstream task exists, else service_unavailable at its next dispatch; its session
+// §6.1, D297: tunnel_lost once an upstream task exists, else service_unavailable at its next dispatch; its session
 // told revoked), and an EventConverted row names both tenants. Nothing of another anonymous tenant is locked.
 func Convert(ctx context.Context, tx pgx.Tx, req ConvertRequest) error {
 	var in uuid.UUID

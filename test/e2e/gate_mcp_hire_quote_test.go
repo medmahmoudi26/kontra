@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// gate_mcp_hire_quote (spec/relay.md §16; §12.3, §13.2; DM4-8, DM4-17, DM4-21; D21, D38, D45, D188). Single tenant.
+// gate_mcp_hire_quote (spec/relay.md §16; §12.3, §13.2; D275, D284, D288; D21, D38, D45, D188). Single tenant.
 // The Admission double quotes the service paid (hosted by a node on replica B); the buyer's sessions are on replica A
 // (S1, declaring elicitation.url and form) and B (S2, declaring elicitation.url; P, declaring none). Asserted:
 //
@@ -169,7 +169,7 @@ func TestGateMCPHireQuote(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually(t, 20*time.Second, "one of S1's streams gets elicitation/complete", func() bool { return len(g1.Messages())+len(g2.Messages()) >= 1 })
-	time.Sleep(5 * time.Second) // past two rescans of every stream (DM4-26)
+	time.Sleep(5 * time.Second) // past two rescans of every stream (D293)
 	g1.Stop()
 	g2.Stop()
 	g3.Stop()

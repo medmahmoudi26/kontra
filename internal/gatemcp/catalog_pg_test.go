@@ -91,7 +91,7 @@ func (w *countingWarmer) WarmTools(_ *mcprelay.Service, _ auth.Principal, info f
 	info(json.RawMessage(`{"name":"web-server","title":"The web server","version":"1"}`))
 }
 
-// search and describe on a single-tenant gate (§12.2, DM4-4): only the services whose allow: admits the principal by
+// search and describe on a single-tenant gate (§12.2, D271): only the services whose allow: admits the principal by
 // an entry other than anonymous, plus listed ones, never a disabled one; ordered by ref, 50 a page, the cursor
 // granting nothing; query matches the ref, the name or the description (the served card's, else search.description)
 // case-insensitively; kind and price filter (free: no price_model); available is a direct backend or a session of a

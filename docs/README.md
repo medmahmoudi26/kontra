@@ -19,7 +19,7 @@ than all of them: [`tunnel.md`](../spec/tunnel.md), [`relay.md`](../spec/relay.m
 [`0003_m4.sql`](../migrations/0003_m4.sql)). Where a spec differs from a document, the
 spec wins once the owner has signed it, and the difference is a numbered entry in
 [`decisions.md`](decisions.md) with its reason and evidence. Each milestone's decisions are under its own heading
-there (M4's are labelled DM4-*n* until M3's review has merged, then renumbered into the D sequence).
+there (M4's, D268 to D298, were numbered after M3's review had merged).
 
 ## Section map: what the notes change in the PRD
 
@@ -34,8 +34,8 @@ there (M4's are labelled DM4-*n* until M3's review has merged, then renumbered i
 | §11 CLI | `kontra tunnel` + `kontra proxy` → `kontra connect`; `--console` on it | Two tables: `kontra` (connect, console, login, seal, publish) and `kontra-gate` (serve, enroll, migrate); `kontra dev` deleted |
 | §12 Security | Tests `mcp_session_cross_node`, `mcp_tool_denied`, `mcp_task_resume` | Anonymous-session abuse controls, test `anon_limits` |
 | §13 OSS vs Cloud | MCP hosting in both; listings gain `kind`; escrow only on task-shaped MCP calls | Cloud gains anonymous and free tiers; OSS gains Helm/compose team gate |
-| §14 Milestones | — | M4 → anonymous sessions + team-gate compose (built: DM4-1; the compose came with M3, D168) |
-| §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" (the demo runs against the staging gate `gateway.kontra.run` until M5, with go install and a2a-cli's real syntax: DM4-13, DM4-31) |
+| §14 Milestones | — | M4 → anonymous sessions + team-gate compose (built: D268; the compose came with M3, D168) |
+| §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" (the demo runs against the staging gate `gateway.kontra.run` until M5, with go install and a2a-cli's real syntax: D280, D298) |
 
 ## The compose team gate, the M3 pentest and the M4 gate runs
 
@@ -43,11 +43,11 @@ A team gate on one host is [`../compose.yaml`](../compose.yaml) (D43, D168): the
 `Dockerfile`, terminating TLS itself, `temporalio/server` 1.32.1 with its two `admin-tools` jobs, and Postgres 16, with
 no Temporal or Postgres port published. [`../deploy/compose/kontra.yaml`](../deploy/compose/kontra.yaml) is its
 configuration with a provided certificate and says what to edit; [`../deploy/compose/kontra.vps.yaml`](../deploy/compose/kontra.vps.yaml)
-is the same gate with built-in ACME, for a fresh VPS (DM4-14, DM4-31). PRD §12's pentest list and M3's own surface were
+is the same gate with built-in ACME, for a fresh VPS (D281, D298). PRD §12's pentest list and M3's own surface were
 run against it on 27 Oct and, after the M3 review rounds, again on 29 Oct (`make pentest`, D186, D266):
 [`pentest-m3.md`](pentest-m3.md) records every probe of the second run, the findings and their fixes.
 
-M4's two gate runs are kits in this repository, run by hand (DM4-15, DM4-31): `scripts/demo-clean-laptop.sh` runs the
+M4's two gate runs are kits in this repository, run by hand (D282, D298): `scripts/demo-clean-laptop.sh` runs the
 README's demo block, as written, in a fresh container against the staging gate, and `scripts/team-gate-vps.sh` brings
 the ACME variant up on a throwaway DigitalOcean droplet, hires through it from another machine and destroys it (DNS
 before the droplet; a listing that fails is never "nothing left"). Each prints its teardown before it starts; `test/demo`
@@ -68,8 +68,8 @@ agents get the same thread URL in `input-required` metadata (`kontra.approve.url
 
 PRD deltas: §7 gains the `quoted` state before `submitted`; §9 names `kontra.approve.url`; §11's
 gate table gains the `/mcp` endpoint; §12 adds that an MCP or API-key session never approves a
-quote. Full spec: kontra-cloud#59. Built in M4 as [`relay.md`](../spec/relay.md) §12 in both MCP eras (DM4-2 to DM4-7,
-DM4-21, DM4-22, DM4-26 to DM4-28); the page on which a person accepts a quote is Cloud's, M5.
+quote. Full spec: kontra-cloud#59. Built in M4 as [`relay.md`](../spec/relay.md) §12 in both MCP eras (D269 to D274,
+D288, D289, D293 to D295); the page on which a person accepts a quote is Cloud's, M5.
 
 ## Pricing (decided 25 Oct, in the Cloud repository's console issue; recorded here for the extension specs)
 

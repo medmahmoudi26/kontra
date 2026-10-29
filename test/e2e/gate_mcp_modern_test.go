@@ -14,7 +14,7 @@ import (
 	"kontra.sh/kontra/internal/gatemcp"
 )
 
-// gate_mcp_modern (spec/relay.md §16; §12.5, §11.12; D24, D178, DM4-2, DM4-7, DM4-28; the corrections' WP-05 rule).
+// gate_mcp_modern (spec/relay.md §16; §12.5, §11.12; D24, D178, D269, D274, D295; the corrections' WP-05 rule).
 // Single tenant. 2026-07-28 requests (no session) to /mcp on alternating replicas; the sellers (the TCK seller, the
 // in-test seller's slow exec, booking, and paid behind a quoting Admission) hosted by a node whose tunnel is on replica
 // B. Asserted:

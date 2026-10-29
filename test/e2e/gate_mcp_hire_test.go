@@ -16,7 +16,7 @@ import (
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
 )
 
-// gate_mcp_hire (spec/relay.md §16; §12.2, §12.3 step 1; DM4-5, DM4-22, DM4-26, DM4-27). Single tenant. A legacy /mcp
+// gate_mcp_hire (spec/relay.md §16; §12.2, §12.3 step 1; D272, D289, D293, D294). Single tenant. A legacy /mcp
 // session with an API key on replica A; the sellers hosted by a node whose tunnel is on replica B: the TCK seller
 // (examples/sellers/tck, a stock seller that completes at once) and the in-test seller (the TCK seller's artifact
 // kinds, a slow exec, a failing exec). Asserted, clause by clause:
@@ -60,7 +60,7 @@ func TestGateMCPHire(t *testing.T) {
 	}
 	hostOn(t, ctx, h, b, map[string]string{"tck": tck.URL, "kinds": seller.URL})
 
-	// No credential: 401 with the Bearer challenge, and no session row (DM4-3).
+	// No credential: 401 with the Bearer challenge, and no session row (D270).
 	sessions := func() int64 { return count(t, h, `select count(*) from kontra.mcp_sessions`) }
 	if st, www := noCredentialPost(t, a.URL+gatemcp.Path, initializeBody); st != http.StatusUnauthorized || !strings.HasPrefix(www, "Bearer") {
 		t.Fatalf("/mcp without a credential: %d %q", st, www)
@@ -68,7 +68,7 @@ func TestGateMCPHire(t *testing.T) {
 	if n := sessions(); n != 0 {
 		t.Fatalf("a request without a credential wrote %d mcp_sessions rows", n)
 	}
-	// An API key with only enroll: scopes: 403, before any session (DM4-26).
+	// An API key with only enroll: scopes: 403, before any session (D293).
 	out, err := h.gateStdout(ctx, "enroll", "-f", h.configPath, "--api-key", "enroller", "--scope", "enroll:*")
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +244,7 @@ func TestGateMCPHire(t *testing.T) {
 		t.Errorf("another buyer's tasks/get of this buyer's task: %d, want -32602", code)
 	}
 
-	// Refs hire does not take, and a null data part: isError, no task row (DM4-5, DM4-27).
+	// Refs hire does not take, and a null data part: isError, no task row (D272, D294).
 	before := taskCount(t, h)
 	for _, c := range []struct{ args, want string }{
 		{`{"service":"web","message":"hi"}`, h.Front.URL + "/mcp/web"},
@@ -264,7 +264,7 @@ func TestGateMCPHire(t *testing.T) {
 		t.Errorf("the seller behind the required extension received %d messages", esc.Messages())
 	}
 
-	// DM4-22: /mcp's tools write no calls rows; every task hire created is marked hired.
+	// D289: /mcp's tools write no calls rows; every task hire created is marked hired.
 	_ = Tool(t, s.Tool("search", `{}`))
 	_ = Tool(t, s.Tool("describe", `{"service":"kinds"}`))
 	if n := count(t, h, `select count(*) from kontra.calls`); n != 0 {

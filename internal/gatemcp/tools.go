@@ -30,7 +30,7 @@ const (
 )
 
 // Ref names a service in search results and in describe's and hire's arguments: <name> on a single-tenant gate,
-// <tenant>/<name> on a multi-tenant one (§12.2, DM4-4).
+// <tenant>/<name> on a multi-tenant one (§12.2, D271).
 type Ref struct {
 	Tenant string // "" on a single-tenant gate
 	Name   string
@@ -65,7 +65,7 @@ func (r Ref) String() string {
 type SearchArgs struct {
 	Query  string `json:"query,omitempty"`
 	Kind   string `json:"kind,omitempty"`  // a2a | mcp
-	Price  string `json:"price,omitempty"` // equality on the price_model annotation; "free": none (DM4-4)
+	Price  string `json:"price,omitempty"` // equality on the price_model annotation; "free": none (D271)
 	Cursor string `json:"cursor,omitempty"`
 }
 
@@ -91,7 +91,7 @@ type DescribeArgs struct {
 }
 
 // DescribeResult is describe's structuredContent: the served card (A2A) or the cached, filtered, annotated
-// tools/list (MCP; ToolsCached false and no Tools when the cache is cold, DM4-4), and how to call the service.
+// tools/list (MCP; ToolsCached false and no Tools when the cache is cold, D271), and how to call the service.
 type DescribeResult struct {
 	Ref         string            `json:"ref"`
 	Kind        string            `json:"kind"`
@@ -118,7 +118,7 @@ type ReplyArgs struct {
 
 // PlainState is the structuredContent of a plain hire or reply (and of tasks/result): {taskId, state, data?}, state
 // the A2A state, data the values of the rendered data parts in order, message first, then each artifact's (§12.2,
-// DM4-22).
+// D289).
 type PlainState struct {
 	TaskID string `json:"taskId"`
 	State  string `json:"state"`

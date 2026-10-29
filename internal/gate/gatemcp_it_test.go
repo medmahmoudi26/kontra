@@ -330,13 +330,13 @@ func (e *gateEnv) hireServices(kinds *hireSeller, extra string) string {
 }
 
 // The gate's own /mcp, legacy era, through two whole replicas on one database (spec §12, M4 WP-04): no credential is
-// 401 (DM4-3); a session opened on A is served by B; tools/list; a plain hire completes inline, a slow one answers
+// 401 (D270); a session opened on A is served by B; tools/list; a plain hire completes inline, a slow one answers
 // {taskId, working} after the plain wait; a task-augmented hire answers CreateTaskResult and tasks/result renders the
 // TCK seller's artifact kinds with structuredContent {taskId, state, data}; a question is the reply-tool text, reply
 // answers it, and a form-declaring session gets the question as an elicitation/create on tasks/result whose accept is
 // the follow-up once; tasks/list is the buyer's hire tasks across services, newest first, and another buyer's
 // tasks/get is -32602; tasks/cancel is cancelled within 10 s and the seller saw CancelTask; an MCP service and a ref
-// the principal may not hire are tool errors; /mcp writes no calls rows (DM4-22); hire tasks are marked hired with the
+// the principal may not hire are tool errors; /mcp writes no calls rows (D289); hire tasks are marked hired with the
 // hire's resend key.
 func TestGateMCPHire(t *testing.T) {
 	e := newGateEnv(t)
@@ -361,7 +361,7 @@ func TestGateMCPHire(t *testing.T) {
 	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, services), timing)
 	key, other := e.mintKey("buyer"), e.mintKey("other")
 
-	// DM4-3: no anonymous principal.
+	// D270: no anonymous principal.
 	anonymous := newMCPClient(t, a.url, "")
 	if status, hdr, _ := anonymous.post(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}`); status != http.StatusUnauthorized ||
 		!strings.HasPrefix(hdr.Get("WWW-Authenticate"), "Bearer") {
@@ -585,7 +585,7 @@ func TestGateMCPHire(t *testing.T) {
 		t.Errorf("refused hires created %d tasks", after-before)
 	}
 
-	// search and describe through the replica; DM4-22: /mcp's tools write no calls rows.
+	// search and describe through the replica; D289: /mcp's tools write no calls rows.
 	_, ans = c.call("search", `{"kind":"a2a"}`)
 	if sr := ans.tool(t); !strings.Contains(sr.text(), `"ref":"hello"`) || strings.Contains(sr.text(), `"ref":"closed"`) {
 		t.Errorf("search: %s", ans.raw)
@@ -716,7 +716,7 @@ func getStream(t *testing.T, url, key, sid string) (msgs func() []json.RawMessag
 		}
 }
 
-// A quoting Admission on /mcp (spec §12.3, §13.2; D21, D38, D45, D188, DM4-21): a session that declared
+// A quoting Admission on /mcp (spec §12.3, §13.2; D21, D38, D45, D188, D288): a session that declared
 // elicitation.url gets -32042 whose url is the hook's approveUrl byte for byte, naming the pre-minted id that became
 // the task's id, and a retry gets the same elicitationId; the quote-acceptance invariant holds (a reply, a client
 // response to the quoted event's gate id, a retried hire and an A2A message to the task leave it quoted, and the

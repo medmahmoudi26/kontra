@@ -124,7 +124,7 @@ type Deps struct {
 	// does) and answers a task-augmented call and tasks/* -32601.
 	Tasks *Tasks
 	// Calls bounds the tools/call requests relayed at once to an anonymous tenant's services (spec/tunnel.md §6.2,
-	// DM4-20: calls, gate-wide; *anon.Caps); nil bounds nothing.
+	// D287: calls, gate-wide; *anon.Caps); nil bounds nothing.
 	Calls CallCaps
 	// ToolsChanged, when set, tells the other replicas that a service's tools changed (an upstream's
 	// notifications/tools/list_changed this replica relayed; toolsnotify.go). Tools is invalidated here first.
@@ -157,7 +157,7 @@ func (h *Handler) takeCall(rq *request) (release func(), ok bool) {
 	return release, true
 }
 
-// anonRefused writes the answer to an anonymous tenant's limit (spec/tunnel.md §6.2, DM4-20) and reports whether err
+// anonRefused writes the answer to an anonymous tenant's limit (spec/tunnel.md §6.2, D287) and reports whether err
 // was one: a runtime cap is 429 with -32600 "rate limited" and Retry-After (as the edge answers, relay.md §2.2), a
 // caller's call over parts_bytes -32602 "anonymous storage limit".
 func anonRefused(w http.ResponseWriter, id json.RawMessage, err error) bool {

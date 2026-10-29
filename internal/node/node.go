@@ -27,7 +27,7 @@
 // roots/list itself from --roots and never relays the client's roots (D173, internal/mcproots). There is no local
 // console (D164).
 //
-// Anonymous sessions (§6, M4 WP-03; DM4-18): a node that holds no API key and no pending or consumed enrollment token
+// Anonymous sessions (§6, M4 WP-03; D285): a node that holds no API key and no pending or consumed enrollment token
 // for the gate, and was given neither --enroll nor --api-key, asks for one (hello.anonymous; a probe never does). A
 // gate that opens them (Cloud's public gate) welcomes it under a tenant anon-<16 hex> with welcome.anonymous's end;
 // --public NAME (repeatable) makes the hosted service NAME callable by anyone (hello.public). The node prints the

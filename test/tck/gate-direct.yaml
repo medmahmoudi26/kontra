@@ -1,4 +1,4 @@
-# The TCK's gate, direct backend: tck_jsonrpc and tck_rest (spec/relay.md §16; D18, DM4-12). A template that
+# The TCK's gate, direct backend: tck_jsonrpc and tck_rest (spec/relay.md §16; D18, D279). A template that
 # scripts/tck.sh fills (@LISTEN@, @PUBLIC_URL@, @POSTGRES@, @TEMPORAL@, @SELLER@) and runs from a fresh database:
 # `make tck VARIANT=direct`. The TCK calls the gate itself, in plaintext on loopback (a localhost public_url).
 #

@@ -62,7 +62,7 @@ func textResult(text string, structured any, meta map[string]any) json.RawMessag
 	return b
 }
 
-// Render is an ended hire task's outcome as MCP content (§12.2, DM4-22): text parts as text, data parts as text (the
+// Render is an ended hire task's outcome as MCP content (§12.2, D289): text parts as text, data parts as text (the
 // value's JSON) and in structuredContent.data, file parts as resource blocks (raw bytes embedded, a URL as a
 // resource_link), from the final status message and then each artifact; structuredContent {taskId, state, data?}
 // with the A2A state. A CallToolResult whatever the state: isError for failed, rejected and canceled, with the final
@@ -160,7 +160,7 @@ func render(task *a2a.Task, state store.State) callToolResult {
 
 // FailureRejected is sh.kontra/failure of a hire task the agent rejected (A2A rejected, MCP "failed"): §12.2 gives
 // every failed, rejected or canceled hire task sh.kontra/failure or sh.kontra/canceled, and §11.8's reasons are the
-// gate's failures, none of which a rejection is (DM4-26).
+// gate's failures, none of which a rejection is (D293).
 const FailureRejected = "rejected"
 
 // rejectedText is a rejected task's text when its status message has none.

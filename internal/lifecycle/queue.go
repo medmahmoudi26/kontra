@@ -56,7 +56,7 @@ type QueueOptions struct {
 	Now func() time.Time
 }
 
-// TaskCaps checks the anonymous tenants' task caps (spec/tunnel.md §6.2, DM4-10) in tx, the transaction that creates a
+// TaskCaps checks the anonymous tenants' task caps (spec/tunnel.md §6.2, D277) in tx, the transaction that creates a
 // task, before its row: an error wrapping anon.ErrRateLimited when the service's tenant (as host) or the principal's
 // (as hirer) has its cap of non-terminal tasks. *anon.Caps implements it.
 type TaskCaps interface {
@@ -276,7 +276,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 var errResent = errors.New("lifecycle: an identical request created the task meanwhile")
 
 // Hire is what Write needs of a task the gate's own /mcp creates with hire (spec/relay.md §12.2, §12.3): the task is
-// marked hired (tasks.hired, DM4-5), its first_request is Key, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)), instead of the
+// marked hired (tasks.hired, D272), its first_request is Key, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)), instead of the
 // request's hash, and the earlier task Write answers it with is a hire task of the same key that is quoted, or left
 // quoted less than RetryWindow ago (§12.3 Retries), instead of a resend of the same messageId (§15). The caller
 // looks the retry up first (store.Log.FindHireRetry); Write looks again under the key's lock, so two identical
@@ -359,7 +359,7 @@ func (q *Queue) resend(ctx context.Context, p *workqueue.Payload, prev *store.Ta
 // kontra.approval until its quote expires, as at its first start (§13.2). A refusal (the work item was accepted
 // already) and a closed workflow are what an idempotent re-issue meets, and are not errors; a task without a work
 // item has no start to re-issue. The relay's resend answer calls it before it answers a quoted task at once
-// (relay.StartReissuer, DM4-23).
+// (relay.StartReissuer, D290).
 func (q *Queue) ReissueStart(ctx context.Context, prev *store.TaskRow) error {
 	wid, err := q.log.FirstWorkItemID(ctx, prev.ID)
 	switch {

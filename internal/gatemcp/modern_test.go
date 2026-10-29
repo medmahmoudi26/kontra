@@ -21,7 +21,7 @@ import (
 	"kontra.sh/kontra/internal/store"
 )
 
-// server/discover on /mcp (§12.5, DM4-2): the three versions, newest first; tools and the tasks extension; the
+// server/discover on /mcp (§12.5, D269): the three versions, newest first; tools and the tasks extension; the
 // gate's serverInfo in _meta; ttlMs and cacheScope private (2026-07-28 CacheableResult); resultType complete.
 func TestDiscoverResult(t *testing.T) {
 	b, err := DiscoverResult()
@@ -95,7 +95,7 @@ func TestModernToolsList(t *testing.T) {
 	}
 }
 
-// A hire task as a modern reader sees it (§12.4, §12.5, DM4-7, §11.12's table): quoted is working with the approve
+// A hire task as a modern reader sees it (§12.4, §12.5, D274, §11.12's table): quoted is working with the approve
 // URL (D21); a text-only question is input_required for a reader whose request declared form elicitation, else
 // working with the reply-tool text; failed and rejected are completed (their result a CallToolResult with isError, the
 // tasks extension's "failed" being for JSON-RPC errors only) with sh.kontra/failure; canceled is cancelled.
@@ -240,7 +240,7 @@ func answerOf(t *testing.T, w *httptest.ResponseRecorder) answer {
 	return a
 }
 
-// The modern surface's answers that need nothing but the request (§12.5, §11.12; D176, DM4-28): CheckModern's
+// The modern surface's answers that need nothing but the request (§12.5, §11.12; D176, D295): CheckModern's
 // refusals (a missing _meta field -32602, a version, Mcp-Method or Mcp-Name that differs from the body -32020, a
 // response 400 -32600, a notification 202), server/discover and tools/list, tasks/result, tasks/list, ping and an
 // unknown method 404 -32601, tasks/* without the tasks extension 400 -32021, subscriptions/listen asking for task

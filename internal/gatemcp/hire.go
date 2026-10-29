@@ -23,7 +23,7 @@ import (
 )
 
 // PlainWait is how long a plain hire and every reply wait for the task to end, ask a question or be quoted
-// before answering {taskId, state} (§12.2, DM4-5): below the 60 s request timeout of the MCP SDKs.
+// before answering {taskId, state} (§12.2, D272): below the 60 s request timeout of the MCP SDKs.
 const PlainWait = 25 * time.Second
 
 // PlainBudget bounds a plain hire's or reply's request from its arrival to its answer: the plain wait is cut so that
@@ -37,7 +37,7 @@ const (
 )
 
 // RetryWindow is how long after a task left quoted a hire with the same resend key answers that task (§12.3
-// Retries), and how long a session's GET streams still get its notifications/elicitation/complete (DM4-21).
+// Retries), and how long a session's GET streams still get its notifications/elicitation/complete (D288).
 const RetryWindow = relay.HireRetryWindow
 
 // HireRequest is one hire: the A2A message the gate builds (its messageId minted by the gate, its parts from the
@@ -62,7 +62,7 @@ type Hirer interface {
 
 // hire answers the hire tool (§12.2, §12.3): the service a ref names when the principal may hire it (else the
 // unknown-service answer); an MCP service, one whose sealing is required, or one whose served card requires an
-// extension (DM4-27) is a tool execution error naming the route to use, and no task; then the task through the
+// extension (D294) is a tool execution error naming the route to use, and no task; then the task through the
 // Hirer, answered as §12.3 says: quoted, -32042 to a session that declared elicitation.url and otherwise the approve
 // URL at once (CreateTaskResult working, or the plain text); any other task, CreateTaskResult when task-augmented,
 // else after the plain wait. A modern request's task is answered by answerModernHire (§12.5); its creation runs on a
@@ -255,7 +255,7 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 }
 
 // extensionsText is the tool execution error of a hire or a reply to a service whose served card requires extensions
-// (spec §2.4, DM4-27): a tool call activates none, so the route is A2A with A2A-Extensions, as the required-sealed
+// (spec §2.4, D294): a tool call activates none, so the route is A2A with A2A-Extensions, as the required-sealed
 // answer names its route.
 func extensionsText(who, tool string, uris []string, a2aURL string) string {
 	s, them := "", "it"
@@ -302,7 +302,7 @@ func (h *Handler) refused(rq *request, what string, err error) {
 }
 
 // waitAndAnswer waits up to the plain wait for the task to end, to reach input-required after version after (a
-// reply's turn; 0 for a new task), or to be quoted, and answers what it then is (§12.2, DM4-5): an ended task as
+// reply's turn; 0 for a new task), or to be quoted, and answers what it then is (§12.2, D272): an ended task as
 // tasks/result renders it; input-required as §12.4's reply-tool text; quoted as the approve URL; a task still
 // running with a text naming the A2A URL that follows it. A request that accepts text/event-stream is answered on an
 // event stream with keep-alives while it waits. It reports whether the answer was written: false when the client left

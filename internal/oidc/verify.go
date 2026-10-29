@@ -27,7 +27,7 @@ import (
 	"kontra.sh/kontra/internal/strictjson"
 )
 
-// Algorithms the gate accepts (DM4-9): never none, never an HMAC (whose key would be the public key set).
+// Algorithms the gate accepts (D276): never none, never an HMAC (whose key would be the public key set).
 const (
 	AlgES256 = "ES256"
 	AlgRS256 = "RS256"
@@ -50,7 +50,7 @@ const (
 // Config configures a Verifier.
 type Config struct {
 	Issuer string // auth.mcp_oauth.issuer, compared byte for byte with the metadata's issuer and every token's iss
-	// Client fetches the metadata and the key set: §10.3's operator-configured endpoint client (DM4-17). Nil is
+	// Client fetches the metadata and the key set: §10.3's operator-configured endpoint client (D284). Nil is
 	// ssrf.NewOperatorClient with the system roots.
 	Client *http.Client
 	Logger *slog.Logger
@@ -172,7 +172,7 @@ func parseHeader(seg string) (header, error) {
 	return h, nil
 }
 
-// claims checks the payload's iss, sub, aud, exp and nbf (§12.1, DM4-9).
+// claims checks the payload's iss, sub, aud, exp and nbf (§12.1, D276).
 func (v *Verifier) claims(payload []byte, audience string) (Claims, error) {
 	m, err := strictjson.Members(payload)
 	if err != nil {
@@ -282,7 +282,7 @@ func (v *Verifier) candidates(ctx context.Context, h header) ([]*jwk, error) {
 	}
 	found := set.find(h)
 	if len(found) == 0 && h.kid != "" {
-		// An unknown kid: perhaps a rotation (DM4-9).
+		// An unknown kid: perhaps a rotation (D276).
 		if set, err = v.current(ctx, true); err != nil {
 			return nil, err
 		}
@@ -384,7 +384,7 @@ func (v *Verifier) fetch(ctx context.Context, meta bool, jwksURI string) (*keySe
 	return set, jwksURI, nil
 }
 
-// MetadataURLs are where the issuer's metadata is looked for, in order (DM4-9, DM4-29): RFC 8414's well-known URI
+// MetadataURLs are where the issuer's metadata is looked for, in order (D276, D296): RFC 8414's well-known URI
 // (inserted before the issuer's path, §3.1), the same appended to the issuer as relay.md §12.1 writes it, then the
 // OpenID configuration appended (OpenID Connect Discovery §4) and inserted. Duplicates are dropped: for an issuer
 // without a path the list is the first and the third.

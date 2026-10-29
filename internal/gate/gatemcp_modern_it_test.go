@@ -173,7 +173,7 @@ hooks:
 }
 
 // The gate's own /mcp in the 2026-07-28 era, through two whole replicas on one database (spec §12.5, §11.12; D24,
-// D159, D176, DM4-2, DM4-7; M4 WP-05):
+// D159, D176, D269, D274; M4 WP-05):
 //
 //   - server/discover lists 2026-07-28, 2025-11-25 and 2025-06-18 and the tasks extension; the modern tools/list has
 //     no execution; both are byte-identical from either replica;
@@ -455,7 +455,7 @@ func TestGateMCPModern(t *testing.T) {
 // A modern client that closes its response stream before its hire is answered has cancelled the request (2026-07-28
 // Streamable HTTP, "Cancellation"; §11.12 step 4, D178): it gets no answer, and the task it created ends canceled
 // within 10 s, the seller receiving CancelTask, whether it declared the tasks extension (the 2 s inline wait) or not
-// (the plain wait). A quoted task is left quoted (DM4-28: it runs nothing until a person approves it), and the client's
+// (the plain wait). A quoted task is left quoted (D295: it runs nothing until a person approves it), and the client's
 // re-issued hire answers it with its approve URL.
 func TestGateMCPModernClientLeaves(t *testing.T) {
 	e := newGateEnv(t)

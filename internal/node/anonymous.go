@@ -2,7 +2,7 @@ package node
 
 import "time"
 
-// An anonymous session's end, as the node tells it (spec/tunnel.md §6.1, DM4-25). welcome.anonymous.expires_at is the
+// An anonymous session's end, as the node tells it (spec/tunnel.md §6.1, D292). welcome.anonymous.expires_at is the
 // gate's time, and the node's wall clock may differ from the gate's by more than expirySlack: compared with it, the
 // gate's {"t": "revoked"} at the end would read as a revocation of the key (the M4 WP-03 review). So the node measures
 // the end on its monotonic clock from the session's opening: first by its own wall clock at the welcome, then from the

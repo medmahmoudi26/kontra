@@ -162,7 +162,7 @@ type OIDC struct {
 	Audience string `yaml:"audience"`
 }
 
-// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). Built in M4 (DM4-9).
+// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). Built in M4 (D276).
 type MCPOAuth struct {
 	Issuer string `yaml:"issuer"`
 }
@@ -202,8 +202,8 @@ type Hooks struct {
 	Lifecycle *LifecycleHook `yaml:"lifecycle"` // nil: built in
 }
 
-// AdmissionHook is the remote Admission (spec §13.1), built in M4 (DM4-8): url is §10.3's operator-configured endpoint
-// (https://, or http:// on a loopback host, DM4-17), and secret_env names the variable holding the bearer secret, which
+// AdmissionHook is the remote Admission (spec §13.1), built in M4 (D275): url is §10.3's operator-configured endpoint
+// (https://, or http:// on a loopback host, D284), and secret_env names the variable holding the bearer secret, which
 // the replica reads at start (it refuses to start when the variable is unset or empty).
 type AdmissionHook struct {
 	URL        string   `yaml:"url"`
@@ -213,7 +213,7 @@ type AdmissionHook struct {
 }
 
 // LifecycleHook is the remote Lifecycle (spec §13.3): the five activities by type name on that queue. Accepted
-// since M3 (D186); the remote Admission hook since M4 (DM4-8).
+// since M3 (D186); the remote Admission hook since M4 (D275).
 type LifecycleHook struct {
 	TaskQueue string `yaml:"task_queue"`
 }
@@ -223,11 +223,11 @@ type Tunnel struct {
 	// ChannelBinding is tls-exporter or none; the default is tls-exporter when the gate terminates TLS
 	// itself and none otherwise (tunnel.md §4, D69).
 	ChannelBinding   string            `yaml:"channel_binding"`
-	Anonymous        AnonymousSessions `yaml:"anonymous"` // tunnel.md §6, DM4-10; M4
+	Anonymous        AnonymousSessions `yaml:"anonymous"` // tunnel.md §6, D277; M4
 	EnrollWithAPIKey bool              `yaml:"enroll_with_api_key"`
 }
 
-// AnonymousSessions is tunnel.anonymous (spec/tunnel.md §6, §6.2; relay.md §17; DM4-10, DM4-20): false (the default,
+// AnonymousSessions is tunnel.anonymous (spec/tunnel.md §6, §6.2; relay.md §17; D277, D287): false (the default,
 // off), true (on, with §6.2's limits), or an object of those limits, each absent key taking its default. It needs
 // tenancy: multi. The integers are at least 1 and hiring_streams at most 32; ttl, purge_after and parts_bytes are
 // positive (a zero is refused when decoded, so after decoding a zero always means "absent, use the default").
@@ -237,11 +237,11 @@ type AnonymousSessions struct {
 	TenantsPerNetwork int      `yaml:"tenants_per_network"` // default 3: live anonymous tenants per IPv4 /24 or IPv6 /48
 	Services          int      `yaml:"services"`            // default 4: a tenant's services that are not disabled
 	Tasks             int      `yaml:"tasks"`               // default 4: concurrent tasks as host and as hirer, each
-	Calls             int      `yaml:"calls"`               // default 8: concurrent plain MCP calls to its services (DM4-20)
+	Calls             int      `yaml:"calls"`               // default 8: concurrent plain MCP calls to its services (D287)
 	HiringStreams     int      `yaml:"hiring_streams"`      // default 8, at most 32: node-opened streams per session
 	PartsBytes        ByteSize `yaml:"parts_bytes"`         // default 64 MiB: parts stored per tenant
 	PurgeAfter        Duration `yaml:"purge_after"`         // default 24h after expiry
-	MaxTenants        int      `yaml:"max_tenants"`         // default 1000: live anonymous tenants gate-wide (DM4-20)
+	MaxTenants        int      `yaml:"max_tenants"`         // default 1000: live anonymous tenants gate-wide (D287)
 }
 
 // anonymousKeys are the keys of tunnel.anonymous's object form, which UnmarshalYAML decodes one by one.

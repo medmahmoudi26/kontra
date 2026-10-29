@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// OpenGate inserts a legacy session of the gate's own /mcp (spec/relay.md §12, DM4-2): an mcp_sessions row whose
+// OpenGate inserts a legacy session of the gate's own /mcp (spec/relay.md §12, D269): an mcp_sessions row whose
 // service is NULL and whose tenant_id is the principal's (NULL when it has none), pinning nothing (no upstream, no
 // tunnel session, no replica), so any replica serves any request of it. Lookup finds it with service "" and the
 // principal's tenant (uuid.Nil for none). row gives the buyer, principal, via, version and the client's

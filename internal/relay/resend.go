@@ -14,7 +14,7 @@ import (
 // resendAnswer answers a blocking SendMessage that repeats an earlier request (a resend: the same principal,
 // service, messageId and request, spec §15) whose task stands at input-required, quoted or auth-required, with that
 // task as it stands (spec §9: a blocking call returns on the first input-required or auth-required state, and a
-// quoted task is input-required on the wire, §5.1; DM4-23, the blocking counterpart of D108's resend stream, which
+// quoted task is input-required on the wire, §5.1; D290, the blocking counterpart of D108's resend stream, which
 // closes at once on the same states).
 //
 // Without it the work queue answers the resend with its task and a2a-go subscribes to that task's log at its

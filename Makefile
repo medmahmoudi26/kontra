@@ -50,7 +50,7 @@ test-race:
 test-e2e:
 	GO="$(GO)" scripts/test_e2e.sh $(ARGS)
 
-# The pinned A2A TCK against the gate (spec/relay.md §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, DM4-12),
+# The pinned A2A TCK against the gate (spec/relay.md §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, D279),
 # one variant per run: VARIANT=direct (the default) or tunnel (the seller examples/sellers/tck on the direct
 # backend, or hosted through `kontra connect`), caddy (the direct backend behind examples/front/caddy), auth (behind
 # a loopback front that adds a tck API key: ListTasks and push through the TCK, nightly). scripts/tck.sh starts a
@@ -62,7 +62,7 @@ VARIANT ?= direct
 tck:
 	GO="$(GO)" scripts/tck.sh $(VARIANT)
 
-# The gate-run kits (M4 WP-08, DM4-31): test/vps and test/demo with Docker (KONTRA_KIT_TESTS=1). The gate image is built
+# The gate-run kits (M4 WP-08, D298): test/vps and test/demo with Docker (KONTRA_KIT_TESTS=1). The gate image is built
 # once from the working tree with the docker driver's builder (kontra-gate:kit-<pid>) for both packages; then compose.yaml's
 # ACME variant comes up and writes its cache, scripts/team-gate-vps.sh --host runs its steps 4 and 5 against a stand-in
 # VPS on this host, the clean laptop's image is checked, and scripts/demo-clean-laptop.sh is rehearsed against a local

@@ -1,4 +1,4 @@
-# The clean laptop of the README demo (DM4-13, DM4-15, DM4-31; the M4 plan's gate run B2): Go 1.26.10 (the golang
+# The clean laptop of the README demo (D280, D282, D298; the M4 plan's gate run B2): Go 1.26.10 (the golang
 # image, pinned by digest) and Node 22 (the official tarball, its sha256 pinned), a user `laptop` with an empty home,
 # and nothing else: no kontra, no a2a-cli, no npm package, no credential. scripts/demo-clean-laptop.sh builds it from
 # `git archive HEAD` with the docker driver's builder and runs the README's block in it; test/demo checks what it holds.

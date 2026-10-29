@@ -24,7 +24,7 @@ import (
 	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
-// anon_lifecycle (spec/tunnel.md §16; §6, §6.1; DM4-10, DM4-18, DM4-19, DM4-20, DM4-25). Multi-tenant,
+// anon_lifecycle (spec/tunnel.md §16; §6, §6.1; D277, D285, D286, D287, D292). Multi-tenant,
 // tunnel.anonymous compressed (ttl 40 s, purge_after 10 s), the Front a PROXY v2 forwarder, a bucket, peer listeners.
 // Asserted:
 //
@@ -38,9 +38,9 @@ import (
 //     row's wording, below), and the node exits 1 saying the anonymous session expired; the key's next hello opens a new tenant with a new anon-<16 hex> slug, the
 //     key moved there;
 //   - a probe after an enrollment that did not commit (the credentials hold the token as unconfirmed) gets unknown_key on
-//     this anonymous gate, opens no anonymous tenant, and its token is sent again and enrolls the key (DM4-18);
+//     this anonymous gate, opens no anonymous tenant, and its token is sent again and enrolls the key (D285);
 //   - enroll tokens from a key of a live anonymous tenant convert it: the key moves to the tokens' tenant, the anonymous
-//     tenant ends at once, and an audit row records the conversion (DM4-19);
+//     tenant ends at once, and an audit row records the conversion (D286);
 //   - after purge_after the old tenant's keys (another node's key still in its tenant), services, bindings, enrollments
 //     (a service and a tenant token an operator minted for it while it was live), tasks with their events, calls, MCP
 //     sessions (the gate's own /mcp's, service NULL, included) and bucket objects are gone; its tenants row is a
@@ -237,7 +237,7 @@ func TestAnonLifecycle(t *testing.T) {
 	// dispatches "fail tunnel_lost, or are retried if no upstream task exists"; relay §6.4 fails a task tunnel_lost
 	// once an upstream task exists. The gate does exactly that, so a task whose upstream task exists fails tunnel_lost,
 	// and one whose dispatch has no upstream task id yet is retried and fails service_unavailable at that next dispatch
-	// (the service disabled, §13.5). Asserted as built; the proposal (DM4-30) is to word §6.1 and the row so.
+	// (the service disabled, §13.5). Asserted as built; the proposal (D297) is to word §6.1 and the row so.
 	for id, want := range map[string]string{inFlight: "tunnel_lost", noUpstream: "service_unavailable"} {
 		eventually(t, 90*time.Second, "a task in flight at the end fails", func() bool { return taskState(t, h, id) == "failed" })
 		if f := failureOf(t, h, id); f != want {
@@ -265,7 +265,7 @@ func TestAnonLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// DM4-18: a probe after an enrollment that did not commit gets unknown_key on this anonymous gate, and the token
+	// D285: a probe after an enrollment that did not commit gets unknown_key on this anonymous gate, and the token
 	// is sent again.
 	if err := h.SeedServices(ctx, SeededService{Tenant: "probe-co", Name: "hello"}); err != nil {
 		t.Fatal(err)
@@ -313,7 +313,7 @@ func TestAnonLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// DM4-19: enroll tokens from a key of a live anonymous tenant convert it.
+	// D286: enroll tokens from a key of a live anonymous tenant convert it.
 	l3 := anonNode(t, ctx, h, v4c.String(), map[string]string{"hello": seller.URL}, nil)
 	s3, t3 := slugOf(l3), h.TenantOf(ctx, slugOf(l3))
 	if err := l3.Kill(); err != nil {
@@ -390,7 +390,7 @@ func TestAnonLifecycle(t *testing.T) {
 		t.Errorf("a client's address is stored in %v", hits)
 	}
 
-	// An anon-<16 hex> slug is refused for an account tenant (the 0003 CHECK, DM4-20).
+	// An anon-<16 hex> slug is refused for an account tenant (the 0003 CHECK, D287).
 	_, err = h.Pool.Exec(ctx, `insert into kontra.tenants (id, slug, kind) values ($1, 'anon-0123456789abcdef', 'account')`, uuid.Must(uuid.NewV7()))
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "anonymous_slug" {

@@ -15,14 +15,14 @@ import (
 	"kontra.sh/kontra/internal/version"
 )
 
-// WarmTools drains svc's tools/list into the cache in the background (relay.md §11.3, §12.2; DM4-4): the gate's own
+// WarmTools drains svc's tools/list into the cache in the background (relay.md §11.3, §12.2; D271): the gate's own
 // /mcp describe of an MCP service whose cache is cold answers without its tools and starts this, at most once per
 // service per 10 minutes (internal/gatemcp), so no request waits on an upstream. The drain runs on a context of its
 // own (bounded by DrainTimeout plus the session's opening and closing), for p, on an upstream session of its own: a
 // legacy initialize to a target chosen as for any initialize (§6.1, the peer hop included), notifications/initialized,
 // the tools/list pages, and a best-effort DELETE; or, for a service whose upstream is known to be of the 2026-07-28
 // era, stateless pages. info, when not nil, gets the upstream's InitializeResult.serverInfo (describe and search show
-// its title or name as the service's description, DM4-4). It writes no calls row and opens no mcp_sessions row (M4
+// its title or name as the service's description, D271). It writes no calls row and opens no mcp_sessions row (M4
 // WP-04; a file of its own, so M3's files are unchanged).
 func (h *Handler) WarmTools(svc *Service, p auth.Principal, info func(serverInfo json.RawMessage)) {
 	go func() {

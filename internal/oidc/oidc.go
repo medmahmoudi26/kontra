@@ -1,18 +1,18 @@
 // Package oidc verifies JWTs from an operator's authorization server, and makes /mcp and every /mcp/{svc} an OAuth
-// 2.1 resource server for it (spec/relay.md §12.1, D25; built in M4, DM4-9).
+// 2.1 resource server for it (spec/relay.md §12.1, D25; built in M4, D276).
 //
 // With auth.mcp_oauth.issuer configured:
 //
 //   - A request to an MCP route without a credential is 401 with WWW-Authenticate: Bearer
 //     resource_metadata="{public_url}/.well-known/oauth-protected-resource/mcp[/{svc}]", scope="mcp" (Challenge;
 //     a credential that was presented and refused adds error="invalid_token", RFC 6750 §3.1). On /mcp/{svc} a
-//     service whose allow: admits anonymous still serves a request without one (DM4-29).
+//     service whose allow: admits anonymous still serves a request without one (D296).
 //   - That RFC 9728 document (MetadataHandler) is served for every well-formed name, existing or not: its resource
 //     is the route's canonical URI ({public_url}/mcp or {public_url}/mcp/{svc}) and it names the issuer.
 //   - A bearer token shaped as a JWT (auth.LooksLikeJWT) is verified by Verifier against the route's canonical URI as
 //     audience (RFC 8707): iss, aud, exp and nbf with 60 s of skew, ES256, RS256 or EdDSA only. Any other bearer is
 //     an API key, as on every route. The key set comes from the issuer's RFC 8414 metadata (else its OpenID
-//     configuration), fetched as one of §10.3's operator-configured endpoints (DM4-17: https://, no redirect, no
+//     configuration), fetched as one of §10.3's operator-configured endpoints (D284: https://, no redirect, no
 //     proxy, no address check, bodies at most 256 KiB, 5 s), cached 10 minutes; an unknown kid refetches it at most
 //     once a minute. scope is not checked.
 //   - The principal is oidc:sub:<sub>, buyer UUIDv5(issuer ‖ sub), no tenant, via mcp (spec §2.3).
@@ -35,7 +35,7 @@ import (
 	"kontra.sh/kontra/internal/ids"
 )
 
-// Verification parameters (DM4-9).
+// Verification parameters (D276).
 const (
 	Skew         = 60 * time.Second
 	KeySetTTL    = 10 * time.Minute

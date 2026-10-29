@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The README's "Five minutes" on a clean laptop (DM4-13, DM4-15, DM4-31; the M4 plan's gate run B2, the gate item "demo
+# The README's "Five minutes" on a clean laptop (D280, D282, D298; the M4 plan's gate run B2, the gate item "demo
 # from a clean laptop against staging"). A fresh container stands in for the laptop: test/demo/Dockerfile (Go 1.26.10
 # and Node 22, a user with an empty home, nothing else), built from `git archive HEAD` with the docker driver's
 # builder, run on the default bridge (internet egress only) with no host mount and no secret. Inside it,

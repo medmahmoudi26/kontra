@@ -1,4 +1,4 @@
-"""Fills a gate configuration template of scripts/tck.sh (test/tck/gate-<variant>.yaml; M4 WP-02, DM4-24).
+"""Fills a gate configuration template of scripts/tck.sh (test/tck/gate-<variant>.yaml; M4 WP-02, D291).
 
     python3 test/tck/kontra_tck_config.py <template> <output>
 

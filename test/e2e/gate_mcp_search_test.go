@@ -13,7 +13,7 @@ import (
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
 )
 
-// gate_mcp_search (spec/relay.md §16; §12.2; DM4-4, DM4-26). Multi-tenant: the services are rows (D116), refs are
+// gate_mcp_search (spec/relay.md §16; §12.2; D271, D293). Multi-tenant: the services are rows (D116), refs are
 // <tenant>/<name>, and the caller is buyer A, an API key of the team tenant default (principal org:default). Seeded:
 // acme/pub (a2a, another tenant's, listed, annotations.search {price, price_model per_call}, §13.4), default/team (a2a, allow org:default), default/open
 // (a2a, allow anonymous only, not listed), default/fs (mcp, its tools cached on replica A by a client's tools/list

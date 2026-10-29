@@ -516,7 +516,7 @@ func TestParseArgs(t *testing.T) {
 	}
 }
 
-// §6.3 step 2 (DM4-29): an authorization server that forgot a registered client refuses it at its authorization
+// §6.3 step 2 (D296): an authorization server that forgot a registered client refuses it at its authorization
 // endpoint without redirecting (RFC 6749 §4.1.2.1; oidctest answers 400 "unknown client"), so kontra login hears
 // nothing until its bound or an interrupt. A login that reused the stored client_id and got no answer forgets it and
 // says so; the next login registers again and signs in. (Before, every later login reused the dead client_id and

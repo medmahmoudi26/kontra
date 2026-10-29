@@ -77,7 +77,7 @@ type TasksConfig struct {
 	Logger *slog.Logger
 }
 
-// TaskCaps checks the anonymous tenants' limits where a gate-owned task is created (spec/tunnel.md §6.2, DM4-20;
+// TaskCaps checks the anonymous tenants' limits where a gate-owned task is created (spec/tunnel.md §6.2, D287;
 // *anon.Caps): Message before anything is written (anon.ErrStorageFull), Task in the transaction that creates the
 // row, under the tenant's lock (anon.ErrRateLimited).
 type TaskCaps interface {

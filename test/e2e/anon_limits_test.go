@@ -25,7 +25,7 @@ func anonConfig(ttl time.Duration, maxTenants int) string {
 		"parts_bytes: 1MiB, max_tenants: %d }", ttl, maxTenants)
 }
 
-// anonNode starts a node with no credential (it asks for an anonymous session, DM4-18) whose connections the Front
+// anonNode starts a node with no credential (it asks for an anonymous session, D285) whose connections the Front
 // presents as coming from src, serving serves (a2a) and mcp (mcp), --public each of public, and waits for its welcome
 // and its tunnels row.
 func anonNode(t *testing.T, ctx context.Context, h *Harness, src string, serves, mcp map[string]string, public ...string) *Node {
@@ -110,7 +110,7 @@ func rateLimited(st int, hdr http.Header, body string) bool {
 // anonLimitsMaxTenants is TestAnonLimits' max_tenants.
 const anonLimitsMaxTenants = 12
 
-// anon_limits (spec/tunnel.md §16; §6.2; DM4-10, DM4-18, DM4-20, DM4-25). Multi-tenant, tunnel.anonymous compressed
+// anon_limits (spec/tunnel.md §16; §6.2; D277, D285, D287, D292). Multi-tenant, tunnel.anonymous compressed
 // (ttl 60 s, the caps 3/4/4/8/8, parts 1 MiB, max_tenants 12), the Front a PROXY v2 forwarder (nodes come from the
 // networks the test names). Asserted:
 //

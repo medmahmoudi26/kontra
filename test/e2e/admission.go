@@ -16,7 +16,7 @@ import (
 	"kontra.sh/kontra/internal/lifecycle"
 )
 
-// M4 (WP-07): an operator's Admission server on loopback (spec/relay.md §13.1, §13.2; DM4-8, DM4-17), which the
+// M4 (WP-07): an operator's Admission server on loopback (spec/relay.md §13.1, §13.2; D275, D284), which the
 // replicas reach as hooks.admission (http:// on a loopback host, operations [task]). For the services it quotes it
 // answers a quote whose approveUrl names the pre-minted taskId the gate sent (Cloud's thread URL
 // https://app.kontra.sh/#/t/<taskId> by default, D188; a team gate's own page with URLFor), expiring ExpiresIn from

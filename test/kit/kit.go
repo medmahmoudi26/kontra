@@ -1,4 +1,4 @@
-// Package kit holds what the gate-run kits' tests share (test/demo, test/vps; DM4-15, DM4-31): the switch that turns
+// Package kit holds what the gate-run kits' tests share (test/demo, test/vps; D282, D298): the switch that turns
 // the Docker-backed ones on, the gate image built from the working tree, a compose project of the team gate with an
 // override file, and the certificates and keys a run mints.
 //

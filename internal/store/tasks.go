@@ -13,12 +13,12 @@ import (
 )
 
 // The tasks of the gate's own /mcp (spec/relay.md §12; M4 WP-04). hire creates an ordinary A2A gate task through
-// the service's work queue and marks it tasks.hired (DM4-5); /mcp's MCP Tasks see only those, of the principal's
+// the service's work queue and marks it tasks.hired (D272); /mcp's MCP Tasks see only those, of the principal's
 // buyer, across services. A hire's resend key is its first_request, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)) (§12.3
 // Retries), matched on (tenant, service, buyer, principal, first_request) while the task is quoted, or less than the
 // retry window after it left quoted. A quoted hire task sent to a session that declared elicitation.url carries
 // that URL elicitation's id and the session (tasks.elicitation_id, tasks.elicitation_session), and the one GET
-// stream of the session that claims it (tasks.elicitation_notified_at, DM4-21) writes its
+// stream of the session that claims it (tasks.elicitation_notified_at, D288) writes its
 // notifications/elicitation/complete.
 
 // MarkHired marks a task hire created (tasks.hired), in tx: the transaction that creates it.
@@ -225,7 +225,7 @@ func (l *Log) SessionElicitations(ctx context.Context, session [32]byte, buyer u
 }
 
 // ClaimElicitationComplete claims the notifications/elicitation/complete of a task that left quoted for one GET
-// stream of session (DM4-21): the update that sets elicitation_notified_at wins only while it is null, so exactly
+// stream of session (D288): the update that sets elicitation_notified_at wins only while it is null, so exactly
 // one stream of the session, on any replica, writes it. It returns the elicitation id and whether this call won.
 func (l *Log) ClaimElicitationComplete(ctx context.Context, taskID uuid.UUID, session [32]byte) (string, bool, error) {
 	var id string

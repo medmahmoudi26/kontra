@@ -60,13 +60,13 @@ type ReviewMessenger interface {
 //     (ext-sealed.md §3); a sealed: required service refuses an unsealed part with InvalidRequest
 //     (sealed_unsealed_part), and an optional one marks it metadata["kontra.sealed"] = false (§5). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
 //     blobs", §10.4), and so is a contextId or messageId over 256 characters (§4), before any task row.
-//     Then an anonymous tenant's storage (spec/tunnel.md §6.2, DM4-20; anonStorage): a message to an anonymous
+//     Then an anonymous tenant's storage (spec/tunnel.md §6.2, D287; anonStorage): a message to an anonymous
 //     tenant's service whose encoding would take what the tenant stores past parts_bytes is InvalidParams
 //     "anonymous storage limit", before Admission and any task row.
 //  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow, or the remote hook
-//     (hooks.RemoteAdmission, M4 DM4-8). It fails closed: a hook error, a decision whose maps break §13.2's rules,
+//     (hooks.RemoteAdmission, M4 D275). It fails closed: a hook error, a decision whose maps break §13.2's rules,
 //     and a quote whose approveUrl is not an absolute https:// URL or whose expiresAt is not in the future
-//     (hooks.CheckQuote, DM4-17) are -32603 "admission unavailable", HTTP 503 on HTTP+JSON. The pre-minted task id
+//     (hooks.CheckQuote, D284) are -32603 "admission unavailable", HTTP 503 on HTTP+JSON. The pre-minted task id
 //     and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
 //  5. Follow-up checks (spec §7): a message with a taskId is refused UnsupportedOperationError unless the
 //     task is input-required; a taskId/contextId disagreement is InvalidParams; a terminal task is
@@ -78,7 +78,7 @@ type ReviewMessenger interface {
 //     the work queue saves an inline config with the task. A follow-up's inline config is checked only
 //     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
 //     is never refused for a DNS change.
-//     Then resends (spec §9, §15; resendAnswer, DM4-23): a blocking SendMessage that repeats a request whose
+//     Then resends (spec §9, §15; resendAnswer, D290): a blocking SendMessage that repeats a request whose
 //     task stands at input-required, quoted or auth-required is answered with that task as an early response (a
 //     quoted task's start re-issued first, through Starts).
 //  7. Large parts (spec §10.4, D167; largeParts): with a bucket, each part over 256 KiB of a new task's first
@@ -114,7 +114,7 @@ type Interceptors struct {
 	// Logger logs why Admission refused a message (the caller sees only "admission unavailable"); nil logs nothing.
 	Logger *slog.Logger
 	// Starts re-issues a resend's start before a resend of a quoted task is answered at once (resendAnswer,
-	// DM4-23): the service's lifecycle.Queue. Nil leaves such a resend to the work queue, which waits for the end
+	// D290): the service's lifecycle.Queue. Nil leaves such a resend to the work queue, which waits for the end
 	// of the quote.
 	Starts StartReissuer
 	// Anon checks a message to an anonymous tenant's service against its parts_bytes (spec/tunnel.md §6.2;
@@ -212,7 +212,7 @@ func (i *Interceptors) anonymous(ctx context.Context, cc *a2asrv.CallContext, re
 }
 
 // anonStorage refuses a message to an anonymous tenant's service that would take the tenant's stored bytes past
-// parts_bytes (spec/tunnel.md §6.2, DM4-20): InvalidParams "anonymous storage limit", before Admission and any task
+// parts_bytes (spec/tunnel.md §6.2, D287): InvalidParams "anonymous storage limit", before Admission and any task
 // row. The message counts as its encoding, as relay.md §6.6 counts each logged event (D103).
 func (i *Interceptors) anonStorage(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if i.Anon == nil || !anon.IsSlug(i.Svc.Tenant) {

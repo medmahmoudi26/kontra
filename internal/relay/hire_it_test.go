@@ -107,7 +107,7 @@ func TestHireRetryReissuesALostStart(t *testing.T) {
 	}
 }
 
-// TestHireRefusesARequiredExtension (spec §2.4, §13.4; DM4-27; M4 WP-04 review): a tool call of /mcp activates no
+// TestHireRefusesARequiredExtension (spec §2.4, §13.4; D294; M4 WP-04 review): a tool call of /mcp activates no
 // extension, so a hire of a service whose served card marks one required: true is refused with
 // ExtensionSupportRequiredError before anything else (no Admission, no task row, nothing to the seller), and so is a
 // reply to a hire task of such a service: what the A2A route refuses a request without A2A-Extensions with.

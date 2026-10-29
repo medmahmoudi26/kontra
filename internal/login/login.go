@@ -1,4 +1,4 @@
-// Package login is `kontra login` (spec/tunnel.md §6.3, DM4-11): it gets an API key for a gate from the gate's
+// Package login is `kontra login` (spec/tunnel.md §6.3, D278): it gets an API key for a gate from the gate's
 // authorization server and keeps it as that origin's API key in ~/.kontra/credentials (§2.4, internal/node's
 // Credentials), which kontra connect then sends as the hello's auth. On an anonymous session's key, that handshake
 // converts the anonymous tenant into the person's account (§6.3, internal/enroll's conversion).
@@ -213,7 +213,7 @@ func Run(ctx context.Context, o Options) error {
 	case errors.Is(err, errNoAnswer) && reused:
 		// An authorization server that no longer knows a client_id must not redirect to it (RFC 6749 §4.1.2.1): it
 		// tells the person on its own page, and kontra login hears nothing until the bound or an interrupt. A login that
-		// reused a registration and got no answer forgets it (§6.3 step 2, DM4-29), so the next login registers again
+		// reused a registration and got no answer forgets it (§6.3 step 2, D296), so the next login registers again
 		// instead of failing the same way for ever. A login that simply was not finished costs one registration more.
 		if forget() {
 			err = fmt.Errorf("%w. It reused this computer's registration at %s, which the authorization server may have "+
@@ -243,7 +243,7 @@ var apiKeyRE = regexp.MustCompile(`^kk_[A-Za-z0-9_]+$`)
 // accessToken is §6.3 step 4: the access token must be an API key of the gate (kk_…), which kontra connect sends as
 // the hello's auth; anything else, a JWT included, is refused and not stored.
 //
-// This is the rule of this revision (DM4-11), the only place that holds it: kontra-cloud#60 has the gate accept
+// This is the rule of this revision (D278), the only place that holds it: kontra-cloud#60 has the gate accept
 // Cloud's JWTs as principals in M5, which may revise it (with the hello's auth) when Cloud's authorization server is
 // built.
 func accessToken(tok string) error {

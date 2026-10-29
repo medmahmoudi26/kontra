@@ -1,4 +1,4 @@
-# The loopback front of the TCK's nightly auth run (scripts/tck.sh, VARIANT=auth; DM4-12): plaintext on
+# The loopback front of the TCK's nightly auth run (scripts/tck.sh, VARIANT=auth; D279): plaintext on
 # 127.0.0.1, it adds `Authorization: Bearer $KONTRA_TCK_KEY` to every request and proxies it to the gate
 # (test/tck/gate-auth.yaml), because the pinned TCK sends no credential (a2a-tck#163, PR #200). A test fixture
 # only: never put a credential in front of a gate for its callers.

@@ -92,7 +92,7 @@ func oauthSend(t *testing.T, method, url, bearer, body string) (int, string, []b
 
 const initialize = `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
 
-// The MCP OAuth resource server through a whole replica (spec/relay.md §12.1, DM4-9, DM4-29; M4 WP-06), against the
+// The MCP OAuth resource server through a whole replica (spec/relay.md §12.1, D276, D296; M4 WP-06), against the
 // in-repository authorization server: a request without a credential to /mcp, to an existing /mcp/{svc} and to an
 // unknown one is 401 with the exact challenge naming that route's RFC 9728 document (a malformed name, none), and a
 // service whose allow: admits anonymous still serves it; each document's resource is the route's canonical URI and
@@ -162,7 +162,7 @@ func TestGateMCPOAuth(t *testing.T) {
 	if status, www, _ := oauthSend(t, http.MethodPost, pub+"/mcp/Bad_Name", "", initialize); status != http.StatusUnauthorized || www != `Bearer scope="mcp"` {
 		t.Errorf("a malformed name: %d %q", status, www)
 	}
-	// DM4-29: a service that admits anonymous serves a request without a credential.
+	// D296: a service that admits anonymous serves a request without a credential.
 	if status, _, body := oauthSend(t, http.MethodPost, pub+"/mcp/open", "", initialize); status != http.StatusOK || !strings.Contains(string(body), `"result"`) {
 		t.Errorf("an anonymous service without a credential: %d %s", status, body)
 	}

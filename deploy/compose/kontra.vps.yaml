@@ -1,4 +1,4 @@
-# The compose team gate on a fresh VPS, with built-in ACME (DM4-14): compose.yaml with KONTRA_CONFIG naming this
+# The compose team gate on a fresh VPS, with built-in ACME (D281): compose.yaml with KONTRA_CONFIG naming this
 # file. Use it on a host that has a public DNS name and no certificate yet; deploy/compose/kontra.yaml is the same gate
 # with a certificate you provide. A test keeps the two in step: edit both.
 #

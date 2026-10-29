@@ -223,7 +223,7 @@ func serve(t *testing.T, h *Handler, p auth.Principal, method string, params map
 	return served{answer: answerOf(t, w), retryAfter: w.Header().Get("Retry-After")}
 }
 
-// A modern tasks/update (§12.4, §12.5, DM4-7; the corrections' WP-05 rule): the one answerable key is the gate id of
+// A modern tasks/update (§12.4, §12.5, D274; the corrections' WP-05 rule): the one answerable key is the gate id of
 // the question outstanding now, as the reader's own request sees it in tasks/get; its accept {reply} is the §7
 // follow-up, once. A quoted task (D38, D45), a task asking nothing, an earlier turn's key, another task's key, a
 // malformed key, a decline, an accept without a string reply, a question the reader did not declare form elicitation
@@ -358,7 +358,7 @@ func TestModernUpdate(t *testing.T) {
 	}
 }
 
-// A modern tasks/get of a hire task (§12.5, §11.12's table, DM4-7): resultType complete, ttlMs and pollIntervalMs (not
+// A modern tasks/get of a hire task (§12.5, §11.12's table, D274): resultType complete, ttlMs and pollIntervalMs (not
 // 2025-11-25's ttl and pollInterval); quoted is working with the approve URL in statusMessage and _meta; a text-only
 // question is input_required with exactly one inputRequests entry, a form elicitation/create keyed by the gate id of
 // the event that asked, for a reader whose request declared form elicitation, and working with the reply-tool text

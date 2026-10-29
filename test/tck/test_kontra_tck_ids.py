@@ -1,4 +1,4 @@
-"""Self-test of kontra_tck_ids.py (M4 WP-02's review, DM4-24), with pytester and a stand-in for the TCK's
+"""Self-test of kontra_tck_ids.py (M4 WP-02's review, D291), with pytester and a stand-in for the TCK's
 tck/requirements/base.py; run by scripts/tck.sh with the other self-tests of test/tck."""
 
 from __future__ import annotations

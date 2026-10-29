@@ -12,7 +12,7 @@
 #
 # Which file: this one when you have a certificate for the gate's name (your CA's, or one you renew yourself);
 # deploy/compose/kontra.vps.yaml, the same gate with built-in ACME, on a fresh VPS with a public DNS name and no
-# certificate yet (DM4-14). A test keeps the two in step.
+# certificate yet (D281). A test keeps the two in step.
 #
 # The gate terminates TLS itself, as on a VPS with no proxy in front (PRD §12). Nodes reach it at public_url; the
 # services below are hosted by the nodes enrolled for them (`docker compose exec gate kontra-gate enroll -f
