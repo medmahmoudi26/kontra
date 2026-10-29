@@ -1,6 +1,7 @@
 // Package vps tests the team gate's VPS kit (DM4-14, DM4-31; the M4 plan's gate run C): test/vps/cloud-init.yaml,
-// scripts/team-gate-vps.sh against stubs of doctl, Cloudflare's API and ssh (nothing is ever created), and, with
-// KONTRA_KIT_TESTS=1, compose.yaml's ACME variant brought up on this host.
+// scripts/team-gate-vps.sh against stubs of doctl, Cloudflare's API, ssh, docker and openssl (nothing is ever
+// created), and, with KONTRA_KIT_TESTS=1, compose.yaml's ACME variant brought up on this host and a rehearsal of the
+// script's steps 4 and 5 against it (rehearsal_test.go).
 //
 // Work package: M4 WP-08.
 package vps
@@ -21,7 +22,17 @@ import (
 	"kontra.sh/kontra/test/kit"
 )
 
-const script = "scripts/team-gate-vps.sh"
+const (
+	script = "scripts/team-gate-vps.sh"
+	// The secrets of a stubbed run: the Cloudflare token, and the API key and enrollment token the ssh stub's
+	// kontra-gate enroll prints (in enroll's formats). None of them may ever be on a command line.
+	cfToken   = "cf-test-token-3f9a"
+	stubKey   = "kk_m4run_Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4z"
+	stubToken = "ket_Zy9xWv8uTs7rQp6oNm5lKj4iHg3fEd2c"
+	// The run's DNS record comment and name (the script's).
+	runComment = "M4 VPS gate run, delete after"
+	runName    = "m4-teamgate.kontra.run"
+)
 
 // The droplet's user data is ASCII only (the Windmill fleet's cloud-init trap: one non-ASCII byte and the droplet boots
 // without Docker), starts as cloud-config, and installs Docker and Compose from Ubuntu's packages and nothing else.
@@ -52,9 +63,18 @@ func TestCloudInitIsASCII(t *testing.T) {
 
 func TestScriptLints(t *testing.T) { kit.Lint(t, script) }
 
-// stubs answers as doctl, curl (Cloudflare's API and DNS over HTTPS), docker and ssh would, from the files in dir:
-// droplets ("ID NAME TAGS" per line) and records (one DNS record id per line). STUB_DO_FP is the fingerprint doctl
-// gives key 58735991, STUB_DOCTL_AUTH=fail fails doctl account get, STUB_DOCKER=down fails docker info.
+// stubs answer as doctl, curl (Cloudflare's API, DNS over HTTPS and the gate), ssh (the VPS), docker and openssl
+// would, from the files in dir: droplets ("ID NAME TAGS" per line) and records (one DNS record per line: id, type, name,
+// content, comment, tab-separated). Cloudflare answers only the token in CLOUDFLARE_API_TOKEN and the gate only the key
+// STUB_KEY, wherever curl reads them from. Faults, each from the environment:
+//   - STUB_DO_FP is the fingerprint doctl gives key 58735991; STUB_DOCTL_AUTH=fail fails doctl account get;
+//   - STUB_DOCTL_LIST=fail fails every droplet listing (a 429), =after-create those after the run's droplet exists;
+//     STUB_DOCTL_DELETE=fail fails droplet deletion;
+//   - STUB_CF_LIST=fail answers every record listing success:false, =after-post those after the run's POST;
+//     STUB_CF_DELETE=fail every record deletion; STUB_CF_POST=lost creates the record and loses the answer (curl 28);
+//   - STUB_SSH_SHIP=fail breaks the ssh that ships the archive (step 4); STUB_DOCKER=down fails docker info.
+//
+// docker cp records the modes of what it copies (stat, relative to the copied directory) in dir/cp-modes.
 func stubs(dir string) map[string]string {
 	return map[string]string{
 		"doctl": `d=` + dir + `
@@ -62,32 +82,115 @@ case "$*" in
   "account get"*) [ "${STUB_DOCTL_AUTH:-ok}" = ok ] || { echo "Error: unauthorized" >&2; exit 1; }; echo "me@example.com active" ;;
   "compute ssh-key get 58735991 "*) echo "$STUB_DO_FP" ;;
   "compute size list "*) printf 's-1vcpu-1gb 0.00893\ns-2vcpu-4gb 0.03571\n' ;;
-  "compute droplet list --tag-name kontra-m4-gaterun "*) cat "$d/droplets" 2>/dev/null; true ;;
-  "compute droplet delete -f "*) id=${!#}; grep -v "^$id " "$d/droplets" > "$d/droplets.new"; mv "$d/droplets.new" "$d/droplets" ;;
+  "compute droplet list --tag-name kontra-m4-gaterun "*)
+    if [ "${STUB_DOCTL_LIST:-ok}" = fail ] || { [ "${STUB_DOCTL_LIST:-ok}" = after-create ] && [ -e "$d/created" ]; }; then
+      echo "Error: GET https://api.digitalocean.com/v2/droplets?tag_name=kontra-m4-gaterun: 429 Too many requests" >&2; exit 1
+    fi
+    cat "$d/droplets" ;;
+  "compute droplet create "*)
+    tags=""; prev=""
+    for a in "$@"; do [ "$prev" = --tag-names ] && tags=$a; prev=$a; done
+    echo "201 $4 $tags" >> "$d/droplets"; : > "$d/created"
+    echo "201 203.0.113.7" ;;
+  "compute droplet delete -f "*)
+    [ "${STUB_DOCTL_DELETE:-ok}" = ok ] || { echo "Error: DELETE: 429 Too many requests" >&2; exit 1; }
+    id=${!#}; grep -v "^$id " "$d/droplets" > "$d/droplets.new"; mv "$d/droplets.new" "$d/droplets" ;;
   *) echo "doctl stub: not expected: $*" >&2; exit 9 ;;
 esac`,
 		"curl": `d=` + dir + `
-method=GET; url=""
-while [ $# -gt 0 ]; do case "$1" in -X) method=$2; shift ;; http*) url=$1 ;; esac; shift; done
-records() { jq -Rn '{success: true, result: [inputs | select(length > 0) | {id: .}]}' < "$d/records"; }
+cf=https://api.cloudflare.com/client/v4
+gate=https://` + runName + `
+method="" url="" auth="" hdr="" data=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -X) method=$2; shift ;;
+    -H) case "$2" in @-) auth=$(cat) ;; @*) auth=$(cat "${2#@}") ;; [Aa]uthorization:*) auth=$2 ;; esac; shift ;;
+    -D) hdr=$2; shift ;;
+    -o) exec > "$2"; shift ;;
+    --data) data=$2; shift ;;
+    --max-time | --connect-to | --cacert) shift ;;
+    http*) url=$1 ;;
+  esac
+  shift
+done
+if [ -z "$method" ]; then if [ -n "$data" ]; then method=POST; else method=GET; fi; fi
+denied='{"success":false,"errors":[{"code":10000,"message":"Authentication error"}]}'
+recs() {
+  jq -Rn --arg f "$1" --arg v "$2" '{success: true, result: [inputs | select(length > 0) | split("\t")
+    | {id: .[0], type: .[1], name: .[2], content: .[3], comment: .[4]} | select(.[$f] == $v)]}' < "$d/records"
+}
+listing() { [ "${STUB_CF_LIST:-ok}" = ok ] || { [ "$STUB_CF_LIST" = after-post ] && [ ! -e "$d/posted" ]; }; }
+keyed() { [ "$auth" = "Authorization: Bearer $STUB_KEY" ] || { echo '{"error":"unauthenticated"}'; exit 22; }; }
+case "$url" in "$cf"/*) [ "$auth" = "Authorization: Bearer $CLOUDFLARE_API_TOKEN" ] || { echo "$denied"; exit 0; } ;; esac
 case "$method $url" in
-  "GET https://api.cloudflare.com/client/v4/zones?name=kontra.run") echo '{"success":true,"result":[{"id":"zone1"}]}' ;;
-  "GET https://api.cloudflare.com/client/v4/zones/zone1/dns_records?name=m4-teamgate.kontra.run") records ;;
-  "GET https://api.cloudflare.com/client/v4/zones/zone1/dns_records?comment.exact=M4%20VPS%20gate%20run%2C%20delete%20after") records ;;
-  "DELETE https://api.cloudflare.com/client/v4/zones/zone1/dns_records/"*)
-    id=${url##*/}; grep -vx "$id" "$d/records" > "$d/records.new"; mv "$d/records.new" "$d/records"
+  "GET $cf/zones?name=kontra.run") echo '{"success":true,"result":[{"id":"zone1"}]}' ;;
+  "GET $cf/zones/zone1/dns_records?name="*)
+    listing || { echo "$denied"; exit 0; }
+    n=${url#*\?name=}; recs name "${n%%&*}" ;;
+  "GET $cf/zones/zone1/dns_records?comment.exact=M4%20VPS%20gate%20run%2C%20delete%20after"*)
+    listing || { echo "$denied"; exit 0; }
+    recs comment "` + runComment + `" ;;
+  "POST $cf/zones/zone1/dns_records")
+    printf 'recA\t%s\n' "$(jq -r '[.type, .name, .content, .comment] | @tsv' <<< "$data")" >> "$d/records"; : > "$d/posted"
+    [ "${STUB_CF_POST:-ok}" = ok ] || { echo "curl: (28) Operation timed out after 30001 milliseconds with 0 bytes received" >&2; exit 28; }
+    echo '{"success":true,"result":{"id":"recA"}}' ;;
+  "DELETE $cf/zones/zone1/dns_records/"*)
+    [ "${STUB_CF_DELETE:-ok}" = ok ] || { echo "$denied"; exit 0; }
+    id=${url##*/}; awk -F'\t' -v id="$id" '$1 != id' "$d/records" > "$d/records.new"; mv "$d/records.new" "$d/records"
     echo '{"success":true,"result":{"id":"'"$id"'"}}' ;;
+  "GET https://1.1.1.1/dns-query?name=` + runName + `&type=A") echo '{"Status":0,"Answer":[{"type":1,"data":"203.0.113.7"}]}' ;;
+  "GET $gate/healthz") echo ok ;;
+  "POST $gate/agents/hello") keyed; echo '{"jsonrpc":"2.0","id":1,"result":{"message":{"role":"ROLE_AGENT","parts":[{"text":"Hello World"}]}}}' ;;
+  "POST $gate/mcp")
+    keyed
+    case "$data" in
+      *'"initialize"'*) printf 'HTTP/2 200\r\nmcp-session-id: sess-1\r\n\r\n' > "$hdr"; echo '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
+      *notifications/initialized*) : ;;
+      *'"search"'*) printf 'event: message\ndata: %s\n\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"services":[{"ref":"hello","kind":"a2a","available":true}]}}}' ;;
+      *) echo "curl stub: not expected: MCP $data" >&2; exit 9 ;;
+    esac ;;
+  "DELETE $gate/mcp") keyed ;;
   *) echo "curl stub: not expected: $method $url" >&2; exit 9 ;;
 esac`,
-		"docker": `[ "$1" = info ] && [ "${STUB_DOCKER:-up}" = up ] && exit 0
-[ "$1" = info ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
-echo "docker stub: not expected: $*" >&2; exit 9`,
-		"ssh": `echo "ssh stub: not expected: $*" >&2; exit 9`,
+		"ssh": `while [ $# -gt 0 ]; do case "$1" in -i | -o) shift 2 ;; -*) shift ;; *) break ;; esac; done
+shift
+case "$*" in
+  true) ;;
+  "cloud-init status --wait") echo "status: done" ;;
+  "docker compose version && docker buildx version") echo "Docker Compose version v2.24.6" ;;
+  "test -e /opt/kontra/.env") exit 1 ;;
+  "mkdir -p /opt/kontra && tar -x -C /opt/kontra")
+    cat > /dev/null
+    [ "${STUB_SSH_SHIP:-ok}" = ok ] || { echo "client_loop: send disconnect: Broken pipe" >&2; exit 255; } ;;
+  "NAME=` + runName + ` DIR=/opt/kontra bash -s") cat > /dev/null; echo "configured (stub)" ;;
+  "cd /opt/kontra && timeout 1200 docker compose up -d --build --wait") echo " Container kontra-gate-1  Healthy" ;;
+  "cd /opt/kontra && docker compose exec -T gate kontra-gate enroll -f /etc/kontra/kontra.yaml --api-key m4run") echo "$STUB_KEY" ;;
+  "cd /opt/kontra && docker compose exec -T gate kontra-gate enroll -f /etc/kontra/kontra.yaml hello") echo "$STUB_TOKEN" ;;
+  "cd /opt/kontra && docker compose ps"*) echo "NAME IMAGE STATUS" ;;
+  "docker image ls"*) echo "kontra-gate:m3 sha256:0 0" ;;
+  *) echo "ssh stub: not expected: $*" >&2; exit 9 ;;
+esac`,
+		"docker": `d=` + dir + `
+case "$1" in
+  info) [ "${STUB_DOCKER:-up}" = up ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; } ;;
+  rm | start | ps) ;;
+  create) echo cid ;;
+  image) [ "$2" = inspect ] || [ "$2" = rm ] || exit 9 ;;
+  cp) (cd "$2" && find . -exec stat -c '%a %n' {} +) > "$d/cp-modes" ;;
+  logs) echo "kontra connect: connected to https://` + runName + ` as nk_1 (tenant default, session s1)" ;;
+  container) echo true ;;
+  *) echo "docker stub: not expected: $*" >&2; exit 9 ;;
+esac`,
+		"openssl": `case "$1" in
+  s_client) echo "-----BEGIN CERTIFICATE----- (stub)" ;;
+  x509) cat > /dev/null; printf "issuer=C = US, O = Let's Encrypt, CN = R11\nsubject=CN = ` + runName + `\n" ;;
+  *) echo "openssl stub: not expected: $*" >&2; exit 9 ;;
+esac`,
 	}
 }
 
 // vpsRun is one stubbed run of the script: the sandbox, an SSH key pair whose MD5 fingerprint the doctl stub returns
-// unless fp says otherwise, and the stubs' files.
+// unless fp says otherwise, the stubs' files and the run's record.
 type vpsRun struct {
 	t       *testing.T
 	dir     string
@@ -95,6 +198,7 @@ type vpsRun struct {
 	log     string
 	keyFile string
 	fp      string
+	record  string
 	env     []string
 }
 
@@ -115,15 +219,16 @@ func newRun(t *testing.T, leave ...string) *vpsRun {
 		t.Fatal(err)
 	}
 	fp := strings.TrimPrefix(strings.Fields(string(out))[1], "MD5:")
-	tools := append(append([]string(nil), kit.BaseTools...), "doctl", "curl", "docker", "ssh")
+	tools := append(append([]string(nil), kit.BaseTools...), "doctl", "curl", "docker", "ssh", "stat", "find")
 	tools = slices.DeleteFunc(tools, func(s string) bool { return slices.Contains(leave, s) })
 	st := stubs(dir)
 	for _, l := range leave {
 		delete(st, l)
 	}
 	bin, log := kit.Sandbox(t, tools, st)
-	r := &vpsRun{t: t, dir: dir, bin: bin, log: log, keyFile: key, fp: fp}
-	r.env = []string{"CLOUDFLARE_API_TOKEN=cf-test-token", "KONTRA_VPS_SSH_KEY=" + key, "STUB_DO_FP=" + fp}
+	r := &vpsRun{t: t, dir: dir, bin: bin, log: log, keyFile: key, fp: fp, record: filepath.Join(dir, "record.log")}
+	r.env = []string{"CLOUDFLARE_API_TOKEN=" + cfToken, "KONTRA_VPS_SSH_KEY=" + key, "STUB_DO_FP=" + fp,
+		"STUB_KEY=" + stubKey, "STUB_TOKEN=" + stubToken}
 	return r
 }
 
@@ -134,36 +239,95 @@ func (r *vpsRun) write(name, content string) {
 	}
 }
 
-func (r *vpsRun) run(env []string, args ...string) (string, string, int) {
+func (r *vpsRun) read(name string) string {
 	r.t.Helper()
-	return kit.Script(r.t, script, r.bin, r.log, append(append([]string(nil), r.env...), env...), args...)
+	b, err := os.ReadFile(filepath.Join(r.dir, name))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return string(b)
 }
 
-func (r *vpsRun) calls() []string { return kit.StubCalls(r.t, r.log) }
+// run runs the script with the stubs, its record in the run's directory (never the repository's).
+func (r *vpsRun) run(env []string, args ...string) (string, string, int) {
+	r.t.Helper()
+	return kit.Script(r.t, script, r.bin, r.log, append(append([]string(nil), r.env...), env...), append(args, "--record", r.record)...)
+}
 
-// The script refuses to start without each prerequisite, naming it, before it calls anything but the checks.
+// calls is the stubs' log; it fails the test when a secret of the run was on any command line (every local user reads
+// /proc/<pid>/cmdline).
+func (r *vpsRun) calls() []string {
+	r.t.Helper()
+	calls := kit.StubCalls(r.t, r.log)
+	for _, c := range calls {
+		for _, secret := range []string{cfToken, stubKey, stubToken} {
+			if strings.Contains(c, secret) {
+				r.t.Errorf("a secret is on a command line: %q", c)
+			}
+		}
+	}
+	return calls
+}
+
+// record is one DNS record line of the stubs' records file.
+func record(id, typ, name, content, comment string) string {
+	return strings.Join([]string{id, typ, name, content, comment}, "\t") + "\n"
+}
+
+// index is the position of the first call with prefix (contains, for a curl call's URL), or -1.
+func index(calls []string, sub string) int {
+	return slices.IndexFunc(calls, func(c string) bool { return strings.Contains(c, sub) })
+}
+
+// dnsDeletes are the record ids the calls DELETE, in order.
+func dnsDeletes(calls []string) []string {
+	var ids []string
+	for _, c := range calls {
+		if strings.HasPrefix(c, "curl ") && strings.Contains(c, "-X DELETE") && strings.Contains(c, "/dns_records/") {
+			ids = append(ids, c[strings.LastIndex(c, "/")+1:])
+		}
+	}
+	return ids
+}
+
+// The script refuses to start without each prerequisite, naming it, before it calls anything but the checks; a
+// KONTRA_VPS_NAME that is not m4-teamgate<…> in the zone, and flags that exclude one another, before it calls anything.
 func TestTeamGateRefusesWithoutPrerequisites(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		leave []string
-		env   []string
-		want  string
+		name    string
+		leave   []string
+		env     []string
+		args    []string
+		want    string
+		noCalls bool
 	}{
-		{"no doctl", []string{"doctl"}, nil, "doctl"},
-		{"no docker", []string{"docker"}, nil, "docker"},
-		{"no jq", []string{"jq"}, nil, "jq"},
-		{"no Cloudflare token", nil, []string{"CLOUDFLARE_API_TOKEN="}, "CLOUDFLARE_API_TOKEN"},
-		{"doctl not authenticated", nil, []string{"STUB_DOCTL_AUTH=fail"}, "doctl is not authenticated"},
-		{"no docker daemon", nil, []string{"STUB_DOCKER=down"}, "docker cannot reach its daemon"},
-		{"no SSH key", nil, []string{"KONTRA_VPS_SSH_KEY=/nonexistent/key"}, "/nonexistent/key"},
+		{"no doctl", []string{"doctl"}, nil, nil, "doctl", false},
+		{"no docker", []string{"docker"}, nil, nil, "docker", false},
+		{"no jq", []string{"jq"}, nil, nil, "jq", false},
+		{"no Cloudflare token", nil, []string{"CLOUDFLARE_API_TOKEN="}, nil, "CLOUDFLARE_API_TOKEN", false},
+		{"doctl not authenticated", nil, []string{"STUB_DOCTL_AUTH=fail"}, nil, "doctl is not authenticated", false},
+		{"no docker daemon", nil, []string{"STUB_DOCKER=down"}, nil, "docker cannot reach its daemon", false},
+		{"no SSH key", nil, []string{"KONTRA_VPS_SSH_KEY=/nonexistent/key"}, nil, "/nonexistent/key", false},
+		// The review's case: a mistyped name on the recovery path once deleted staging's records.
+		{"another gate's name", nil, []string{"KONTRA_VPS_NAME=gateway.kontra.run"}, []string{"--teardown-only"},
+			"KONTRA_VPS_NAME gateway.kontra.run", true},
+		{"a name outside the zone", nil, []string{"KONTRA_VPS_NAME=m4-teamgate.example.com"}, nil, "want m4-teamgate<…>.kontra.run", true},
+		{"--host and --dry-run", nil, nil, []string{"--host", "192.0.2.10", "--dry-run"}, "exclude one another", true},
+		{"a rehearsal flag without --host", nil, nil, []string{"--connect-to", "127.0.0.1:1"}, "need --host", true},
+		{"--host without the SSH key", nil, []string{"KONTRA_VPS_SSH_KEY=/nonexistent/key"}, []string{"--host", "192.0.2.10"},
+			"/nonexistent/key", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newRun(t, tc.leave...)
-			stdout, stderr, code := r.run(tc.env)
+			stdout, stderr, code := r.run(tc.env, tc.args...)
 			if code != 2 || !strings.Contains(stderr, tc.want) {
 				t.Errorf("exit %d, stderr %q, want 2 naming %q (stdout %q)", code, stderr, tc.want, stdout)
 			}
-			for _, c := range r.calls() {
+			calls := r.calls()
+			if tc.noCalls && len(calls) > 0 {
+				t.Errorf("a refused start called %q", calls)
+			}
+			for _, c := range calls {
 				if strings.Contains(c, "droplet create") || strings.Contains(c, "droplet delete") || strings.Contains(c, " -X POST") ||
 					strings.Contains(c, " -X DELETE") || strings.HasPrefix(c, "ssh ") {
 					t.Errorf("a refused start called %q", c)
@@ -179,7 +343,8 @@ func TestTeamGateRefusesWithoutPrerequisites(t *testing.T) {
 	})
 }
 
-// --dry-run runs the read-only pre-flight, prints the plan and the teardown it would run, and creates nothing.
+// --dry-run runs the read-only pre-flight, prints the plan and the teardown it would run (DNS before the droplet), and
+// creates nothing.
 func TestTeamGateDryRun(t *testing.T) {
 	r := newRun(t)
 	stdout, stderr, code := r.run(nil, "--dry-run")
@@ -188,8 +353,8 @@ func TestTeamGateDryRun(t *testing.T) {
 	}
 	for _, want := range []string{
 		"teardown, in a trap on EXIT/INT/TERM: docker rm -f kontra-teammate-",
+		`DNS first: DELETE the A record of m4-teamgate.kontra.run by id, then every record commented "M4 VPS gate run, delete after"; once that succeeded,`,
 		"doctl compute droplet delete -f <id of kontra-m4-teamgate-",
-		"DELETE the A record of m4-teamgate.kontra.run by id; ssh-keygen -R <ip>;",
 		"then: no droplet tagged kontra-m4-gaterun, no record for m4-teamgate.kontra.run",
 		"(fra1, s-2vcpu-4gb at $0.03571/h, ubuntu-24-04-x64), https://m4-teamgate.kontra.run",
 		"dry run: pre-flight passed; nothing created",
@@ -198,10 +363,14 @@ func TestTeamGateDryRun(t *testing.T) {
 			t.Errorf("stdout lacks %q:\n%s", want, stdout)
 		}
 	}
+	if strings.Index(stdout, "DELETE the A record") > strings.Index(stdout, "droplet delete -f <id") {
+		t.Errorf("the printed teardown deletes the droplet before the DNS record:\n%s", stdout)
+	}
 	calls := r.calls()
 	for _, want := range []string{"doctl account get", "doctl compute ssh-key get 58735991", "doctl compute size list",
-		"doctl compute droplet list --tag-name kontra-m4-gaterun", "docker info"} {
-		if !slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, want) }) {
+		"doctl compute droplet list --tag-name kontra-m4-gaterun", "docker info", "/dns_records?name=m4-teamgate.kontra.run",
+		"/dns_records?comment.exact="} {
+		if index(calls, want) < 0 {
 			t.Errorf("the pre-flight never ran %q: %q", want, calls)
 		}
 	}
@@ -214,8 +383,9 @@ func TestTeamGateDryRun(t *testing.T) {
 	assertListsOnlyByTag(t, calls)
 }
 
-// The pre-flight refuses a DigitalOcean SSH key that is not this host's, leftovers of another run, and an existing
-// record for the name, before anything is created.
+// The pre-flight refuses a DigitalOcean SSH key that is not this host's, leftovers of another run, a record named the
+// name or with the run's comment, and a listing that fails (a failed listing is never "nothing there"), before anything
+// is created.
 func TestTeamGatePreflightRefusals(t *testing.T) {
 	t.Run("another SSH key", func(t *testing.T) {
 		r := newRun(t)
@@ -232,23 +402,39 @@ func TestTeamGatePreflightRefusals(t *testing.T) {
 			t.Errorf("exit %d, stderr %q", code, stderr)
 		}
 	})
-	t.Run("a record left", func(t *testing.T) {
-		r := newRun(t)
-		r.write("records", "rec9\n")
-		_, stderr, code := r.run(nil, "--dry-run")
-		if code != 2 || !strings.Contains(stderr, "already has a record") {
-			t.Errorf("exit %d, stderr %q", code, stderr)
-		}
-	})
+	for name, rec := range map[string]string{
+		"a record named the name": record("rec9", "A", runName, "203.0.113.9", "made by hand"),
+		"a record of a run":       record("rec8", "A", "m4-teamgate-2.kontra.run", "203.0.113.8", runComment),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRun(t)
+			r.write("records", rec)
+			_, stderr, code := r.run(nil, "--dry-run")
+			if code != 2 || !strings.Contains(stderr, "already has a record") || !strings.Contains(stderr, strings.SplitN(rec, "\t", 2)[0]) {
+				t.Errorf("exit %d, stderr %q", code, stderr)
+			}
+		})
+	}
+	for _, env := range []string{"STUB_DOCTL_LIST=fail", "STUB_CF_LIST=fail"} {
+		t.Run(env, func(t *testing.T) {
+			r := newRun(t)
+			stdout, stderr, code := r.run([]string{env}, "--dry-run")
+			if code == 0 || !strings.Contains(stderr, "could not be listed") || strings.Contains(stdout, "pre-flight passed") {
+				t.Errorf("a listing that failed: exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
+			}
+		})
+	}
 }
 
-// --teardown-only deletes every droplet tagged kontra-m4-gaterun, whether or not its ttl passed, and every DNS record
-// with the run's name or comment; droplets are listed only by the tag, and main-droplet is never deleted.
+// --teardown-only deletes the DNS records of a run (every record with the run's comment, whatever its name) and then
+// every droplet tagged kontra-m4-gaterun, whether or not its ttl passed; droplets are listed only by the tag, and
+// main-droplet is never deleted.
 func TestTeamGateTeardownOnly(t *testing.T) {
 	r := newRun(t)
 	r.write("droplets", "101 kontra-m4-teamgate-1000 kontra-m4-gaterun,ttl-15400\n"+
 		"102 kontra-m4-teamgate-9999999990 kontra-m4-gaterun,ttl-9999999999\n")
-	r.write("records", "rec1\nrec2\n")
+	r.write("records", record("rec1", "A", runName, "203.0.113.1", runComment)+record("rec2", "AAAA", runName, "2001:db8::1", runComment)+
+		record("rec3", "A", "m4-teamgate-2.kontra.run", "203.0.113.3", runComment))
 	stdout, stderr, code := r.run(nil, "--teardown-only")
 	if code != 0 {
 		t.Fatalf("exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
@@ -259,20 +445,18 @@ func TestTeamGateTeardownOnly(t *testing.T) {
 			t.Errorf("never ran %q: %q", want, calls)
 		}
 	}
-	deletes := 0
-	for _, c := range calls {
-		if strings.HasPrefix(c, "curl ") && strings.Contains(c, "-X DELETE") {
-			deletes++
-			if !strings.HasSuffix(c, "/dns_records/rec1") && !strings.HasSuffix(c, "/dns_records/rec2") {
-				t.Errorf("deleted %q", c)
-			}
-		}
+	if got := dnsDeletes(calls); !slices.Equal(got, []string{"rec1", "rec2", "rec3"}) {
+		t.Errorf("DNS deletions %v, want rec1, rec2 and rec3: %q", got, calls)
 	}
-	if deletes != 2 {
-		t.Errorf("%d DNS deletions, want 2: %q", deletes, calls)
+	if last, first := slices.IndexFunc(calls, func(c string) bool { return strings.HasSuffix(c, "/dns_records/rec3") }),
+		index(calls, "droplet delete"); last > first {
+		t.Errorf("a droplet was deleted before the DNS records: %q", calls)
 	}
 	if !strings.Contains(stdout, "kontra-m4-teamgate-1000 (101): its ttl passed") || !strings.Contains(stdout, "nothing of a run is left") {
 		t.Errorf("stdout:\n%s", stdout)
+	}
+	if r.read("droplets") != "" || r.read("records") != "" {
+		t.Errorf("left: droplets %q, records %q", r.read("droplets"), r.read("records"))
 	}
 	assertListsOnlyByTag(t, calls)
 	if strings.Contains(stdout+stderr+strings.Join(calls, "\n"), "main-droplet") {
@@ -287,6 +471,165 @@ func TestTeamGateTeardownOnly(t *testing.T) {
 	if code == 0 || !strings.Contains(stderr, "refusing to delete main-droplet") || slices.Contains(calls, "doctl compute droplet delete -f 999") ||
 		!slices.Contains(calls, "doctl compute droplet delete -f 103") {
 		t.Errorf("with main-droplet tagged: exit %d, stderr %q, calls %q", code, stderr, calls)
+	}
+}
+
+// --teardown-only fails closed (the review's finding): when doctl or Cloudflare cannot list, or Cloudflare cannot
+// delete, it never says "nothing of a run is left" and exits non-zero; and no droplet is deleted while a record of a run
+// may still name its address.
+func TestTeamGateTeardownOnlyFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		env         string
+		want        string
+		dnsDeleted  bool
+		dropletKept bool
+	}{
+		{"STUB_DOCTL_LIST=fail", "could not verify that no droplet", true, true},
+		{"STUB_CF_LIST=fail", "could not list the DNS records", false, true},
+		{"STUB_CF_DELETE=fail", "no droplet is deleted while a DNS record of a run may be left", false, true},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			r := newRun(t)
+			r.write("droplets", "101 kontra-m4-teamgate-1000 kontra-m4-gaterun,ttl-15400\n")
+			r.write("records", record("rec1", "A", runName, "203.0.113.1", runComment))
+			stdout, stderr, code := r.run([]string{tc.env}, "--teardown-only")
+			out := stdout + stderr
+			if code == 0 || strings.Contains(out, "nothing of a run is left") || !strings.Contains(out, tc.want) {
+				t.Errorf("exit %d, want non-zero naming %q and never \"nothing of a run is left\":\n%s", code, tc.want, out)
+			}
+			calls := r.calls()
+			if tc.dropletKept && (index(calls, "droplet delete") >= 0 || r.read("droplets") == "") {
+				t.Errorf("the droplet was deleted: %q", calls)
+			}
+			if gone := r.read("records") == ""; gone != tc.dnsDeleted {
+				t.Errorf("the record deleted %v, want %v: %q", gone, tc.dnsDeleted, calls)
+			}
+		})
+	}
+}
+
+// --teardown-only deletes only the records with the run's comment (DM4-31): a record named the name with another
+// comment is reported and left, the reap fails, and the droplets are kept. The review's case, KONTRA_VPS_NAME naming the
+// staging gate, deletes nothing.
+func TestTeamGateReapsOnlyTheRunsRecords(t *testing.T) {
+	t.Run("another gate's name", func(t *testing.T) {
+		r := newRun(t)
+		staging := record("staging-A", "A", "gateway.kontra.run", "203.0.113.50", "Kontra v4 M4 staging gate") +
+			record("staging-AAAA", "AAAA", "gateway.kontra.run", "2001:db8::50", "Kontra v4 M4 staging gate")
+		r.write("records", staging)
+		_, _, code := r.run([]string{"KONTRA_VPS_NAME=gateway.kontra.run"}, "--teardown-only")
+		if code != 2 || len(dnsDeletes(r.calls())) > 0 || r.read("records") != staging {
+			t.Errorf("exit %d, records %q", code, r.read("records"))
+		}
+	})
+	t.Run("a record with another comment", func(t *testing.T) {
+		r := newRun(t)
+		r.write("droplets", "101 kontra-m4-teamgate-1000 kontra-m4-gaterun,ttl-15400\n")
+		foreign := record("hand1", "A", runName, "198.51.100.4", "made by hand")
+		r.write("records", foreign+record("rec1", "A", runName, "203.0.113.1", runComment))
+		stdout, stderr, code := r.run(nil, "--teardown-only")
+		calls := r.calls()
+		if code == 0 || !strings.Contains(stdout, "refusing to delete A m4-teamgate.kontra.run 198.51.100.4 (hand1)") ||
+			strings.Contains(stdout+stderr, "nothing of a run is left") {
+			t.Errorf("exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
+		}
+		if got := dnsDeletes(calls); !slices.Equal(got, []string{"rec1"}) || r.read("records") != foreign {
+			t.Errorf("DNS deletions %v (want rec1), records left %q", got, r.read("records"))
+		}
+		if index(calls, "droplet delete") >= 0 {
+			t.Errorf("a droplet was deleted while a record named %s is left: %q", runName, calls)
+		}
+	})
+}
+
+// A run's own teardown (the EXIT trap), on a run that fails after its DNS record exists: DNS before the droplet; every
+// record with the run's comment, also one whose id the run never learnt; the droplet kept while a record may be left;
+// and a listing that fails is never "nothing left".
+func TestTeamGateRunTeardown(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		env     []string
+		want    string
+		clean   bool // the run ends with nothing left
+		deleted bool // the droplet is deleted
+	}{
+		{"the run fails at step 4", nil, "torn down; nothing left", true, true},
+		{"the POST's answer is lost", []string{"STUB_CF_POST=lost"}, "torn down; nothing left", true, true},
+		{"Cloudflare cannot delete", []string{"STUB_CF_DELETE=fail"}, "KEPT the droplet kontra-m4-teamgate-", false, false},
+		{"Cloudflare cannot list", []string{"STUB_CF_LIST=after-post"}, "could not verify that no DNS record", false, false},
+		{"doctl cannot list", []string{"STUB_DOCTL_LIST=after-create"}, "could not verify that no droplet", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRun(t)
+			stdout, stderr, code := r.run(append([]string{"STUB_SSH_SHIP=fail"}, tc.env...))
+			out := stdout + stderr
+			if code == 0 || !strings.Contains(out, tc.want) || (!tc.clean && strings.Contains(out, "nothing left")) {
+				t.Errorf("exit %d, want non-zero naming %q:\n%s", code, tc.want, out)
+			}
+			calls := r.calls()
+			if index(calls, "droplet create") < 0 || index(calls, "-X POST") < 0 {
+				t.Fatalf("the run never created its droplet and record: %q", calls)
+			}
+			del := index(calls, "doctl compute droplet delete -f 201")
+			if tc.deleted != (del >= 0) {
+				t.Errorf("the droplet deleted %v, want %v: %q", del >= 0, tc.deleted, calls)
+			}
+			if tc.deleted && (len(dnsDeletes(calls)) == 0 || index(calls, "/dns_records/recA") > del) {
+				t.Errorf("the droplet was deleted before the DNS record recA: %q", calls)
+			}
+			if tc.clean && (r.read("records") != "" || r.read("droplets") != "") {
+				t.Errorf("left: droplets %q, records %q", r.read("droplets"), r.read("records"))
+			}
+			if !tc.deleted && r.read("droplets") == "" {
+				t.Errorf("the droplet is gone: %q", calls)
+			}
+		})
+	}
+}
+
+// --host runs steps 4 and 5 on a host the operator already has, under a hardened umask: it creates and deletes nothing
+// on DigitalOcean or Cloudflare (it needs neither doctl nor the token), the team member's files are readable by the
+// image's user whatever the umask, and neither the gate's key nor the node's token is ever on a command line or in the
+// record (the review's findings on --host, the umask and argv).
+func TestTeamGateHostMode(t *testing.T) {
+	kit.Umask(t, 0o077)
+	r := newRun(t, "doctl")
+	stdout, stderr, code := r.run([]string{"CLOUDFLARE_API_TOKEN="}, "--host", "192.0.2.10", "--connect-to", "127.0.0.1:9")
+	if code != 0 || !strings.Contains(stdout, "team-gate-vps: PASS (root@192.0.2.10, https://m4-teamgate.kontra.run") ||
+		!strings.Contains(stdout, "torn down; the gate on 192.0.2.10 stays up") {
+		t.Fatalf("exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
+	}
+	calls := r.calls()
+	var remote []string
+	for _, c := range calls {
+		if strings.Contains(c, "api.cloudflare.com") || strings.HasPrefix(c, "doctl ") {
+			t.Errorf("--host called %q", c)
+		}
+		if strings.HasPrefix(c, "ssh ") {
+			if !strings.Contains(c, " root@192.0.2.10 ") {
+				t.Errorf("ssh to another host: %q", c)
+			}
+			remote = append(remote, c[strings.Index(c, " root@192.0.2.10 ")+len(" root@192.0.2.10 "):])
+		}
+	}
+	for i, want := range []string{"test -e /opt/kontra/.env", "mkdir -p /opt/kontra && tar -x -C /opt/kontra",
+		"NAME=m4-teamgate.kontra.run DIR=/opt/kontra bash -s", "cd /opt/kontra && timeout 1200 docker compose up -d --build --wait"} {
+		if i >= len(remote) || remote[i] != want {
+			t.Errorf("remote command %d is not %q: %q", i+1, want, remote)
+		}
+	}
+	modes := r.read("cp-modes")
+	for _, want := range []string{"755 .\n", "644 ./run.sh\n", "644 ./token\n"} {
+		if !strings.Contains(modes, want) {
+			t.Errorf("under umask 077 the team member's files are copied as\n%swant %q", modes, want)
+		}
+	}
+	rec, err := os.ReadFile(r.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rec), stubKey) || strings.Contains(string(rec), stubToken) || !strings.Contains(string(rec), "PASS") {
+		t.Errorf("the record:\n%s", rec)
 	}
 }
 

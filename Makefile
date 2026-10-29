@@ -62,10 +62,11 @@ tck:
 
 # The gate-run kits (M4 WP-08, DM4-31): test/vps and test/demo with Docker (KONTRA_KIT_TESTS=1). The gate image is built
 # once from the working tree with the docker driver's builder (kontra-gate:kit-<pid>) for both packages; then compose.yaml's
-# ACME variant comes up and writes its cache, the clean laptop's image is checked, and scripts/demo-clean-laptop.sh is
-# rehearsed against a local multi-tenant gate answering for gateway.kontra.run on a docker network (about 30 minutes;
-# needs the internet for Go modules and npm). Every image, container and volume is removed. One run at a time, never
-# beside the e2e tests or a pentest; nothing touches staging, DigitalOcean or Cloudflare (the runs are WP-09's).
+# ACME variant comes up and writes its cache, scripts/team-gate-vps.sh --host runs its steps 4 and 5 against a stand-in
+# VPS on this host, the clean laptop's image is checked, and scripts/demo-clean-laptop.sh is rehearsed against a local
+# multi-tenant gate answering for gateway.kontra.run on a docker network (about 40 minutes; needs the internet for Go
+# modules and npm). Every image, container and volume is removed. One run at a time, never beside the e2e tests or a
+# pentest; nothing touches staging, DigitalOcean or Cloudflare (the runs are WP-09's).
 test-kits:
 	@set -u; img="kontra-gate:kit-$$$$"; \
 	clean() { docker image rm "$$img" >/dev/null 2>&1; true; }; trap clean EXIT INT TERM; \

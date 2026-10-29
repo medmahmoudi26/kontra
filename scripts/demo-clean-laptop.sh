@@ -185,7 +185,10 @@ if [ "$build_only" = 0 ]; then
 fi
 
 mkdir -p "$tmp/ctx" "$tmp/payload"
-git archive --format=tar HEAD | tar -x -C "$tmp/ctx"
+# The archive's modes, not this host's umask: -p keeps them for a user who is not root too (root's tar always does),
+# so /src is the laptop's to read.
+git archive --format=tar HEAD | tar -x -p -C "$tmp/ctx"
+chmod 0755 "$tmp/ctx"
 echo "building $image (target $target) from git archive $sha"
 BUILDX_BUILDER=default docker build -q --target "$target" -t "$image" -f "$tmp/ctx/test/demo/Dockerfile" "$tmp/ctx"
 if [ "$build_only" = 1 ]; then
@@ -202,6 +205,10 @@ if [ -n "$ca_file" ]; then
   cp "$ca_file" "$tmp/payload/extra-ca.pem"
   env_args+=(-e KONTRA_DEMO_EXTRA_CA=/opt/kontra-demo/extra-ca.pem)
 fi
+# docker cp keeps these modes (root becomes the owner) and the image runs as laptop (uid 1000): the payload must be
+# world-readable whatever this host's umask, or the laptop cannot read its runner.
+chmod 0755 "$tmp/payload"
+chmod 0644 "$tmp/payload"/*
 docker create --name "$name" --init "${net_args[@]}" "${env_args[@]}" "$image" bash /opt/kontra-demo/laptop.sh > /dev/null
 docker cp "$tmp/payload/." "$name:/opt/kontra-demo" > /dev/null
 docker start "$name" > /dev/null
@@ -265,6 +272,7 @@ fi
 
 echo "demo-clean-laptop: host checks passed; stopping the laptop"
 : > "$tmp/stop"
+chmod 0644 "$tmp/stop"
 docker cp "$tmp/stop" "$name:/opt/kontra-demo/stop" > /dev/null
 if ! timeout 60 docker wait "$name" > /dev/null; then
   echo "demo-clean-laptop: the laptop did not stop within 60 s of its stop file; docker stop"

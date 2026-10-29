@@ -49,9 +49,10 @@ their fixes.
 
 M4's two gate runs are kits in this repository, run by hand (DM4-15, DM4-31): `scripts/demo-clean-laptop.sh` runs the
 README's demo block, as written, in a fresh container against the staging gate, and `scripts/team-gate-vps.sh` brings
-the ACME variant up on a throwaway DigitalOcean droplet, hires through it from another machine and destroys it. Each
-prints its teardown before it starts; `test/demo` and `test/vps` test both (`make test-kits` with Docker), and the runs
-are recorded in `gate-runs-m4.md` beside this file.
+the ACME variant up on a throwaway DigitalOcean droplet, hires through it from another machine and destroys it (DNS
+before the droplet; a listing that fails is never "nothing left"). Each prints its teardown before it starts; `test/demo`
+and `test/vps` test both (`make test-kits` with Docker rehearses each against a local gate), and the runs are recorded
+in `gate-runs-m4.md` beside this file.
 
 ## Hiring from another agent (decided 25 Oct)
 

@@ -286,6 +286,43 @@ func TestDemoDryRun(t *testing.T) {
 	}
 }
 
+// The laptop's payload (laptop.sh, the commands, the stop file) is readable by the image's user whatever this host's
+// umask (the review's finding): docker cp keeps the modes it finds and makes root the owner, and the laptop runs as
+// uid 1000. A stub docker records the modes of what the script copies, under umask 077; its laptop fails at once.
+func TestDemoPayloadModes(t *testing.T) {
+	kit.Umask(t, 0o077)
+	dir := t.TempDir()
+	docker := `d=` + dir + `
+case "$*" in
+  info*) ;;
+  "container inspect -f"*) echo false ;;
+  "container inspect "*) exit 1 ;;
+  build* | start* | rm* | "image rm"*) ;;
+  create*) echo cid ;;
+  cp*) (cd "$2" && find . -exec stat -c '%a %n' {} +) >> "$d/cp-modes" ;;
+  logs*) echo "kontra-demo: FAIL the stub runs nothing" ;;
+  *) echo "docker stub: not expected: $*" >&2; exit 9 ;;
+esac`
+	bin, log := kit.Sandbox(t, append(append([]string(nil), kit.BaseTools...), "curl", "stat", "find"), map[string]string{"docker": docker})
+	transcript := filepath.Join(dir, "transcript.log")
+	stdout, stderr, code := kit.Script(t, script, bin, log, nil, "--transcript", transcript)
+	if code != 1 || !strings.Contains(stdout, "kontra-demo: FAIL the stub runs nothing") {
+		t.Fatalf("exit %d, want 1 at the stub laptop's FAIL\nstdout %s\nstderr %s", code, stdout, stderr)
+	}
+	if calls := kit.StubCalls(t, log); !slices.ContainsFunc(calls, func(c string) bool { return strings.HasPrefix(c, "docker cp ") }) {
+		t.Fatalf("the script never copied the payload: %q", calls)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "cp-modes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"755 .\n", "644 ./commands\n", "644 ./laptop.sh\n"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("under umask 077 the payload is copied as\n%swant %q", b, want)
+		}
+	}
+}
+
 // The laptop image (the M4 plan's WP-08 acceptance): it builds from HEAD, and before the README's install step it
 // holds no kontra and no a2a binary, an empty home, Go 1.26.10 with the default GOPATH off PATH, Node 22.23.4; the
 // source target has the archive at /src (read-only for the laptop), the published one none.
@@ -400,6 +437,7 @@ tunnel: { anonymous: true }
 	}
 	transcript := filepath.Join(t.TempDir(), "transcript.log")
 	root := kit.Root(t)
+	kit.Umask(t, 0o077) // a hardened host's: the laptop must still read its payload
 	out, err := kit.Run(ctx, root, nil, filepath.Join(root, script), "--network", s.Network(), "--ca-file", caFile,
 		"--resolve", ip, "--transcript", transcript)
 	t.Logf("the run:\n%s", kit.Tail(out, 80))

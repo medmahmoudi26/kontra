@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -489,6 +490,14 @@ func Script(t *testing.T, script, bin, stubLog string, env []string, args ...str
 		t.Fatalf("%s: %v", script, err)
 	}
 	return o.String(), e.String(), code
+}
+
+// Umask sets this process's umask (which the scripts it runs inherit) to mask until the test ends. The kits must not
+// depend on it: a hardened host runs them under 027 or 077.
+func Umask(t *testing.T, mask int) {
+	t.Helper()
+	old := syscall.Umask(mask)
+	t.Cleanup(func() { syscall.Umask(old) })
 }
 
 // StubCalls is the stub log's lines.

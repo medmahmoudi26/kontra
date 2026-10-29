@@ -3180,3 +3180,29 @@ attempt, the public card and `SendMessage` from the host, the stop file, one ano
 Checked red: the old healthcheck without `-f` (the gate never healthy, 4 minutes); a fresh volume on `kontra-gate:m3`
 (root's, 65532 cannot write); README blocks with a short slug, `-a` without the card path and a `:7778` console; the
 first rehearsal failing at its `docker stop` (exit 137, the runc refusal above).
+
+**Review fixes** (WP-08's review, 29 Oct). The VPS script fails closed. The droplet and record listings fail loudly
+when doctl or Cloudflare does not answer (a 429, an expired token). Every check treats that as "could not verify",
+never as "nothing left", and the pre-flight refuses to start on it. DNS goes before the droplet, in the trap and in
+`--teardown-only`: first the run's record by id, then every record with the run's comment, including one whose POST
+answer was lost. A droplet is deleted only once that succeeded, so the name never points at an address DigitalOcean may
+give to someone else, who could then serve it and get a certificate for it. The price is a droplet that keeps billing
+until `--teardown-only` succeeds; the run says so ("KEPT"). The reap deletes only records with the run's comment. A
+record named the name with another comment is reported and left, and the reap fails. `KONTRA_VPS_NAME` must be
+`m4-teamgate<…>` in the zone (the review deleted staging's records with a mistyped one). No secret is on a command line:
+curl reads the Cloudflare token on its stdin (`-H @-`) and the gate's key from a 0600 file in the run's 0700 directory,
+and `a2a send` reads `A2ACLI_AUTH`. The payloads both kits `docker cp` for the image's non-root user get explicit modes
+(directory 0755, files 0644). The build context keeps the archive's modes (`tar -p`), and the remote configure step sets
+`umask 022`. So a hardened umask (027, 077) on this host or on the VPS breaks neither kit. Steps 4 and 5 also run on a
+host one already has (`--host ADDR`: nothing created or deleted on DigitalOcean or Cloudflare, the gate stays up, a
+configured host refused), and `make test-kits` rehearses them as written (`TestTeamGateRehearsal`). The stand-in VPS is
+this host: an ssh that runs the remote commands here with `/opt/kontra` as the stack's directory; an `edge` forwarder
+that answers for the name's port 443 on the project's network, as the published port does on the VPS; the name's
+certificate in the ACME cache from the run's CA; and the rehearsal flags `--network`, `--ca-file` and `--connect-to`.
+Only steps 1 to 3 (covered by stubs), the Let's Encrypt issuance and issuer, and the port probe remain the real VPS's.
+Measured (29 Oct, this host, beside other sessions' runs): `make test-kits` exit 0. `TestTeamGateRehearsal` took 274 s:
+compose up 18 s with the configured files, then the team member's node connected about 3 minutes later (it builds kontra
+from `/src` and a2a-cli), then SendMessage answered Hello World and `search` listed `hello`, all under umask 077.
+`TestDemoRehearsal` took 346 s, also under umask 077. Checked red against the scripts as they were: the fail-open reap
+and pre-flight (exit 0, "nothing of a run is left"), the droplet deleted before its record, the staging records deleted
+with `KONTRA_VPS_NAME=gateway.kontra.run`, the token in curl's argv, and the payload copied 0700/0600 under umask 077.
