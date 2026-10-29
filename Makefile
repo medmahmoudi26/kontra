@@ -1,5 +1,5 @@
 # `make check` is what CI runs and what runs before every PR.
-.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e tck pentest-image pentest
+.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e tck test-kits pentest-image pentest
 
 # The system Go may be older than the module's toolchain (go 1.26, a2a-go v2.7.0 needs it); pin the one
 # the module names so every go command, and gofmt, come from the same toolchain.
@@ -59,6 +59,18 @@ test-e2e:
 VARIANT ?= direct
 tck:
 	GO="$(GO)" scripts/tck.sh $(VARIANT)
+
+# The gate-run kits (M4 WP-08, DM4-31): test/vps and test/demo with Docker (KONTRA_KIT_TESTS=1). The gate image is built
+# once from the working tree with the docker driver's builder (kontra-gate:kit-<pid>) for both packages; then compose.yaml's
+# ACME variant comes up and writes its cache, the clean laptop's image is checked, and scripts/demo-clean-laptop.sh is
+# rehearsed against a local multi-tenant gate answering for gateway.kontra.run on a docker network (about 30 minutes;
+# needs the internet for Go modules and npm). Every image, container and volume is removed. One run at a time, never
+# beside the e2e tests or a pentest; nothing touches staging, DigitalOcean or Cloudflare (the runs are WP-09's).
+test-kits:
+	@set -u; img="kontra-gate:kit-$$$$"; \
+	clean() { docker image rm "$$img" >/dev/null 2>&1; true; }; trap clean EXIT INT TERM; \
+	BUILDX_BUILDER=default docker build -q --build-arg VERSION=kit -t "$$img" . && \
+	KONTRA_KIT_TESTS=1 KONTRA_KIT_GATE_IMAGE="$$img" $(GO) test -p 1 -count=1 -timeout 120m ./test/vps ./test/demo -v $(ARGS)
 
 # The pentest (M3 WP-10, D168, D186): PRD §12's list and M3's own surface against the compose team gate, built from
 # this repository under the compose project m3pentest. pentest-image builds kontra-gate:m3 once, with the docker

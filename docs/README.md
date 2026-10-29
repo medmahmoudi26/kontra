@@ -9,15 +9,17 @@ the two architecture notes correct it after the prototypes of 21–24 October 20
 | [`architecture/01-tunnel-and-protocols.html`](architecture/01-tunnel-and-protocols.html) | 24 Oct | **One node type**: no buyer sidecar and no seller sidecar, one `kontra connect` that hosts and hires. **Membership is which gate you dial.** One identity key per node, enrolled per gate, plus per-job keys. **MCP servers tunnel next to A2A agents**: `/mcp/{name}`, session affinity for plain calls, the same `TaskLifecycle` for task-augmented calls (MCP Tasks, 2025-11-25). Per-tool allow lists. No Kontra wire protocol; standard bindings only. `services:` replaces `agents:`. |
 | [`architecture/02-deployment-topology.html`](architecture/02-deployment-topology.html) | 24 Oct | **Only the CLI runs on a user's machine.** Gates are clusters: `gateway.kontra.sh` (Cloud) or a team's own (Helm or a three-container compose). `kontra dev` is deleted; anonymous ephemeral sessions on the public gate are how people try it. One Go module, two binaries: `kontra` and `kontra-gate`. |
 
-## Specifications (M0, 25 Oct)
+## Specifications (M0, 25 Oct; amended by each milestone)
 
 The specifications in [`../spec/`](../spec/) are written from the three documents above and are later
 than all of them: [`tunnel.md`](../spec/tunnel.md), [`relay.md`](../spec/relay.md),
 [`ext-escrow.md`](../spec/ext-escrow.md), [`ext-sealed.md`](../spec/ext-sealed.md),
-[`ext-input-schema.md`](../spec/ext-input-schema.md), and the schema
-[`../migrations/0001_init.sql`](../migrations/0001_init.sql). Where a spec differs from a document, the
+[`ext-input-schema.md`](../spec/ext-input-schema.md), and the schema, one file per milestone
+([`0001_init.sql`](../migrations/0001_init.sql), [`0002_m3.sql`](../migrations/0002_m3.sql),
+[`0003_m4.sql`](../migrations/0003_m4.sql)). Where a spec differs from a document, the
 spec wins once the owner has signed it, and the difference is a numbered entry in
-[`decisions.md`](decisions.md) with its reason and evidence.
+[`decisions.md`](decisions.md) with its reason and evidence. Each milestone's decisions are under its own heading
+there (M4's are labelled DM4-*n* until M3's review has merged, then renumbered into the D sequence).
 
 ## Section map: what the notes change in the PRD
 
@@ -32,16 +34,24 @@ spec wins once the owner has signed it, and the difference is a numbered entry i
 | §11 CLI | `kontra tunnel` + `kontra proxy` → `kontra connect`; `--console` on it | Two tables: `kontra` (connect, console, login, seal, publish) and `kontra-gate` (serve, enroll, migrate); `kontra dev` deleted |
 | §12 Security | Tests `mcp_session_cross_node`, `mcp_tool_denied`, `mcp_task_resume` | Anonymous-session abuse controls, test `anon_limits` |
 | §13 OSS vs Cloud | MCP hosting in both; listings gain `kind`; escrow only on task-shaped MCP calls | Cloud gains anonymous and free tiers; OSS gains Helm/compose team gate |
-| §14 Milestones | — | M4 → anonymous sessions + team-gate compose |
-| §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" |
+| §14 Milestones | — | M4 → anonymous sessions + team-gate compose (built: DM4-1; the compose came with M3, D168) |
+| §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" (the demo runs against the staging gate `gateway.kontra.run` until M5, with go install and a2a-cli's real syntax: DM4-13, DM4-31) |
 
-## The compose team gate and the M3 pentest
+## The compose team gate, the M3 pentest and the M4 gate runs
 
 A team gate on one host is [`../compose.yaml`](../compose.yaml) (D43, D168): the gate built from the repository's
 `Dockerfile`, terminating TLS itself, `temporalio/server` 1.32.1 with its two `admin-tools` jobs, and Postgres 16, with
 no Temporal or Postgres port published. [`../deploy/compose/kontra.yaml`](../deploy/compose/kontra.yaml) is its
-configuration and says what to edit. PRD §12's pentest list and M3's own surface were run against it on 27 Oct
-(`make pentest`, D186): [`pentest-m3.md`](pentest-m3.md) records every probe, the findings and their fixes.
+configuration with a provided certificate and says what to edit; [`../deploy/compose/kontra.vps.yaml`](../deploy/compose/kontra.vps.yaml)
+is the same gate with built-in ACME, for a fresh VPS (DM4-14, DM4-31). PRD §12's pentest list and M3's own surface were
+run against it on 27 Oct (`make pentest`, D186): [`pentest-m3.md`](pentest-m3.md) records every probe, the findings and
+their fixes.
+
+M4's two gate runs are kits in this repository, run by hand (DM4-15, DM4-31): `scripts/demo-clean-laptop.sh` runs the
+README's demo block, as written, in a fresh container against the staging gate, and `scripts/team-gate-vps.sh` brings
+the ACME variant up on a throwaway DigitalOcean droplet, hires through it from another machine and destroys it. Each
+prints its teardown before it starts; `test/demo` and `test/vps` test both (`make test-kits` with Docker), and the runs
+are recorded in `gate-runs-m4.md` beside this file.
 
 ## Hiring from another agent (decided 25 Oct)
 
@@ -57,7 +67,8 @@ agents get the same thread URL in `input-required` metadata (`kontra.approve.url
 
 PRD deltas: §7 gains the `quoted` state before `submitted`; §9 names `kontra.approve.url`; §11's
 gate table gains the `/mcp` endpoint; §12 adds that an MCP or API-key session never approves a
-quote. Full spec: kontra-cloud#59.
+quote. Full spec: kontra-cloud#59. Built in M4 as [`relay.md`](../spec/relay.md) §12 in both MCP eras (DM4-2 to DM4-7,
+DM4-21, DM4-22, DM4-26 to DM4-28); the page on which a person accepts a quote is Cloud's, M5.
 
 ## Pricing (decided 25 Oct, in the Cloud repository's console issue; recorded here for the extension specs)
 
