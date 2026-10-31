@@ -52,8 +52,10 @@ README's demo block, as written, in a fresh container against the staging gate, 
 the ACME variant up on a throwaway DigitalOcean droplet, hires through it from another machine and destroys it (DNS
 before the droplet; a listing that fails is never "nothing left"). Each prints its teardown before it starts; `test/demo`
 and `test/vps` test both (`make test-kits` with Docker rehearses each against a local gate). The runs themselves are M4's
-WP-09, not done yet: the staging gate is not deployed, and `gate-runs-m4.md` beside this file will record them once
-they have run (D306).
+WP-09, recorded in [`gate-runs-m4.md`](gate-runs-m4.md) (31 Oct, at `3b890f3`): the staging gate `gateway.kontra.run`
+is deployed, and the clean laptop, the TCK and `anon_limits` passed; the VPS run failed on a defect of `compose.yaml`
+(two services build one image tag) and is to be repeated with its fix, and the published laptop run follows the merge
+(D306).
 
 ## Hiring from another agent (decided 25 Oct)
 

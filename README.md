@@ -33,11 +33,12 @@ and since M4:
 - comes up on a fresh VPS from `compose.yaml` with built-in ACME ([below](#a-team-gate-on-your-own-vps)).
 
 The demo below is written for the staging gate, `gateway.kontra.run`: the production gate, `gateway.kontra.sh`, opens
-no anonymous sessions until Cloud's M5 (D268 and D280 in [`docs/decisions.md`](docs/decisions.md)). **The staging gate
-is not deployed yet**: M4's gate runs (WP-09) deploy it and run this block on a clean laptop, and until then
-`gateway.kontra.run` does not resolve (D306). [A team gate from source](#a-team-gate-from-source) runs the same node,
-gate and hire on one machine today, with an enrolled node instead of an anonymous session. Every built
-seller and server is listed in [`examples/`](examples/README.md); stock agents and MCP servers run unmodified.
+no anonymous sessions until Cloud's M5 (D268 and D280 in [`docs/decisions.md`](docs/decisions.md)). The staging gate
+has been up since 31 Oct: M4's gate runs deployed it and ran this block on a clean laptop against it
+([`docs/gate-runs-m4.md`](docs/gate-runs-m4.md)). It is a staging environment, redeployed as M4 lands.
+[A team gate from source](#a-team-gate-from-source) runs the same node, gate and hire on one machine, with an enrolled
+node instead of an anonymous session. Every built seller and server is listed in [`examples/`](examples/README.md);
+stock agents and MCP servers run unmodified.
 
 `docs/` is the design; `spec/` is the protocol specification written from it; code lands against both. Read in
 this order:

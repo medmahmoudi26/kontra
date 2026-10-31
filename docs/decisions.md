@@ -3763,7 +3763,8 @@ an in-repository Admission server and authorization server, and anonymous limits
 gate names are not tests in CI: the clean-laptop demo against the staging gate (`scripts/demo-clean-laptop.sh`, a
 container image built from `golang` with nothing else) and the team gate on a clean VPS (`scripts/team-gate-vps.sh`);
 both are to be recorded in `docs/gate-runs-m4.md` with what was run, what was seen and when everything was torn down
-(not yet written: WP-09 has not run them, D306).
+(written by WP-09 on 31 Oct, at `3b890f3`: [`gate-runs-m4.md`](gate-runs-m4.md); the VPS run failed there on a
+defect of `compose.yaml` and is to be repeated, D306).
 
 ### D283. PRD §14's other M4 examples stay skeletons — **decided under the owner's standing instruction, 28 Oct**
 
@@ -4679,7 +4680,12 @@ naming the gate's authorization server: refused `invalid_target`, nothing stored
   WP-09 has deployed staging from this head, run `make test-kits`, the clean laptop in source mode and the VPS run
   (dry run, then a real droplet with Let's Encrypt), committed `gate-runs-m4.md`, and, after the merge, run
   `demo-clean-laptop.sh --published --expect <merge commit>`.** None of that is this review's to do: it touches
-  staging, DigitalOcean and Cloudflare, which the orchestrator runs (O2).
+  staging, DigitalOcean and Cloudflare, which the orchestrator runs (O2). WP-09 ran them on 31 Oct at `3b890f3`
+  and [`gate-runs-m4.md`](gate-runs-m4.md) records them: staging deployed, `make test-kits`, the clean laptop in
+  source mode, the TCK and `anon_limits` passed; the VPS run failed on a defect of `compose.yaml` (`gate-migrate` and
+  `gate` both build `kontra-gate:m4`, which races on a fresh Ubuntu 24.04's containerd image store) and is to be
+  repeated with its fix, and the published laptop run, staging's redeploy from the merge commit and the anonymous
+  tenant's purge are still to do.
 - **Smaller corrections.** The demo's prerequisite is Node 22.19 or later (the pinned inspector and its undici need
   it); compose has three one-shot jobs; M4's decisions run from D268 under their headings. `demo-clean-laptop.sh`
   creates the laptop's log before its follower starts: under load the loop read it first and failed
