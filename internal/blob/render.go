@@ -98,6 +98,14 @@ func WithKeepRefs(ctx context.Context) context.Context {
 	return context.WithValue(ctx, keepKey{}, true)
 }
 
+// ForCaller undoes WithKeepRefs: what is rendered on the returned context is a caller's, presigned GETs. The gate's
+// own /mcp renders a hire task's parts so for every reader, a request that arrived on a hiring stream included: its
+// answer is an MCP result, which a hiring node relays as it is (it inlines the parts of A2A answers only), so its
+// client is a caller and the node fetches nothing from it (spec/relay.md §10.4, §12.2; D56 holds; D303).
+func ForCaller(ctx context.Context) context.Context {
+	return context.WithValue(ctx, keepKey{}, false)
+}
+
 // KeepRefs reports whether ctx is marked by WithKeepRefs.
 func KeepRefs(ctx context.Context) bool { v, _ := ctx.Value(keepKey{}).(bool); return v }
 

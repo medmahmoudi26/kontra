@@ -123,8 +123,8 @@ type Deps struct {
 	// Tasks serves gate-owned MCP tasks (§11.5–§11.8); nil, a durable service advertises no tasks (as tasks: off
 	// does) and answers a task-augmented call and tasks/* -32601.
 	Tasks *Tasks
-	// Calls bounds the tools/call requests relayed at once to an anonymous tenant's services (spec/tunnel.md §6.2,
-	// D287: calls, gate-wide; *anon.Caps); nil bounds nothing.
+	// Calls bounds the requests and streams relayed at once to an anonymous tenant's services (spec/tunnel.md §6.2,
+	// D287, D304: calls, gate-wide; *anon.Caps); nil bounds nothing.
 	Calls CallCaps
 	// ToolsChanged, when set, tells the other replicas that a service's tools changed (an upstream's
 	// notifications/tools/list_changed this replica relayed; toolsnotify.go). Tools is invalidated here first.
@@ -132,29 +132,42 @@ type Deps struct {
 	now          func() time.Time
 }
 
-// CallCaps takes one of an anonymous tenant's slots for a relayed tools/call (*anon.Caps.Call): an error wrapping
-// anon.ErrRateLimited when its calls are in flight; release frees the slot once the answer is relayed. A service of a
-// tenant that is not anonymous takes none.
+// CallCaps takes one of an anonymous tenant's slots for a relayed request or stream (*anon.Caps.Call): an error
+// wrapping anon.ErrRateLimited when its calls are in flight; release frees the slot once the answer is relayed or the
+// stream ends. A service of a tenant that is not anonymous takes none.
 type CallCaps interface {
 	Call(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (release func(), err error)
 }
 
 // takeCall takes the call's slot of an anonymous tenant's calls (spec/tunnel.md §6.2): over it the call is 429 with
 // -32600 "rate limited" and Retry-After, before anything is forwarded or metered. Every tools/call the relay forwards
-// counts, a passthrough task-augmented one too (it holds the same relay while its answer comes back). ok is false when
-// the answer was written.
+// counts, a passthrough task-augmented one too (it holds the same relay while its answer comes back), and so does every
+// other request and stream it forwards (takeRelay). ok is false when the answer was written.
 func (h *Handler) takeCall(rq *request) (release func(), ok bool) {
 	if h.deps.Calls == nil {
 		return func() {}, true
 	}
 	release, err := h.deps.Calls.Call(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Tenant)
 	if err != nil {
-		if !anonRefused(rq.w, rq.msg.ID, err) {
+		if !anonRefused(rq.w, rq.id(), err) {
 			h.internal(rq, "take an anonymous call slot", err)
 		}
 		return nil, false
 	}
 	return release, true
+}
+
+// takeRelay is takeCall for a client request or stream the relay forwards to the service other than a tools/call
+// (spec/tunnel.md §6.2, D304): an initialize, resources/read, prompts/get, completion/complete, any method the gate
+// does not know, server/discover, and a GET or subscriptions/listen stream for as long as it is open, so that a
+// --public MCP service of an anonymous tenant is no unbounded relay. A notification and a client response take none
+// (they hold no relay open), nor does what the gate answers itself (tools/list from its cache, durable tasks/*, a
+// gate-written stream).
+func (h *Handler) takeRelay(rq *request) (release func(), ok bool) {
+	if m := rq.msg; m != nil && (m.Method == "" || len(m.ID) == 0) {
+		return func() {}, true
+	}
+	return h.takeCall(rq)
 }
 
 // anonRefused writes the answer to an anonymous tenant's limit (spec/tunnel.md §6.2, D287) and reports whether err

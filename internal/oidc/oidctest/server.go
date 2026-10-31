@@ -637,7 +637,11 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	} else {
 		tok, err = s.Sign(Token{Subject: g.subject, Audience: []string{g.resource}})
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrInvalidTarget):
+		refuse("invalid_target", "this authorization server issues no key for that resource")
+		return
+	case err != nil:
 		refuse("server_error", "could not issue the access token")
 		return
 	}
@@ -689,18 +693,36 @@ func (s *Server) Follow(ctx context.Context, authorizeURL string, tamper ...func
 	return cresp.StatusCode, nil
 }
 
-// DBMinter mints the access token as a kk_ API key of the account tenant on a gate's database, with the scopes Cloud's
-// authorization server gives a kontra login key (hire and enroll:*, spec/tunnel.md §6.3).
-func DBMinter(pool *pgxpool.Pool, tenantID uuid.UUID) func(ctx context.Context, subject, resource string) (string, error) {
+// ErrInvalidTarget is a MintKey's refusal of the authorization's resource: the token endpoint answers invalid_target
+// (RFC 8707 §2) and issues nothing.
+var ErrInvalidTarget = errors.New("oidctest: no key is issued for that resource")
+
+// ForResource mints with mint only when the authorization's resource is gate, the origin of the one gate whose API
+// keys the server issues, and refuses any other with ErrInvalidTarget (spec/tunnel.md §6.3 step 4, D305): an API key
+// has no audience, so a gate whose RFC 9728 document names this server would otherwise receive a key for the person's
+// account at another gate.
+func ForResource(gate string, mint func(ctx context.Context, subject, resource string) (string, error)) func(ctx context.Context, subject, resource string) (string, error) {
+	return func(ctx context.Context, subject, resource string) (string, error) {
+		if resource != gate {
+			return "", fmt.Errorf("%w: %q, not %q", ErrInvalidTarget, resource, gate)
+		}
+		return mint(ctx, subject, resource)
+	}
+}
+
+// DBMinter mints the access token as a kk_ API key of the account tenant on the database of the gate at origin gate,
+// with the scopes Cloud's authorization server gives a kontra login key (hire and enroll:*, spec/tunnel.md §6.3), and
+// only for that gate's origin as the resource (ForResource).
+func DBMinter(pool *pgxpool.Pool, tenantID uuid.UUID, gate string) func(ctx context.Context, subject, resource string) (string, error) {
 	keys := auth.NewAPIKeys(pool, nil)
-	return func(ctx context.Context, subject, _ string) (string, error) {
+	return ForResource(gate, func(ctx context.Context, subject, _ string) (string, error) {
 		m, err := keys.Mint(ctx, auth.MintRequest{TenantID: tenantID, Name: "kontra login " + subject, Prefix: "login",
 			Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}, Actor: "oidctest"})
 		if err != nil {
 			return "", err
 		}
 		return m.Secret, nil
-	}
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

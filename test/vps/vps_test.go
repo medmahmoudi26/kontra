@@ -9,6 +9,7 @@ package vps
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,10 +33,13 @@ const (
 	// The run's DNS record comment and name (the script's).
 	runComment = "M4 VPS gate run, delete after"
 	runName    = "m4-teamgate.kontra.run"
+	// The run's DigitalOcean SSH key id and a droplet KONTRA_VPS_PROTECTED names: neutral values (D306).
+	doKey            = "12345678"
+	protectedDroplet = "protected-droplet"
 )
 
-// The droplet's user data is ASCII only (the Windmill fleet's cloud-init trap: one non-ASCII byte and the droplet boots
-// without Docker), starts as cloud-config, and installs Docker and Compose from Ubuntu's packages and nothing else.
+// The droplet's user data is ASCII only (cloud-init's trap: one non-ASCII byte and the droplet may boot without
+// Docker), starts as cloud-config, and installs Docker and Compose from Ubuntu's packages and nothing else.
 func TestCloudInitIsASCII(t *testing.T) {
 	b, err := os.ReadFile("cloud-init.yaml")
 	if err != nil {
@@ -67,7 +71,7 @@ func TestScriptLints(t *testing.T) { kit.Lint(t, script) }
 // would, from the files in dir: droplets ("ID NAME TAGS" per line) and records (one DNS record per line: id, type, name,
 // content, comment, tab-separated). Cloudflare answers only the token in CLOUDFLARE_API_TOKEN and the gate only the key
 // STUB_KEY, wherever curl reads them from. Faults, each from the environment:
-//   - STUB_DO_FP is the fingerprint doctl gives key 58735991; STUB_DOCTL_AUTH=fail fails doctl account get;
+//   - STUB_DO_FP is the fingerprint doctl gives key 12345678 (doKey); STUB_DOCTL_AUTH=fail fails doctl account get;
 //   - STUB_DOCTL_LIST=fail fails every droplet listing (a 429), =after-create those after the run's droplet exists;
 //     STUB_DOCTL_DELETE=fail fails droplet deletion;
 //   - STUB_CF_LIST=fail answers every record listing success:false, =after-post those after the run's POST;
@@ -80,7 +84,7 @@ func stubs(dir string) map[string]string {
 		"doctl": `d=` + dir + `
 case "$*" in
   "account get"*) [ "${STUB_DOCTL_AUTH:-ok}" = ok ] || { echo "Error: unauthorized" >&2; exit 1; }; echo "me@example.com active" ;;
-  "compute ssh-key get 58735991 "*) echo "$STUB_DO_FP" ;;
+  "compute ssh-key get ` + doKey + ` "*) echo "$STUB_DO_FP" ;;
   "compute size list "*) printf 's-1vcpu-1gb 0.00893\ns-2vcpu-4gb 0.03571\n' ;;
   "compute droplet list --tag-name kontra-m4-gaterun "*)
     if [ "${STUB_DOCTL_LIST:-ok}" = fail ] || { [ "${STUB_DOCTL_LIST:-ok}" = after-create ] && [ -e "$d/created" ]; }; then
@@ -227,7 +231,8 @@ func newRun(t *testing.T, leave ...string) *vpsRun {
 	}
 	bin, log := kit.Sandbox(t, tools, st)
 	r := &vpsRun{t: t, dir: dir, bin: bin, log: log, keyFile: key, fp: fp, record: filepath.Join(dir, "record.log")}
-	r.env = []string{"CLOUDFLARE_API_TOKEN=" + cfToken, "KONTRA_VPS_SSH_KEY=" + key, "STUB_DO_FP=" + fp,
+	r.env = []string{"CLOUDFLARE_API_TOKEN=" + cfToken, "KONTRA_VPS_SSH_KEY=" + key, "KONTRA_VPS_DO_KEY=" + doKey,
+		"KONTRA_VPS_PROTECTED=" + protectedDroplet + ",another-droplet", "STUB_DO_FP=" + fp,
 		"STUB_KEY=" + stubKey, "STUB_TOKEN=" + stubToken}
 	return r
 }
@@ -308,6 +313,9 @@ func TestTeamGateRefusesWithoutPrerequisites(t *testing.T) {
 		{"doctl not authenticated", nil, []string{"STUB_DOCTL_AUTH=fail"}, nil, "doctl is not authenticated", false},
 		{"no docker daemon", nil, []string{"STUB_DOCKER=down"}, nil, "docker cannot reach its daemon", false},
 		{"no SSH key", nil, []string{"KONTRA_VPS_SSH_KEY=/nonexistent/key"}, nil, "/nonexistent/key", false},
+		// D306: neither key has a default (no operator's own identifiers in a public script).
+		{"KONTRA_VPS_SSH_KEY unset", nil, []string{"KONTRA_VPS_SSH_KEY="}, nil, "KONTRA_VPS_SSH_KEY", false},
+		{"KONTRA_VPS_DO_KEY unset", nil, []string{"KONTRA_VPS_DO_KEY="}, []string{"--dry-run"}, "KONTRA_VPS_DO_KEY", false},
 		// The review's case: a mistyped name on the recovery path once deleted staging's records.
 		{"another gate's name", nil, []string{"KONTRA_VPS_NAME=gateway.kontra.run"}, []string{"--teardown-only"},
 			"KONTRA_VPS_NAME gateway.kontra.run", true},
@@ -367,7 +375,7 @@ func TestTeamGateDryRun(t *testing.T) {
 		t.Errorf("the printed teardown deletes the droplet before the DNS record:\n%s", stdout)
 	}
 	calls := r.calls()
-	for _, want := range []string{"doctl account get", "doctl compute ssh-key get 58735991", "doctl compute size list",
+	for _, want := range []string{"doctl account get", "doctl compute ssh-key get " + doKey, "doctl compute size list",
 		"doctl compute droplet list --tag-name kontra-m4-gaterun", "docker info", "/dns_records?name=m4-teamgate.kontra.run",
 		"/dns_records?comment.exact="} {
 		if index(calls, want) < 0 {
@@ -427,8 +435,8 @@ func TestTeamGatePreflightRefusals(t *testing.T) {
 }
 
 // --teardown-only deletes the DNS records of a run (every record with the run's comment, whatever its name) and then
-// every droplet tagged kontra-m4-gaterun, whether or not its ttl passed; droplets are listed only by the tag, and
-// main-droplet is never deleted.
+// every droplet tagged kontra-m4-gaterun, whether or not its ttl passed; droplets are listed only by the tag, and a
+// droplet named in KONTRA_VPS_PROTECTED is never deleted.
 func TestTeamGateTeardownOnly(t *testing.T) {
 	r := newRun(t)
 	r.write("droplets", "101 kontra-m4-teamgate-1000 kontra-m4-gaterun,ttl-15400\n"+
@@ -459,18 +467,18 @@ func TestTeamGateTeardownOnly(t *testing.T) {
 		t.Errorf("left: droplets %q, records %q", r.read("droplets"), r.read("records"))
 	}
 	assertListsOnlyByTag(t, calls)
-	if strings.Contains(stdout+stderr+strings.Join(calls, "\n"), "main-droplet") {
-		t.Error("the run named main-droplet")
+	if strings.Contains(stdout+stderr+strings.Join(calls, "\n"), protectedDroplet) {
+		t.Error("the run named the protected droplet")
 	}
 
-	// A droplet named main-droplet that somehow carries the tag is refused, and the run fails.
+	// A protected droplet that somehow carries the tag is refused, and the run fails.
 	r = newRun(t)
-	r.write("droplets", "999 main-droplet kontra-m4-gaterun\n103 kontra-m4-teamgate-1 kontra-m4-gaterun,ttl-2\n")
+	r.write("droplets", "999 "+protectedDroplet+" kontra-m4-gaterun\n103 kontra-m4-teamgate-1 kontra-m4-gaterun,ttl-2\n")
 	_, stderr, code = r.run(nil, "--teardown-only")
 	calls = r.calls()
-	if code == 0 || !strings.Contains(stderr, "refusing to delete main-droplet") || slices.Contains(calls, "doctl compute droplet delete -f 999") ||
+	if code == 0 || !strings.Contains(stderr, "refusing to delete "+protectedDroplet) || slices.Contains(calls, "doctl compute droplet delete -f 999") ||
 		!slices.Contains(calls, "doctl compute droplet delete -f 103") {
-		t.Errorf("with main-droplet tagged: exit %d, stderr %q, calls %q", code, stderr, calls)
+		t.Errorf("with %s tagged: exit %d, stderr %q, calls %q", protectedDroplet, code, stderr, calls)
 	}
 }
 
@@ -732,5 +740,48 @@ func TestACMEVariantWritesItsCache(t *testing.T) {
 	defer conn.Close()
 	if names := conn.ConnectionState().PeerCertificates[0].DNSNames; !slices.Equal(names, []string{domain}) {
 		t.Errorf("the published port serves a certificate for %v, want the cache's for %s", names, domain)
+	}
+}
+
+// D306: what the README's VPS steps write in the working tree (.env with the database passwords, the operator's copy of
+// the configuration, the card-signing key, a provided certificate) is ignored by git, so `git add -A` never commits it,
+// and kept out of the image's build context; the shipped configurations are not ignored.
+func TestOperatorSecretsAreIgnored(t *testing.T) {
+	root := kit.Root(t)
+	ignored := func(path string) bool {
+		cmd := exec.Command("git", "check-ignore", "-q", "--no-index", path)
+		cmd.Dir = root
+		err := cmd.Run()
+		var ee *exec.ExitError
+		switch {
+		case err == nil:
+			return true
+		case errors.As(err, &ee) && ee.ExitCode() == 1:
+			return false
+		}
+		t.Fatalf("git check-ignore %s: %v", path, err)
+		return false
+	}
+	for _, p := range []string{".env", "deploy/compose/kontra.team.yaml", "deploy/compose/kontra.local.yaml",
+		"deploy/compose/signing/kontra.key", "deploy/compose/tls/cert.pem", "deploy/compose/tls/key.pem"} {
+		if !ignored(p) {
+			t.Errorf("%s is not ignored by git", p)
+		}
+	}
+	for _, p := range []string{"deploy/compose/kontra.yaml", "deploy/compose/kontra.vps.yaml", "deploy/compose/kontra.lifecycle.yaml",
+		"deploy/compose/postgres-init.sh", "compose.yaml"} {
+		if ignored(p) {
+			t.Errorf("%s, which ships, is ignored by git", p)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(root, ".dockerignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(b), "\n")
+	for _, want := range []string{".env", "deploy"} {
+		if !slices.Contains(lines, want) {
+			t.Errorf(".dockerignore has no line %q: the build context would carry the operator's secrets", want)
+		}
 	}
 }

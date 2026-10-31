@@ -3,6 +3,8 @@ package gate
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
@@ -21,10 +23,12 @@ func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator
 	cfg := r.cfg
 	multi := cfg.Tenancy == config.TenancyMulti
 	catalog := gatemcp.NewCatalog(gatemcp.CatalogConfig{
-		DB: r.pool, Multi: multi, PublicURL: cfg.PublicURL, MCP: r.services, Tools: r.tools, Warm: r.mcp, Logger: r.log,
+		DB: r.pool, Multi: multi, PublicURL: cfg.PublicURL, MCP: r.services, Tools: r.tools, Warm: r.mcp,
+		Served: r.servedService, Logger: r.log,
 	})
 	tasks, err := gatemcp.NewHireTasks(gatemcp.HireTasksConfig{
-		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Hirer: hirer, Render: r.render, Logger: r.log,
+		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Hirer: hirer, Render: r.render,
+		Served: r.servedService, Logger: r.log,
 	})
 	if err != nil {
 		return err
@@ -33,7 +37,7 @@ func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator
 	h, err := gatemcp.NewHandler(gatemcp.Deps{
 		PublicURL: cfg.PublicURL, Multi: multi, Auth: authn, Sessions: mcprelay.NewSessions(r.pool), Catalog: catalog,
 		Hirer: hirer, Tasks: tasks, Elicitations: gatemcp.NewElicitations(r.storeLog, r.listener, r.log), Log: r.storeLog,
-		Waker: r.listener, Render: r.render, AllowedOrigins: cfg.MCP.AllowedOrigins, Logger: r.log,
+		Waker: r.listener, Render: r.render, Served: r.servedService, AllowedOrigins: cfg.MCP.AllowedOrigins, Logger: r.log,
 		PlainWait: r.opts.plainWait,
 	})
 	if err != nil {
@@ -41,6 +45,16 @@ func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator
 	}
 	h.Register(routes)
 	return nil
+}
+
+// servedService is gatemcp.Served over the replica's registry (D303): an enabled service it serves, with its kind and
+// allow: as the A2A route and /mcp/{svc} read them on every request.
+func (r *Replica) servedService(_ context.Context, tenantID uuid.UUID, name string) (gatemcp.ServedService, bool) {
+	s := r.services.LookupByID(tenantID, name)
+	if s == nil || s.Disabled {
+		return gatemcp.ServedService{}, false
+	}
+	return gatemcp.ServedService{Kind: s.Ref.Kind, Allow: s.Allow}, true
 }
 
 // awaitHireCancels waits, at most gatemcp.DetachedWait, for /mcp's detached kontra.cancel Updates and for the modern

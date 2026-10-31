@@ -100,9 +100,17 @@ func (h *Handler) modern(rq *request) {
 		h.modernToolsList(rq)
 	case mcpwire.MethodToolsCall:
 		h.modernToolsCall(rq)
-	case mcpwire.MethodServerDiscover:
-		h.modernForward(rq, nil, h.discoverResult(rq))
 	default:
+		// An anonymous tenant's slot while the request, or a subscriptions/listen stream, is relayed (§6.2, D304).
+		release, ok := h.takeRelay(rq)
+		if !ok {
+			return
+		}
+		defer release()
+		if m.Method == mcpwire.MethodServerDiscover {
+			h.modernForward(rq, nil, h.discoverResult(rq))
+			return
+		}
 		h.modernForward(rq, nil, nil)
 	}
 }

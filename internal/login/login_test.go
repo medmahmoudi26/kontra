@@ -723,3 +723,62 @@ func TestLoginComparesTheResourceAsAnOrigin(t *testing.T) {
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// spec/tunnel.md §6.3 step 4 (D305): an authorization server mints a gate API key only for the origin of the gate whose
+// keys it issues, and answers any other resource invalid_target (RFC 8707 §2). A gate whose RFC 9728 document names
+// another gate's authorization server therefore gets nothing through kontra login: the login fails naming
+// invalid_target and stores no key, under either origin. The login prints the authorization server's origin beside the
+// gate's.
+func TestLoginThroughAnotherGatesDocumentStoresNothing(t *testing.T) {
+	var legit string // the rig's gate, known once it runs
+	r := newRig(t, oidctest.Config{MintKey: func(ctx context.Context, sub, resource string) (string, error) {
+		return oidctest.ForResource(legit, func(context.Context, string, string) (string, error) {
+			return "kk_legit_" + strings.Repeat("a", 32), nil
+		})(ctx, sub, resource)
+	}})
+	legit = r.origin
+	// The other gate: its own origin as the resource, the legitimate gate's authorization server.
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/.well-known/oauth-protected-resource/mcp" {
+			http.NotFound(w, req)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"resource": "http://" + req.Host + "/mcp", "authorization_servers": []string{r.as.Issuer()}})
+	}))
+	t.Cleanup(other.Close)
+
+	var out syncBuffer
+	o := r.options(&out)
+	o.Gate, _ = url.Parse(other.URL)
+	err := Run(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "invalid_target") {
+		t.Fatalf("a login through another gate's document: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "sign-in by "+r.as.Issuer()) {
+		t.Errorf("the login does not name the authorization server's origin:\n%s", out.String())
+	}
+	c, err := node.LoadCredentials(r.creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k := c.For(other.URL).APIKey; k != "" {
+		t.Errorf("a key was stored for the other gate: %q", k)
+	}
+	if k := c.For(legit).APIKey; k != "" {
+		t.Errorf("a key was stored for the legitimate gate: %q", k)
+	}
+	toks := r.as.TokenRequests()
+	if len(toks) != 1 || toks[0].Issued != "" || toks[0].Form.Get("resource") != other.URL {
+		t.Fatalf("the token requests: %+v", toks)
+	}
+
+	// The control: the same server issues the key to a login at its own gate.
+	out = syncBuffer{}
+	if err := Run(context.Background(), r.options(&out)); err != nil {
+		t.Fatalf("a login at the legitimate gate: %v\n%s", err, out.String())
+	}
+	if k := r.credential().APIKey; k != "kk_legit_"+strings.Repeat("a", 32) {
+		t.Fatalf("the legitimate gate's key: %q", k)
+	}
+}

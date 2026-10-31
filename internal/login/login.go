@@ -558,11 +558,13 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	defer stop()
 
 	shown := tunnel.Printable(au.String())
+	// Both origins: the gate's, whose key this is, and the authorization server's, whose page asks for consent (D305).
+	where := s.Origin + " (sign-in by " + issuerOrigin(s.Issuer) + ")"
 	if o.Open == nil {
-		fmt.Fprintf(o.Out, "kontra login: open this URL in a browser on this machine to sign in at %s:\n\n  %s\n\n", s.Origin, shown)
+		fmt.Fprintf(o.Out, "kontra login: open this URL in a browser on this machine to sign in at %s:\n\n  %s\n\n", where, shown)
 	} else {
 		fmt.Fprintf(o.Out, "kontra login: signing in at %s in your browser; if it does not open, open this URL on this machine:\n\n  %s\n\n",
-			s.Origin, shown)
+			where, shown)
 		if err := o.Open(au.String()); err != nil {
 			fmt.Fprintf(o.Out, "kontra login: the browser could not be opened (%v): open the URL above\n", err)
 		}
@@ -583,6 +585,15 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 		return "", res.err
 	}
 	return redeem(ctx, client, s, clientID, res.code, verifier, redirect)
+}
+
+// issuerOrigin is the printable origin of an issuer URL, the URL itself when it has none.
+func issuerOrigin(issuer string) string {
+	u, err := url.Parse(issuer)
+	if err != nil || u.Host == "" {
+		return tunnel.Printable(issuer)
+	}
+	return tunnel.Printable(u.Scheme + "://" + u.Host)
 }
 
 // redeem is the token request (RFC 6749 §4.1.3, RFC 7636 §4.5, RFC 8707): it follows no redirect, and nothing it

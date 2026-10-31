@@ -212,7 +212,10 @@ chmod 0644 "$tmp/payload"/*
 docker create --name "$name" --init "${net_args[@]}" "${env_args[@]}" "$image" bash /opt/kontra-demo/laptop.sh > /dev/null
 docker cp "$tmp/payload/." "$name:/opt/kontra-demo" > /dev/null
 docker start "$name" > /dev/null
-docker logs -f "$name" > "$tmp/laptop.log" 2>&1 &
+# The log exists before the loop reads it: the follower opens it only once it runs, which under load may come after
+# the loop's first read.
+: > "$tmp/laptop.log"
+docker logs -f "$name" >> "$tmp/laptop.log" 2>&1 &
 follower=$!
 started=$SECONDS
 shown=0

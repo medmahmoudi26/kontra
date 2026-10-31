@@ -40,10 +40,15 @@ const DrainEvery = 10 * time.Minute
 // marks listed; never a service of an anonymous tenant (spec/tunnel.md §6.2), never a disabled one, nor one of a
 // tenant that has ended. hire reaches a service by ref when its allow: admits the principal at all (any entry,
 // anonymous included), as the A2A route does.
+//
+// The rows are the services table's; with Served, only those this replica's registry serves, enabled, with the
+// registry's allow: (D303): /mcp lists and hires exactly what the A2A route and /mcp/{svc} serve. A row whose allow:
+// does not parse is left out, and logged, as the registry leaves it out: it never fails a request (D303).
 type Catalog struct {
 	db        *pgxpool.Pool
 	multi     bool
 	publicURL string
+	served    Served
 	mcp       mcprelay.Services    // the MCP relay's view of a service: its tools policy and tool_meta (§11.3, §13.4)
 	tools     *mcprelay.ToolsCache // the drained tools/list of each MCP service (§11.3), read without draining
 	warm      ToolsWarmer          // starts a background drain of a cold cache; nil starts none
@@ -52,6 +57,7 @@ type Catalog struct {
 	mu     sync.Mutex
 	warmed map[mcprelay.ToolsKey]time.Time // the last drain describe started per service (DrainEvery)
 	infos  map[mcprelay.ToolsKey]string    // an MCP upstream's serverInfo title or name, as its last drain read it
+	bad    map[string]time.Time            // when a row that cannot be read was last logged, by tenant/name
 	now    func() time.Time
 
 	batch   int // rows one query of a search reads (searchBatch)
@@ -73,6 +79,7 @@ type CatalogConfig struct {
 	MCP       mcprelay.Services
 	Tools     *mcprelay.ToolsCache
 	Warm      ToolsWarmer
+	Served    Served // the replica's registry (D303); nil reads the services table alone
 	Logger    *slog.Logger
 }
 
@@ -82,8 +89,9 @@ func NewCatalog(cfg CatalogConfig) *Catalog {
 		cfg.Logger = slog.Default()
 	}
 	return &Catalog{db: cfg.DB, multi: cfg.Multi, publicURL: strings.TrimRight(cfg.PublicURL, "/"), mcp: cfg.MCP,
-		tools: cfg.Tools, warm: cfg.Warm, log: cfg.Logger, warmed: map[mcprelay.ToolsKey]time.Time{},
-		infos: map[mcprelay.ToolsKey]string{}, now: time.Now, batch: searchBatch, examine: SearchExamine}
+		tools: cfg.Tools, warm: cfg.Warm, served: cfg.Served, log: cfg.Logger, warmed: map[mcprelay.ToolsKey]time.Time{},
+		infos: map[mcprelay.ToolsKey]string{}, bad: map[string]time.Time{}, now: time.Now, batch: searchBatch,
+		examine: SearchExamine}
 }
 
 // service is one services row as the catalog reads it.
@@ -135,6 +143,10 @@ const serviceColumns = `t.id, t.slug, s.name, s.kind, s.allow, s.listed, t.kind 
 const serviceFrom = ` from kontra.services s join kontra.tenants t on t.id = s.tenant_id
 	where s.disabled_at is null and t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`
 
+// errUnreadable is a services row the catalog cannot read (its allow: does not parse): left out, as the registry
+// leaves it out, never failing the request (D303).
+var errUnreadable = errors.New("gatemcp: a services row cannot be read")
+
 func scanService(row pgx.Row) (*service, error) {
 	var (
 		s                    service
@@ -151,7 +163,7 @@ func scanService(row pgx.Row) (*service, error) {
 	s.ref.Timeout, s.ref.Retention = time.Duration(timeoutS)*time.Second, time.Duration(retentionS)*time.Second
 	s.ref.Sealed = store.SealedRef(sealed)
 	if s.allow, err = auth.ParseAllowList(allow); err != nil {
-		return nil, fmt.Errorf("gatemcp: service %s/%s: %w", s.ref.Tenant, s.ref.Name, err)
+		return &s, fmt.Errorf("%w: service %s/%s: allow: %w", errUnreadable, s.ref.Tenant, s.ref.Name, err)
 	}
 	if card != nil && json.Valid([]byte(*card)) && *card != "null" {
 		s.card = json.RawMessage(*card)
@@ -160,20 +172,58 @@ func scanService(row pgx.Row) (*service, error) {
 }
 
 // lookup is the service a ref names, nil when none: an enabled service of a live tenant (a single-tenant gate's
-// team tenant). Visibility is the caller's to decide.
+// team tenant) that this replica serves (keep), and nil for a row that cannot be read. Visibility is the caller's to
+// decide.
 func (c *Catalog) lookup(ctx context.Context, ref Ref) (*service, error) {
 	slug := ref.Tenant
 	if !c.multi {
 		slug = tenant.TeamSlug
 	}
 	s, err := scanService(c.db.QueryRow(ctx, `select `+serviceColumns+serviceFrom+` and t.slug = $1 and s.name = $2`, slug, ref.Name))
-	if errors.Is(err, pgx.ErrNoRows) {
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
 		return nil, nil
-	}
-	if err != nil {
+	case errors.Is(err, errUnreadable):
+		c.unreadable(s, err)
+		return nil, nil
+	case err != nil:
 		return nil, fmt.Errorf("gatemcp: look up service %s: %w", ref, err)
 	}
+	if !c.keep(ctx, s) {
+		return nil, nil
+	}
 	return s, nil
+}
+
+// keep reports whether this replica serves s (Served), giving s the registry's allow:; true without Served.
+func (c *Catalog) keep(ctx context.Context, s *service) bool {
+	if c.served == nil {
+		return true
+	}
+	got, ok := c.served(ctx, s.ref.TenantID, s.ref.Name)
+	if !ok || got.Kind != s.ref.Kind {
+		return false
+	}
+	s.allow = got.Allow
+	return true
+}
+
+// unreadableLogEvery is how often one unreadable row is logged.
+const unreadableLogEvery = 10 * time.Minute
+
+// unreadable logs a row the catalog leaves out, at most once per unreadableLogEvery per row.
+func (c *Catalog) unreadable(s *service, err error) {
+	key := s.ref.Tenant + "/" + s.ref.Name
+	c.mu.Lock()
+	now := c.now()
+	last, seen := c.bad[key]
+	if !seen || now.Sub(last) >= unreadableLogEvery {
+		c.bad[key] = now
+	}
+	c.mu.Unlock()
+	if !seen || now.Sub(last) >= unreadableLogEvery {
+		c.log.Error("gatemcp: a services row cannot be read; search, describe and hire leave it out", "service", key, "error", err)
+	}
 }
 
 // Hireable is the service a hire's ref names when p may hire it (its allow: admits p, by any entry), nil otherwise:
@@ -243,20 +293,21 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("gatemcp: search: %w", err)
 		}
+		// batch holds nil for a row that cannot be read: it is left out (logged), and the page goes on past it.
 		var batch []*service
 		var refs []string
 		for rows.Next() {
-			var (
-				s   service
-				ref string
-			)
-			sp, err := scanService(scanTail{rows, &ref})
-			if err != nil {
+			var ref string
+			s, err := scanService(scanTail{rows, &ref})
+			switch {
+			case errors.Is(err, errUnreadable):
+				c.unreadable(s, err)
+				s = nil
+			case err != nil:
 				rows.Close()
 				return SearchResult{}, fmt.Errorf("gatemcp: search: %w", err)
 			}
-			s = *sp
-			batch, refs = append(batch, &s), append(refs, ref)
+			batch, refs = append(batch, s), append(refs, ref)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -264,7 +315,7 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 		}
 		for i, s := range batch {
 			after = refs[i]
-			if !visible(s, p) || !c.matches(s, query, args.Price) {
+			if s == nil || !c.keep(ctx, s) || !visible(s, p) || !c.matches(s, query, args.Price) {
 				continue
 			}
 			if len(out.Services) == PageSize {

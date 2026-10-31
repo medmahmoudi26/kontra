@@ -48,6 +48,11 @@ func (h *Handler) initialize(rq *request) {
 		writeRefusal(rq.w, ref)
 		return
 	}
+	release, ok := h.takeRelay(rq)
+	if !ok {
+		return
+	}
+	defer release()
 	clientID, hash, err := MintID()
 	if err != nil {
 		h.internal(rq, "mint a session id", err)
@@ -383,6 +388,12 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 	if rq.r.Method == http.MethodGet {
+		// An anonymous tenant's slot for as long as the stream is open (§6.2, D304).
+		release, ok := h.takeRelay(rq)
+		if !ok {
+			return
+		}
+		defer release()
 		h.forward(rq, t, nil)
 		return
 	}
@@ -397,6 +408,11 @@ func (h *Handler) pinned(rq *request) {
 			writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "Method not found", nil)
 			return
 		}
+		release, ok := h.takeRelay(rq)
+		if !ok {
+			return
+		}
+		defer release()
 		h.forward(rq, t, nil)
 	}
 }

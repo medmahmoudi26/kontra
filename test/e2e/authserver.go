@@ -26,8 +26,9 @@ import (
 // and kontra login (spec/tunnel.md §6.3, D278): internal/oidc/oidctest over HTTPS on 127.0.0.1, with a throwaway
 // CA that the replicas and kontra login trust through SSL_CERT_FILE (a file under the run's directory). Its token
 // endpoint issues, by default, a kk_ API key of an account tenant of the gate's database with the scopes hire and
-// enroll:* (oidctest.DBMinter, once the test names the tenant with MintFor); with MintJWT it issues an ES256 JWT for
-// the authorization's resource instead (an access token that is not an API key).
+// enroll:* (oidctest.DBMinter, once the test names the tenant and the gate with MintFor), and only for that gate's
+// origin as the resource, invalid_target for any other (spec/tunnel.md §6.3 step 4, D305); with MintJWT it issues an
+// ES256 JWT for the authorization's resource instead (an access token that is not an API key).
 
 // AuthServer is the authorization server double.
 type AuthServer struct {
@@ -68,10 +69,11 @@ func (as *AuthServer) issue(ctx context.Context, subject, resource string) (stri
 	return mint(ctx, subject, resource)
 }
 
-// MintFor makes the token endpoint issue kk_ keys of the tenant tenantID (hire, enroll:*), minted in pool.
-func (as *AuthServer) MintFor(pool *pgxpool.Pool, tenantID uuid.UUID) {
+// MintFor makes the token endpoint issue kk_ keys of the tenant tenantID (hire, enroll:*), minted in pool, for the
+// gate at origin gate only.
+func (as *AuthServer) MintFor(pool *pgxpool.Pool, tenantID uuid.UUID, gate string) {
 	as.mu.Lock()
-	as.mint = oidctest.DBMinter(pool, tenantID)
+	as.mint = oidctest.DBMinter(pool, tenantID, gate)
 	as.mu.Unlock()
 }
 

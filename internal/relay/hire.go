@@ -61,6 +61,20 @@ type Hirer struct {
 	// Starts is the service's work queue re-issuing a task's start (lifecycle.Queue.ReissueStart, as the A2A route's
 	// resend does, §14.5); nil re-issues nothing.
 	Starts func(svc store.ServiceRef) StartReissuer
+	// Serves reports whether this replica serves the A2A service to p as its A2A route does on every request, a
+	// follow-up included (the registry's entry, enabled, of kind a2a, whose allow: admits p; a2ahttp): a row the
+	// registry refused or has not loaded yet, a disabled service and a principal its allow: no longer admits are
+	// ErrNotServed, before anything is stored or sent (relay.md §12.2, D303). nil serves every service (tests).
+	Serves func(svc store.ServiceRef, p auth.Principal) bool
+}
+
+// ErrNotServed refuses a hire or a reply to a service this replica's A2A route would answer "unknown service" for the
+// principal (Hirer.Serves): /mcp answers it as an unknown service (hire) or an unknown task (reply, D303).
+var ErrNotServed = errors.New("relay: this replica serves no such service to the principal")
+
+// serves is Serves, true when it is nil.
+func (h *Hirer) serves(svc store.ServiceRef, p auth.Principal) bool {
+	return h.Serves == nil || h.Serves(svc, p)
 }
 
 // CardExtensions is what a service's served card requires of a request (spec §2.4), as a hire reads it (D300).
@@ -148,7 +162,8 @@ func HireOwner(p auth.Principal) store.Owner {
 	return store.Owner{BuyerID: p.BuyerID, Principal: p.ID, Via: string(p.Via), TenantID: p.TenantID}
 }
 
-// Hire answers a hire: refused with ExtensionsRequiredError when the service's served card requires an extension a hire
+// Hire answers a hire: ErrNotServed when this replica's A2A route would not serve the service to the principal
+// (Serves, D303); refused with ExtensionsRequiredError when the service's served card requires an extension a hire
 // cannot activate (§2.4, as the A2A route refuses a request that does not activate it, before anything else), the
 // operator's required entries being activated for the buyer and given to Admission (D300); the task of the same
 // resend key that is quoted, or left quoted less than the retry window ago, as it is (nothing is sent, Admission is
@@ -163,6 +178,9 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 	}
 	if req.Message == nil || req.Message.ID == "" || len(req.Message.Parts) == 0 || req.Message.TaskID != "" {
 		return HireOutcome{}, fmt.Errorf("relay: a hire needs a new message with its id and parts: %w", a2a.ErrInvalidParams)
+	}
+	if !h.serves(req.Service, req.Principal) {
+		return HireOutcome{}, ErrNotServed
 	}
 	activated, err := h.activate(req.Service)
 	if err != nil {
@@ -207,7 +225,9 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 // Reply sends parts as the §7 follow-up of a hire task of the principal's buyer, through the service's handler: the
 // followUp interceptor and the kontra.message Update decide (spec §7: refused unless the task is input-required; a
 // quoted task is refused, its quote being accepted on the operator's page and never in the protocol, §13.2; one
-// follow-up per turn end); a service whose served card now requires an extension a hire cannot activate refuses it as
+// follow-up per turn end); a service this replica's A2A route no longer serves to p (disabled, its allow: no longer
+// admitting p, a row the registry refused) is ErrNotServed, as that route answers the follow-up (D303); a service
+// whose served card now requires an extension a hire cannot activate refuses it as
 // Hire does (§2.4; a follow-up has no Admission, so the operator's required entries need nothing more, D300). It
 // returns the task's version read before the Update (the turn the follow-up started begins after it). task is the
 // caller's row (store.Log.LoadHired).
@@ -225,6 +245,10 @@ func (h *Hirer) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow
 	svc, err := h.Log.LoadService(ctx, task.TenantID, task.Service)
 	if err != nil {
 		return 0, err
+	}
+	if !h.serves(svc, p) {
+		// As the A2A route answers a follow-up: unknown service, nothing sent, the task left as it is (D303).
+		return 0, ErrNotServed
 	}
 	if _, err := h.activate(svc); err != nil {
 		return 0, err

@@ -32,8 +32,11 @@ and since M4:
   failures (`make tck`, and the `tck` workflow);
 - comes up on a fresh VPS from `compose.yaml` with built-in ACME ([below](#a-team-gate-on-your-own-vps)).
 
-The demo below runs against the staging gate, `gateway.kontra.run`: the production gate, `gateway.kontra.sh`, opens no
-anonymous sessions until Cloud's M5 (D268 and D280 in [`docs/decisions.md`](docs/decisions.md)). Every built
+The demo below is written for the staging gate, `gateway.kontra.run`: the production gate, `gateway.kontra.sh`, opens
+no anonymous sessions until Cloud's M5 (D268 and D280 in [`docs/decisions.md`](docs/decisions.md)). **The staging gate
+is not deployed yet**: M4's gate runs (WP-09) deploy it and run this block on a clean laptop, and until then
+`gateway.kontra.run` does not resolve (D306). [A team gate from source](#a-team-gate-from-source) runs the same node,
+gate and hire on one machine today, with an enrolled node instead of an anonymous session. Every built
 seller and server is listed in [`examples/`](examples/README.md); stock agents and MCP servers run unmodified.
 
 `docs/` is the design; `spec/` is the protocol specification written from it; code lands against both. Read in
@@ -56,7 +59,8 @@ Where a note and the PRD disagree, the later document wins; `docs/README.md` has
 
 ## Five minutes
 
-On a laptop with Go 1.26 and Node 22 (for the MCP lines), and nothing of Kontra:
+On a laptop with Go 1.26 and Node 22.19 or later (for the MCP lines; the pinned inspector needs it), and nothing of
+Kontra:
 
 <!-- demo:begin -->
 ```sh
@@ -105,8 +109,9 @@ Any stock MCP client works where the inspector does: `{ "mcpServers": { "fs": { 
 ## A team gate on your own VPS
 
 The same gate image with Temporal and Postgres, from [`compose.yaml`](compose.yaml): three long-running containers
-and two one-shot jobs, nothing published but the gate. On a fresh VPS with Docker, a DNS name pointing at it and
-nothing listening on 443, the gate gets its own certificate (built-in ACME, TLS-ALPN-01):
+and three one-shot jobs (Temporal's schema, its namespace, the gate's migrations), nothing published but the gate. On
+a fresh VPS with Docker, a DNS name pointing at it and nothing listening on 443, the gate gets its own certificate
+(built-in ACME, TLS-ALPN-01):
 
 ```sh
 git clone https://github.com/medmahmoudi26/kontra && cd kontra
@@ -120,15 +125,21 @@ docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml --api-key
 docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml hello           # a node's token
 ```
 
+`.env`, `deploy/compose/kontra.team.yaml` and the `signing/` and `tls/` directories beside it hold secrets: the
+repository's `.gitignore` keeps them out of git and `.dockerignore` out of the image's build. The gate is published on
+IPv4 and IPv6 (an AAAA record works as kontra.vps.yaml says); `KONTRA_LISTEN_ADDR` restricts it to one address.
+
 Then, on any machine of the team: `kontra connect --gate https://<your name> --enroll <token> --serve
 a2a:hello=http://127.0.0.1:9999`, and `a2a send -a https://<your name>/agents/hello/.well-known/agent-card.json --auth
 "Bearer <API key>" "hi"`. The same key reaches the gate's own MCP server at `https://<your name>/mcp`. With a
 certificate of your own, keep the default configuration, [`deploy/compose/kontra.yaml`](deploy/compose/kontra.yaml),
 which says where it goes. Helm: [`charts/kontra`](charts/kontra).
 
-Upgrading a gate to M4: `kontra-gate migrate` (compose runs it in `gate-migrate`) applies `0003_m4.sql`, which holds
-the `tasks` table's lock for one sequential read of it (its header says why); run it before the new replicas start, or
-when that pause is acceptable. A team or account slug may no longer be `anon-` and 16 hex digits.
+Upgrading a gate to M4: `git pull && docker compose up -d --build --wait`. The image is `kontra-gate:m4`: without
+`--build` an M3 host has no such image to run, and its `kontra-gate:m3` holds M3's embedded migrations. `kontra-gate
+migrate` (compose runs it in `gate-migrate`) applies `0003_m4.sql`, which holds the `tasks` table's lock for one
+sequential read of it (its header says why); run it before the new replicas start, or when that pause is acceptable. A
+team or account slug may no longer be `anon-` and 16 hex digits.
 
 PRD §12's pentest list ran against this compose team gate with M3's own surface at `f65760a` (four findings, each
 fixed) and again after the M3 review rounds at `33f06a8` (no finding, D266);

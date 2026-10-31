@@ -11,8 +11,9 @@ code and its review (D191–D205, D213, D223, D224, D230), decided under the own
 D276, D282), and was amended the same day after the M4 plan's audit: §10.3's operator-configured endpoints, one
 stream for `elicitation/complete`, the shape of a `hire` result and the anonymous limits (D284, D287 to D289). It was
 amended on 31 Oct after M5's plan audit: `hire` activates the operator's required extensions for the buyer, an
-`allow:` entry `oidc:*`, and §13.3's metric not yet exported (D300 to D302). Normative. The key words MUST, MUST NOT,
-SHOULD and MAY are used as in RFC 2119.
+`allow:` entry `oidc:*`, and §13.3's metric not yet exported (D300 to D302), and again after M4's review: what `/mcp`
+serves, its sessions in use, its `tasks/result` streams and its rendering of bucketed parts (§10.4, §12; D303).
+Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
@@ -824,7 +825,9 @@ ref to its task, since one `payload_ref` column cannot name the several large pa
 are delivered:
 
 - **to callers** (stock A2A clients, push receivers, and direct backends) as a `url` part with a presigned GET
-  valid 15 minutes;
+  valid 15 minutes. The gate's own `/mcp` renders a `hire` task's bucketed parts so for every reader, a request that
+  arrived on a node's hiring stream included: the node relays an MCP answer as it is, so its local client is a caller,
+  and the node fetches nothing a part names (D56, D303);
 - **to nodes**, as a `url` part whose URL is `kontra-blob:<ref>`: the node fetches it through its own tunnel
   ([`tunnel.md`](tunnel.md) §8.3), never from a URL taken from a part (D56).
 
@@ -1343,7 +1346,10 @@ not a tunnelled service and has no upstream. §11.1's transport rules apply (one
 `Origin`, versions, the gate's own `Mcp-Session-Id`), and so does §11.12's classification of a request's era (rules
 1–5): the gate is the server of both eras (D24, D269, §12.5). A legacy session is an `mcp_sessions` row whose
 `service` is NULL and whose `tenant_id` is the principal's (NULL when it has none); nothing is pinned, no request hops
-(§11.2) and no era is learned (§11.12), so any replica serves any request of it. A request of a legacy session whose
+(§11.2) and no era is learned (§11.12), so any replica serves any request of it. Its idle sweep closes a session after
+§11.2's default `session_idle_s` without a request and, as §11.2 says of every session, never while a stream of it
+lasts: a replica serving its `GET` stream or a blocking `tasks/result` keeps its `last_seen_at` fresh (D303). A
+request of a legacy session whose
 `MCP-Protocol-Version` names another version than the one the session negotiated is `400` with `-32022`: the
 negotiated version decides what the session has (tasks, `hire`'s `execution`; D293). `/mcp` has no anonymous
 principal: a request without a credential is `401` (§12.1); through a node, the session's principal applies
@@ -1436,6 +1442,14 @@ the route to use (`/mcp/…`; the service's A2A URL through a node, which seals)
   the sealed extension whoever asserts it, is answered as above with the text naming the service's A2A URL and the
   URIs to activate there; a `reply` to a task of such a service is refused the same way, nothing sent.
 
+**What `/mcp` serves (D303).** `search`, `describe` and `hire` see exactly the services the replica serves on its A2A
+route and `/mcp/{svc}`: an enabled row its registry has loaded, admitted by the registry's `allow:`. A row the
+registry refused to build (an `allow:` or an annotation it cannot read) is left out of `search` and logged, never
+failing the request, and is an unknown service to `describe` and `hire`; so is a row the replica has not loaded yet. A
+`hire` task is the principal's on `/mcp` only while its service is so served and its `allow:` admits the principal,
+as the A2A route answers `GetTask`, `CancelTask` and a follow-up `404` "unknown service" otherwise: `reply` is then
+`unknown task`, `tasks/*` are `-32602` and `tasks/list` leaves the task out, and nothing is sent or cancelled.
+
 A `message` part whose `data` is `null` breaks the input schema (a2a-go cannot read such a part back). A ref the
 principal's `allow:` does not admit is the unknown-service error (§2.1); on `/mcp`, whose tools name the service in
 their arguments, that error is one `CallToolResult` with `isError` and the text `unknown service`, the same for a ref
@@ -1479,7 +1493,9 @@ row and events are the record.
      elicitation_notified_at = now() WHERE id = $1 AND elicitation_notified_at IS NULL` and writes it on that one
      stream only if its update won; a stream opened within the 10 minutes after the task left `quoted` (the retry
      window below) gets it only if no stream has claimed it. `GET` streams of `/mcp` carry no event ids and are not
-     resumed: a client that missed the notification retries `hire`.
+     resumed: a client that missed the notification retries `hire`. Nor do the response streams of its `tasks/result`
+     (D303): a `GET` naming a `Last-Event-ID` is the session's plain `GET` stream, which never carries a request's
+     answer, so a client whose stream was cut asks `tasks/result` again.
    - **Otherwise** (and always on a modern request, which never gets `-32042`: 2026-07-28 removed it, D24, D269): `hire` answers at once (task-augmented: `CreateTaskResult` with `status: "working"` and
      the URL in `statusMessage`; plain: a text block with the URL and the task id). No input is requested from
      the client, so a client that cancels input-requiring tasks when it is not interactive does not decline

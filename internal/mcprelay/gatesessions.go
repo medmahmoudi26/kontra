@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,4 +50,44 @@ func (s *Sessions) SweepGateIdle(ctx context.Context, idle time.Duration, now ti
 		return 0, fmt.Errorf("mcprelay: sweep the idle sessions of /mcp: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
+}
+
+// KeepSeen keeps the last_seen_at of a session of the gate's own /mcp fresh while a stream of it is open on this
+// replica (its GET stream, a blocking tasks/result): Touch every IdleWrite/2 (it writes at most once per IdleWrite),
+// until stop runs. SweepGateIdle then never closes a session in use, as §11.2 says of every session (on /mcp/{svc}, D231's
+// Handler.hold does the same): a stock client whose GET stream outlived the idle period would otherwise get 404 on its
+// next request (relay.md §12, D303).
+func (s *Sessions) KeepSeen(hash [32]byte, now func() time.Time, log *slog.Logger) (stop func()) {
+	if now == nil {
+		now = time.Now
+	}
+	every := s.idleWrite / 2
+	if every <= 0 {
+		every = time.Second
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				err := s.Touch(ctx, hash, now())
+				cancel()
+				if err != nil && log != nil {
+					log.Debug("mcp: the last_seen_at of a session in use was not written", "error", err)
+				}
+			}
+		}
+	}()
+	var closed bool
+	return func() {
+		if !closed {
+			closed = true
+			close(done)
+		}
+	}
 }

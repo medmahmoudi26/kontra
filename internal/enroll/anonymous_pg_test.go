@@ -95,6 +95,51 @@ func TestAdmitAnonymousOpens(t *testing.T) {
 	}
 }
 
+// spec/tunnel.md §6.1, §12 (D304): a key of an anonymous tenant is not rotated. A hello whose rotate_from names it is
+// enroll_invalid, whatever else it carries, and nothing is written: the new key is not admitted into the anonymous
+// tenant (which would give it a session without the anonymous decision: no end clock, the full hiring-stream cap, and
+// no tenant counted), the old key is not marked rotated. The new key's hello without rotate_from then opens an
+// anonymous session of its own, which §6.2 counts.
+func TestAnonymousKeyIsNotRotated(t *testing.T) {
+	e := newAnonEnv(t, nil)
+	old := newTestKey(t)
+	d, err := e.admitFrom(old, anonHello(old, a2a("hello")), "203.0.113.7")
+	if err != nil || d.Anonymous == nil {
+		t.Fatalf("the anonymous session: %+v %v", d, err)
+	}
+	tenantID := d.Key.TenantID
+	keys := func() int {
+		return e.count(`select count(*) from kontra.tunnel_keys where tenant_id = '` + tenantID.String() + `'`)
+	}
+	for _, mk := range []func(k *testKey) *tunnel.Hello{
+		func(k *testKey) *tunnel.Hello { return hello(k, a2a("hello")) },     // what kontra connect --rotate sends
+		func(k *testKey) *tunnel.Hello { return anonHello(k, a2a("hello")) }, // with anonymous: true too
+		func(k *testKey) *tunnel.Hello { return hello(k) },                   // declaring nothing
+	} {
+		k := newTestKey(t)
+		h := mk(k)
+		req := Request{Hello: h, PubKey: k.pub, SessionID: uuid.Must(uuid.NewV7()), ReplicaID: e.replic,
+			Client: netip.MustParseAddr("203.0.113.7"), OldPubKey: old.pub}
+		h.RotateFrom = old.ref()
+		_, err := e.store.Admit(context.Background(), req)
+		wantCode(t, "rotate_from naming an anonymous key", err, tunnel.CodeEnrollInvalid)
+		if n := keys(); n != 1 {
+			t.Fatalf("the anonymous tenant holds %d keys after a refused rotation", n)
+		}
+		if n := e.count(`select count(*) from kontra.tunnel_keys where key_id = '` + old.kid + `' and (revoked_reason is not null or rotated_to is not null)`); n != 0 {
+			t.Fatal("the anonymous key was marked rotated")
+		}
+		// The node's next hello: the new key alone, asking for an anonymous session of its own.
+		nd, err := e.admitFrom(k, anonHello(k, a2a("hello")), "203.0.113.8")
+		if err != nil || nd.Anonymous == nil || nd.Key.TenantID == tenantID {
+			t.Fatalf("the new key's own anonymous session: %+v %v", nd, err)
+		}
+		if _, err := e.pool.Exec(context.Background(), `update kontra.tenants set expires_at = now() where id = $1`, nd.Key.TenantID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // D285, §6, §6.2: without anonymous: true an unknown key stays unknown_key on a gate with anonymous sessions (the
 // lost-welcome probe relies on it), and so does a probe from a key holding an anonymous session; a gate without
 // tunnel.anonymous answers the field from an unknown key anonymous_unavailable; the limits' refusals are the

@@ -18,7 +18,8 @@
 #   docker compose down            # -v also drops the databases and the ACME cache
 #
 # Settings, from the environment or an .env file beside this one:
-#   KONTRA_LISTEN_ADDR, KONTRA_PORT   where the public listener is published (default 0.0.0.0:8443; 443 for ACME)
+#   KONTRA_LISTEN_ADDR, KONTRA_PORT   where the public listener is published (default every address, IPv4 and IPv6,
+#                                    port 8443; 443 for ACME); an address restricts it (127.0.0.1, or [::1])
 #   KONTRA_METRICS_PORT              the metrics listener, on 127.0.0.1 (default 9090)
 #   KONTRA_CONFIG                    the configuration file (default deploy/compose/kontra.yaml)
 #   KONTRA_TLS_DIR, KONTRA_SIGNING_DIR   the certificate's and the signing key's directories (default
@@ -31,10 +32,10 @@
 # the project m3pentest; test/vps runs the ACME variant (KONTRA_KIT_TESTS=1).
 
 x-gate: &gate
-  image: kontra-gate:m3
+  image: kontra-gate:m4
   build:
     context: .
-    args: { VERSION: m3 }
+    args: { VERSION: m4 }
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -141,7 +142,7 @@ services:
     <<: *gate
     command: ["serve", "-f", "/etc/kontra/kontra.yaml"]
     ports:
-      - "${KONTRA_LISTEN_ADDR:-0.0.0.0}:${KONTRA_PORT:-8443}:8443"
+      - "${KONTRA_LISTEN_ADDR:+${KONTRA_LISTEN_ADDR:-}:}${KONTRA_PORT:-8443}:8443"
       - "127.0.0.1:${KONTRA_METRICS_PORT:-9090}:9090"
     healthcheck:
       test: ["CMD", "/usr/local/bin/kontra-gate", "health", "--url", "https://127.0.0.1:8443/healthz",

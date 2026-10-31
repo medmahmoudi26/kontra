@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"regexp"
@@ -39,8 +40,8 @@ func TestLoginConverts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	as.MintFor(h.Pool, acme)
 	origin := h.Front.URL
+	as.MintFor(h.Pool, acme, origin)
 
 	// An anonymous session hosting hello, public.
 	n := anonNode(t, ctx, h, "198.51.100.40", map[string]string{"hello": seller.URL}, nil, "hello")
@@ -204,5 +205,33 @@ func TestLoginConverts(t *testing.T) {
 	}
 	if b, err := os.ReadFile(CredentialsFile(home)); err == nil && strings.Contains(string(b), "api_key") {
 		t.Errorf("kontra login stored a key for a gate without sign-in: %s", b)
+	}
+
+	// A gate whose RFC 9728 document names this gate's authorization server (spec/tunnel.md §6.3 step 4, D305): the
+	// authorization server issues keys for this gate's origin only, so the login through the other gate is refused
+	// invalid_target, and nothing is stored for either origin.
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/oauth-protected-resource/mcp" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"resource": "http://" + r.Host + "/mcp", "authorization_servers": []string{as.Issuer()}})
+	}))
+	t.Cleanup(other.Close)
+	tokens := len(as.TokenRequests())
+	home = tempDir(t, h, "home-other-gate")
+	ro, err := h.Login(ctx, as, other.URL, home, as.CAFile, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro.Code != 1 || !strings.Contains(ro.Stderr+ro.Stdout, "invalid_target") {
+		t.Errorf("kontra login through another gate's document: exit %d\n%s\n%s", ro.Code, ro.Stdout, ro.Stderr)
+	}
+	if toks := as.TokenRequests(); len(toks) != tokens+1 || toks[tokens].Issued != "" || toks[tokens].Form.Get("resource") != other.URL {
+		t.Errorf("the token request through another gate's document: %+v", toks[tokens:])
+	}
+	if b, err := os.ReadFile(CredentialsFile(home)); err == nil && strings.Contains(string(b), "api_key") {
+		t.Errorf("kontra login through another gate's document stored a key: %s", b)
 	}
 }

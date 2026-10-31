@@ -19,7 +19,7 @@ than all of them: [`tunnel.md`](../spec/tunnel.md), [`relay.md`](../spec/relay.m
 [`0003_m4.sql`](../migrations/0003_m4.sql)). Where a spec differs from a document, the
 spec wins once the owner has signed it, and the difference is a numbered entry in
 [`decisions.md`](decisions.md) with its reason and evidence. Each milestone's decisions are under its own heading
-there (M4's, D268 to D298, were numbered after M3's review had merged).
+there (M4's, D268 onward under the M4 headings, were numbered after M3's review had merged).
 
 ## Section map: what the notes change in the PRD
 
@@ -51,8 +51,9 @@ M4's two gate runs are kits in this repository, run by hand (D282, D298): `scrip
 README's demo block, as written, in a fresh container against the staging gate, and `scripts/team-gate-vps.sh` brings
 the ACME variant up on a throwaway DigitalOcean droplet, hires through it from another machine and destroys it (DNS
 before the droplet; a listing that fails is never "nothing left"). Each prints its teardown before it starts; `test/demo`
-and `test/vps` test both (`make test-kits` with Docker rehearses each against a local gate), and the runs are recorded
-in `gate-runs-m4.md` beside this file.
+and `test/vps` test both (`make test-kits` with Docker rehearses each against a local gate). The runs themselves are M4's
+WP-09, not done yet: the staging gate is not deployed, and `gate-runs-m4.md` beside this file will record them once
+they have run (D306).
 
 ## Hiring from another agent (decided 25 Oct)
 

@@ -2189,7 +2189,7 @@ Five things stopped the pentest from running as D168 and D169 describe it. The D
 Temporal's frontend, which `compose.yaml` does not publish; and the `hooks.lifecycle` key it needs is refused at
 load until M5 (`internal/config/validate.go`), although the gate's half (the hooks snapshot, and the five
 activities scheduled by type name on the configured queue, `lifecycle.WorkerConfig.RemoteHooks`) is built since
-M1. Port 8333, SeaweedFS's S3 default, is held on this host by `windmill-seaweedfs`. SigV4 presigning signs the
+M1. Port 8333, SeaweedFS's S3 default, is held on the build host by another container. SigV4 presigning signs the
 host, so a presigned GET works only through the endpoint the gate signed it for, which the gate's container and
 the host's attackers must both reach. `go test`'s default 10-minute timeout is shorter than building the gate
 image on 2 CPUs and running the targets, and would panic with the stack left up. And a key file bind-mounted
@@ -3762,7 +3762,8 @@ an in-repository Admission server and authorization server, and anonymous limits
 `tunnel.anonymous`. `tck_jsonrpc`, `tck_rest` and `tck_behind_caddy` are `make tck` (D279). The two runs the owner's
 gate names are not tests in CI: the clean-laptop demo against the staging gate (`scripts/demo-clean-laptop.sh`, a
 container image built from `golang` with nothing else) and the team gate on a clean VPS (`scripts/team-gate-vps.sh`);
-both are recorded in `docs/gate-runs-m4.md` with what was run, what was seen and when everything was torn down.
+both are to be recorded in `docs/gate-runs-m4.md` with what was run, what was seen and when everything was torn down
+(not yet written: WP-09 has not run them, D306).
 
 ### D283. PRD §14's other M4 examples stay skeletons — **decided under the owner's standing instruction, 28 Oct**
 
@@ -4365,11 +4366,11 @@ droplet tagged `kontra-m4-gaterun`, no record for the name), waits until 1.1.1.1
 before compose asks Let's Encrypt, publishes on 443, checks the ports with bash's `/dev/tcp` (no nc), and hires through
 the gate with `curl` (A2A JSON-RPC and an MCP `search` on `/mcp`) from this host while a `kontra-demo` container is the
 team member's node. Droplets are only ever listed by the run's tag, `--teardown-only` reaps by tag and by the record's
-comment, and a droplet named `main-droplet` is refused even if tagged. The droplet's user data adds `docker-buildx` to
+comment, and a droplet the operator names in `KONTRA_VPS_PROTECTED` is refused even if tagged (D306). The droplet's user data adds `docker-buildx` to
 the plan's `docker.io` and `docker-compose-v2`: Ubuntu packages buildx separately, and without it Docker builds with its
 deprecated legacy builder.
 
-**Staging.** The manifests are private (`~/.kontra-secrets/gateway-staging/`), named `gate-v4` and `gate-v4-*` with the
+**Staging.** The manifests are private (kept outside this repository), named `gate-v4` and `gate-v4-*` with the
 labels the corrections give, the signing key mounted at `/etc/kontra-signing` as in production; `config.staging.json`
 names the same hosts and path.
 
@@ -4533,3 +4534,152 @@ in M4. It is follow-up work, beside D299's, for a public-repo issue, and §13.3 
 it is, an operator alerts on the hook queue's backlog age and on its own hook worker's activity failures (M5's plan
 alerts on `kontra-settlement`'s backlog age), and the gate's `kontra_gate_operator_patches_refused_total` counts the
 patches it drops.
+
+## From M4's review (31 Oct)
+
+The review of the merged M4 branch (`69bd5f0`) confirmed twenty findings, two of them twice. D303 to D306 record how
+each was settled.
+
+### D303. `/mcp` serves what the replica's registry serves, and its waits, sessions, streams and parts hold as the other routes' do — **decided under the owner's standing instruction, 31 Oct** (amends D271, D293, D299; completes D272, D288)
+
+The review found five places where the gate's own `/mcp` departed from the routes beside it. Decision:
+
+- **What `/mcp` serves is the registry's.** The A2A route resolves every request, `GetTask`, `CancelTask` and a
+  follow-up included, through the replica's in-memory registry: an enabled entry of kind `a2a` whose `allow:` admits
+  the principal, else `404` "unknown service". `/mcp` read the services table instead, and its task surfaces were keyed
+  by `buyer_id` only, so a key sharing the buyer of the key that hired (an operator-written key, or `MintRequest.BuyerID`)
+  but refused by `allow:` could read, cancel and answer the task, and so could the hiring key after its `allow:` entry
+  was removed; a reply to a task whose service was disabled was sent and failed the task `service_unavailable`.
+  `search`, `describe` and `hire` now see exactly what the registry serves, with its `allow:` (`gatemcp.Served`, wired
+  to `gate.Services.LookupByID`); a hire task is the reader's only while its service is so served and admits the
+  reader (`reply` "unknown task", `tasks/*` `-32602`, left out of `tasks/list`, nothing sent or cancelled); and the
+  hirer checks it again before a hire or a follow-up is sent (`relay.Hirer.Serves`, `relay.ErrNotServed`). A row the
+  registry refused to build (an annotation it cannot read) or has not loaded yet is an unknown service to `/mcp`, as to
+  the A2A route, instead of a hire that ran Admission without the operator's required extensions activated (D300) or
+  the seller's checked (D294). The answer is the unknown service, not `503`: the registry cannot tell a row it has not
+  loaded from one it refused, and the A2A route answers both the same. relay.md §12.2.
+- **A row that cannot be read is left out, never a failed request.** A services row whose `allow:` no longer parses (a
+  stored `oidc:sub:*`, a literal subject before D301 and refused since) made every `search` whose scan reached it `503`,
+  for every tenant's buyers on a multi-tenant gate. `search` now logs it (once per row per 10 minutes) and goes on past
+  it, and `describe` and `hire` answer it as an unknown service, as the registry leaves it out. No data step rewrites
+  such rows: on a team gate config refuses them at load and the sync rewrites the row; on a multi-tenant gate the rows
+  are the operator's, and the log names each.
+- **A plain wait reads a state and the event it comes from together.** A reply's wait read the row and then, in a
+  second statement, the seq of the task's last status event; a turn's terminal event committed between the two made the
+  wait end on the row's earlier question, so `reply` answered "Which date?" for a task that had completed (6 of 150 in
+  the reviewer's run) and the client's next reply was refused. The wait now reads both in one statement
+  (`store.Log.LoadHiredAsked`), and ends at `input-required` only on a question asked after the reply's own message.
+- **A session in use is not idle.** §11.2 keeps a session whose stream is open from the idle sweep; `/mcp` wrote
+  `last_seen_at` only when a request started, so a stock client whose standalone `GET` stream stayed open for an hour
+  had its session closed under it, and its next request was `404` (the TypeScript SDK does not re-initialize on `404`).
+  The replica serving a `/mcp` session's `GET` stream or a blocking `tasks/result` now keeps its `last_seen_at` fresh
+  (`mcprelay.Sessions.KeepSeen`, every `IdleWrite/2`). relay.md §12.
+- **`tasks/result` streams carry no event ids** (amends D299's bullet that kept their `k.` ids). D299 kept them under
+  §11.7, but `/mcp` never resumes a stream: its `GET` is always the session's notification stream, so a client whose
+  `tasks/result` stream was cut and that reconnected with `Last-Event-ID`, as the TypeScript SDK does once it has seen
+  an id, waited on a stream that never carries the answer. Without ids the client asks `tasks/result` again, which is
+  what §11.7's resumed stream would have made it do too (D203). The `elicitation/create` keeps its JSON-RPC id
+  `k.<taskId>.<seq>`, which a response names. relay.md §12.3.
+- **A bucketed part reaches an `/mcp` client as a presigned GET, through a node too.** A request on a hiring stream
+  keeps `kontra-blob:` refs, which the hiring node inlines for `/agents/…` answers only, so a `hire` result fetched
+  through a node carried a `resource_link` to `kontra-blob:<ref>` that no client can fetch. `/mcp` now renders a hire
+  task's parts for a caller whatever stream the request came on (`blob.ForCaller`): the node relays an MCP answer as
+  it is, its local client is a caller, and the node dials nothing a part names (D56). The node does not inline them
+  instead: a `resource_link` with a fetchable URL is what an MCP client expects for large content, where an embedded
+  resource of up to 64 MiB would land whole in a model's context, and `hire` cannot be sealed (D272), so there is
+  nothing for the node to open. relay.md §10.4, and the hiring node's comment.
+
+Tests: `TestReplyAnswersTheTurnItStarted` (the terminal event committed between the wait's read and its decision),
+`TestHireTaskSurfacesFollowTheRegistry`, `TestCatalogServesWhatTheRegistryServes`, `TestGateSessionInUseOutlivesTheIdleSweep`,
+`TestGateTasksResultStreamHasNoEventIDs`, `TestGateMCPRendersBlobsThroughANode` (`internal/gatemcp`), and through a whole
+replica in `TestGateMCPReviewFixes` (a key of the same buyer refused by `allow:`, the `allow:` entry removed, the
+service disabled, a row the registry refused, a row whose `allow:` does not parse, and forty `hire` and `reply` turns
+each answering its own).
+
+### D304. What an anonymous tenant's `calls` limit counts, an anonymous key is not rotated, and the sweeps run without the setting — **decided under the owner's standing instruction, 31 Oct** (amends D287, D292; completes D286)
+
+- **`calls` counts every relayed request and stream.** §6.2 gave `calls` the purpose of keeping a `--public` MCP
+  service from being an unbounded relay, but its mechanism counted plain `tools/call` only: `resources/read`,
+  `prompts/get`, `completion/complete`, any made-up method, an `initialize` and every `GET` or `subscriptions/listen`
+  stream went through with no slot. Every request with an `id` and a method that the relay forwards to an anonymous
+  tenant's service, and every `GET` or listen stream for as long as it is open, now takes one of the tenant's `calls`
+  slots (`mcprelay.Handler.takeRelay`, the same gate-wide `anon_calls` rows), with `429` `-32600` and `Retry-After`
+  over it; a notification, a client's response and what the gate answers itself (`tools/list` from its cache, durable
+  `tasks/*`, a gate-written stream) take none. Streams share the limit with calls rather than having one of their own:
+  a second limit would need a column of `anon_calls`, a key and its spec, for the same bound, and a stock client's
+  standalone `GET` refused `429` is not fatal to it (the TypeScript SDK reports it and goes on). The anonymous
+  principal still has no `max_sessions_per_principal` (relay.md §11.2): that is deliberate. tunnel.md §6.2.
+- **A key of an anonymous tenant is not rotated.** `kontra connect --rotate` sends `rotate_from` and never
+  `anonymous`, and the gate admitted the new key into the anonymous tenant through §5's rules, without the anonymous
+  decision: no `welcome.anonymous`, no end clock on the session, the 32-stream hiring cap instead of `hiring_streams`,
+  and no tenant counted. A chain of rotations held any number of sessions of one tenant at once until its end (the
+  sweeper's end still closed them all). A `rotate_from` naming a key of an anonymous tenant, live or ended, is now
+  `enroll_invalid`, and nothing is written; the node then sends its hello without `rotate_from`, which with no
+  credential asks for an anonymous session of its own, counted by §6.2. Rotating inside the tenant was the
+  alternative; an anonymous key has nothing a rotation protects that a new session does not give. tunnel.md §6.1, §12.
+- **The sweeps run on every multi-tenant gate.** They were built only with `tunnel.anonymous`, so a gate that turned
+  the setting off while anonymous tenants lived, typically against abuse, never ended them in the database nor purged
+  their tasks, objects, sessions and keys. The expiry and the purge now run on every multi-tenant gate, with the
+  block's values or §6.2's defaults; with no anonymous tenant they find nothing. tunnel.md §6.
+- **What anonymous tenants can keep stored is documented, not changed.** The creation limits count live tenants and an
+  ended tenant keeps its parts until its purge, so about (1 + `purge_after` / `ttl`) generations coexist: 13 with the
+  defaults, about 2.4 GiB per /24 and 0.8 TiB gate-wide. Counting unpurged tenants toward `tenants_per_network` would
+  give a network three anonymous sessions a day instead of three at a time, which the demo and the purpose of the
+  setting do not survive; deleting parts at the end would take away the day an operator has to look at an abusive
+  tenant before its purge. tunnel.md §6.2 states the bound and what lowers it (`purge_after`, `parts_bytes`, the
+  creation limits); a gate-wide cap on anonymous stored bytes is follow-up work if Cloud's figures need one.
+
+Tests: `TestEveryRelayedRequestIsCapped` (`internal/mcprelay`), `TestAnonymousKeyIsNotRotated` (`internal/enroll`),
+`TestAnonymousSweepsRunWithoutAnonymousSessions` (`internal/gate`).
+
+### D305. An authorization server issues a gate's API key only for that gate's origin — **decided under the owner's standing instruction, 31 Oct** (amends D278, D296)
+
+`kontra login` takes the authorization server from the gate's own RFC 9728 document and stores the `kk_` key it gets
+under that gate's origin, and `kontra connect` sends it there. Nothing bound the key to the gate: an API key has no
+audience, so a hostile gate whose document named Cloud's authorization server would receive the person's Cloud key
+once they signed in through it and connected. RFC 8707 makes the binding the authorization server's to keep.
+Decision: tunnel.md §6.3 step 4 now says the authorization server MUST issue a gate API key only when `resource` is the
+origin of the gate whose keys it issues, answer any other `invalid_target` (RFC 8707 §2), and name that origin on its
+consent page; this is a requirement of M5's authorization server (kontra-cloud#60), to be carried into that contract
+when it is written (this branch does not reach that repository). The in-repository doubles keep it
+(`oidctest.ForResource`; `DBMinter` and the e2e authorization server mint only for their gate's origin), and
+`kontra login` prints the authorization server's origin beside the gate's. It does not warn when the two are not the
+same site: Cloud's own sign-in is on another host than its gate, and the CLI cannot know an operator's sites. Tests:
+`TestLoginThroughAnotherGatesDocumentStoresNothing` (`internal/login`), and `login_converts` (another gate's document
+naming the gate's authorization server: refused `invalid_target`, nothing stored).
+
+### D306. The compose gate is M4's, published on both address families, its secrets ignored, the kits neutral, and the gate runs not done yet — **decided under the owner's standing instruction, 31 Oct** (amends D282, D298)
+
+- **The compose image is `kontra-gate:m4`, built with `VERSION m4`.** It was still `kontra-gate:m3`, so every M4 compose
+  gate reported `m3` (`kontra-gate version`, `gate_replicas.version`, `/mcp`'s `serverInfo`, the hook clients'
+  User-Agent, the VPS run's record), and an M3 host that upgraded with `docker compose up -d` and no `--build` kept
+  running its M3 image, whose embedded migrations never apply `0003_m4.sql`. The pentest's default image follows
+  (`KONTRA_PENTEST_IMAGE`, `test/pentest`); its project stays `m3pentest` by default, which D266 already lets a run
+  beside another checkout's override. The README's upgrade is `git pull && docker compose up -d --build --wait`.
+- **The gate is published on IPv4 and IPv6.** `kontra.vps.yaml` advises an AAAA record, but compose published on
+  `0.0.0.0`, which Docker binds on IPv4 only, so IPv6 clients were refused. The default now names no host address
+  (`${KONTRA_LISTEN_ADDR:+${KONTRA_LISTEN_ADDR:-}:}${KONTRA_PORT:-8443}:8443`), which Docker publishes on both families;
+  `KONTRA_LISTEN_ADDR` still restricts it, and set but empty means the default, never `0.0.0.0`.
+- **An operator's secrets stay out of git and of the build.** The README's VPS steps write `.env`, the operator's copy
+  of the configuration and the card-signing key into the working tree; a root `.gitignore` now ignores them (and a
+  provided certificate), keeping the shipped configurations tracked, and `.dockerignore` keeps `.env` and `deploy/` out
+  of the build context.
+- **The kits name no one's infrastructure.** `scripts/team-gate-vps.sh` defaulted to the owner's DigitalOcean key id
+  and SSH key file and refused to delete one droplet by its name. `KONTRA_VPS_DO_KEY` and `KONTRA_VPS_SSH_KEY` are now
+  required (exit 2 when unset), the droplets never deleted are those `KONTRA_VPS_PROTECTED` names (none by default),
+  and the tests use neutral values; the public files no longer name a host's fleet or a private secrets path.
+- **The gate runs are not done.** The README's demo is written for the staging gate, `gateway.kontra.run`, which is
+  not deployed: it does not resolve, the clean-laptop and VPS runs (WP-09) have not been made on this head, and
+  `docs/gate-runs-m4.md` does not exist. The README now says the staging gate is not up yet and points at the
+  from-source gate meanwhile; `docs/README.md` and D282 say the record will be written. **M4 is not gated until
+  WP-09 has deployed staging from this head, run `make test-kits`, the clean laptop in source mode and the VPS run
+  (dry run, then a real droplet with Let's Encrypt), committed `gate-runs-m4.md`, and, after the merge, run
+  `demo-clean-laptop.sh --published --expect <merge commit>`.** None of that is this review's to do: it touches
+  staging, DigitalOcean and Cloudflare, which the orchestrator runs (O2).
+- **Smaller corrections.** The demo's prerequisite is Node 22.19 or later (the pinned inspector and its undici need
+  it); compose has three one-shot jobs; M4's decisions run from D268 under their headings. `demo-clean-laptop.sh`
+  creates the laptop's log before its follower starts: under load the loop read it first and failed
+  (`TestDemoPayloadModes` failed once in `make check` on this host for that reason).
+
+Tests: `TestComposeTeamGate` (the image, its version and the publish default), `TestOperatorSecretsAreIgnored` and the
+VPS kit's refusals without `KONTRA_VPS_DO_KEY` or `KONTRA_VPS_SSH_KEY` and its protected-droplet case (`test/vps`).

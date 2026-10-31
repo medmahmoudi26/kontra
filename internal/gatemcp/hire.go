@@ -14,6 +14,7 @@ import (
 
 	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcprelay"
@@ -124,6 +125,10 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 	out, err := h.deps.Hirer.Hire(hctx, HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key})
 	var xe *relay.ExtensionsRequiredError
 	switch {
+	case errors.Is(err, relay.ErrNotServed):
+		// The registry stopped serving it since the catalog read it (D303).
+		h.toolError(rq, ErrUnknownService)
+		return
 	case errors.As(err, &xe):
 		rq.result(errorResult(extensionsText("service "+ref.String(), "hire", xe.URIs,
 			base+"/agents/"+ref.String())+" No task was created.", nil))
@@ -229,6 +234,11 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 	case err != nil:
 		h.internal(rq, "read the task", err)
 		return
+	case !admitsTask(rq.ctx(), h.deps.Served, rq.p, row):
+		// The A2A route answers a follow-up "unknown service" when its service is not served to the principal (disabled,
+		// its allow: no longer admitting it): nothing is sent, and the task is left as it is (D303).
+		rq.result(errorResult("unknown task", nil))
+		return
 	}
 	switch {
 	case row.State == store.StateQuoted:
@@ -243,6 +253,9 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 	after, err := h.deps.Hirer.Reply(rq.ctx(), rq.p, row, parts)
 	var xe *relay.ExtensionsRequiredError
 	switch {
+	case errors.Is(err, relay.ErrNotServed):
+		rq.result(errorResult("unknown task", nil))
+		return
 	case errors.As(err, &xe):
 		ref := h.serviceRef(row)
 		rq.result(errorResult(extensionsText("the task's service "+ref, "reply", xe.URIs,
@@ -322,7 +335,9 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 	aw.begin()
 	var row *store.TaskRow
 	for {
-		r, err := h.deps.Log.Load(ctx, id)
+		// The row and the seq of the event its state comes from, in one statement (one snapshot): read apart, a turn's
+		// terminal event committed between the two reads would end a reply's wait on the row's earlier question.
+		r, asked, err := h.deps.Log.LoadHiredAsked(ctx, rq.p.BuyerID, id)
 		if err != nil {
 			if ctx.Err() != nil {
 				return false
@@ -331,7 +346,10 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 			return true
 		}
 		row = r
-		if h.turnOver(ctx, row, after) {
+		if h.deps.afterRead != nil {
+			h.deps.afterRead(row)
+		}
+		if turnOver(row, asked, after) {
 			break
 		}
 		select {
@@ -363,18 +381,16 @@ func (h *Handler) plainWait(rq *request) time.Duration {
 }
 
 // turnOver reports whether a plain wait ends at row: terminal, quoted, or input-required with its question asked
-// after version after.
-func (h *Handler) turnOver(ctx context.Context, row *store.TaskRow, after int64) bool {
+// after version after. asked is the seq of the task or status event row's state comes from, read with row
+// (store.Log.LoadHiredAsked): a seq read on its own may be a later event's, which row does not hold yet.
+func turnOver(row *store.TaskRow, asked, after int64) bool {
 	switch {
 	case row.State.Terminal(), row.State == store.StateQuoted:
 		return true
 	case row.State != store.StateInputRequired:
 		return false
-	case after == 0:
-		return true
 	}
-	seq, err := h.deps.Log.StatusSeq(ctx, row.ID)
-	return err == nil && seq > after
+	return after == 0 || asked > after
 }
 
 // plainAnswer is the CallToolResult of a plain hire or reply for the task as row has it (§12.2).
@@ -383,7 +399,7 @@ func (h *Handler) plainAnswer(ctx context.Context, row *store.TaskRow, p auth.Pr
 	case row.State.Terminal():
 		task := row.Snapshot
 		if h.deps.Render != nil {
-			if t, err := h.deps.Render.Task(ctx, task); err == nil {
+			if t, err := h.deps.Render.Task(blob.ForCaller(ctx), task); err == nil {
 				task = t
 			}
 		}

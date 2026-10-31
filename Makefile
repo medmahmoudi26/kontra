@@ -77,7 +77,7 @@ test-kits:
 
 # The pentest (M3 WP-10, D168, D186): PRD §12's list and M3's own surface against the compose team gate, built from
 # this repository under the compose project $(KONTRA_PENTEST_PROJECT) (m3pentest by default). pentest-image builds the
-# gate's image, $(KONTRA_PENTEST_IMAGE) (kontra-gate:m3 by default), once, with the docker driver's builder
+# gate's image, $(KONTRA_PENTEST_IMAGE) (kontra-gate:m4 by default), once, with the docker driver's builder
 # (BUILDX_BUILDER=default: never another project's builder); `go test` never builds it. Another checkout running its
 # pentest on the same Docker sets both to names of its own: one project would tear the other's stack down, one tag
 # run the other's gate. pentest runs
@@ -86,7 +86,7 @@ test-kits:
 # processes the run starts die with the test binary (a parent-death signal). KONTRA_PENTEST_REPORT names the file the probe table is written to.
 KONTRA_PENTEST_TIMEOUT ?= 90m
 KONTRA_PENTEST_PROJECT ?= m3pentest
-KONTRA_PENTEST_IMAGE ?= kontra-gate:m3
+KONTRA_PENTEST_IMAGE ?= kontra-gate:m4
 export KONTRA_PENTEST_PROJECT KONTRA_PENTEST_IMAGE
 PENTEST_COMPOSE = docker compose -p $(KONTRA_PENTEST_PROJECT) -f compose.yaml -f compose.pentest.yaml
 

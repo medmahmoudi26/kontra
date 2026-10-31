@@ -1377,6 +1377,18 @@ func (s *Services) Lookup(_ context.Context, tenant, name string) (*a2ahttp.Serv
 	return e.served, nil
 }
 
+// LookupByID is Lookup by the tenant's id: the service as this replica serves it, disabled ones included, or nil when
+// it serves none of that name (a row it has not loaded yet, or refused to build: apply leaves such a row out). The
+// gate's own /mcp reads it to list, hire and follow exactly what the A2A route serves (relay.md §12.2, D303).
+func (s *Services) LookupByID(tenantID uuid.UUID, name string) *a2ahttp.Service {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if e := s.byID[svcID{tenantID, name}]; e != nil {
+		return e.served
+	}
+	return nil
+}
+
 // errNoService is the registry's answer for a service it does not serve.
 var errNoService = errors.New("gate: no such service")
 

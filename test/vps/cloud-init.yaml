@@ -3,8 +3,8 @@
 # Docker, Compose v2 and buildx from Ubuntu's own packages, and nothing else. The script ships the repository and runs
 # compose.yaml with deploy/compose/kontra.vps.yaml over ssh.
 #
-# ASCII only (test/vps checks it): a non-ASCII byte in user data has broken cloud-init's parsing of a whole fleet's
-# boot before (the Windmill fleet), and the failure shows only as a droplet without Docker.
+# ASCII only (test/vps checks it): a non-ASCII byte in user data can break cloud-init's parsing of the whole file,
+# and the failure shows only as a droplet without Docker.
 package_update: true
 packages:
   - docker.io

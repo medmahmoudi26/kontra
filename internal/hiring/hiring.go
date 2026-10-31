@@ -647,9 +647,10 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 // verified (RewriteCard) and is never served unverified; an answer on a card route that is not one JSON object
 // with exact keys, an event stream included, is not served either (502).
 //
-// Parts. Only answers on A2A routes (/agents/…) are walked: MCP and the gate's own routes carry no kontra-blob:
-// part (D167: the bucket carries A2A parts only), and an MCP answer is no A2A body (an MCP task's status is a
-// string).
+// Parts. Only answers on A2A routes (/agents/…) are walked: an MCP answer is no A2A body (an MCP task's status is a
+// string). /mcp/{svc} carries no kontra-blob: part (D167: MCP has no parts in the bucket), and the gate's own /mcp
+// renders a hire task's bucketed parts as presigned GETs for every reader, a hiring stream's included
+// (blob.ForCaller, D303): its client is a caller, and the node fetches nothing a part names (D56).
 func (s *Server) modify(res *http.Response) error {
 	req := res.Request
 	ctx := req.Context()

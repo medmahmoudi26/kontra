@@ -74,6 +74,7 @@ type Deps struct {
 	Log            *store.Log          // the task log hire tasks are read from
 	Waker          store.TaskWaker     // the replica's LISTEN connection: plain waits, tasks/result, GET streams
 	Render         *blob.Renderer      // kontra-blob: parts as presigned GETs in what /mcp answers; nil renders none
+	Served         Served              // the replica's registry: reply's task is the reader's only while served to it (D303)
 	AllowedOrigins []string            // mcp.allowed_origins (§11.1)
 	Logger         *slog.Logger
 	// PlainWait is how long a plain hire and a reply wait (PlainWait when zero; tests shorten it).
@@ -82,6 +83,9 @@ type Deps struct {
 	// zero; tests shorten it).
 	PlainBudget time.Duration
 	now         func() time.Time
+	// afterRead, when set, runs after each read of a plain wait (tests: an event committed between the wait's read and
+	// its decision).
+	afterRead func(*store.TaskRow)
 }
 
 // Handler serves POST, GET and DELETE on /mcp after the edge and the credential check.
@@ -366,6 +370,8 @@ func (h *Handler) session(rq *request) {
 	}
 	switch rq.r.Method {
 	case http.MethodGet:
+		// The session is in use while its stream is open: the idle sweep leaves it (§11.2, D303).
+		defer h.deps.Sessions.KeepSeen(sess.Hash, h.now, h.log)()
 		h.deps.Elicitations.Stream(rq.ctx(), rq.w, sid, sess)
 		return
 	case http.MethodDelete:

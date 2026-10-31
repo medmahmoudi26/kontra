@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -27,7 +28,14 @@ import (
 //     tasks/list, tasks/get, tasks/result and tasks/cancel on the hire key's session; the hire key's task is not
 //     cancelled;
 //   - a 2025-06-18 session decides by its own version: a request naming 2025-11-25 in MCP-Protocol-Version is 400,
-//     tasks/* are -32601 and hire has no execution (D293).
+//     tasks/* are -32601 and hire has no execution (D293);
+//   - M4's review (D303): /mcp follows what the replica's registry serves. A key that shares the hiring key's buyer but
+//     that the service's allow: does not admit gets -32602 from tasks/get and tasks/cancel, sees nothing in tasks/list,
+//     and its reply is "unknown task", as the A2A route answers it 404; so does the hiring key once its allow: entry is
+//     removed, and once the service is disabled, its reply sending nothing and the task left at input-required. A row
+//     the registry refused to build is no service to search, describe or hire, and a row whose allow: does not parse
+//     fails no search;
+//   - a reply answers the turn it started, every time (a loop of hire "ask" and reply; MCP-2).
 func TestGateMCPReviewFixes(t *testing.T) {
 	e := newGateEnv(t)
 	ctx := context.Background()
@@ -39,6 +47,11 @@ func TestGateMCPReviewFixes(t *testing.T) {
     allow: ["org:default"]
     task: { timeout: 10m, retries: 1 }
     annotations: { card_extensions: [ { uri: "`+escrow+`", required: true } ] }
+  narrow:
+    kind: a2a
+    backend: { a2a: { url: "`+kinds.srv.URL+`/base", allow_private: true } }
+    allow: ["key:kk_buyer_*"]
+    task: { timeout: 10m, retries: 1 }
 `)
 	timing := fastTiming
 	timing.PlainWait = 4 * time.Second
@@ -159,6 +172,133 @@ func TestGateMCPReviewFixes(t *testing.T) {
 	}
 	if _, ans = c.rpc("tasks/cancel", `{"taskId":"`+slow.Task.TaskID+`"}`); !strings.Contains(string(ans.Result), `"status":"cancelled"`) {
 		t.Errorf("the hire key's tasks/cancel: %s", ans.raw)
+	}
+
+	// D303: /mcp follows the registry. narrow admits key:kk_buyer_* (the hire key); another key of the same buyer is
+	// refused by its allow:.
+	other, err := keys.Mint(ctx, auth.MintRequest{TenantID: tid, Name: "other", BuyerID: &hire.BuyerID, Actor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ans = c.call("hire", `{"service":"narrow","message":"ask"}`)
+	q := ans.tool(t)
+	if q.IsError || q.Structured.State != "TASK_STATE_INPUT_REQUIRED" {
+		t.Fatalf("a hire of narrow that asks: %s", ans.raw)
+	}
+	state := func() string {
+		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, q.Structured.TaskID)
+	}
+	cancels := kinds.count("CancelTask")
+	turns := len(kinds.turnTexts())
+	unknown := func(what string, cl *mcpClient) {
+		t.Helper()
+		if _, ans := cl.rpc("tasks/get", `{"taskId":"`+q.Structured.TaskID+`"}`); ans.Error == nil || ans.Error.Code != -32602 {
+			t.Errorf("%s: tasks/get %s", what, ans.raw)
+		}
+		if _, ans := cl.rpc("tasks/list", `{}`); ans.Error != nil || strings.Contains(string(ans.Result), q.Structured.TaskID) {
+			t.Errorf("%s: tasks/list %s", what, ans.raw)
+		}
+		if _, ans := cl.rpc("tasks/cancel", `{"taskId":"`+q.Structured.TaskID+`"}`); ans.Error == nil || ans.Error.Code != -32602 {
+			t.Errorf("%s: tasks/cancel %s", what, ans.raw)
+		}
+		if _, ans := cl.call("reply", `{"taskId":"`+q.Structured.TaskID+`","message":"tomorrow"}`); !ans.tool(t).IsError || ans.tool(t).text() != "unknown task" {
+			t.Errorf("%s: reply %s", what, ans.raw)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if st := state(); st != "input-required" || kinds.count("CancelTask") != cancels || len(kinds.turnTexts()) != turns {
+			t.Fatalf("%s: the task is %s, the seller saw %d cancels and %d turns (before: %d, %d)", what, st,
+				kinds.count("CancelTask"), len(kinds.turnTexts()), cancels, turns)
+		}
+	}
+	oc := newMCPClient(t, a.url, other.Secret)
+	oc.initialize(`{}`)
+	unknown("a key of the same buyer that allow: does not admit", oc)
+	// The control: the A2A route answers that key 404 unknown service.
+	req, _ = http.NewRequest(http.MethodPost, a.url+"/agents/narrow", strings.NewReader(
+		`{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"`+q.Structured.TaskID+`"}}`))
+	req.Header.Set("Authorization", "Bearer "+other.Secret)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("A2A-Version", "1.0")
+	if resp, err = http.DefaultClient.Do(req); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("the control, A2A GetTask by the other key: %d", resp.StatusCode)
+	}
+	if _, ans = c.rpc("tasks/get", `{"taskId":"`+q.Structured.TaskID+`"}`); ans.Error != nil {
+		t.Fatalf("the hiring key's tasks/get: %s", ans.raw)
+	}
+	// The row changes as an operator would change it (NOTIFY kontra_services), and the registry follows.
+	change := func(sql, what string, served bool) {
+		t.Helper()
+		if _, err := e.pool.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.pool.Exec(ctx, `select pg_notify('kontra_services', 'default/narrow')`); err != nil {
+			t.Fatal(err)
+		}
+		// The registry's view, as the A2A route reads it (describe would read the row itself).
+		eventually(t, 20*time.Second, what, func() bool {
+			req, _ := http.NewRequest(http.MethodGet, a.url+"/agents/narrow/.well-known/agent-card.json", nil)
+			req.Header.Set("Authorization", "Bearer "+hire.Secret)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return false
+			}
+			resp.Body.Close()
+			return (resp.StatusCode == http.StatusNotFound) != served
+		})
+	}
+	change(`update kontra.services set allow = '{key:kk_nobody_*}' where name = 'narrow'`, "the allow: entry removed", false)
+	unknown("the hiring key once its allow: entry is removed", c)
+	change(`update kontra.services set allow = '{key:kk_buyer_*}' where name = 'narrow'`, "the allow: entry back", true)
+	change(`update kontra.services set disabled_at = now() where name = 'narrow'`, "the service disabled", false)
+	unknown("the hiring key once the service is disabled", c)
+
+	// A row the registry refuses to build (an annotation it cannot read): no service to search, describe or hire, and no
+	// task (MCP-4). A row whose allow: does not parse fails no search (MCP-3).
+	if _, err := e.pool.Exec(ctx, `insert into kontra.services (tenant_id, name, kind, backend, allow, source, annotations)
+		values ($1, 'refused', 'a2a', $2::jsonb, '{org:default}', 'db', '{"card_extensions":"x"}'),
+		       ($1, 'unparsed', 'a2a', $2::jsonb, '{oidc:sub:*}', 'db', '{}')`, tid, `{"a2a": {"url": "`+kinds.srv.URL+`/base", "allow_private": true}}`); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"refused", "unparsed"} {
+		if _, err := e.pool.Exec(ctx, `select pg_notify('kontra_services', $1)`, "default/"+n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(2 * time.Second)
+	before = tasks()
+	_, ans = c.call("search", `{}`)
+	if r := ans.tool(t); r.IsError || ans.Error != nil || strings.Contains(r.text(), `"refused"`) || strings.Contains(r.text(), `"unparsed"`) ||
+		!strings.Contains(r.text(), `"kinds"`) {
+		t.Errorf("search beside a refused and an unparsed row: %s", ans.raw)
+	}
+	for _, n := range []string{"refused", "unparsed"} {
+		if _, ans := c.call("describe", `{"service":"`+n+`"}`); !ans.tool(t).IsError || !strings.Contains(ans.tool(t).text(), "unknown service") {
+			t.Errorf("describe of %s: %s", n, ans.raw)
+		}
+		if _, ans := c.call("hire", `{"service":"`+n+`","message":"hi"}`); !ans.tool(t).IsError || !strings.Contains(ans.tool(t).text(), "unknown service") {
+			t.Errorf("hire of %s: %s", n, ans.raw)
+		}
+	}
+	if n := tasks(); n != before {
+		t.Errorf("hires of rows the registry does not serve created %d tasks", n-before)
+	}
+
+	// MCP-2: a reply answers the turn it started, never the question before it.
+	for i := range 40 {
+		_, ans := c.call("hire", `{"service":"kinds","message":"ask"}`)
+		q := ans.tool(t)
+		if q.IsError || q.Structured.State != "TASK_STATE_INPUT_REQUIRED" {
+			t.Fatalf("hire %d: %s", i, ans.raw)
+		}
+		day := fmt.Sprintf("day %d", i)
+		_, ans = c.call("reply", `{"taskId":"`+q.Structured.TaskID+`","message":"`+day+`"}`)
+		if r := ans.tool(t); r.IsError || r.Structured.State != "TASK_STATE_COMPLETED" || r.text() != "booked for "+day {
+			t.Fatalf("reply %d answered %s, want the completed turn", i, ans.raw)
+		}
 	}
 
 	// A 2025-06-18 session.

@@ -20,6 +20,7 @@ import (
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/mcpwire"
+	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/strictjson"
 )
@@ -34,6 +35,7 @@ type HireTasks struct {
 	lc        HireLifecycle
 	hirer     Hirer
 	render    *blob.Renderer
+	served    Served
 	logger    *slog.Logger
 	keepAlive time.Duration // a gate-served stream's comment interval (§2.2)
 	reread    time.Duration // how often a blocked tasks/result reads the log without a wake
@@ -69,6 +71,7 @@ type HireTasksConfig struct {
 	Lifecycle HireLifecycle
 	Hirer     Hirer          // §12.4's accepted answer is the §7 follow-up, as reply sends it
 	Render    *blob.Renderer // kontra-blob: parts as presigned GETs; nil renders none
+	Served    Served         // the replica's registry: a task is the reader's only while its service is served to it (D303)
 	Logger    *slog.Logger
 }
 
@@ -83,7 +86,7 @@ func NewHireTasks(cfg HireTasksConfig) (*HireTasks, error) {
 	idle := make(chan struct{})
 	close(idle)
 	return &HireTasks{log: cfg.Log, waker: cfg.Waker, lc: cfg.Lifecycle, hirer: cfg.Hirer, render: cfg.Render,
-		logger: cfg.Logger.With("component", "gate-mcp-tasks"), keepAlive: keepAliveEvery, reread: 5 * time.Second,
+		served: cfg.Served, logger: cfg.Logger.With("component", "gate-mcp-tasks"), keepAlive: keepAliveEvery, reread: 5 * time.Second,
 		settle: CancelSettle, cancels: map[uuid.UUID]time.Time{}, idle: idle}, nil
 }
 
@@ -106,16 +109,24 @@ var errLifecycleUnavailable = errors.New("gatemcp: the task's lifecycle is unava
 // load is the reader's hire task taskID names, nil when it names none of them, and asked, the seq of the task or status
 // event its state comes from, read with it (store.Log.LoadHiredAsked): at input-required, the event that asked the
 // question the row carries, whose gate id k.<taskId>.<asked> names it (§12.4). A principal that may not hire (spec
-// §2.3) has none: the handler refuses it before (403), and this holds for every caller of HireTasks.
+// §2.3) has none: the handler refuses it before (403), and this holds for every caller of HireTasks. Nor does a reader
+// whose task's service this replica no longer serves to it (disabled, its allow: no longer admitting the reader, a
+// row the registry refused), as the A2A route answers GetTask, CancelTask and a follow-up of it "unknown service"
+// (Served, D303).
 func (t *HireTasks) load(ctx context.Context, rd Reader, taskID uuid.UUID) (*store.TaskRow, int64, error) {
 	if taskID == uuid.Nil || !rd.Principal.MayHire() {
 		return nil, 0, nil
 	}
 	row, asked, err := t.log.LoadHiredAsked(ctx, rd.Principal.BuyerID, taskID)
-	if errors.Is(err, a2a.ErrTaskNotFound) {
+	switch {
+	case errors.Is(err, a2a.ErrTaskNotFound):
+		return nil, 0, nil
+	case err != nil:
+		return nil, 0, err
+	case !admitsTask(ctx, t.served, rd.Principal, row):
 		return nil, 0, nil
 	}
-	return row, asked, err
+	return row, asked, nil
 }
 
 // taskIDParam reads params.taskId as a gate task id (uuid.Nil when it is none).
@@ -171,7 +182,7 @@ func (t *HireTasks) modernGet(ctx context.Context, row *store.TaskRow, asked int
 	case row.State.Terminal() && row.State != store.StateCanceled:
 		task := row.Snapshot
 		if t.render != nil {
-			r, err := t.render.Task(ctx, task)
+			r, err := t.render.Task(blob.ForCaller(ctx), task) // a caller's, through a node too (D303)
 			if err != nil {
 				return nil, err
 			}
@@ -189,8 +200,10 @@ func (t *HireTasks) modernGet(ctx context.Context, row *store.TaskRow, asked int
 // Result answers a legacy tasks/result: blocks (on the waker) until the task ends, delivering §12.4's form
 // elicitation on its own SSE response stream first (a text-only question, to a reader that declared form
 // elicitation: elicitation/create {mode: form, message, requestedSchema {reply: string}} with the related-task _meta,
-// its JSON-RPC and event id the gate id k.<taskId>.<seq> of the event that asked), then the rendered outcome (Render)
-// with the related-task _meta. A task that has ended when asked is answered in JSON. sid is the session's
+// its JSON-RPC id the gate id k.<taskId>.<seq> of the event that asked), then the rendered outcome (Render) with the
+// related-task _meta. A task that has ended when asked is answered in JSON. The stream's events carry no event id, as
+// /mcp's GET stream and a plain hire's carry none: /mcp resumes no stream, and a GET naming a Last-Event-ID is its
+// plain GET stream, which would never carry this request's answer (§12.3, D303). sid is the session's
 // Mcp-Session-Id.
 func (t *HireTasks) Result(ctx context.Context, w http.ResponseWriter, sid string, rd Reader, m *mcpwire.Message) {
 	row, _, err := t.load(ctx, rd, taskIDParam(m.Params))
@@ -222,7 +235,7 @@ func (t *HireTasks) Result(ctx context.Context, w http.ResponseWriter, sid strin
 			return
 		}
 		if row.State.Terminal() {
-			msg, seq, err := t.outcome(ctx, row, m.ID)
+			msg, err := t.outcome(ctx, row, m.ID)
 			if err != nil {
 				t.logger.Warn("tasks/result: the outcome could not be rendered", "task_id", id, "error", err)
 				if !s.Started() {
@@ -239,7 +252,7 @@ func (t *HireTasks) Result(ctx context.Context, w http.ResponseWriter, sid strin
 				_, _ = w.Write(msg)
 				return
 			}
-			_ = s.Event(store.GateRequestID(id, seq), msg)
+			_ = s.Event("", msg)
 			return
 		}
 		if err := s.Start(); err != nil {
@@ -249,7 +262,7 @@ func (t *HireTasks) Result(ctx context.Context, w http.ResponseWriter, sid strin
 			// asked is read with row: the request's id names the event whose text it carries.
 			if ir, text, _ := Question(row.Snapshot, rd); ir && !delivered[asked] {
 				gateID := store.GateRequestID(id, asked)
-				if err := s.Event(gateID, elicitationRequest(gateID, id, text)); err != nil {
+				if err := s.Event("", elicitationRequest(gateID, id, text)); err != nil {
 					return
 				}
 				delivered[asked] = true
@@ -281,13 +294,13 @@ func elicitationRequest(gateID string, task uuid.UUID, text string) []byte {
 }
 
 // outcome is an ended task's tasks/result answer to the request id (§12.2): the rendered CallToolResult (never a
-// JSON-RPC error) with the related-task key, and the seq of the event that ended it.
-func (t *HireTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.RawMessage) ([]byte, int64, error) {
+// JSON-RPC error) with the related-task key.
+func (t *HireTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.RawMessage) ([]byte, error) {
 	task := row.Snapshot
 	if t.render != nil {
-		r, err := t.render.Task(ctx, task)
+		r, err := t.render.Task(blob.ForCaller(ctx), task) // a caller's, through a node too (D303)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		task = r
 	}
@@ -298,17 +311,14 @@ func (t *HireTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.
 	res.Meta[mcpwire.MetaRelatedTask] = relatedTask(row.ID)
 	b, err := json.Marshal(res)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	seq, err := t.log.StatusSeq(ctx, row.ID)
-	if err != nil {
-		return nil, 0, err
-	}
-	return responseBytes(reqID, "result", b), seq, nil
+	return responseBytes(reqID, "result", b), nil
 }
 
 // List answers a legacy tasks/list: the buyer's hire tasks across services, newest first, gate-minted cursors
-// (§12.2).
+// (§12.2), but those whose service this replica does not serve to the reader (load's rule, D303): a page may then hold
+// fewer than store.HiredPageSize tasks, and nextCursor still names the next.
 func (t *HireTasks) List(ctx context.Context, rd Reader, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {
 	cursor := ""
 	if v, ok := mcpwire.Member(params, "cursor"); ok && string(bytes.TrimSpace(v)) != "null" {
@@ -331,6 +341,9 @@ func (t *HireTasks) List(ctx context.Context, rd Reader, params json.RawMessage)
 	svcs := map[string]store.ServiceRef{}
 	tasks := make([]any, 0, len(rows))
 	for _, r := range rows {
+		if !admitsTask(ctx, t.served, rd.Principal, r) {
+			continue
+		}
 		k := r.TenantID.String() + "/" + r.Service
 		svc, ok := svcs[k]
 		if !ok {
@@ -648,6 +661,10 @@ func (h *Handler) tasks(rq *request) {
 	)
 	switch m.Method {
 	case "tasks/result":
+		if rq.sess != nil {
+			// The session is in use while tasks/result blocks: the idle sweep leaves it (§11.2, D303).
+			defer h.deps.Sessions.KeepSeen(rq.sess.Hash, h.now, h.log)()
+		}
 		t.Result(rq.ctx(), rq.w, rq.sid, rd, m)
 		return
 	case "tasks/get":
@@ -670,6 +687,9 @@ func (h *Handler) writeTaskAnswer(rq *request, res json.RawMessage, rpcErr *mcpw
 	case errors.Is(err, errLifecycleUnavailable):
 		h.log.Warn("mcp: a task's lifecycle did not accept the request in time", "method", m.Method, "error", err)
 		writeError(rq.w, http.StatusServiceUnavailable, m.ID, mcpwire.CodeInternal, "the task's lifecycle is unavailable", nil)
+	case errors.Is(err, relay.ErrNotServed):
+		// The task's service stopped being served to the reader between the read and the follow-up (D303).
+		writeRPCError(rq.w, rq.sid, m.ID, errTaskNotFound)
 	case errors.As(err, &refusal):
 		h.refused(rq, "send the follow-up", refusal.err)
 	case err != nil:

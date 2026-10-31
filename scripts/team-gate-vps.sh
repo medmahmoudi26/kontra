@@ -36,7 +36,7 @@
 # A crashed run is reaped with --teardown-only, in the same order: every record with the run's comment, then, once that
 # succeeded, every droplet tagged kontra-m4-gaterun (its ttl tag says when it was due). A record named the name whose
 # comment is another is not a run's: it is reported and left, and the reap fails. Droplets are only ever listed by that
-# tag; a droplet named main-droplet is never deleted. The name must be m4-teamgate<…> in the zone.
+# tag; a droplet named in KONTRA_VPS_PROTECTED is never deleted. The name must be m4-teamgate<…> in the zone.
 #
 # Usage: scripts/team-gate-vps.sh [--dry-run | --teardown-only | --host ADDR] [--published --expect <commit>] [--record <file>]
 #   --dry-run        the pre-flight and the plan, printed; nothing created
@@ -54,7 +54,10 @@
 #                    probes ADDR, and a2a send are skipped
 # Settings (environment): CLOUDFLARE_API_TOKEN (required but with --host; DNS edit on the zone), KONTRA_VPS_NAME
 # (m4-teamgate.kontra.run), KONTRA_VPS_ZONE (kontra.run), KONTRA_VPS_REGION (fra1), KONTRA_VPS_SIZE (s-2vcpu-4gb),
-# KONTRA_VPS_DO_KEY (58735991), KONTRA_VPS_SSH_KEY (~/.ssh/kontra-client01-fleet), KONTRA_VPS_TTL (14400 s).
+# KONTRA_VPS_TTL (14400 s); KONTRA_VPS_DO_KEY (required but with --teardown-only and --host: the id of your DigitalOcean
+# SSH key, whose MD5 fingerprint must be KONTRA_VPS_SSH_KEY.pub's), KONTRA_VPS_SSH_KEY (required but with
+# --teardown-only: the private key's file, with .pub beside it), KONTRA_VPS_PROTECTED (droplet names, separated by
+# spaces or commas, never deleted even if tagged; none by default).
 # Prerequisites: doctl (authenticated), docker (a running daemon), curl, jq, ssh, ssh-keygen, openssl, git, and
 # CLOUDFLARE_API_TOKEN; run from the repository. --teardown-only needs only doctl, curl, jq and the token; --host needs
 # neither doctl nor the token. Exit 2 when one is missing.
@@ -104,8 +107,9 @@ name=${KONTRA_VPS_NAME:-m4-teamgate.kontra.run}
 zone=${KONTRA_VPS_ZONE:-kontra.run}
 region=${KONTRA_VPS_REGION:-fra1}
 size=${KONTRA_VPS_SIZE:-s-2vcpu-4gb}
-do_key=${KONTRA_VPS_DO_KEY:-58735991}
-ssh_key=${KONTRA_VPS_SSH_KEY:-$HOME/.ssh/kontra-client01-fleet}
+do_key=${KONTRA_VPS_DO_KEY:-}
+ssh_key=${KONTRA_VPS_SSH_KEY:-}
+protected=" $(tr ',' ' ' <<< "${KONTRA_VPS_PROTECTED:-}") "
 life=${KONTRA_VPS_TTL:-14400}
 tag=kontra-m4-gaterun
 comment="M4 VPS gate run, delete after"
@@ -133,8 +137,15 @@ if [ "$mode" != host ] && [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
   missing+=("CLOUDFLARE_API_TOKEN (a Cloudflare token that edits DNS in $zone)")
 fi
 if [ "$mode" != reap ]; then
-  if [ ! -r "$ssh_key" ] || [ ! -r "$ssh_key.pub" ]; then
+  if [ -z "$ssh_key" ]; then
+    missing+=("KONTRA_VPS_SSH_KEY (the SSH private key's file, with .pub beside it)")
+  elif [ ! -r "$ssh_key" ] || [ ! -r "$ssh_key.pub" ]; then
     missing+=("the SSH key $ssh_key and $ssh_key.pub (KONTRA_VPS_SSH_KEY)")
+  fi
+fi
+if [ "$mode" = run ] || [ "$mode" = dry ]; then
+  if ! [[ "$do_key" =~ ^[0-9]+$ ]]; then
+    missing+=("KONTRA_VPS_DO_KEY (the id of your DigitalOcean SSH key, digits: doctl compute ssh-key list)")
   fi
 fi
 if [ -n "$ca_file" ] && [ ! -r "$ca_file" ]; then
@@ -198,10 +209,13 @@ tagged() {
   [ -z "$out" ] || printf '%s\n' "$out"
 }
 
-# delete_droplet ID NAME, refusing main-droplet whatever its tags.
+# is_protected NAME reports a droplet named in KONTRA_VPS_PROTECTED.
+is_protected() { [[ "$protected" == *" $1 "* ]]; }
+
+# delete_droplet ID NAME, refusing a protected droplet whatever its tags.
 deleted=0
 delete_droplet() {
-  if [ "$2" = main-droplet ]; then
+  if is_protected "$2"; then
     echo "team-gate-vps: refusing to delete $2 ($1), tagged $tag or not" >&2
     return 1
   fi
@@ -238,7 +252,7 @@ reap_records() {
   [ "$ok" = 1 ]
 }
 
-# verify_gone checks that nothing of a run is left: no droplet tagged $tag but main-droplet (after a deletion it waits
+# verify_gone checks that nothing of a run is left: no droplet tagged $tag but a protected one (after a deletion it waits
 # up to a minute while DigitalOcean removes the droplet) and no DNS record named $name or with the run's comment. A
 # listing that fails is "could not verify", never "nothing left".
 verify_gone() {
@@ -248,7 +262,7 @@ verify_gone() {
       left=unknown
       break
     fi
-    left=$(awk '$2 != "main-droplet"' <<< "$left")
+    left=$(awk -v p="$protected" 'index(p, " " $2 " ") == 0' <<< "$left")
     { [ -z "$left" ] || [ "$deleted" = 0 ] || [ "$i" = 7 ]; } && break
     sleep 10
   done
