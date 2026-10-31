@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/pgtest"
 )
 
@@ -711,6 +712,53 @@ func TestCapsCall(t *testing.T) {
 	release()
 	if n := scalar[int](t, e.pool, `select count(*) from kontra.anon_calls`); n != 2 {
 		t.Errorf("a team service took a slot")
+	}
+}
+
+// T §6.2 (review round 2, D308): a GET or subscriptions/listen stream takes one of the tenant's streams slots, counted
+// apart from calls in anon_calls (stream = true), so streams held open never leave requests without a slot, nor
+// requests streams: with both full each refuses its own kind only (ErrTooManyStreams, 429), and a release frees a slot
+// of its kind.
+func TestCapsStreamsApartFromCalls(t *testing.T) {
+	e := newPGEnv(t)
+	ctx := context.Background()
+	tn := e.mustOpen(Defaults, OpenRequest{Key: newKey(1), Network: netOf("203.0.113.9"), Services: svcs("m")})
+	lim := Defaults
+	lim.Calls, lim.Streams = 1, 2
+	caps := NewCaps(e.pool, lim, e.replica, nil)
+	s1, err := caps.Stream(ctx, tn.ID, tn.Slug)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := caps.Stream(ctx, tn.ID, tn.Slug); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := caps.Stream(ctx, tn.ID, tn.Slug); !errors.Is(err, ErrTooManyStreams) || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("a 3rd stream with streams 2: %v", err)
+	}
+	c1, err := caps.Call(ctx, tn.ID, tn.Slug)
+	if err != nil {
+		t.Fatalf("a call with every stream slot taken: %v", err)
+	}
+	if _, err := caps.Call(ctx, tn.ID, tn.Slug); !errors.Is(err, ErrTooManyCalls) {
+		t.Fatalf("a 2nd call with calls 1: %v", err)
+	}
+	if n := scalar[int](t, e.pool, `select count(*) from kontra.anon_calls where tenant_id = $1 and stream`, tn.ID); n != 2 {
+		t.Errorf("%d stream rows, want 2", n)
+	}
+	s1()
+	if _, err := caps.Call(ctx, tn.ID, tn.Slug); !errors.Is(err, ErrTooManyCalls) {
+		t.Fatalf("a stream's release freed a call's slot: %v", err)
+	}
+	if _, err := caps.Stream(ctx, tn.ID, tn.Slug); err != nil {
+		t.Fatalf("a stream after a stream's release: %v", err)
+	}
+	c1()
+	if _, err := caps.Call(ctx, tn.ID, tn.Slug); err != nil {
+		t.Fatalf("a call after a call's release: %v", err)
+	}
+	if lim := LimitsFrom(config.AnonymousSessions{}); lim.Streams != config.DefaultAnonStreams || config.DefaultAnonStreams != 8 {
+		t.Errorf("the default streams = %d", lim.Streams)
 	}
 }
 

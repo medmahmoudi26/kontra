@@ -231,6 +231,42 @@ func TestAnonymousTenantLimitsThroughTheGate(t *testing.T) {
 	e.seller.releaseAll()
 }
 
+// spec/tunnel.md §6, §6.2 (review round 2, D309): a multi-tenant gate whose tunnel.anonymous was turned off while an
+// anonymous tenant lives still serves its --public service until its end, so it still applies the tenant's runtime
+// limits to it: with enabled: false and tasks: 2 (the operator's limits kept), a third concurrent task is 429 -32600
+// "rate limited" and creates no task, and a caller's message past parts_bytes is "anonymous storage limit".
+func TestAnonymousLimitsHoldWithTheSettingOff(t *testing.T) {
+	e := newGateEnv(t)
+	port := freePort(t)
+	path := e.replicaConfig(port, time.Minute, "tenancy: multi\ntunnel: { anonymous: { enabled: false, tasks: 2, parts_bytes: 16KiB } }\n")
+	run := e.start("a", path, fastTiming)
+	slug := "anon-00000000000000c3"
+	tenant := e.seedAnonymousService(run.url, slug, "slow")
+	t.Cleanup(e.seller.releaseAll)
+	url := run.url + "/agents/" + slug + "/slow"
+	for i := range 2 {
+		st, _, body := anonPost(t, url, sendBody("SendMessage", fmt.Sprintf("slow-%d", i), true))
+		if st != 200 || !strings.Contains(string(body), `"result"`) {
+			t.Fatalf("task %d: %d %s", i, st, body)
+		}
+	}
+	eventually(t, 20*time.Second, "both tasks working", func() bool {
+		return scalar[int64](t, e.pool, `select count(*) from kontra.tasks where tenant_id = $1 and state = 'working'`, tenant) == 2
+	})
+	st, hdr, body := anonPost(t, url, sendBody("SendMessage", "slow-2", true))
+	if st != http.StatusTooManyRequests || hdr.Get("Retry-After") != "5" || !strings.Contains(string(body), `"code":-32600`) ||
+		!strings.Contains(string(body), `"rate limited"`) {
+		t.Fatalf("a third task with the setting off: %d %v %s", st, hdr, body)
+	}
+	st, _, body = anonPost(t, url, sendBody("SendMessage", strings.Repeat("x", 17<<10), true))
+	if st != 200 || !strings.Contains(string(body), `"anonymous storage limit"`) {
+		t.Fatalf("a message past parts_bytes with the setting off: %d %.300s", st, body)
+	}
+	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where tenant_id = $1`, tenant); n != 2 {
+		t.Fatalf("%d tasks after the refusals, want 2", n)
+	}
+}
+
 // bigSeller is an a2a-go v2.7.0 agent that answers every message with one artifact of two parts of size bytes each.
 type bigSeller struct{ size int }
 

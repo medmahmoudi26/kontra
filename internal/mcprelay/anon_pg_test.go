@@ -1,14 +1,18 @@
 package mcprelay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,15 +23,24 @@ import (
 	"kontra.sh/kontra/internal/pg"
 )
 
-// fakeCalls is an anonymous tenant's calls cap (anon.Caps.Call) as the relay sees it: at most limit slots, counted
-// here; full refuses every call.
+// fakeCalls is an anonymous tenant's calls and streams caps (anon.Caps.Call and Stream) as the relay sees them: at
+// most limit requests and streamLimit streams in flight, each counted apart (D308); full refuses.
 type fakeCalls struct {
-	mu       sync.Mutex
-	limit    int
-	inFlight int
-	taken    int
-	released int
-	asked    []string
+	mu          sync.Mutex
+	limit       int
+	streamLimit int
+	inFlight    int
+	taken       int
+	released    int
+	streams     slots
+	asked       []string
+}
+
+// slots counts one kind of slot.
+type slots struct{ inFlight, taken, released int }
+
+func newFakeCalls(calls, streams int) *fakeCalls {
+	return &fakeCalls{limit: calls, streamLimit: streams}
 }
 
 func (f *fakeCalls) Call(_ context.Context, _ uuid.UUID, slug string) (func(), error) {
@@ -50,7 +63,34 @@ func (f *fakeCalls) Call(_ context.Context, _ uuid.UUID, slug string) (func(), e
 	}, nil
 }
 
+func (f *fakeCalls) Stream(_ context.Context, _ uuid.UUID, slug string) (func(), error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.asked = append(f.asked, slug)
+	if f.streams.inFlight >= f.streamLimit {
+		return nil, fmt.Errorf("%w (streams %d)", anon.ErrTooManyStreams, f.streamLimit)
+	}
+	f.streams.inFlight++
+	f.streams.taken++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			f.mu.Lock()
+			f.streams.inFlight--
+			f.streams.released++
+			f.mu.Unlock()
+		})
+	}, nil
+}
+
+// set sets both limits.
 func (f *fakeCalls) set(limit int) {
+	f.mu.Lock()
+	f.limit, f.streamLimit = limit, limit
+	f.mu.Unlock()
+}
+
+func (f *fakeCalls) setCalls(limit int) {
 	f.mu.Lock()
 	f.limit = limit
 	f.mu.Unlock()
@@ -62,6 +102,12 @@ func (f *fakeCalls) counts() (inFlight, taken, released int) {
 	return f.inFlight, f.taken, f.released
 }
 
+func (f *fakeCalls) streamCounts() slots {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.streams
+}
+
 // spec/tunnel.md §6.2 (D287): a plain tools/call to an anonymous tenant's service takes one of its calls slots for
 // as long as its answer is relayed; with none free it is 429 with -32600 "rate limited" and Retry-After, before
 // anything is forwarded or metered, in both eras. tools/list, answered from the gate's cache, takes no slot.
@@ -69,7 +115,7 @@ func TestPlainCallsAreCapped(t *testing.T) {
 	e := newEnv(t)
 	up, url := dualEra(t, mcptest.Tool("echo", ""))
 	e.service("svc", url, nil)
-	calls := &fakeCalls{limit: 100}
+	calls := newFakeCalls(100, 100)
 	r := e.replica("a", replicaOpts{withDeps: func(_ *replica, deps *Deps, _ *pg.Listener, _ *slog.Logger) { deps.Calls = calls }})
 	key, _ := e.apiKey("buyer")
 	c := newClient(t, key)
@@ -123,16 +169,82 @@ func TestPlainCallsAreCapped(t *testing.T) {
 	}
 }
 
-// spec/tunnel.md §6.2 (D304): not only tools/call. Every other request the relay forwards to an anonymous tenant's
-// service takes one of its calls slots while its answer is relayed (an initialize, resources/read, prompts/get,
-// completion/complete, a method the gate does not know; on a modern request too), and a GET stream holds one for as long
-// as it is open; with none free each is 429 with -32600 "rate limited" and Retry-After, and the upstream sees nothing.
-// A notification and a client response take none.
+// streamingBack is dualEra's upstream behind a handler that, while streamBack is set, answers a notification or a
+// client's response with an event stream that never ends, as a seller's own server may; ended receives each such
+// exchange's body once the upstream saw it end (the gate closed it).
+func streamingBack(t *testing.T, tools ...json.RawMessage) (up *mcptest.Server, url string, streamBack *atomic.Bool, ended chan string) {
+	t.Helper()
+	up = mcptest.New()
+	up.Modern = true
+	up.Tools = tools
+	streamBack, ended = &atomic.Bool{}, make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && streamBack.Load() {
+			b, _ := io.ReadAll(r.Body)
+			var m map[string]json.RawMessage
+			_ = json.Unmarshal(b, &m)
+			_, hasID := m["id"]
+			_, hasMethod := m["method"]
+			if !hasID || !hasMethod {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				for i := 0; ; i++ {
+					if _, err := fmt.Fprintf(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\","+
+						"\"params\":{\"level\":\"info\",\"data\":\"%d %s\"}}\n\n", i, strings.Repeat("A", 4096)); err != nil {
+						break
+					}
+					w.(http.Flusher).Flush()
+					select {
+					case <-r.Context().Done():
+					case <-time.After(20 * time.Millisecond):
+						continue
+					}
+					break
+				}
+				ended <- string(b)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(b))
+		}
+		up.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return up, srv.URL + "/mcp", streamBack, ended
+}
+
+// standaloneGET opens a legacy session's standalone GET stream, as the TypeScript SDK's client does once
+// notifications/initialized is accepted, and returns its response and the function that closes it (run at the end of
+// the test too).
+func standaloneGET(t *testing.T, key, url, sid string) (*http.Response, func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Mcp-Session-Id", sid)
+	req.Header.Set("MCP-Protocol-Version", mcptest.Version)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		cancel()
+		t.Fatalf("GET stream: %v", err)
+	}
+	closeGET := func() { cancel(); resp.Body.Close() }
+	t.Cleanup(closeGET) // a test that fails with the stream open still lets the replica's server close
+	return resp, closeGET
+}
+
+// spec/tunnel.md §6.2 (D304, D307, D308): not only tools/call. Every other request the relay forwards to an anonymous
+// tenant's service takes one of its calls slots while its answer is relayed (an initialize, resources/read,
+// prompts/get, completion/complete, a method the gate does not know; on a modern request too), and a GET stream holds
+// one of its streams slots, counted apart, for as long as it is open; with none free each is 429 with -32600 "rate
+// limited" and Retry-After, and the upstream sees nothing. A notification and a client response take none, and are
+// answered 202 with no body whatever the upstream answers them, an endless event stream included: the gate closes it
+// unread, so it never relays a stream no slot bounds.
 func TestEveryRelayedRequestIsCapped(t *testing.T) {
 	e := newEnv(t)
-	up, url := dualEra(t, mcptest.Tool("echo", ""))
+	up, url, streamBack, ended := streamingBack(t, mcptest.Tool("echo", ""))
 	e.service("svc", url, nil)
-	calls := &fakeCalls{limit: 100}
+	calls := newFakeCalls(100, 100)
 	r := e.replica("a", replicaOpts{withDeps: func(_ *replica, deps *Deps, _ *pg.Listener, _ *slog.Logger) { deps.Calls = calls }})
 	key, _ := e.apiKey("buyer")
 	c := newClient(t, key)
@@ -177,16 +289,52 @@ func TestEveryRelayedRequestIsCapped(t *testing.T) {
 	if n := upstream() - before; n != 0 {
 		t.Fatalf("%d refused requests reached the upstream", n)
 	}
-	// A notification and a client response take no slot.
-	for _, b := range []string{`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}`,
-		`{"jsonrpc":"2.0","id":"upstream-1","result":{}}`} {
-		if rep := c.do(http.MethodPost, svcURL, b, nil); rep.status != http.StatusAccepted {
-			t.Fatalf("%s: %d %s", b, rep.status, rep.body)
+	// A modern subscriptions/listen stream takes a stream's slot, not a call's (D308): refused with no stream slot free
+	// while calls are, and served, counted as a stream, with one.
+	calls.setCalls(100)
+	listen := map[string]any{"notifications": map[string]any{"toolsListChanged": true}}
+	refused("modern subscriptions/listen with no stream slot", modern.req(40, "subscriptions/listen", listen))
+	if up.Count("subscriptions/listen") != 0 {
+		t.Fatal("a refused subscriptions/listen reached the upstream")
+	}
+	calls.set(1)
+	streamsBefore := calls.streamCounts()
+	_, callsBefore, _ := calls.counts()
+	if rep := modern.req(41, "subscriptions/listen", listen); rep.status != http.StatusOK || up.Count("subscriptions/listen") != 1 {
+		t.Fatalf("modern subscriptions/listen with a stream slot: %d %s", rep.status, rep.body)
+	}
+	if _, callsAfter, _ := calls.counts(); calls.streamCounts().taken != streamsBefore.taken+1 || callsAfter != callsBefore {
+		t.Fatalf("subscriptions/listen took %+v → %+v stream slots and %d → %d call slots", streamsBefore, calls.streamCounts(), callsBefore, callsAfter)
+	}
+	calls.set(0)
+	// A notification and a client response take no slot, and are answered 202 with no body: from a stock upstream, and
+	// from one that answers them with an endless event stream, whose exchange the gate ends at once (D307).
+	quick := &client{t: t, key: key, sid: c.sid, hc: &http.Client{Timeout: 5 * time.Second}}
+	for _, streams := range []bool{false, true} {
+		streamBack.Store(streams)
+		for _, b := range []string{`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}`,
+			`{"jsonrpc":"2.0","id":"upstream-1","result":{}}`} {
+			rep := quick.do(http.MethodPost, svcURL, b, nil)
+			if rep.status != http.StatusAccepted || len(rep.body) != 0 || rep.header.Get("Content-Type") != "" {
+				t.Fatalf("%s (upstream streams back: %v): %d %q %d bytes", b, streams, rep.status, rep.header.Get("Content-Type"), len(rep.body))
+			}
+			if streams {
+				select {
+				case <-ended:
+				case <-time.After(10 * time.Second):
+					t.Fatalf("%s: the upstream's stream was not ended", b)
+				}
+			}
 		}
 	}
+	streamBack.Store(false)
+	if inFlight, _, _ := calls.counts(); inFlight != 0 || calls.streamCounts().inFlight != 0 {
+		t.Fatalf("slots in flight after the notifications: %d calls, %+v streams", inFlight, calls.streamCounts())
+	}
 
-	// One slot: a request goes through (the upstream's own -32601) and gives it back; an open GET stream holds it, so
-	// that a request meanwhile is refused, and frees it when it closes.
+	// One slot of each: a request goes through (the upstream's own -32601) and gives its slot back. An open GET stream
+	// holds a stream's slot, not a call's (D308): a request meanwhile is served, a second stream is refused, and the
+	// slot is freed when the stream closes.
 	calls.set(1)
 	if rep := c.do(http.MethodPost, svcURL, `{"jsonrpc":"2.0","id":30,"method":"resources/read","params":{"uri":"file:///x"}}`, nil); rep.status != http.StatusOK ||
 		up.Count("resources/read") != 1 {
@@ -195,27 +343,79 @@ func TestEveryRelayedRequestIsCapped(t *testing.T) {
 	if inFlight, _, _ := calls.counts(); inFlight != 0 {
 		t.Fatalf("%d slots in flight after the answer", inFlight)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, svcURL, nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Mcp-Session-Id", c.sid)
-	req.Header.Set("MCP-Protocol-Version", mcptest.Version)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		cancel()
-		t.Fatalf("GET stream: %v %v", resp, err)
+	resp, closeGET := standaloneGET(t, key, svcURL, c.sid)
+	if resp.StatusCode != http.StatusOK {
+		closeGET()
+		t.Fatalf("GET stream: %d", resp.StatusCode)
 	}
-	eventually(t, 5*time.Second, "the GET stream holds a slot", func() bool { n, _, _ := calls.counts(); return n == 1 })
-	refused("prompts/get while the stream is open", c.do(http.MethodPost, svcURL, `{"jsonrpc":"2.0","id":31,"method":"prompts/get","params":{"name":"p"}}`, nil))
-	cancel()
-	resp.Body.Close()
-	eventually(t, 5*time.Second, "the closed GET stream frees its slot", func() bool { n, _, _ := calls.counts(); return n == 0 })
-	if rep := c.do(http.MethodPost, svcURL, `{"jsonrpc":"2.0","id":32,"method":"prompts/get","params":{"name":"p"}}`, nil); rep.status != http.StatusOK {
-		t.Fatalf("prompts/get after the stream closed: %d %s", rep.status, rep.body)
+	eventually(t, 5*time.Second, "the GET stream holds a stream's slot", func() bool { return calls.streamCounts().inFlight == 1 })
+	if rep := c.do(http.MethodPost, svcURL, `{"jsonrpc":"2.0","id":31,"method":"prompts/get","params":{"name":"p"}}`, nil); rep.status != http.StatusOK {
+		t.Fatalf("prompts/get while the stream is open: %d %s", rep.status, rep.body)
 	}
-	if inFlight, taken, released := calls.counts(); inFlight != 0 || taken != released {
-		t.Fatalf("slots: %d in flight, %d taken, %d released", inFlight, taken, released)
+	refused("a second GET stream while the first is open", c.do(http.MethodGet, svcURL, "", map[string]string{"Accept": "text/event-stream"}))
+	closeGET()
+	eventually(t, 5*time.Second, "the closed GET stream frees its slot", func() bool { return calls.streamCounts().inFlight == 0 })
+	resp, closeGET = standaloneGET(t, key, svcURL, c.sid)
+	closeGET()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("a GET stream after the first closed: %d", resp.StatusCode)
+	}
+	eventually(t, 5*time.Second, "every slot released", func() bool {
+		inFlight, taken, released := calls.counts()
+		st := calls.streamCounts()
+		return inFlight == 0 && taken == released && st.inFlight == 0 && st.taken == st.released && st.taken == 3 // the listen and two GETs
+	})
+}
+
+// spec/tunnel.md §6.2 (review round 2, D308): the TypeScript SDK's client opens its standalone GET stream as soon as
+// notifications/initialized is accepted, and the stock server keeps it open while the client is idle. With §6.2's
+// defaults, eight such clients hold eight streams, and every request of theirs, and a ninth client's initialize, is
+// still served: streams take the streams slots, never the calls requests need. A ninth stream is refused.
+func TestIdleStreamsLeaveCallsTheirSlots(t *testing.T) {
+	e := newEnv(t)
+	_, url := dualEra(t, mcptest.Tool("echo", ""))
+	e.service("svc", url, nil)
+	calls := newFakeCalls(anon.Defaults.Calls, anon.Defaults.Streams)
+	r := e.replica("a", replicaOpts{withDeps: func(_ *replica, deps *Deps, _ *pg.Listener, _ *slog.Logger) { deps.Calls = calls }})
+	key, _ := e.apiKey("buyer")
+	svcURL := r.url + "/mcp/svc"
+	var clients []*client
+	for i := range anon.Defaults.Streams {
+		c := newClient(t, key)
+		c.initialize(svcURL)
+		if rep := c.do(http.MethodPost, svcURL, `{"jsonrpc":"2.0","method":"notifications/initialized"}`, nil); rep.status != http.StatusAccepted {
+			t.Fatalf("client %d: notifications/initialized: %d %s", i, rep.status, rep.body)
+		}
+		resp, _ := standaloneGET(t, key, svcURL, c.sid)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("client %d: GET stream: %d", i, resp.StatusCode)
+		}
+		clients = append(clients, c)
+	}
+	eventually(t, 5*time.Second, "8 GET streams open", func() bool {
+		inFlight, _, _ := calls.counts()
+		return inFlight+calls.streamCounts().inFlight == anon.Defaults.Streams
+	})
+	for i, c := range clients {
+		if rep := c.call(svcURL, 100+i, "echo", "hi"); rep.status != http.StatusOK || rep.msg(t)["result"] == nil {
+			t.Fatalf("client %d: tools/call with 8 idle streams open: %d %s", i, rep.status, rep.body)
+		}
+	}
+	if st := calls.streamCounts(); st.inFlight != anon.Defaults.Streams {
+		t.Fatalf("the 8 GET streams hold %+v stream slots", st)
+	}
+	ninth := newClient(t, key)
+	ninth.initialize(svcURL)
+	resp, closeGET := standaloneGET(t, key, svcURL, ninth.sid)
+	defer closeGET()
+	if resp.StatusCode != http.StatusTooManyRequests || resp.Header.Get("Retry-After") != "5" {
+		t.Fatalf("a ninth GET stream: %d", resp.StatusCode)
+	}
+	if rep := ninth.call(svcURL, 200, "echo", "hi"); rep.status != http.StatusOK {
+		t.Fatalf("the ninth client's tools/call: %d %s", rep.status, rep.body)
+	}
+	if inFlight, taken, released := calls.counts(); inFlight != 0 || taken != released || taken != 2*len(clients)+2 {
+		t.Fatalf("calls slots: %d in flight, %d taken, %d released", inFlight, taken, released)
 	}
 }
 

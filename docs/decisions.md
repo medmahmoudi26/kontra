@@ -4630,7 +4630,9 @@ each answering its own).
   creation limits); a gate-wide cap on anonymous stored bytes is follow-up work if Cloud's figures need one.
 
 Tests: `TestEveryRelayedRequestIsCapped` (`internal/mcprelay`), `TestAnonymousKeyIsNotRotated` (`internal/enroll`),
-`TestAnonymousSweepsRunWithoutAnonymousSessions` (`internal/gate`).
+`TestAnonymousSweepsRunWithoutAnonymousSessions` (`internal/gate`). Amended by D307 (a notification or response is
+answered `202`, never relayed as a stream), D308 (streams have a limit of their own), D309 (the limits apply with the
+setting off, and `enabled: false` keeps them) and D310 (the stored-parts bound carries `tasks`).
 
 ### D305. An authorization server issues a gate's API key only for that gate's origin — **decided under the owner's standing instruction, 31 Oct** (amends D278, D296)
 
@@ -4683,3 +4685,112 @@ naming the gate's authorization server: refused `invalid_target`, nothing stored
 
 Tests: `TestComposeTeamGate` (the image, its version and the publish default), `TestOperatorSecretsAreIgnored` and the
 VPS kit's refusals without `KONTRA_VPS_DO_KEY` or `KONTRA_VPS_SSH_KEY` and its protected-droplet case (`test/vps`).
+
+## From M4's second review (31 Oct)
+
+The second review of the branch (`ea50cec`, after D303 to D306) confirmed six findings. D307 to D311 record how each
+was settled; every one has a regression test that fails on `ea50cec`.
+
+### D307. A client's notification or response is answered `202`, never relayed as a stream — **decided under the owner's standing instruction, 31 Oct** (amends D304)
+
+D304 gave a notification and a client's response no `calls` slot because "they hold no relay open", but on the legacy
+pinned path the gate forwarded them and relayed whatever the upstream answered: an event stream on a notification was
+relayed until the upstream or the client closed it, with no slot and no timeout. The stock node passes
+`text/event-stream` through for any exchange, so an anonymous tenant only had to make its own local server stream on
+a notification to hold any number of relayed streams open for its `--public` service, bounded only by the edge's
+per-address limits (an anonymous caller has no key for `inflight_per_key`). The reviewer relayed 144 events, 600 KB, in
+3 s with the cap full. The 2026-07-28 path was not affected: it answers a notification `202` and a response `400`
+before forwarding anything.
+
+Decision: the gate answers a forwarded notification or response as the MCP transport says a server answers one, whatever
+the upstream sent: `202` with no body when the upstream answered `2xx`, its error status bare otherwise (the 404 that
+closes the session and the `401`/`403`/`407` → `502` rule as before), and it closes the upstream's body unread, which
+ends the exchange (the tunnel stream, the peer hop, the direct backend's connection). Taking a slot for such a POST
+when the upstream streams was the alternative; it would still relay messages a client does not expect there and
+read a body the transport says is empty. The body of an error status is dropped too, which the transport allows (an
+error response "MAY" carry one): reading it is a relay without a slot as well. relay.md §11.2, tunnel.md §6.2.
+Test: `TestEveryRelayedRequestIsCapped` (an upstream that answers a notification and a client response with an
+endless event stream while the cap is full: `202`, no body, the upstream's exchange ended).
+
+### D308. MCP streams relayed to an anonymous tenant have a limit of their own, `streams` — **decided under the owner's standing instruction, 31 Oct** (amends D304, D287)
+
+D304 made each `GET` or `subscriptions/listen` stream take one of the tenant's `calls` slots for as long as it is open,
+and nothing ends an idle stream (keep-alives every 15 s, no write timeout on SSE, its session kept fresh while it is
+open, D303). The TypeScript SDK's client (1.32.2) opens its standalone `GET` as soon as `notifications/initialized` is
+accepted, and the stock server keeps it open until it is cancelled. So eight idle stock clients held the eight default
+slots, and every `tools/call` and every new `initialize`, from any client, was `429` for as long as they stayed: an
+anonymous `--public` service, which takes callers without a credential and has no `max_sessions_per_principal`, could be
+shut off for its whole `ttl` at no cost. D304's rationale considered only a refused ninth stream, not open streams
+starving requests.
+
+Decision: streams are counted apart from requests, at most `streams` per tenant (default 8, a new `tunnel.anonymous`
+key), gate-wide in the same `anon_calls` rows with a `stream` column (migration 0003, M4's own and not yet released).
+Requests keep `calls`; a ninth stream is `429`, which a stock client reports and goes on from (D304). Reserving part of
+`calls` for requests would leave the same starvation at a lower count, and bounding a stream's lifetime frees nothing
+for long, since the SDK reconnects its `GET`. tunnel.md §6.2, relay.md §17. Tests: `TestIdleStreamsLeaveCallsTheirSlots`
+(eight stock-shaped clients with their `GET` open still get `tools/call` served, and a ninth client's `initialize`; its
+`GET` is `429`), `TestEveryRelayedRequestIsCapped` (a request is served while a stream holds its slot; a second stream
+is refused), `TestCapsStreamsApartFromCalls` (`internal/anon`).
+
+### D309. An anonymous tenant's limits apply on every multi-tenant gate, and `enabled: false` keeps them — **decided under the owner's standing instruction, 31 Oct** (amends D277, D292, D304)
+
+D304 ran the sweeps on every multi-tenant gate, but the runtime limits (`anon.Caps`: `tasks`, `parts_bytes`, `calls`)
+were still built only with `tunnel.anonymous` on, while the registry serves a live anonymous tenant's services until
+its `expires_at` whatever the setting says. After an operator turned the setting off, typically against abuse, a live
+tenant's `--public` service took any number of tasks and parts from unauthenticated callers until its end (the reviewer
+had 11 of 11 accepted against the default `tasks` of 4), and a replica with it off took no `calls` slot for a session
+another replica serves. And the setting off could not carry the operator's limits: `false` is §6.2's defaults, and the
+object form always meant on, so an operator who kept `purge_after: 168h` for evidence had that data purged 24 h after
+each end once the setting was off.
+
+Decision: the caps are built on every multi-tenant gate, with the sweeps' limits (they act on anonymous slugs only, so
+on a gate with no anonymous tenant they cost one indexed lookup for a task a node's key creates and one for an MCP
+task's dispatch), and the object form takes an
+`enabled` key (default `true`): `{enabled: false, purge_after: 168h, …}` opens no anonymous session and keeps those
+limits for the tenants that live and for their purge, the others at §6.2's defaults. Recording each tenant's purge
+deadline on its row was the alternative; it would take the operator's later change of `purge_after` away from tenants
+already ended, and the gate keeps no other per-tenant copy of a limit. A purge reads `purge_after` when it runs, so on
+a gate whose replicas disagree the shortest wins; tunnel.md §6 says so. A disabled block's limits are still checked
+(`hiring_streams` at most 32) but not refused on a single-tenant gate. tunnel.md §6, relay.md §17,
+`spec/schema/config.json`. Tests: `TestAnonymousLimitsHoldWithTheSettingOff` (`internal/gate`, through a replica:
+`enabled: false, tasks: 2`, a third task `429`, a message past `parts_bytes` refused), the `enabled: false` case of
+`TestAnonymousSweepsRunWithoutAnonymousSessions`, and `TestTunnelAnonymous` (`internal/config`).
+
+### D310. What anonymous tenants can keep stored carries the `tasks` factor — **decided under the owner's standing instruction, 31 Oct** (amends D304)
+
+D304's bound, about (1 + `purge_after` / `ttl`) × `tenants_per_network` × `parts_bytes`, left out D292's Budget
+SPEC-CONFLICT: a dispatch counts the tenant's other tasks' bytes as they stood when it started, so its `tasks`
+concurrent tasks started together may each store up to `parts_bytes`. The tenant controls its upstream and its callers,
+so it reaches that. Decision: the conflict stands (re-reading the total at each externalized part is D292's open
+proposal, for the spec's owner), and tunnel.md §6.2 states the bound it gives: (1 + `purge_after` / `ttl`) ×
+`tenants_per_network` × `tasks` × `parts_bytes`, 13 × 3 × 4 × 64 MiB ≈ 9.75 GiB per /24 or /48 with the defaults, and
+13 × 1000 × 4 × 64 MiB ≈ 3.2 TiB gate-wide, with `tasks` among what lowers it. `Caps.Budget`'s comment already said
+"tasks × the room left"; its "64 MiB, the default task_bytes" now says `parts_bytes` (task_bytes is 256 MiB, and
+the `min(…, parts_bytes)` caps each task at 64 MiB). Documentation only, so no regression test.
+
+### D311. A seller's case variant of a member the gate owns refuses its card, and §2.4 reads the served card with exact keys — **decided under the owner's standing instruction, 31 Oct** (amends D52, D300; carries D172 to cards)
+
+`card.Rewrite` set and removed members by their exact keys, while a2a-go's card parser and the gate's own §2.4 reader
+(`a2ahttp.cardExtensions`, which backs the A2A route's required extensions and `Server.Declared`, hence hire's
+activation, D300) decode with `encoding/json`, which matches names case-insensitively and keeps the last match. A seller
+whose `capabilities` held `"Extensions"` after `"extensions"` had the operator's entries written at the first place and
+its own read in their place, on a card the gate signed and a2a-go verified: an operator's optional entry made required
+(hire activates it for every buyer, the route refuses callers without it), a required one (Cloud's escrow) hidden (the
+route stops requiring it, hire stops activating it, a buyer's URI is dropped as undeclared before Admission), an escrow
+entry's quote replaced, the gate's anonymous extension removed or forged. Money still moved only through the operator's
+own quote on its own page, and the node's strict readers refuse such a card. The reviewer's third claim, a top-level
+`"SupportedInterfaces"` or `"Capabilities"` shadow, does not reach a client: signing refuses a pair of top-level keys
+equal under case folding (`jws.CardPayload`), so such a card was never installed. A lone top-level variant of a member
+the gate removes (`"Signatures"`, `"URL"`, an only-anonymous service's `"SecuritySchemes"`) did pass signing.
+
+Decision: `Rewrite` reads the normalized card with exact keys at the levels the gate acts on and refuses it
+(`ErrBadCard`: not installed, no card until the seller publishes another, as for a card JCS refuses, D193) when its top
+level, `capabilities` or a `capabilities.extensions` entry holds a repeated key, two keys equal under case folding, or a
+lone case variant of a member the gate writes, removes or reads there: `supportedInterfaces`, `capabilities`,
+`securitySchemes`, `securityRequirements`, `signatures` and the 0.x members at the top; `pushNotifications`,
+`streaming`, `extendedAgentCard` and `extensions` in `capabilities`; `uri` and `required` in an entry. Dropping the
+variants instead would serve a card the seller did not write in a way it did not mean, and the hosting node refuses them
+already. `cardExtensions` reads `capabilities.extensions` and each entry with exact keys, as the node does. relay.md §3.
+Tests: `TestCaseVariantsOfGateMembersAreRefused` (`internal/card`, through `Keeper.Seed` with the gate's signer: each
+variant refused; the controls install and a2a-go reads exactly the operator's entry), `TestDeclaredReadsExactKeys`
+(`internal/a2ahttp`: the variants declare nothing; an installed card declares what a2a-go reads of it).

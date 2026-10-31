@@ -109,13 +109,24 @@ func (okBucket) DeleteTask(context.Context, uuid.UUID, uuid.UUID) error { return
 // bindings revoked) and are purged purge_after later (only the tombstone left), with the block's defaults. A
 // single-tenant gate, which has no anonymous tenant, runs none.
 func TestAnonymousSweepsRunWithoutAnonymousSessions(t *testing.T) {
-	if _, ok := anonSweepLimits(&config.Config{Tenancy: config.TenancySingle}); ok {
+	if _, ok := anonTenantLimits(&config.Config{Tenancy: config.TenancySingle}); ok {
 		t.Fatal("a single-tenant gate runs the anonymous sweeps")
 	}
 	cfg := &config.Config{Tenancy: config.TenancyMulti} // tunnel.anonymous off
-	lim, ok := anonSweepLimits(cfg)
+	lim, ok := anonTenantLimits(cfg)
 	if !ok || lim.PurgeAfter != anon.Defaults.PurgeAfter || lim.TTL != anon.Defaults.TTL {
 		t.Fatalf("a multi-tenant gate without tunnel.anonymous: sweeps %v, limits %+v", ok, lim)
+	}
+	// D309: an operator who turns the setting off with enabled: false keeps its purge_after (the evidence it keeps
+	// for a week) and its other limits; what it leaves out is §6.2's default.
+	off, err := config.Parse([]byte("public_url: http://localhost:8080\npostgres: postgres://kontra@localhost:5432/kontra\n"+
+		"tenancy: multi\ntunnel: { anonymous: { enabled: false, purge_after: 168h, tasks: 2 } }\n"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept, ok := anonTenantLimits(off); off.Tunnel.Anonymous.Enabled || !ok || kept.PurgeAfter != 168*time.Hour || kept.Tasks != 2 ||
+		kept.TTL != anon.Defaults.TTL || kept.Calls != anon.Defaults.Calls {
+		t.Fatalf("enabled: false with limits: enabled %v, sweeps %v, limits %+v", off.Tunnel.Anonymous.Enabled, ok, kept)
 	}
 
 	pool := pgtest.Pool(t, pgtest.Migrated(t))

@@ -227,17 +227,21 @@ type Tunnel struct {
 	EnrollWithAPIKey bool              `yaml:"enroll_with_api_key"`
 }
 
-// AnonymousSessions is tunnel.anonymous (spec/tunnel.md §6, §6.2; relay.md §17; D277, D287): false (the default,
-// off), true (on, with §6.2's limits), or an object of those limits, each absent key taking its default. It needs
-// tenancy: multi. The integers are at least 1 and hiring_streams at most 32; ttl, purge_after and parts_bytes are
-// positive (a zero is refused when decoded, so after decoding a zero always means "absent, use the default").
+// AnonymousSessions is tunnel.anonymous (spec/tunnel.md §6, §6.2; relay.md §17; D277, D287, D309): false (the
+// default, off), true (on, with §6.2's limits), or an object of those limits, each absent key taking its default, on
+// unless it says enabled: false. Off, the gate opens no anonymous session, but a multi-tenant gate still applies the
+// limits to the anonymous tenants that live and ends and purges them: an object with enabled: false keeps its limits
+// for that (its ttl and purge_after, typically), where false is §6.2's defaults. On, it needs tenancy: multi. The
+// integers are at least 1 and hiring_streams at most 32; ttl, purge_after and parts_bytes are positive (a zero is
+// refused when decoded, so after decoding a zero always means "absent, use the default").
 type AnonymousSessions struct {
-	Enabled           bool     `yaml:"-"`
+	Enabled           bool     `yaml:"enabled"`             // the object form's default true; false and an absent block are off
 	TTL               Duration `yaml:"ttl"`                 // default 2h
 	TenantsPerNetwork int      `yaml:"tenants_per_network"` // default 3: live anonymous tenants per IPv4 /24 or IPv6 /48
 	Services          int      `yaml:"services"`            // default 4: a tenant's services that are not disabled
 	Tasks             int      `yaml:"tasks"`               // default 4: concurrent tasks as host and as hirer, each
-	Calls             int      `yaml:"calls"`               // default 8: concurrent plain MCP calls to its services (D287)
+	Calls             int      `yaml:"calls"`               // default 8: concurrent MCP requests relayed to its services (D287, D304)
+	Streams           int      `yaml:"streams"`             // default 8: GET and subscriptions/listen streams open to them (D308)
 	HiringStreams     int      `yaml:"hiring_streams"`      // default 8, at most 32: node-opened streams per session
 	PartsBytes        ByteSize `yaml:"parts_bytes"`         // default 64 MiB: parts stored per tenant
 	PurgeAfter        Duration `yaml:"purge_after"`         // default 24h after expiry
@@ -245,13 +249,13 @@ type AnonymousSessions struct {
 }
 
 // anonymousKeys are the keys of tunnel.anonymous's object form, which UnmarshalYAML decodes one by one.
-var anonymousKeys = map[string]bool{"ttl": true, "tenants_per_network": true, "services": true, "tasks": true, "calls": true,
-	"hiring_streams": true, "parts_bytes": true, "purge_after": true, "max_tenants": true}
+var anonymousKeys = map[string]bool{"enabled": true, "ttl": true, "tenants_per_network": true, "services": true, "tasks": true,
+	"calls": true, "streams": true, "hiring_streams": true, "parts_bytes": true, "purge_after": true, "max_tenants": true}
 
 // UnmarshalYAML accepts true, false or the limits object. An unknown key, a repeated key and an integer below 1 are
 // refused, as Load refuses them everywhere else.
 func (a *AnonymousSessions) UnmarshalYAML(n *yaml.Node) error {
-	const want = "tunnel.anonymous: want true, false or {ttl, tenants_per_network, services, tasks, calls, hiring_streams, parts_bytes, purge_after, max_tenants}"
+	const want = "tunnel.anonymous: want true, false or {enabled, ttl, tenants_per_network, services, tasks, calls, streams, hiring_streams, parts_bytes, purge_after, max_tenants}"
 	switch n.Kind {
 	case yaml.ScalarNode:
 		if n.ShortTag() != "!!bool" {
@@ -277,6 +281,12 @@ func (a *AnonymousSessions) UnmarshalYAML(n *yaml.Node) error {
 			seen[k.Value] = true
 			var err error
 			switch k.Value {
+			case "enabled":
+				if v.Kind != yaml.ScalarNode || v.ShortTag() != "!!bool" {
+					err = fmt.Errorf("line %d: want true or false", v.Line)
+				} else {
+					err = v.Decode(&out.Enabled)
+				}
 			case "ttl":
 				err = v.Decode(&out.TTL)
 			case "purge_after":
@@ -297,6 +307,8 @@ func (a *AnonymousSessions) UnmarshalYAML(n *yaml.Node) error {
 					out.Tasks = n
 				case "calls":
 					out.Calls = n
+				case "streams":
+					out.Streams = n
 				case "hiring_streams":
 					out.HiringStreams = n
 				case "max_tenants":
@@ -313,10 +325,10 @@ func (a *AnonymousSessions) UnmarshalYAML(n *yaml.Node) error {
 	return fmt.Errorf("line %d: %s", n.Line, want)
 }
 
-// applyDefaults fills the limits an enabled block leaves out with §6.2's defaults; a disabled one holds none.
+// applyDefaults fills the limits an enabled block leaves out with §6.2's defaults. A disabled one keeps what it names
+// (enabled: false with limits, D309) and nothing else: anon.LimitsFrom takes §6.2's default for each zero.
 func (a *AnonymousSessions) applyDefaults() {
 	if !a.Enabled {
-		*a = AnonymousSessions{}
 		return
 	}
 	if a.TTL == 0 {
@@ -333,6 +345,9 @@ func (a *AnonymousSessions) applyDefaults() {
 	}
 	if a.Calls == 0 {
 		a.Calls = DefaultAnonCalls
+	}
+	if a.Streams == 0 {
+		a.Streams = DefaultAnonStreams
 	}
 	if a.HiringStreams == 0 {
 		a.HiringStreams = DefaultAnonHiringStreams

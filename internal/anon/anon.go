@@ -17,7 +17,8 @@
 // tenant row as a tombstone (tenants.deleted_at), so a slug is never reused.
 //
 // The runtime limits (§6.2) are checked where the work is created: Caps.Task when a task is created (as host and as
-// hirer, under a per-tenant lock), Caps.Call around a plain MCP call (gate-wide, in anon_calls), the hiring-stream cap
+// hirer, under a per-tenant lock), Caps.Call around an MCP request and Caps.Stream around an MCP stream relayed to the
+// tenant's services (gate-wide, in anon_calls, each counted apart), the hiring-stream cap
 // in internal/tunnelgate, the parts total with relay §6.6's byte accounting (Caps.Message before a task row,
 // Caps.Budget at each dispatch).
 //
@@ -60,7 +61,8 @@ type Limits struct {
 	TenantsPerNetwork int
 	Services          int
 	Tasks             int // as host and as hirer, each
-	Calls             int // concurrent plain MCP calls to the tenant's services
+	Calls             int // concurrent MCP requests relayed to the tenant's services (D304)
+	Streams           int // GET and subscriptions/listen streams open to them, counted apart (D308)
 	HiringStreams     int
 	PartsBytes        int64
 	PurgeAfter        time.Duration
@@ -70,7 +72,7 @@ type Limits struct {
 // Defaults are §6.2's.
 var Defaults = Limits{
 	TTL: config.DefaultAnonTTL, TenantsPerNetwork: config.DefaultAnonTenantsPerNetwork, Services: config.DefaultAnonServices,
-	Tasks: config.DefaultAnonTasks, Calls: config.DefaultAnonCalls, HiringStreams: config.DefaultAnonHiringStreams,
+	Tasks: config.DefaultAnonTasks, Calls: config.DefaultAnonCalls, Streams: config.DefaultAnonStreams, HiringStreams: config.DefaultAnonHiringStreams,
 	PartsBytes: config.DefaultAnonPartsBytes, PurgeAfter: config.DefaultAnonPurgeAfter, MaxTenants: config.DefaultAnonMaxTenants,
 }
 
@@ -79,7 +81,7 @@ var Defaults = Limits{
 func LimitsFrom(a config.AnonymousSessions) Limits {
 	l := Limits{
 		TTL: a.TTL.D(), TenantsPerNetwork: a.TenantsPerNetwork, Services: a.Services, Tasks: a.Tasks, Calls: a.Calls,
-		HiringStreams: a.HiringStreams, PartsBytes: a.PartsBytes.Int64(), PurgeAfter: a.PurgeAfter.D(), MaxTenants: a.MaxTenants,
+		Streams: a.Streams, HiringStreams: a.HiringStreams, PartsBytes: a.PartsBytes.Int64(), PurgeAfter: a.PurgeAfter.D(), MaxTenants: a.MaxTenants,
 	}
 	return l.withDefaults()
 }
@@ -104,6 +106,7 @@ func (l Limits) withDefaults() Limits {
 	set(&l.Services, d.Services)
 	set(&l.Tasks, d.Tasks)
 	set(&l.Calls, d.Calls)
+	set(&l.Streams, d.Streams)
 	set(&l.HiringStreams, d.HiringStreams)
 	set(&l.MaxTenants, d.MaxTenants)
 	return l
@@ -143,8 +146,10 @@ var (
 	ErrKindMismatch = errors.New("anon: the anonymous session has this service with another kind")
 	// ErrTooManyTasks: the tenant has tasks non-terminal tasks in the role (429).
 	ErrTooManyTasks = fmt.Errorf("%w: too many tasks in flight for this anonymous session", ErrRateLimited)
-	// ErrTooManyCalls: calls plain MCP calls to the tenant's services are in flight (429).
+	// ErrTooManyCalls: calls MCP requests to the tenant's services are in flight (429).
 	ErrTooManyCalls = fmt.Errorf("%w: too many MCP calls in flight to this anonymous session's services", ErrRateLimited)
+	// ErrTooManyStreams: streams MCP streams to the tenant's services are open (429, D308).
+	ErrTooManyStreams = fmt.Errorf("%w: too many MCP streams open to this anonymous session's services", ErrRateLimited)
 	// ErrStorageFull: a caller's message would take the tenant's stored bytes past parts_bytes (InvalidParams
 	// "anonymous storage limit", before any task row).
 	ErrStorageFull = errors.New("anonymous storage limit")
@@ -987,13 +992,28 @@ func (c *Caps) Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug
 // callTimeout bounds Call's statements, and the delete that releases a slot.
 const callTimeout = 5 * time.Second
 
-// Call takes one of the Calls slots of an anonymous service's tenant for a plain MCP call (§6.2, D287), counted
-// gate-wide in anon_calls under a lock on the tenant's row, and returns its release, which the caller runs when the
-// call's answer is relayed. A service of a tenant that is not anonymous takes no slot. ErrTooManyCalls when Calls are
-// in flight.
+// Call takes one of the Calls slots of an anonymous service's tenant for an MCP request the relay forwards (§6.2,
+// D287, D304), counted gate-wide in anon_calls under a lock on the tenant's row, and returns its release, which the
+// caller runs when the request's answer is relayed. A service of a tenant that is not anonymous takes no slot.
+// ErrTooManyCalls when Calls are in flight. An open stream takes none of them (Stream).
 func (c *Caps) Call(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (release func(), err error) {
+	return c.take(ctx, svcTenant, svcSlug, false)
+}
+
+// Stream is Call for a GET or subscriptions/listen stream relayed to an anonymous service's tenant, for as long as it
+// is open: one of its Streams slots, counted apart from Calls (D308), so that streams a stock client keeps open while
+// it is idle never leave its requests, or any other client's, without a slot. ErrTooManyStreams when Streams are open.
+func (c *Caps) Stream(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (release func(), err error) {
+	return c.take(ctx, svcTenant, svcSlug, true)
+}
+
+func (c *Caps) take(ctx context.Context, svcTenant uuid.UUID, svcSlug string, stream bool) (release func(), err error) {
 	if c == nil || !IsSlug(svcSlug) {
 		return func() {}, nil
+	}
+	limit, refusal, what := c.lim.Calls, ErrTooManyCalls, "calls"
+	if stream {
+		limit, refusal, what = c.lim.Streams, ErrTooManyStreams, "streams"
 	}
 	c.retryLeaked(ctx)
 	id, err := uuid.NewV7()
@@ -1007,9 +1027,9 @@ func (c *Caps) Call(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (r
 		if _, err := tx.Exec(cctx, `select 1 from kontra.tenants where id = $1 for no key update`, svcTenant); err != nil {
 			return err
 		}
-		tag, err := tx.Exec(cctx, `insert into kontra.anon_calls (id, tenant_id, replica_id)
-			select $1, $2, $3 where (select count(*) from kontra.anon_calls where tenant_id = $2) < $4`,
-			id, svcTenant, c.replica, c.lim.Calls)
+		tag, err := tx.Exec(cctx, `insert into kontra.anon_calls (id, tenant_id, replica_id, stream)
+			select $1, $2, $3, $5 where (select count(*) from kontra.anon_calls where tenant_id = $2 and stream = $5) < $4`,
+			id, svcTenant, c.replica, limit, stream)
 		taken = err == nil && tag.RowsAffected() == 1
 		return err
 	})
@@ -1017,7 +1037,7 @@ func (c *Caps) Call(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (r
 		return nil, fmt.Errorf("anon: take a call slot: %w", err)
 	}
 	if !taken {
-		return nil, fmt.Errorf("%w (calls %d)", ErrTooManyCalls, c.lim.Calls)
+		return nil, fmt.Errorf("%w (%s %d)", refusal, what, limit)
 	}
 	var once sync.Once
 	return func() { once.Do(func() { c.release(ctx, id) }) }, nil
@@ -1092,10 +1112,11 @@ func (c *Caps) Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string,
 // SPEC-CONFLICT (spec/tunnel.md §6.2, relay.md §6.6: parts_bytes "in all", D287): an exact total across the
 // tenant's tasks would read the other tasks' bytes, under a lock, at every event each dispatch logs. The closest
 // faithful behaviour: a dispatch counts the others' bytes as they stood when it started, so the tasks of one tenant
-// dispatched together may store up to tasks × the room left between them (with §6.2's defaults, 4 × 64 MiB, the
-// default task_bytes); each event of each is still bounded, a caller's message is checked against the total before
-// any task row (Message), and every later dispatch starts from the total. Proposal (D292): keep it so, or re-read
-// the total at each externalized part only.
+// dispatched together may store up to tasks × the room left between them (with §6.2's defaults, 4 × 64 MiB: each is
+// capped at parts_bytes, below the default task_bytes of 256 MiB); each event of each is still bounded, a caller's
+// message is checked against the total before any task row (Message), and every later dispatch starts from the total.
+// Proposal (D292): keep it so, or re-read the total at each externalized part only. spec/tunnel.md §6.2 states the
+// stored-parts bound this gives, with its tasks factor (D310).
 func (c *Caps) Budget(ctx context.Context, svcTenant uuid.UUID, svcSlug string, task uuid.UUID, taskBytes int64) (others, limit int64, applies bool, err error) {
 	if c == nil {
 		return 0, taskBytes, false, nil

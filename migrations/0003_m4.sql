@@ -38,14 +38,16 @@ create index tenants_anonymous_network on tenants (created_from) where kind = 'a
 -- or team can take an anonymous tenant's name, and an anonymous tenant always has one.
 alter table tenants add constraint anonymous_slug check ((kind = 'anonymous') = (slug ~ '^anon-[0-9a-f]{16}$'));
 
--- T §6.2 (D287): one row per plain MCP tools/call being relayed to an anonymous tenant's service, at most
--- tunnel.anonymous.calls per tenant, counted gate-wide under a lock on the tenant's row. The row is deleted when the
--- call's answer has been relayed; a replica that dies takes its rows with its gate_replicas row (T §11), and the purge
--- takes a tenant's.
+-- T §6.2 (D287, D304, D308): one row per MCP request being relayed to an anonymous tenant's service (stream false, at
+-- most tunnel.anonymous.calls per tenant) and per GET or subscriptions/listen stream open to one (stream true, at most
+-- tunnel.anonymous.streams), counted gate-wide under a lock on the tenant's row. The row is deleted when the request's
+-- answer has been relayed or the stream closed; a replica that dies takes its rows with its gate_replicas row (T §11),
+-- and the purge takes a tenant's.
 create table anon_calls (
     id          uuid primary key,
     tenant_id   uuid not null references tenants (id) on delete cascade,
     replica_id  text not null references gate_replicas (replica_id) on delete cascade,
+    stream      boolean not null default false,
     started_at  timestamptz not null default now()
 );
 create index anon_calls_by_tenant on anon_calls (tenant_id);

@@ -388,8 +388,8 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 	if rq.r.Method == http.MethodGet {
-		// An anonymous tenant's slot for as long as the stream is open (§6.2, D304).
-		release, ok := h.takeRelay(rq)
+		// An anonymous tenant's stream slot for as long as the stream is open (§6.2, D304, D308).
+		release, ok := h.takeStream(rq)
 		if !ok {
 			return
 		}
@@ -549,6 +549,9 @@ func (h *Handler) forward(rq *request, t target, meter *callMeter) {
 			return
 		}
 		o.method, o.reqID = m.Method, m.ID
+		// A notification or a client's response takes no calls slot (takeRelay): it is answered 202, never with what
+		// the upstream streams back (D307).
+		o.accepted = m.Method == "" || len(m.ID) == 0
 		if m.Method == mcpwire.MethodToolsCall {
 			x.RequestID = idString(m.ID)
 		}

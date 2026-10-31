@@ -1158,7 +1158,7 @@ func TestMCPExamplesLoad(t *testing.T) {
 // the limits object, each absent key taking its default; the staging gate's fixture loads with its own.
 func TestTunnelAnonymous(t *testing.T) {
 	defaults := AnonymousSessions{Enabled: true, TTL: Duration(2 * time.Hour), TenantsPerNetwork: 3, Services: 4, Tasks: 4,
-		Calls: 8, HiringStreams: 8, PartsBytes: 64 << 20, PurgeAfter: Duration(24 * time.Hour), MaxTenants: 1000}
+		Calls: 8, Streams: 8, HiringStreams: 8, PartsBytes: 64 << 20, PurgeAfter: Duration(24 * time.Hour), MaxTenants: 1000}
 	multi := minimal + "tenancy: multi\n"
 	for _, y := range []string{"tunnel: { anonymous: true }\n", "tunnel: { anonymous: {} }\n", "tunnel:\n  anonymous:\n"} {
 		c, err := Parse([]byte(multi+y), "")
@@ -1185,13 +1185,41 @@ func TestTunnelAnonymous(t *testing.T) {
   enroll_with_api_key: true
 `)
 	want := AnonymousSessions{Enabled: true, TTL: Duration(20 * time.Second), TenantsPerNetwork: 3, Services: 4, Tasks: 4, Calls: 2,
-		HiringStreams: 8, PartsBytes: 1 << 20, PurgeAfter: Duration(10 * time.Second), MaxTenants: 1000}
+		Streams: 8, HiringStreams: 8, PartsBytes: 1 << 20, PurgeAfter: Duration(10 * time.Second), MaxTenants: 1000}
 	if c.Tunnel.Anonymous != want || !c.Tunnel.EnrollWithAPIKey {
 		t.Errorf("the compressed limits = %+v, want %+v", c.Tunnel.Anonymous, want)
 	}
 	if c := parse(t, multi+"tunnel: { anonymous: { hiring_streams: 32, max_tenants: 1, parts_bytes: \"512 KiB\" } }\n"); c.Tunnel.Anonymous.HiringStreams != 32 ||
 		c.Tunnel.Anonymous.MaxTenants != 1 || c.Tunnel.Anonymous.PartsBytes != 512<<10 || c.Tunnel.Anonymous.TTL.D() != 2*time.Hour {
 		t.Errorf("the bounds = %+v", c.Tunnel.Anonymous)
+	}
+	// streams is its own limit (D308).
+	if c := parse(t, multi+"tunnel: { anonymous: { streams: 3 } }\n"); c.Tunnel.Anonymous.Streams != 3 || c.Tunnel.Anonymous.Calls != 8 {
+		t.Errorf("streams: 3 = %+v", c.Tunnel.Anonymous)
+	}
+	// enabled: false (D309): off, keeping the limits it names for the anonymous tenants that live (their purge_after
+	// above all), the others left to §6.2's defaults; enabled: true is the object form's default. A disabled block's
+	// limits are not refused on a single-tenant gate, which has no anonymous tenant, but are still checked.
+	for _, y := range []string{multi, minimal} {
+		c := parse(t, y+"tunnel: { anonymous: { enabled: false, purge_after: 168h, ttl: 1h } }\n")
+		if want := (AnonymousSessions{PurgeAfter: Duration(168 * time.Hour), TTL: Duration(time.Hour)}); c.Tunnel.Anonymous != want {
+			t.Errorf("enabled: false with limits = %+v, want %+v", c.Tunnel.Anonymous, want)
+		}
+	}
+	if c := parse(t, multi+"tunnel: { anonymous: { enabled: true, calls: 3 } }\n"); !c.Tunnel.Anonymous.Enabled || c.Tunnel.Anonymous.Calls != 3 ||
+		c.Tunnel.Anonymous.TTL.D() != 2*time.Hour {
+		t.Errorf("enabled: true = %+v", c.Tunnel.Anonymous)
+	}
+	for y, want := range map[string]string{
+		"tunnel: { anonymous: { enabled: no } }\n":                        "tunnel.anonymous.enabled",
+		"tunnel: { anonymous: { enabled: 0 } }\n":                         "tunnel.anonymous.enabled",
+		"tunnel: { anonymous: { enabled: false, enabled: true } }\n":      "repeated",
+		"tunnel: { anonymous: { enabled: false, hiring_streams: 33 } }\n": "hiring_streams 33: at most 32",
+		"tunnel: { anonymous: { enabled: false, streams: 0 } }\n":         "tunnel.anonymous.streams",
+	} {
+		if err := parseErr(t, multi+y); !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want %q", y, err, want)
+		}
 	}
 	// Refused on a single-tenant gate, naming D277's rule, and nothing else is wrong with the file.
 	err := parseErr(t, minimal+"tunnel: { anonymous: true }\n")

@@ -240,6 +240,10 @@ type relayOpts struct {
 	meter  *callMeter
 	tools  ToolsKey
 	hold   bool // initialize: the headers wait for onResponse
+	// accepted is a client's notification or response (no method, or no id): it is answered as MCP's Streamable HTTP
+	// says, 202 with no body when the upstream accepts it and the upstream's error status otherwise, and nothing the
+	// upstream sends with it is relayed (relayAccepted, D307).
+	accepted bool
 	// status is the upstream's HTTP status, set when the response is relayed (relayResponse), for onResponse: a
 	// 2026-07-28 request's virtual session opens on a 2xx answer only (§11.12, D177).
 	status int
@@ -269,6 +273,8 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 //     session (tunnel_lost, 404); full is 503; any other is 502;
 //   - 401, 403 or 407 is 502 with -32603 "upstream refused": the only WWW-Authenticate a client sees is the gate's;
 //   - a 404 on a pinned session closes it upstream_closed and is relayed;
+//   - a client's notification or response is answered 202 with no body, or the upstream's error status bare, and
+//     nothing the upstream sent with it is relayed (relayAccepted, D307);
 //   - a JSON body is read within §6.6's limit and decoded strictly (Parse, FromUpstream); one that fails is 502
 //     with -32603 and nothing of it is relayed; otherwise it is scrubbed (§2.5) and relayed;
 //   - an event stream is relayed event by event, each decoded and scrubbed, and ends before an event that fails;
@@ -330,6 +336,10 @@ func (h *Handler) relayResponse(rq *request, resp *http.Response, o *relayOpts) 
 			h.closeRow(rq, CloseUpstreamClosed)
 		}
 	}
+	if o.accepted {
+		h.relayAccepted(rq, resp, o)
+		return 0
+	}
 	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	switch mt {
 	case "text/event-stream":
@@ -354,6 +364,25 @@ func (h *Handler) relayResponse(rq *request, resp *http.Response, o *relayOpts) 
 	w.Header().Set("Content-Length", "0")
 	w.WriteHeader(resp.StatusCode)
 	return 0
+}
+
+// relayAccepted answers a client's notification or response that the relay forwarded (MCP Streamable HTTP: "If the
+// server accepts the input, the server MUST return HTTP status code 202 Accepted with no body"; otherwise an error
+// status, whose body MAY carry a JSON-RPC error without an id): a 2xx is 202 with no body whatever the upstream sent
+// with it, and any other status is relayed bare. The upstream's body is closed unread, which ends its exchange (the
+// tunnel's stream, the peer hop's request, a direct backend's connection): such a message takes no calls slot of an
+// anonymous tenant (spec/tunnel.md §6.2), so a stream or a body relayed for it would be a relay no limit bounds
+// (D307). The 404 that closed the session, and the node's and the 401/403/407 answers, were written before.
+func (h *Handler) relayAccepted(rq *request, resp *http.Response, o *relayOpts) {
+	_ = resp.Body.Close()
+	status := resp.StatusCode
+	if status/100 == 2 {
+		status = http.StatusAccepted
+	}
+	if o.sid != "" {
+		rq.w.Header().Set(mcpwire.HeaderSessionID, o.sid)
+	}
+	writeEmpty(rq.w, status)
 }
 
 // writeHeaders writes the response headers the client may see: Content-Type and Cache-Control from the upstream,

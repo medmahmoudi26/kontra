@@ -510,13 +510,12 @@ func (c *Config) validateTunnel(v *validator) {
 	default:
 		v.add("tunnel.channel_binding %q: want tls-exporter or none", c.Tunnel.ChannelBinding)
 	}
-	if a := c.Tunnel.Anonymous; a.Enabled {
-		if c.Tenancy != TenancyMulti {
-			v.add("tunnel.anonymous: needs tenancy: multi, since an anonymous service's URL names its tenant (tunnel.md §6, D277)")
-		}
-		if a.HiringStreams > MaxAnonHiringStreams {
-			v.add("tunnel.anonymous.hiring_streams %d: at most %d, the gate's per-session stream cap (tunnel.md §14)", a.HiringStreams, MaxAnonHiringStreams)
-		}
+	a := c.Tunnel.Anonymous
+	if a.Enabled && c.Tenancy != TenancyMulti {
+		v.add("tunnel.anonymous: needs tenancy: multi, since an anonymous service's URL names its tenant (tunnel.md §6, D277)")
+	}
+	if a.HiringStreams > MaxAnonHiringStreams {
+		v.add("tunnel.anonymous.hiring_streams %d: at most %d, the gate's per-session stream cap (tunnel.md §14)", a.HiringStreams, MaxAnonHiringStreams)
 	}
 }
 

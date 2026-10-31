@@ -171,7 +171,7 @@
       "properties": {
         "channel_binding": { "enum": ["tls-exporter", "none"], "description": "Default: tls-exporter when the gate terminates TLS, else none." },
         "anonymous": {
-          "description": "Anonymous sessions (tunnel.md §6, D277, D287): true for the §6.2 defaults, or those limits. Needs tenancy: multi.",
+          "description": "Anonymous sessions (tunnel.md §6, D277, D287, D309): true for the §6.2 defaults, or those limits, on unless enabled is false. On, it needs tenancy: multi. Off (false, absent, or enabled: false), the gate opens no anonymous session; a multi-tenant gate still applies the limits to the anonymous tenants that live, and ends and purges them, with the object's limits or the §6.2 defaults.",
           "default": false,
           "oneOf": [
             { "type": "boolean" },
@@ -179,11 +179,13 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
+                "enabled": { "type": "boolean", "default": true, "description": "false: no anonymous session is opened, and the limits still apply to the anonymous tenants that live (D309)." },
                 "ttl": { "$ref": "#/$defs/duration", "default": "2h" },
                 "tenants_per_network": { "type": "integer", "minimum": 1, "default": 3 },
                 "services": { "type": "integer", "minimum": 1, "default": 4 },
                 "tasks": { "type": "integer", "minimum": 1, "default": 4 },
-                "calls": { "type": "integer", "minimum": 1, "default": 8, "description": "Concurrent plain MCP calls to an anonymous tenant's services, as host." },
+                "calls": { "type": "integer", "minimum": 1, "default": 8, "description": "Concurrent MCP requests relayed to an anonymous tenant's services, as host (D304)." },
+                "streams": { "type": "integer", "minimum": 1, "default": 8, "description": "GET and subscriptions/listen streams open at once to an anonymous tenant's services, as host; counted apart from calls (D308)." },
                 "hiring_streams": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 },
                 "parts_bytes": { "$ref": "#/$defs/byteSize", "default": "64MiB" },
                 "purge_after": { "$ref": "#/$defs/duration", "default": "24h" },

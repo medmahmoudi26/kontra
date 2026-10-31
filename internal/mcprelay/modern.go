@@ -101,8 +101,13 @@ func (h *Handler) modern(rq *request) {
 	case mcpwire.MethodToolsCall:
 		h.modernToolsCall(rq)
 	default:
-		// An anonymous tenant's slot while the request, or a subscriptions/listen stream, is relayed (§6.2, D304).
-		release, ok := h.takeRelay(rq)
+		// An anonymous tenant's slot while the request is relayed, or a stream's slot for as long as a
+		// subscriptions/listen stream is open (§6.2, D304, D308).
+		take := h.takeRelay
+		if m.Method == mcpwire.MethodListen {
+			take = h.takeStream
+		}
+		release, ok := take(rq)
 		if !ok {
 			return
 		}

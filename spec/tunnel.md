@@ -277,17 +277,21 @@ the proof. A service the gate creates during a handshake gets `allow: [org:<its 
 A gate with `tunnel.anonymous` set (Cloud's public gate; never a default) accepts a `hello` that carries `anonymous:
 true` (§4) and neither `enroll` nor `auth`, whose key is unknown at the gate or belongs to a live anonymous tenant
 (note 2 §2). The setting needs `tenancy: multi`, since an anonymous service's URL names its tenant
-([`relay.md`](relay.md) §2.1, §17), and is either `true` or an object of §6.2's limits (D277). A hello without
+([`relay.md`](relay.md) §2.1, §17), and is either `true` or an object of §6.2's limits (D277), on unless the object
+says `enabled: false` (D309). A hello without
 `anonymous: true` never opens or resumes one (D285): an unknown key that nothing in it enrolls stays `unknown_key`
 (§5), which the lost-welcome probe of §2.4 relies on. A gate without the setting answers a hello carrying it from a
 key it does not know `anonymous_unavailable`, and so does a gate whose live anonymous tenants already number
 `max_tenants` (§6.2). A gate without the setting (turned off while anonymous tenants live) answers a hello carrying
 it from a key of an anonymous tenant `anonymous_unavailable` too, and treats any other hello from such a key as §5
 treats a new key's: the probe is `unknown_key`; a hello §5 admits moves the key, and the tenant it leaves ends at once
-(D292). Every multi-tenant gate runs §6.1's expiry and purge, with or without the setting (§6.2's defaults for what the
-block no longer says): a tenant opened before the setting was turned off still ends at its `expires_at` and is purged
-`purge_after` later (D304). A hello from a key of a team or account tenant is admitted as §5 says, for its existing
-bindings, with or without the field.
+(D292). Every multi-tenant gate applies §6.2's runtime limits to the anonymous tenants that live and runs §6.1's
+expiry and purge, with or without the setting: a tenant opened before the setting was turned off is still served
+within its limits until its `expires_at` (D309), ends then and is purged `purge_after` later (D304). The limits are
+the block's: an operator who turns the setting off and keeps limits (its `purge_after` above all) writes `{enabled:
+false, …}`; `false`, or no block, is §6.2's defaults. A purge reads `purge_after` when it runs, so a change applies to
+every ended tenant, and on a gate whose replicas disagree the shortest one wins. A hello from a key of a team or account
+tenant is admitted as §5 says, for its existing bindings, with or without the field.
 
 ### 6.1 What happens
 
@@ -339,7 +343,8 @@ bindings, with or without the field.
 | Anonymous tenants per network (IPv4 /24, IPv6 /48) at once | 3 | `tenants_per_network` |
 | Services per anonymous tenant (not disabled) | 4 | `services` |
 | Concurrent tasks per anonymous tenant, as host and as hirer | 4 each | `tasks` |
-| Concurrent MCP requests and streams relayed to an anonymous tenant's services (as host) | 8 | `calls` |
+| Concurrent MCP requests relayed to an anonymous tenant's services (as host) | 8 | `calls` |
+| MCP streams (`GET`, `subscriptions/listen`) open at once to an anonymous tenant's services (as host) | 8 | `streams` |
 | Node-opened (hiring) streams in flight per session | 8 | `hiring_streams` |
 | Parts stored per anonymous tenant | 64 MiB ([`relay.md`](relay.md) §6.6) | `parts_bytes` |
 | Live anonymous tenants, gate-wide | 1000 | `max_tenants` |
@@ -363,25 +368,33 @@ relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never t
   the cap, A2A answers `429` as [`relay.md`](relay.md) §2.2 says (on JSON-RPC, `-32600` `rate limited`), a
   task-augmented MCP call `429` with `-32600`, and `hire` a `CallToolResult` with `isError`.
 - A plain MCP call is not a task. The requests the gate relays to the tenant's services, whoever sent them, are at
-  most `calls` in flight, together with their open streams: every request with an `id` and a method that is forwarded
-  (`initialize`, a plain `tools/call`, `resources/read`, `prompts/get`, `completion/complete`, `server/discover`, a
-  method the gate does not know), and each `GET` or `subscriptions/listen` stream for as long as it is open. Over it the
-  request or stream is `429` with `-32600` `rate limited` and `Retry-After`, before anything is forwarded or metered,
-  so a `--public` MCP service is not an unbounded relay (D304; a stock client's standalone `GET` stream so refused is
-  not fatal to it). A notification, a client's response, and what the gate answers itself (`tools/list` from its cache,
-  a durable service's `tasks/*`, a gate-written stream) take none. They are counted gate-wide: each request or stream
-  being relayed is a row of `anon_calls` (migration 0003), deleted when its answer has been relayed or the stream
-  closed, and with the replica that held it when that replica dies (§11; D292). The node's own hiring streams are
-  bounded by `hiring_streams` and the edge.
+  most `calls` in flight: every request with an `id` and a method that is forwarded (`initialize`, a plain
+  `tools/call`, `resources/read`, `prompts/get`, `completion/complete`, `server/discover`, a method the gate does not
+  know). Each `GET` or `subscriptions/listen` stream is one of at most `streams` open, for as long as it is open,
+  counted apart (D308): the TypeScript SDK's client opens its standalone `GET` once `notifications/initialized` is
+  accepted and the stock server keeps it open while the client is idle, so streams counted with requests would leave
+  eight idle clients holding every slot and the service refusing every call. Over either limit the request or stream
+  is `429` with `-32600` `rate limited` and `Retry-After`, before anything is forwarded or metered, so a `--public` MCP
+  service is not an unbounded relay (D304; a stock client's standalone `GET` stream so refused is not fatal to it). A
+  notification, a client's response, and what the gate answers itself (`tools/list` from its cache, a durable service's
+  `tasks/*`, a gate-written stream) take none, and are never relayed as a stream: a notification or response the
+  upstream accepts (any `2xx`) is answered `202` with no body, any other status bare, and whatever the upstream sends
+  with it is closed unread ([`relay.md`](relay.md) §11.1, D307). They are counted gate-wide: each request or stream
+  being relayed is a row of `anon_calls` (migration 0003, `stream` telling them apart), deleted when its answer has
+  been relayed or the stream closed, and with the replica that held it when that replica dies (§11; D292). The node's
+  own hiring streams are bounded by `hiring_streams` and the edge.
 - Parts: a caller's message whose parts would take the tenant's stored parts past `parts_bytes` is `InvalidParams`
   `anonymous storage limit`, before any task row; upstream bytes past it fail the task `upstream_error`, as
   [`relay.md`](relay.md) §6.6 says.
-- **What anonymous tenants can keep stored (D304).** The creation limits count live tenants, while an ended tenant
-  keeps its tasks and their bucket objects until its purge, `purge_after` after its end. So the parts kept for one
-  network are bounded by about (1 + `purge_after` / `ttl`) × `tenants_per_network` × `parts_bytes` (with the defaults,
-  13 × 3 × 64 MiB, about 2.4 GiB per /24 or /48), and gate-wide by the same factor × `max_tenants` × `parts_bytes`
-  (about 0.8 TiB); a conversion ends a tenant at once and so frees its slot sooner, for the holder of an account key.
-  An operator lowers the bound with `purge_after`, `parts_bytes` or the creation limits.
+- **What anonymous tenants can keep stored (D304, D310).** The creation limits count live tenants, while an ended
+  tenant keeps its tasks and their bucket objects until its purge, `purge_after` after its end. And one tenant may hold
+  up to `tasks` × `parts_bytes`, not `parts_bytes`: a dispatch counts the others' bytes as they stood when it started
+  (D292's SPEC-CONFLICT on [`relay.md`](relay.md) §6.6), so its `tasks` concurrent tasks started together may each
+  store up to `parts_bytes`. So the parts kept for one network are bounded by about (1 + `purge_after` / `ttl`) ×
+  `tenants_per_network` × `tasks` × `parts_bytes` (with the defaults, 13 × 3 × 4 × 64 MiB, about 9.75 GiB per /24 or
+  /48), and gate-wide by (1 + `purge_after` / `ttl`) × `max_tenants` × `tasks` × `parts_bytes` (about 3.2 TiB); a
+  conversion ends a tenant at once and so frees its slot sooner, for the holder of an account key. An operator lowers
+  the bound with `purge_after`, `parts_bytes`, `tasks` or the creation limits.
 
 ### 6.3 `kontra login` (D278)
 

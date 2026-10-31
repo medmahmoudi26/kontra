@@ -276,6 +276,15 @@ five fields with the 1.0 names, plus two it must also own, D52):
 | `capabilities.extensions` | The seller's list, except that every entry whose URI the gate or the operator asserts — `https://kontra.sh/ext/sealed/v1` for a sealed service, `https://kontra.sh/ext/anonymous/v1` (`required: false`, `params.expiresAt`) for a service of an anonymous tenant ([`tunnel.md`](tunnel.md) §6.1, D292), and every URI in the operator's `card_extensions` (§13.4) — replaces a seller entry with the same URI. A seller's `input-schema/v1` entry passes unchanged. |
 | `signatures` | Exactly one: the gate's JWS (below). |
 
+The gate sets and removes these members by their exact keys, and the seller's card is read with exact keys where they
+live (§11.1's rule, D172): a card whose top level, `capabilities` or `capabilities.extensions` entries hold a repeated
+key, two keys equal under case folding, or a lone case variant of a member the gate writes, removes or reads there
+(`Extensions`, `Streaming`, `Signatures`, `SecuritySchemes`, `URL`, an entry's `Required`, …) is not installed, and the
+service has no card until its seller publishes another. A decoder that matches names case-insensitively (a2a-go's card
+parser) takes the last of such variants, so a seller's `Extensions` after the gate's `extensions` would replace the
+operator's entries on a card the gate signs (D311). §2.4's declared extensions are read from the served card with exact
+keys.
+
 **The gate's signature.** ES256 over RFC 8785 JCS of the served card without `signatures`; protected header `{alg:
 "ES256", kid, typ: "JOSE", jku: {public_url}/.well-known/jwks.json, "kontra.upstream": {sha256, url, verified,
 jwks}}`, where `sha256` is the hex SHA-256 over the JCS of the upstream card, `url` is
@@ -918,8 +927,10 @@ and unknown methods pass through unchanged, except Kontra's own keys (§2.5).
   check of §6.1, with the upstream's id substituted. Requests and responses pass unchanged otherwise: JSON-RPC
   ids, SSE event ids and `retry:` fields are the upstream's (they are scoped to the upstream session), except that
   a `POST`'s event stream reaches the client without its event ids, and a `GET`'s carries no response (§11.4,
-  D265). A client's `GET` stream and its `Last-Event-ID` resume go to the same pinned session, except gate-written
-  streams (§11.7).
+  D265). A client's notification or response is answered as the MCP transport says a server answers one, whatever
+  the upstream sent: `202` with no body when the upstream answered `2xx`, its error status bare otherwise; what the
+  upstream sends with it (a body, an event stream) is closed unread, never relayed (D307). A client's `GET` stream
+  and its `Last-Event-ID` resume go to the same pinned session, except gate-written streams (§11.7).
 - **404.** A client id that is unknown, closed, bound to another principal, or presented on another service's
   path is `404` (`mcp_session_cross_node`). A pinned tunnel session that is gone, or whose key or binding was
   revoked, closes the row (`tunnel_lost` or `revoked`) and answers `404`, as the transport requires; the client
@@ -1967,7 +1978,7 @@ met, are D297.
 | `hooks.lifecycle.task_queue` | built in | §13.3 |
 | `drain_timeout` | `10m` | §14.3 |
 | `tunnel.channel_binding` | `tls-exporter` when the gate terminates TLS, else `none` | [`tunnel.md`](tunnel.md) §4 |
-| `tunnel.anonymous` | `false`; `true`, or `{ttl, tenants_per_network, services, tasks, calls, hiring_streams, parts_bytes, purge_after, max_tenants}` with [`tunnel.md`](tunnel.md) §6.2's defaults; needs `tenancy: multi` (D277, D287) | [`tunnel.md`](tunnel.md) §6 |
+| `tunnel.anonymous` | `false`; `true`, or `{enabled, ttl, tenants_per_network, services, tasks, calls, streams, hiring_streams, parts_bytes, purge_after, max_tenants}` with [`tunnel.md`](tunnel.md) §6.2's defaults, on unless `enabled: false`, which keeps the limits for the anonymous tenants that live (D309); on, needs `tenancy: multi` (D277, D287, D308) | [`tunnel.md`](tunnel.md) §6 |
 | `tunnel.enroll_with_api_key` | `false` | [`tunnel.md`](tunnel.md) §5 |
 
 The config's JSON Schema (`kontra.sh/schema/config/v1`, PRD §11) is published with the first gate code (M1).

@@ -218,8 +218,8 @@ type Replica struct {
 	// cancels (gatemcp.HireTasks.Wait) before the Temporal client closes.
 	hireTasks *gatemcp.HireTasks
 
-	// Anonymous sessions (spec/tunnel.md §6; tunnel.anonymous): their limits' checks, nil without the setting, and the
-	// sweeper that ends and purges their tenants, on every multi-tenant gate (anonSweepLimits); anonKick asks the
+	// Anonymous sessions (spec/tunnel.md §6; tunnel.anonymous): their limits' checks and the sweeper that ends and
+	// purges their tenants, on every multi-tenant gate with or without the setting (anonTenantLimits); anonKick asks the
 	// expiry sweep to run now (a session's end).
 	anonCaps    *anon.Caps
 	anonSweeper *anon.Sweeper
@@ -377,16 +377,16 @@ func (r *Replica) assemble() error {
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
 	// Anonymous sessions (spec/tunnel.md §6, D277): opened by the admission, their limits checked where work is
 	// created, their tenants ended and purged by every replica's sweeps. A gate without tunnel.anonymous opens none,
-	// but a multi-tenant one still ends and purges those opened before the setting was turned off (anonSweepLimits).
+	// but a multi-tenant one still applies the runtime limits to those opened before the setting was turned off, and
+	// ends and purges them (anonTenantLimits, D304, D309).
 	var anonLimits *anon.Limits
-	if cfg.Tunnel.Anonymous.Enabled {
-		lim := anon.LimitsFrom(cfg.Tunnel.Anonymous)
-		anonLimits = &lim
+	if lim, ok := anonTenantLimits(cfg); ok {
 		r.anonCaps = anon.NewCaps(r.pool, lim, r.id, log)
-	}
-	if lim, ok := anonSweepLimits(cfg); ok {
 		r.anonSweeper = anon.NewSweeper(r.pool, lim, r.objects(), log)
 		r.anonKick = make(chan struct{}, 1)
+		if cfg.Tunnel.Anonymous.Enabled {
+			anonLimits = &lim
+		}
 	}
 	r.enroll = enroll.NewStore(r.pool, enroll.Options{
 		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti,
@@ -616,12 +616,15 @@ func (r *Replica) assemble() error {
 	return nil
 }
 
-// anonSweepLimits reports whether a replica runs the anonymous expiry and purge sweeps (spec/tunnel.md §6.1), and with
-// which limits: on every multi-tenant gate, whether or not it opens anonymous sessions now. A gate that turned
-// tunnel.anonymous off while anonymous tenants lived (D292) still ends each at its expires_at and purges it purge_after
-// later, so their data is not kept for ever; with no anonymous tenant both passes find nothing. The limits are the
-// block's, its defaults for what it leaves out (D304). A single-tenant gate has no anonymous tenant.
-func anonSweepLimits(cfg *config.Config) (anon.Limits, bool) {
+// anonTenantLimits reports whether a replica applies the anonymous tenants' runtime limits (spec/tunnel.md §6.2: tasks,
+// parts_bytes, calls, streams) and runs their expiry and purge sweeps (§6.1), and with which limits: on every
+// multi-tenant gate, whether or not it opens anonymous sessions now. A gate that turned tunnel.anonymous off while
+// anonymous tenants lived (D292) still serves their services until each ends, so it still bounds what their callers
+// create (D309), ends each at its expires_at and purges it purge_after later, so their data is not kept for ever (D304);
+// with no anonymous tenant the caps take no slot and both passes find nothing. The limits are the block's, an
+// enabled: false object's included, and §6.2's defaults for what it leaves out. A single-tenant gate has no anonymous
+// tenant.
+func anonTenantLimits(cfg *config.Config) (anon.Limits, bool) {
 	if cfg.Tenancy != config.TenancyMulti {
 		return anon.Limits{}, false
 	}

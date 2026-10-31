@@ -695,35 +695,37 @@ func (s *Server) Declared(svc *Service) *ExtensionSet {
 	return s.declared(svc)(nil)
 }
 
-// cardExtensions reads capabilities.extensions of a served card, entry by entry: an entry that is not an
-// object with a string uri is skipped, so one malformed seller entry cannot hide the operator's.
+// cardExtensions reads capabilities.extensions of a served card, entry by entry, with exact keys (D311): the
+// capabilities object and each entry as the gate wrote them (card.Rewrite refuses a card with a case variant of any of
+// them), never a seller's "Extensions" or "Required" that a case-insensitive decoder would take for them. An entry that
+// is not an object with a string uri is skipped, so one malformed seller entry cannot hide the operator's.
 func cardExtensions(body []byte) (all, required []string) {
-	var c struct {
-		Capabilities struct {
-			Extensions []json.RawMessage `json:"extensions"`
-		} `json:"capabilities"`
+	top, err := strictjson.Members(body)
+	if err != nil {
+		return nil, nil
 	}
-	if json.Unmarshal(body, &c) != nil {
-		var loose struct {
-			Capabilities json.RawMessage `json:"capabilities"`
-		}
-		if json.Unmarshal(body, &loose) != nil || json.Unmarshal(loose.Capabilities, &c.Capabilities) != nil {
-			return nil, nil
-		}
+	caps, err := strictjson.Members(top["capabilities"])
+	if err != nil {
+		return nil, nil
+	}
+	var list []json.RawMessage
+	if raw, ok := caps["extensions"]; !ok || json.Unmarshal(raw, &list) != nil {
+		return nil, nil
 	}
 	seen := map[string]bool{}
-	for _, raw := range c.Capabilities.Extensions {
-		var e struct {
-			URI      string          `json:"uri"`
-			Required json.RawMessage `json:"required"`
-		}
-		if json.Unmarshal(raw, &e) != nil || e.URI == "" || seen[e.URI] {
+	for _, raw := range list {
+		e, err := strictjson.Members(raw)
+		if err != nil {
 			continue
 		}
-		seen[e.URI] = true
-		all = append(all, e.URI)
-		if string(bytes.TrimSpace(e.Required)) == "true" {
-			required = append(required, e.URI)
+		var uri string
+		if json.Unmarshal(e["uri"], &uri) != nil || uri == "" || seen[uri] {
+			continue
+		}
+		seen[uri] = true
+		all = append(all, uri)
+		if string(bytes.TrimSpace(e["required"])) == "true" {
+			required = append(required, uri)
 		}
 	}
 	return all, required
