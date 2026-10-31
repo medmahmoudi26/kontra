@@ -144,6 +144,10 @@ sequential read of it (its header says why); run it before the new replicas star
 build first: `docker compose build gate && docker compose run --rm gate-migrate`. A team or account slug may no longer
 be `anon-` and 16 hex digits.
 
+M4's gate runs brought this team gate up on a fresh DigitalOcean droplet (Ubuntu 24.04, Docker 29.1.3) at `f9f5e61`:
+built-in ACME got its Let's Encrypt certificate, a node on another machine enrolled, and its service was hired through
+the gate ([`docs/gate-runs-m4.md`](docs/gate-runs-m4.md); the first run, at `3b890f3`, found the defect D313 fixed).
+
 PRD §12's pentest list ran against this compose team gate with M3's own surface at `f65760a` (four findings, each
 fixed) and again after the M3 review rounds at `33f06a8` (no finding, D266);
 [`docs/pentest-m3.md`](docs/pentest-m3.md) records the second run's every probe, what changed since the first, and

@@ -3763,8 +3763,8 @@ an in-repository Admission server and authorization server, and anonymous limits
 gate names are not tests in CI: the clean-laptop demo against the staging gate (`scripts/demo-clean-laptop.sh`, a
 container image built from `golang` with nothing else) and the team gate on a clean VPS (`scripts/team-gate-vps.sh`);
 both are to be recorded in `docs/gate-runs-m4.md` with what was run, what was seen and when everything was torn down
-(written by WP-09 on 31 Oct, at `3b890f3`: [`gate-runs-m4.md`](gate-runs-m4.md); the VPS run failed there on a
-defect of `compose.yaml` and is to be repeated, D306).
+(written by WP-09 on 31 Oct: [`gate-runs-m4.md`](gate-runs-m4.md); the VPS run failed at `3b890f3` on a defect of
+`compose.yaml` and passed at `f9f5e61` with its fix, D313; D306 lists what is left).
 
 ### D283. PRD §14's other M4 examples stay skeletons — **decided under the owner's standing instruction, 28 Oct**
 
@@ -4680,12 +4680,13 @@ naming the gate's authorization server: refused `invalid_target`, nothing stored
   WP-09 has deployed staging from this head, run `make test-kits`, the clean laptop in source mode and the VPS run
   (dry run, then a real droplet with Let's Encrypt), committed `gate-runs-m4.md`, and, after the merge, run
   `demo-clean-laptop.sh --published --expect <merge commit>`.** None of that is this review's to do: it touches
-  staging, DigitalOcean and Cloudflare, which the orchestrator runs (O2). WP-09 ran them on 31 Oct at `3b890f3`
-  and [`gate-runs-m4.md`](gate-runs-m4.md) records them: staging deployed, `make test-kits`, the clean laptop in
-  source mode, the TCK and `anon_limits` passed; the VPS run failed on a defect of `compose.yaml` (`gate-migrate` and
-  `gate` both build `kontra-gate:m4`, which races on a fresh Ubuntu 24.04's containerd image store) and is to be
-  repeated with its fix, and the published laptop run, staging's redeploy from the merge commit and the anonymous
-  tenant's purge are still to do.
+  staging, DigitalOcean and Cloudflare, which the orchestrator runs (O2). WP-09 ran them on 31 Oct and
+  [`gate-runs-m4.md`](gate-runs-m4.md) records them, with each gate item's verdict and commit: staging deployed,
+  `make test-kits`, the clean laptop in source mode, the TCK and `anon_limits` passed at `3b890f3`; the VPS run failed
+  there on a defect of `compose.yaml` (`gate-migrate` and `gate` both build `kontra-gate:m4`, which races on a fresh
+  Ubuntu 24.04's containerd image store), fixed by D313, and passed at `f9f5e61`. The `tck` workflow's first CI run on
+  the pull request, staging's redeploy from the merge commit, the published laptop run and the anonymous tenant's
+  purge are still to do.
 - **Smaller corrections.** The demo's prerequisite is Node 22.19 or later (the pinned inspector and its undici need
   it); compose has three one-shot jobs; M4's decisions run from D268 under their headings. `demo-clean-laptop.sh`
   creates the laptop's log before its follower starts: under load the loop read it first and failed
@@ -4842,7 +4843,8 @@ that answers it as the stock double does, with a 1 MiB JSON body, with a silent 
 ## From M4's gate runs (31 Oct)
 
 The team gate on a clean VPS (gate run C, WP-09, at `3b890f3`) failed at `docker compose up -d --build --wait` on a
-defect of `compose.yaml`; the gate runs' record, `docs/gate-runs-m4.md`, holds the run. D313 records the fix.
+defect of `compose.yaml`. D313 records the fix, with which the run passed at `f9f5e61`; the gate runs' record,
+`docs/gate-runs-m4.md`, holds both runs.
 
 ### D313. Only the `gate` service builds the gate's image, and `gate-migrate` runs it — **decided under the owner's standing instruction, 31 Oct** (amends D306; completes D281)
 
@@ -4888,4 +4890,7 @@ writable on the containerd store too. Tests: `TestComposeTeamGate` (`test/pentes
 configuration; fails there with `the services that build [gate gate-migrate]`), `TestTeamGateHostMode` and
 `TestTeamGateRecordsComposeFailure` (`test/vps`, against stubs: the versions, the storage driver and the built image in
 the record; on a failure all 31 lines of compose's output and the stack's state, and no step 5; both fail on the
-script as it was), `TestTeamGateRehearsal` (`make test-kits`). The VPS run is to be made again with this fix (D306).
+script as it was), `TestTeamGateRehearsal` (`make test-kits`). The VPS run was made again with this fix at `f9f5e61`
+(31 Oct, droplet 614610093: Docker 29.1.3 on the containerd image store, compose 2.40.3) and passed: `up -d --build
+--wait` exit 0 in 232 s with one build, `gate-migrate` and `gate` on the one image, the Let's Encrypt certificate, and
+a hire and an MCP `search` through the gate from another machine ([`gate-runs-m4.md`](gate-runs-m4.md)).

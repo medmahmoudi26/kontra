@@ -6,22 +6,33 @@ up on a clean VPS**. D282 makes the last two runs by hand, not tests in CI, and 
 WP-09 had still to do. This file records those runs: what ran, at which commit, when, the commands, what was seen, the
 ids, and how everything was torn down.
 
-Every run below was made on **31 Oct 2026 at `3b890f3`** (`3b890f3794e4ea43532c16d8134754ccdbd46b0c`, the head of
-`m4-mcp-anon-tck` after the second review, D307–D311, checked out clean as `m4-gate-runs`). The TCK's direct
-variant and `anon_limits` ran last (20:27Z–20:31Z), from the same checkout while only this record and the three
-documents that point at it were edited: the code they built was `3b890f3`'s. Times are UTC.
+The runs were made on **31 Oct 2026**, at two commits of `m4-mcp-anon-tck`. Times are UTC.
+
+- **`3b890f3`** (`3b890f3794e4ea43532c16d8134754ccdbd46b0c`, the head after the second review, D307–D311, checked out
+  clean as `m4-gate-runs`): the staging gate, `make test-kits`, the clean laptop, the TCK, `anon_limits` and the first
+  VPS run. The TCK's direct variant and `anon_limits` ran last (20:27Z–20:31Z), from the same checkout while only this
+  record and the three documents that point at it were edited: the code they built was `3b890f3`'s.
+- **`f9f5e61`** (`f9f5e61b3ae684dc7adab804c145b80606739eff`, the head with the third review's fix, D312 at
+  `7033e0a`, the compose fix, D313 at `2eb8041`, and this record's first version): the VPS rerun, from this worktree
+  of the branch, clean before and after the run.
 
 ## Verdicts
 
-| Gate item | Verdict at `3b890f3` | Where |
-|---|---|---|
-| `tck_*` green bar with expected failures | **Green on this host** for the tunnel, caddy and direct variants, both bindings each: 0 failed, 0 xpassed, every listed expected failure xfailed and every listed skip skipped. **The `tck` workflow has not run**: the branch is not pushed, so there is no CI run to link yet | [The TCK](#the-tck-tck_) |
-| `anon_limits` | **Passed** (`TestAnonLimits`, run on its own with `-v`), and in the second review's full `make test-e2e` on the same tree. CI's `e2e` workflow has not run it (not pushed) | [`anon_limits`](#anon_limits) |
-| Demo from a clean laptop against staging | **Passed** in source mode against the staging gate deployed from this commit. The published rerun (`--published --expect <merge commit>`) is after the merge | [Staging](#the-staging-gate-gatewaykontrarun), [the clean laptop](#the-clean-laptop-against-staging) |
-| Team gate up on a clean VPS | **Failed** at `docker compose up -d --build --wait` on a defect of `compose.yaml` (two services build one image tag, which races on a fresh Ubuntu 24.04's Docker). Torn down and checked; the fix is written and verified but not applied; the run is to be repeated on a head that has it | [The VPS](#the-team-gate-on-a-clean-vps-failed) |
+| Gate item | Verdict | Taken at | What remains |
+|---|---|---|---|
+| [`tck_*` green bar with expected failures](#the-tck-tck_) | **Green on this host** for the tunnel, caddy and direct variants, both bindings each: 0 failed, 0 xpassed, every listed expected failure xfailed and every listed skip skipped | `3b890f3` | **The `tck` workflow's first CI run** on the pull request, linked here: the branch is not pushed, so it has not run. The nightly `auth` variant once the workflow is on the default branch |
+| [`anon_limits`](#anon_limits) | **Passed**: `TestAnonLimits` on its own with `-v`, and in the second review's full `make test-e2e` on the same tree | `3b890f3` | CI's `e2e` workflow on the same pull request (not pushed, not run) |
+| Demo from a clean laptop against staging ([staging](#the-staging-gate-gatewaykontrarun), [the laptop](#the-clean-laptop-against-staging)) | **Passed** in source mode, against the staging gate deployed from the same commit | `3b890f3` (the laptop and the staging gate) | **Staging redeployed from the merge commit**, then **the published run**, `scripts/demo-clean-laptop.sh --published --expect <merge sha>`; **the anonymous tenant's purge** confirmed after 2026-11-01 21:28Z |
+| [Team gate up on a clean VPS](#the-team-gate-on-a-clean-vps) | **Failed at `3b890f3`** at `docker compose up -d --build --wait`, on a defect of `compose.yaml` (two services built one image tag, which races on a fresh Ubuntu 24.04's containerd image store). **Passed at `f9f5e61`** with D313's fix: one build on Docker 29.1.3's containerd store, a Let's Encrypt certificate, a hire and an MCP `search` through the gate from another machine. Both droplets were torn down and the teardowns checked | `3b890f3` (failed), **`f9f5e61` (passed)** | nothing |
 
-`make test-kits` (the two kits' own tests and their rehearsals against local gates) passed as well. **M4 is not gated
-yet**: see [what is still to do](#what-is-still-to-do).
+Every gate item has a passing run. **M4 is not gated yet**: D306 gates it on the published clean-laptop run at the
+merge commit, and the last column's items are open ([what is still to do](#what-is-still-to-do)).
+
+Between the two commits the gate's code changed once: D312 (`7033e0a`) has `/mcp` refuse an `initialize` without an
+`id` (400, never forwarded). D313 (`2eb8041`) changed `compose.yaml`, `scripts/team-gate-vps.sh` and their tests, and
+`f9f5e61` adds this record. The TCK, `anon_limits` and the clean laptop were not run again at `f9f5e61`; `make check`
+and `make test-kits` passed with D313's change ([below](#make-test-kits)), the pull request's CI runs the TCK and
+`anon_limits` at the head, and the published laptop run is at the merge commit.
 
 ## The host
 
@@ -29,8 +40,8 @@ The runs were made from the project's build host: 2 CPUs shared with other work,
 buildx 0.19.3 on the classic `overlay2` store, `GOTOOLCHAIN=go1.26.10`, one heavy run at a time. The staging manifests,
 the Postgres password, the card-signing keys, the Cloudflare token and the DigitalOcean credentials stay outside the
 repository; nothing in this file is a secret. Production (`gateway.kontra.sh`, namespace `kontra`), Traefik and the
-FastAPI staging objects were not changed by any run: `gateway.kontra.sh/healthz` answered 200 after the staging apply
-and at the end.
+FastAPI staging objects were not changed by any run: `gateway.kontra.sh/healthz` answered 200 after the staging apply,
+at the end of the first runs and after the VPS rerun (21:20Z).
 
 ## The staging gate, `gateway.kontra.run`
 
@@ -95,16 +106,17 @@ app.kubernetes.io/part-of=kontra-gateway-staging`, never `delete -f`), the two D
 
 ## `make test-kits`
 
-| | |
-|---|---|
-| When | 19:12:09Z, 856 s |
-| Command | `make test-kits` (`GOTOOLCHAIN=go1.26.10`) |
-| Result | **exit 0**, 20 top-level tests passed: `ok kontra.sh/kontra/test/vps 361.631s` (`TestTeamGateRehearsal` 229.6 s, `TestACMEVariantWritesItsCache` 115.9 s, the refusal, dry-run, pre-flight, teardown-only, reaping and run-teardown cases), `ok kontra.sh/kontra/test/demo 285.876s` (`TestDemoRehearsal` 280.7 s, `TestREADMEDemoBlock`, `TestDemoImage`, …) |
-| Teardown | the kits' own: the `kontra-gate:kit-<pid>` image and every container, volume and network they made were gone afterwards |
+| | At `3b890f3` | At `2eb8041` (D313; the code of `f9f5e61`) |
+|---|---|---|
+| When | 19:12:09Z, 856 s | 20:46Z–21:06Z, 1171 s |
+| Command | `make test-kits` (`GOTOOLCHAIN=go1.26.10`) | the same, `KONTRA_TEST_PG` unset; `make check` (`GOFLAGS=-p=1`) had passed with the same change, exit 0 in 89 s |
+| Result | **exit 0**, 20 top-level tests passed: `ok kontra.sh/kontra/test/vps 361.631s` (`TestTeamGateRehearsal` 229.6 s, `TestACMEVariantWritesItsCache` 115.9 s, the refusal, dry-run, pre-flight, teardown-only, reaping and run-teardown cases), `ok kontra.sh/kontra/test/demo 285.876s` (`TestDemoRehearsal` 280.7 s, `TestREADMEDemoBlock`, `TestDemoImage`, …) | **exit 0**, 21 top-level tests passed: `ok kontra.sh/kontra/test/vps 623.898s` (14, with D313's `TestTeamGateRecordsComposeFailure`; `TestTeamGateRehearsal` 485.8 s, in which the script's compose built the gate once from the shipped archive, `#16 naming to docker.io/library/kontra-gate:kitvps-3899213 done`, `gate-migrate` exited 0 on that image and the gate reported `kontra-gate m4 (go1.26.10, linux/amd64)`; `TestACMEVariantWritesItsCache` 119.1 s), `ok kontra.sh/kontra/test/demo 344.825s` (7; `TestDemoRehearsal` 338.4 s) |
+| Teardown | the kits' own: the `kontra-gate:kit-<pid>` image and every container, volume and network they made were gone afterwards | the same: no image, container, volume or network beyond a snapshot taken before; the default builder's cache grew by about 2 GB and was left, as other projects share it |
 
 The rehearsals run each kit end to end against a local gate (the VPS kit's steps 4 and 5 on `root@127.0.0.1` with a
-local CA; the laptop against a local gate). They are not the gate runs, and as the VPS run showed they do not cover a
-fresh VPS's Docker ([below](#why-the-kits-did-not-see-it)).
+local CA; the laptop against a local gate). They are not the gate runs. Since D313 the VPS rehearsal builds the gate as
+the VPS does and counts the builds, but this host's Docker is not a fresh VPS's: only a droplet covers that
+([below](#why-the-kits-did-not-see-it)).
 
 ## The clean laptop against staging
 
@@ -114,7 +126,7 @@ yet).
 | | |
 |---|---|
 | When | 19:26:38Z dry run; 19:26:42Z–19:29:09Z the run, 147 s (laptop ready in 136 s) |
-| Command | `scripts/demo-clean-laptop.sh --transcript <file>` (after `--dry-run`, which listed the 10 commands, the two substitutions and the teardown, and built nothing); `a2a-cli` v0.3.1 on the host's `PATH` as `a2a`, so the script's optional host `a2a send` ran too |
+| Command | `scripts/demo-clean-laptop.sh --transcript <file>` (after `--dry-run`, which listed the 10 commands, the two substitutions and the teardown, and built nothing); the host's `a2a-cli` on its `PATH` as `a2a`, so the script's optional host `a2a send` ran too. That binary is installed as `a2a-cli-v031` but reports `v0.3.2-0.20261016125318-609d0b5dd28f`, a build of a commit after v0.3.1; the laptop installs the pinned v0.3.1 itself |
 | Laptop | `kontra-demo:3b890f3794e4`, target `laptop-src`, built from `git archive 3b890f3794e4`: `golang:1.26.10-bookworm` with Node v22.23.4, user `laptop` with an empty home, the default bridge, no mounts, no secrets |
 | Result | **PASS, exit 0**: commands 1 to 10 of README.md's demo block all passed at the first attempt; the host checks passed with no credential |
 | Slug | `anon-2d1d2dc15fff9177`, public URL `https://gateway.kontra.run/agents/anon-2d1d2dc15fff9177/hello` |
@@ -207,9 +219,10 @@ database, stopped its processes (gate, seller, node, Caddy, Temporal) and remove
 and no process was left.
 
 Not run: the nightly `auth` variant, and the `tck` workflow itself. The workflow runs on pull requests that change the
-gate and needs the file on the default branch for its schedule; `3b890f3` is not pushed, so there is no green CI run
-to link yet. The TCK checkout first named for the runs had a modified `uv.lock` (rewritten by a newer `uv`), which
-`scripts/tck.sh` refuses by design; the runs used a clean clone at the same pin (`d4d6fae`, no modified file).
+gate and needs the file on the default branch for its schedule; neither `3b890f3` nor the head, `f9f5e61`, is pushed,
+so there is no green CI run to link yet. The TCK checkout first named for the runs had a modified `uv.lock`
+(rewritten by a newer `uv`), which `scripts/tck.sh` refuses by design; the runs used a clean clone at the same pin
+(`d4d6fae`, no modified file).
 
 ## `anon_limits`
 
@@ -231,10 +244,25 @@ It also ran in the second review's full `make test-e2e` on the tree it committed
 commit (not pushed). The staging run above showed the part of §6.2 a real deployment adds, the client's /24 carried
 through Traefik by PROXY v2.
 
-## The team gate on a clean VPS (failed)
+## The team gate on a clean VPS
 
 The plan's run C, gate item "team gate up on a clean VPS": `scripts/team-gate-vps.sh`, the ACME variant of
-`compose.yaml` on a throwaway DigitalOcean droplet. **It failed at step 4, on a defect of `compose.yaml`.**
+`compose.yaml` on a throwaway DigitalOcean droplet. **The first run, at `3b890f3`, failed at step 4 on a defect of
+`compose.yaml`.** D313 fixed it (`2eb8041`), and **the rerun, at `f9f5e61`, passed**: compose built the gate's image
+once on a fresh droplet's containerd image store, the gate got its Let's Encrypt certificate, and a node on another
+machine enrolled; its service was hired through the gate with an API key and found through `/mcp`. Both droplets and
+both DNS records were deleted by the script's trap, and each teardown was checked by hand.
+
+| | First run | Rerun |
+|---|---|---|
+| Commit | `3b890f3` | `f9f5e61` |
+| Result | **FAIL, exit 1**, at step 4 | **PASS, exit 0** |
+| Droplet | id **614595251** | id **614610093** |
+| DNS record | id **`dcd828bd791bd0ef06882021d9caa090`** | id **`2d7f37ac23e44fb9f1c5bc07bbbf8d02`** |
+| Lifetime and cost | 5 min 34 s; at most $0.0357, about $0.0033 pro rata | 11 min 6 s; at most $0.0357, about $0.0066 pro rata |
+| Teardown | the trap; checked at 19:44:36Z and 20:12:59Z | the trap, then `--teardown-only`; checked at 21:20:09Z |
+
+### The first run, at `3b890f3` (failed)
 
 | | |
 |---|---|
@@ -283,7 +311,18 @@ team-gate-vps: torn down; nothing left
 
 **Not reached**: healthz and the Let's Encrypt certificate on `m4-teamgate.kontra.run`, the port check, `enroll`, the
 team member's container, `a2a send` and the MCP `search` with the key, and the record of `docker compose ps` and the
-image digests. Only one droplet was allowed for the run, so it was not repeated.
+image digests. Only one droplet was allowed for the run, so it was not repeated before the fix; the rerun is the
+second droplet.
+
+**Its teardown, checked.** At 19:44:36Z and again at 20:12:59Z: `doctl compute droplet list --tag-name
+kontra-m4-gaterun --no-header` empty (exit 0, 0 lines), and `doctl compute droplet get 614595251` answered 404; the
+only droplet of the account was the build host's, which `KONTRA_VPS_PROTECTED` named. Cloudflare: no record named
+`m4-teamgate.kontra.run`, none with the comment "M4 VPS gate run, delete after", and a GET of record
+`dcd828bd791bd0ef06882021d9caa090` answered 81044 ("Record does not exist"); the zone's 28 records were identical (id,
+type, name, content) to the snapshot taken before the run, `gateway.kontra.run`'s A and AAAA among them. No
+`kontra-demo`, `kontra-teammate` or repro container and no `kontra-demo` image were left; `164.92.142.134` was not in
+`known_hosts`; the run's temporary directories and the repro's container and volume were removed.
+`gateway.kontra.sh/healthz` and `gateway.kontra.run/healthz` answered 200.
 
 ### The defect
 
@@ -303,12 +342,14 @@ is harmless, and `test/vps` and `test/demo` override `gate-migrate`'s image (`bu
 `make test-kits` never builds the tag twice on a containerd image store. A green `make test-kits` says nothing about a
 fresh VPS's Docker. The script's record printed Compose's and buildx's versions but not the engine's or its storage
 driver, and kept the last 20 lines of Compose's output; `docker version` and `docker info --format '{{.Driver}}
-{{.DriverStatus}}'` in the record would have named the cause at once.
+{{.DriverStatus}}'` in the record would have named the cause at once. D313 changed both: the rehearsal builds the gate
+as the VPS does and counts the builds, and the record names the engine, containerd, runc and the storage driver, and
+keeps compose's whole output when it fails.
 
-### The fix, verified but not applied
+### The fix, D313 (`2eb8041`)
 
-Only `gate` builds the image, and `gate-migrate` runs the image `gate` builds (Compose does not pull an image another
-service of the project builds):
+Only `gate` builds the image, and `gate-migrate` runs the image `gate` builds; compose builds every image a command
+needs before it creates any container, so the image exists when `gate-migrate` starts:
 
 ```diff
  x-gate: &gate
@@ -326,45 +367,157 @@ service of the project builds):
      command: ["serve", "-f", "/etc/kontra/kontra.yaml"]
 ```
 
-with a check in `TestComposeTeamGate` (`test/pentest`) that no service but `gate` builds: it passes with the fix and
-fails on `3b890f3` with `service gate-migrate builds "kontra-gate:m4" too: only the gate builds kontra-gate:m4`.
-Verified, in the same `ubuntu:24.04` container with Docker 29.1.3 and Compose 2.40.3: the two-service shape with the
-fix failed 0 of 15 fresh tries, and its upgrade path (`up --build` over a running stack) and `build` then `up
---no-build` passed; on the build host's Compose 2.24.6 it passes too. The whole patched `compose.yaml`, with a real
-gate build, capped at 1 CPU: `docker compose up -d --build --wait` exit 0 in 366 s, the tag named once, every service
-healthy or exited 0, `kontra-gate version` `kontra-gate m4 (go1.26.10, linux/amd64)`, healthz 200, and an API key and
-an enrollment token minted. A new named volume over the image's `/var/lib/kontra-gate` (owned by 65532) stays
-writable for 65532 on the containerd store, so the ACME cache works there. The fix needs a decision entry and a
-commit; WP-09 did not apply it.
+Verified before it was committed, in the same `ubuntu:24.04` container with Docker 29.1.3 and Compose 2.40.3: the
+two-service shape with the fix failed 0 of 15 fresh tries, and its upgrade path (`up --build` over a running stack)
+and `build` then `up --no-build` passed; on the build host's Compose 2.24.6 it passes too. The whole patched
+`compose.yaml`, with a real gate build, capped at 1 CPU: `docker compose up -d --build --wait` exit 0 in 366 s, the tag
+named once, every service healthy or exited 0, `kontra-gate version` `kontra-gate m4 (go1.26.10, linux/amd64)`,
+healthz 200, and an API key and an enrollment token minted. A new named volume over the image's `/var/lib/kontra-gate`
+(owned by 65532) stays writable for 65532 on the containerd store, so the ACME cache works there.
 
-### Teardown, checked
+Committed as `2eb8041` with D313. `TestComposeTeamGate` (`test/pentest`, in `make check`) and
+`TestComposeConfigResolves` (`docker compose config`) check that no service but `gate` builds and that `gate-migrate`
+runs the gate's image; both fail on `7033e0a`'s `compose.yaml`. `scripts/team-gate-vps.sh`'s step 4 records the host's
+Docker (engine, containerd, runc, the storage driver and its status, compose, buildx) and the images compose built,
+and on a failure compose's whole output, `docker compose ps -a` and each service's last 40 log lines
+(`TestTeamGateHostMode`, `TestTeamGateRecordsComposeFailure`). Compose 2.24.6 first tries to pull `gate-migrate`'s
+image, prints `gate-migrate Pulling` and `Error`, and goes on; `docker compose run --rm gate-migrate` alone now needs
+`docker compose build gate` first, which the README's upgrade paragraph says.
 
-At 19:44:36Z and again at 20:12:59Z: `doctl compute droplet list --tag-name kontra-m4-gaterun --no-header` empty
-(exit 0, 0 lines), and `doctl compute droplet get 614595251` answered 404; the only droplet of the account was the
-build host's, which `KONTRA_VPS_PROTECTED` named. Cloudflare: no record named `m4-teamgate.kontra.run`, none with the
-comment "M4 VPS gate run, delete after", and a GET of record `dcd828bd791bd0ef06882021d9caa090` answered 81044
-("Record does not exist"); the zone's 28 records were identical (id, type, name, content) to the snapshot taken before
-the run, `gateway.kontra.run`'s A and AAAA among them. No `kontra-demo`, `kontra-teammate` or repro container and no
-`kontra-demo` image were left; `164.92.142.134` was not in `known_hosts`; the run's temporary directories and the
-repro's container and volume were removed. `gateway.kontra.sh/healthz` and `gateway.kontra.run/healthz` answered 200.
+### The rerun, at `f9f5e61` (passed)
+
+The same procedure on a second droplet, at the head that has D313.
+
+| | |
+|---|---|
+| When | pre-flight 21:07:50Z; dry run 21:08:18Z; the run 21:08:27Z–21:19:37Z (droplet 21:08:31Z, DNS 21:10:24Z, compose 21:10:35Z, checks from this host 21:14:40Z, record 21:19:16Z); explicit teardown 21:19:55Z; teardown checked 21:20:09Z |
+| Command | as the first run's: `scripts/team-gate-vps.sh --dry-run`, then `scripts/team-gate-vps.sh`, then `scripts/team-gate-vps.sh --teardown-only` |
+| Droplet | `kontra-m4-teamgate-1793480911`, id **614610093**, `157.230.110.237`, fra1, `s-2vcpu-4gb` (`$0.035710/h`), `ubuntu-24-04-x64`, tags `kontra-m4-gaterun` and `ttl-1793495311`; cloud-init done |
+| The droplet's Docker | Engine 29.1.3, containerd 2.2.1, runc 1.3.4; storage driver `overlayfs`, `driver-type io.containerd.snapshotter.v1`: the containerd image store, where `3b890f3`'s two builds failed. Compose 2.40.3, buildx 0.30.1 |
+| DNS | A `m4-teamgate.kontra.run` → `157.230.110.237`, id **`2d7f37ac23e44fb9f1c5bc07bbbf8d02`**, comment "M4 VPS gate run, delete after"; 1.1.1.1 resolved it before step 4 |
+| `docker compose up -d --build --wait` | **exit 0 in 232 s**, one build (`#17 naming to docker.io/library/kontra-gate:m4 done`); `gate-migrate`, `temporal-schema` and `temporal-namespace` exited 0 (`gate` and `temporal` start only on their successful completion); `postgres` and `gate` healthy, `temporal` up |
+| From the build host | `/healthz` 200; the certificate's issuer `C = US, O = Let's Encrypt, CN = YE2`, subject `CN = m4-teamgate.kontra.run`; ports 22 and 443 open, 80, 5432, 7233, 8443 and 9090 closed |
+| Minted on the VPS | an API key `m4run` (scope `hire`, tenant `default`) and a single-use enrollment token for `hello`; neither recorded |
+| The team member | `kontra-demo:f9f5e61b3ae6`, built on this host for this head, as container `kontra-teammate-1793480911` on the default bridge: `kontra` installed from the image's source (`git archive f9f5e61b3ae6`, `go install ./cmd/kontra`), `a2a-cli` v0.3.1 (`go install …@v0.3.1`), `a2a server --exec 'echo Hello World'`, `kontra connect --enroll`: "connected to https://m4-teamgate.kontra.run as k1_vjqsoszafrmkmzlyco6wrfpihp (tenant default, …)", `hello` at `/agents/hello` |
+| Hired with the key | `SendMessage` "hi" with `curl` to `https://m4-teamgate.kontra.run/agents/hello`: a task with the artifact `Hello World\n`; `a2a send` with the host's `a2a` (the clean laptop's host check used the same binary, which reports `v0.3.2-0.20261016125318-609d0b5dd28f`): `Status: completed`, artifact `Hello World`; MCP `initialize` and `tools/call` `search` on `/mcp`: `services` `[{ref: hello, kind: a2a, available: true}]` |
+| Recorded | `docker compose ps`: `gate` healthy on `0.0.0.0:443->8443`, `[::]:443->8443` and `127.0.0.1:9090`, `postgres` healthy, `temporal` up; `docker compose images`: `gate` and `gate-migrate` both on `kontra-gate:m4`, image `0652b5e9f172`; `kontra-gate version`: `kontra-gate m4 (go1.26.10, linux/amd64)`; the digests below |
+| Lifetime and cost | 11 min 6 s; at most $0.0357 (billed as one hour at $0.035710/h), about $0.0066 pro rata |
+| Teardown | the script's EXIT trap: the team member's container and the `kontra-demo` image removed, the DNS record deleted by id, then the droplet, `ssh-keygen -R` for its address, its temporary directory removed: "torn down; nothing left"; then `--teardown-only` (exit 0, "nothing of a run is left"); checked (below) |
+
+| Image on the droplet | Digest |
+|---|---|
+| `kontra-gate:m4` (`gate` and `gate-migrate`) | `sha256:0652b5e9f17259bdc473381f7a463fb20f7b7bc08ddd35570cfb9faee2070eea` |
+| `postgres:16-alpine` | `sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab` |
+| `temporalio/admin-tools:1.32.1` | `sha256:9ef0dc5b063bf4ffd5c1512de72e0e73e225bd2c7006a18ce69bd592a8862a83` |
+| `temporalio/server:1.32.1` | `sha256:acecbab5b0b8ae9cf4012b508866ca97feda3709577bf157b537239f40029049` |
+
+**Pre-flight**, read-only, as the first run's: `doctl` context `default`, active; the account's SSH key named by
+`KONTRA_VPS_DO_KEY` had the MD5 fingerprint of the local key's `.pub`; `s-2vcpu-4gb` at $0.035710/h; no droplet tagged
+`kontra-m4-gaterun`; no Cloudflare record named `m4-teamgate.kontra.run` or with the run's comment. The dry run passed
+its pre-flight, printed the teardown and created nothing (exit 0).
+
+**The run's record**, as `team-gate-vps.sh` printed it, abridged (`…`):
+
+```
+team-gate-vps: 2026-10-31T21:08:31Z, commit f9f5e61b3ae6, kontra-m4-teamgate-1793480911 (fra1, s-2vcpu-4gb at $0.035710/h, ubuntu-24-04-x64), https://m4-teamgate.kontra.run
+== 21:08:31 2. create kontra-m4-teamgate-1793480911
+droplet 614610093 at 157.230.110.237
+cloud-init: …status: done
+== 21:10:24 3. DNS: A m4-teamgate.kontra.run -> 157.230.110.237
+record 2d7f37ac23e44fb9f1c5bc07bbbf8d02
+1.1.1.1 resolves m4-teamgate.kontra.run to 157.230.110.237
+== 21:10:35 4. ship git archive f9f5e61b3ae6 and bring compose up
+configured: deploy/compose/kontra.run.yaml, .env (KONTRA_PORT=443), a new signing key
+  vps | docker Engine 29.1.3; containerd 2.2.1; runc 1.3.4-0ubuntu1~24.04.1; docker-init 0.19.0; client 29.1.3
+  vps | storage driver overlayfs [["driver-type","io.containerd.snapshotter.v1"]]
+  vps | Docker Compose version 2.40.3+ds1-0ubuntu1~24.04.1
+  vps | github.com/docker/buildx 0.30.1 0.30.1-0ubuntu1~24.04.1
+compose up --build --wait: 232 s; the images it built:
+  vps | #17 naming to docker.io/library/kontra-gate:m4 done
+  …
+  vps |  Container kontra-temporal-schema-1  Exited
+  vps |  Container kontra-temporal-1  Healthy
+  vps |  Container kontra-gate-migrate-1  Exited
+  vps |  Container kontra-postgres-1  Healthy
+  vps |  Container kontra-temporal-namespace-1  Exited
+  vps |  Container kontra-gate-1  Healthy
+== 21:14:40 5. verify from this host
+GET https://m4-teamgate.kontra.run/healthz: 200
+issuer=C = US, O = Let's Encrypt, CN = YE2
+subject=CN = m4-teamgate.kontra.run
+port 22: open
+port 80: closed
+port 443: open
+port 5432: closed
+port 7233: closed
+port 8443: closed
+port 9090: closed
+minted API key "m4run": principal key:kk_m4run_…, tenant default, …, scopes hire; the key is shown once
+minted an enrollment token for service hello (tenant default): single use, valid until 2026-10-31T21:29:47Z; it is shown once
+an API key kk_… and a token for hello (neither recorded)
+the team member's clean machine: kontra-teammate-1793480911
+  …
+  teammate | kontra connect: connected to https://m4-teamgate.kontra.run as k1_vjqsoszafrmkmzlyco6wrfpihp (tenant default, session 01a193d4-9a42-7b0e-8768-9c7818133040)
+  teammate |   a2a hello  https://m4-teamgate.kontra.run/agents/hello
+SendMessage "hi" to https://m4-teamgate.kontra.run/agents/hello with the key: {"jsonrpc":"2.0","id":1,"result":{"task":{"id":"01a193d4-ab26-7bcd-be1c-f93db9e150cc","artifacts":[{…,"parts":[{"text":"Hello World\n"}]}],…
+a2a send: Task:     01a193d4-b488-75fc-950f-94c25b4ed0a7
+…
+Status:   completed (2026-10-31T21:19:13Z)
+  the service ended the task: completed
+Artifacts:
+  [01a193d4-b5e0-751b-a1b7-51ba86f7fdd8] Hello World
+…
+MCP tools/call search on https://m4-teamgate.kontra.run/mcp with the key: {"jsonrpc":"2.0","id":2,"result":{…,"structuredContent":{"services":[{"ref":"hello","kind":"a2a","name":"hello","description":"Wraps command: echo Hello World","available":true}]}}}
+== 21:19:16 record
+  vps | NAME                IMAGE                      … SERVICE    … STATUS                   PORTS
+  vps | kontra-gate-1       kontra-gate:m4             … gate       … Up 4 minutes (healthy)   127.0.0.1:9090->9090/tcp, 0.0.0.0:443->8443/tcp, [::]:443->8443/tcp
+  vps | kontra-postgres-1   postgres:16-alpine         … postgres   … Up 4 minutes (healthy)   5432/tcp
+  vps | kontra-temporal-1   temporalio/server:1.32.1   … temporal   … Up 4 minutes
+  vps | CONTAINER                     REPOSITORY               TAG                 PLATFORM            IMAGE ID            …
+  vps | kontra-gate-1                 kontra-gate              m4                  linux/amd64         0652b5e9f172        …
+  vps | kontra-gate-migrate-1         kontra-gate              m4                  linux/amd64         0652b5e9f172        …
+  …
+  vps | kontra-gate m4 (go1.26.10, linux/amd64)
+  vps | kontra-gate:m4 sha256:0652b5e9f17259bdc473381f7a463fb20f7b7bc08ddd35570cfb9faee2070eea 0652b5e9f172
+  …
+team-gate-vps: PASS (kontra-m4-teamgate-1793480911, https://m4-teamgate.kontra.run, 10 min)
+team-gate-vps: teardown (exit 0)
+DELETE dns_records/2d7f37ac23e44fb9f1c5bc07bbbf8d02 (m4-teamgate.kontra.run)
+doctl compute droplet delete -f 614610093   # kontra-m4-teamgate-1793480911
+droplet lifetime: 11 min 6 s; cost at most $0.0357 (1 h at $0.035710/h)
+team-gate-vps: torn down; nothing left
+```
+
+On success the record keeps compose's `naming to` lines and its last 20 lines, which do not reach back to compose's
+attempt to pull `gate-migrate`'s image: whether Compose 2.40.3 prints the `gate-migrate Pulling` and `Error` that 2.24.6
+prints is not recorded. Either way compose built once and `gate-migrate` ran the gate's image.
+
+**Its teardown, checked.** At 21:19:55Z `scripts/team-gate-vps.sh --teardown-only` reaped again: exit 0, "nothing of a
+run is left". At 21:20:09Z, read-only: `doctl compute droplet list --tag-name kontra-m4-gaterun --no-header` empty
+(exit 0, 0 lines), `doctl compute droplet get 614610093` answered 404, and the account's only droplet was the build
+host's, which `KONTRA_VPS_PROTECTED` named. Cloudflare: no record named `m4-teamgate.kontra.run`, none with the comment
+"M4 VPS gate run, delete after", and a GET of record `2d7f37ac23e44fb9f1c5bc07bbbf8d02` answered 81044 ("Record does
+not exist"); the zone's 28 records were identical (id, type, name, content) to the snapshot taken before the run,
+`gateway.kontra.run`'s A and AAAA among them; 1.1.1.1 answered NXDOMAIN for `m4-teamgate.kontra.run`. On the build
+host: no `kontra-demo` or `kontra-teammate` container and no `kontra-demo` image; `157.230.110.237` was not in
+`known_hosts`; the run's temporary directory was empty and was removed; containers, images, volumes and networks were
+identical to the snapshot taken before the run. `gateway.kontra.sh/healthz` and `gateway.kontra.run/healthz` answered
+200.
 
 ## What is still to do
 
-M4 is gated when these are done (D306 and the plan's binding corrections for WP-09):
+Done since the first runs: `compose.yaml`'s fix with its decision entry and tests, and the record of the host's Docker
+in `team-gate-vps.sh` (D313, `2eb8041`); the VPS run on a head that has them (`f9f5e61`, passed). M4 is gated when
+these are done (D306 and the plan's binding corrections for WP-09):
 
-1. **Fix `compose.yaml`** as above, with its decision entry and the `TestComposeTeamGate` check, on the M4 head.
-2. **Repeat the VPS run on a head that has the fix**: `scripts/team-gate-vps.sh --dry-run`, then one fresh droplet
-   with Let's Encrypt, recording here the droplet's id, lifetime and cost, the empty tag listing, the deleted DNS
-   record's id, `docker compose ps`, the image digests, the certificate, the port check, the hire through the gate
-   and the MCP `search`.
-3. **The `tck` workflow green** on the pull request (direct, tunnel, caddy), linked here; the nightly `auth` variant
-   once the workflow is on the default branch. CI's `e2e` workflow runs `anon_limits` on the same pull request.
-4. **Redeploy staging from the merge commit**: build `kontra-gate:m4-<merge sha>`, import it on the platform worker,
+1. **The `tck` workflow's first CI run on the pull request**, green for the direct, tunnel and caddy variants, linked
+   here; CI's `e2e` workflow runs `anon_limits` on the same pull request. The nightly `auth` variant once the workflow
+   is on the default branch.
+2. **Staging redeployed from the merge commit**: build `kontra-gate:m4-<merge sha>`, import it on the platform worker,
    set the `gate-v4` Deployment's image (label-scoped, nothing else changed), and check healthz, the certificate and
    that Traefik can still list secrets.
-5. **The published clean-laptop run**: `scripts/demo-clean-laptop.sh --published --expect <merge commit>` against the
+3. **The published clean-laptop run**: `scripts/demo-clean-laptop.sh --published --expect <merge sha>` against the
    redeployed staging, which runs the README's block with no substitution but the slug; record here the `kontra
    version` the laptop installed (it must name the merge commit) and its transcript.
-6. **The anonymous tenant's purge**: after 2026-11-01 21:28Z, the same read-only query for `anon-2d1d2dc15fff9177`
+4. **The anonymous tenant's purge**: after 2026-11-01 21:28Z, the same read-only query for `anon-2d1d2dc15fff9177`
    must show `deleted_at` set (the tombstone).
-7. Worth doing with the fix: `team-gate-vps.sh`'s record could print `docker version` and the storage driver.
