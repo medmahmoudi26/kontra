@@ -43,7 +43,7 @@ import (
 //   - anything else: completed, echoing the text.
 //
 // It serves its card at /.well-known/agent-card.json and JSON-RPC at its root, as `kontra connect --serve
-// a2a:<name>=<root URL>` hosts an agent, and records the methods and turns it receives.
+// a2a:<name>=<root URL>` hosts an agent, and records the methods, turns and A2A-Extensions headers it receives.
 
 // Seller is the in-test seller.
 type Seller struct {
@@ -52,7 +52,15 @@ type Seller struct {
 	mu      sync.Mutex
 	methods []string
 	turns   []SellerTurn
+	exts    []string // each A2A-Extensions header value received
 	srv     *http.Server
+}
+
+// Activations are the A2A-Extensions header values the seller received.
+func (s *Seller) Activations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.exts...)
 }
 
 // SellerTurn is one Execute call.
@@ -68,6 +76,13 @@ const BigPart = 300 << 10
 // StartSeller serves a Seller on 127.0.0.1 until the test ends.
 func StartSeller(t testing.TB) *Seller {
 	t.Helper()
+	return StartSellerCaps(t, `{"streaming":true}`)
+}
+
+// StartSellerCaps is StartSeller with caps (a JSON object) as its card's capabilities, e.g. one that requires an
+// extension of its own.
+func StartSellerCaps(t testing.TB, caps string) *Seller {
+	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +91,7 @@ func StartSeller(t testing.TB) *Seller {
 	rpc := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(s, a2asrv.WithTaskStore(taskstore.NewInMemory(nil))))
 	card := `{"name":"kinds","description":"answers every kind of part","version":"1.0.0",
 "supportedInterfaces":[{"url":"` + s.URL + `/","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
-"capabilities":{"streaming":true},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],
+"capabilities":` + caps + `,"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],
 "skills":[{"id":"kinds","name":"kinds","description":"kinds","tags":["k"]}]}`
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +107,11 @@ func StartSeller(t testing.TB) *Seller {
 				s.mu.Unlock()
 				break
 			}
+		}
+		if v := r.Header.Values("A2A-Extensions"); len(v) > 0 {
+			s.mu.Lock()
+			s.exts = append(s.exts, v...)
+			s.mu.Unlock()
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		rpc.ServeHTTP(w, r)

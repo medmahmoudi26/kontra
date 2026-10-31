@@ -2,8 +2,9 @@
 
 Status: **draft** (M0, revision 2). Public specification; implemented only by Kontra Cloud. The open-source
 gate contains no escrow code and names no escrow key: it passes the card entry through from the operator's
-annotations, enforces `required: true` like any extension, stores the task metadata the operator's hooks
-write, renders the operator's `mcpMeta` verbatim, and offers review-window messages to the operator's
+annotations, enforces `required: true` like any extension (a `hire` of its own `/mcp` activates the entry for the
+buyer, as it does every required entry of the operator's, [`relay.md`](relay.md) §12.2), stores the task metadata the
+operator's hooks write, renders the operator's `mcpMeta` verbatim, and offers review-window messages to the operator's
 `OnReviewMessage` hook ([`relay.md`](relay.md) §2.5, §7, §13).
 
 Escrow is the price shape `per_task` (README, "Pricing"): a fixed quote held once a person accepts it, released
@@ -46,6 +47,11 @@ JSON Schema: [`schema/ext-escrow.params.json`](schema/ext-escrow.params.json).
 the card the caller fetched (PRD §5). It is not, by itself, approval to pay: **an API key or an MCP session
 never approves a quote** (README, 25 Oct, "§12 adds"), so a task from such a principal is always `quoted`
 until a person accepts it on the operator's page (D38).
+
+A `hire` of the gate's own `/mcp` sends no `A2A-Extensions`: the gate activates the entry on the buyer's behalf, because
+`hire` is this flow. Admission receives the URI in `extensions` and quotes; the quote is shown to the client as the
+approve URL (URL elicitation, or the URL in the answer: [`relay.md`](relay.md) §12.3), the thread on the operator's
+page, where a person accepts it. The service is not told of the activation (D300).
 
 ## 2. Admission and the hold
 

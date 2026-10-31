@@ -63,6 +63,9 @@ type Service struct {
 	// extensions A2A-Extensions is checked against (spec §2.4). An error, or a card marked Unavailable,
 	// makes the card routes answer 503 (spec §3).
 	Cards func() (*card.Served, error)
+	// OperatorExtensions are the URIs of the operator's card_extensions entries (spec §13.4) the served card was
+	// built with: a hire of the gate's own /mcp activates those the card requires for the buyer (§12.2, D300).
+	OperatorExtensions []string
 }
 
 // Services resolves a path's tenant and name to a service (nil when there is none). On a single-tenant
@@ -684,7 +687,7 @@ func (s *Server) declared(svc *Service) func(*http.Request) *ExtensionSet {
 
 // Declared is what svc's served card declares in capabilities.extensions, read as Extensions reads it for the
 // service's routes (spec §2.4); nil (none) for no service or one without a servable card. The gate's own /mcp checks a
-// hire against it (relay.Hirer.RequiredExtensions, M4 WP-04).
+// hire against it (relay.Hirer.Extensions, with Service.OperatorExtensions: D294, D300).
 func (s *Server) Declared(svc *Service) *ExtensionSet {
 	if svc == nil {
 		return nil

@@ -33,6 +33,8 @@ type resendRig struct {
 	deps   HandlerDeps
 	admit  hooks.Admission
 	queues lifecycle.QueueOptions
+	// backends serves the seller's backend and card Info to dispatch (a test may change what the card declares).
+	backends *staticBackends
 }
 
 func newResendRig(t *testing.T, admit hooks.Admission) *resendRig {
@@ -62,6 +64,7 @@ func newResendRig(t *testing.T, admit hooks.Admission) *resendRig {
 	r.agent = agent
 	backends := &staticBackends{}
 	backends.set(b, info, nil)
+	r.backends = backends
 	r.deps = HandlerDeps{
 		Log: log, Puller: store.NewPullerProvider(log, runListener(t, dsn)), Backends: backends, Signals: r.lc,
 		Executor: ExecutorOptions{PollInterval: 50 * time.Millisecond},

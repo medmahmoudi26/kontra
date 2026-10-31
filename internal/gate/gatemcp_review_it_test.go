@@ -19,9 +19,10 @@ import (
 //   - a hire whose message has a data part of JSON null is an invalid-arguments isError and writes no task (a2a-go
 //     writes {"data":null} and cannot read it back: such a task could never be loaded, and the buyer's tasks/list
 //     would answer 503 from then on); tasks/list still works;
-//   - a hire of a service whose served card marks an extension required: true (an operator's card_extensions entry,
-//     §13.4) is isError naming the A2A route, with no task row and nothing sent to the seller, as the A2A route
-//     refuses a SendMessage without A2A-Extensions with -32008 (§2.4, D294);
+//   - a hire of a service whose served card marks an extension of the seller's own required: true is isError naming
+//     that URI (not the operator's card_extensions entry beside it, which a hire activates, D300) and the A2A route,
+//     with no task row and nothing sent to the seller, as the A2A route refuses a SendMessage without A2A-Extensions
+//     with -32008 (§2.4, D294);
 //   - an API key with only enroll: scopes, sharing the buyer of a hire key (§2.3), is 403 on /mcp: initialize, and
 //     tasks/list, tasks/get, tasks/result and tasks/cancel on the hire key's session; the hire key's task is not
 //     cancelled;
@@ -30,8 +31,8 @@ import (
 func TestGateMCPReviewFixes(t *testing.T) {
 	e := newGateEnv(t)
 	ctx := context.Background()
-	kinds, esc := newHireSeller(t), newHireSeller(t)
-	const escrow = "https://x.example.com/ext/escrow"
+	const escrow, own = "https://x.example.com/ext/escrow", "https://seller.example.com/ext/own"
+	kinds, esc := newHireSeller(t), newHireSellerCaps(t, `{"streaming":true,"extensions":[{"uri":"`+own+`","required":true}]}`)
 	services := e.hireServices(kinds, `  escrowed:
     kind: a2a
     backend: { a2a: { url: "`+esc.srv.URL+`/base", allow_private: true } }
@@ -80,8 +81,9 @@ func TestGateMCPReviewFixes(t *testing.T) {
 		t.Errorf("tasks/list after the refused hires: %d %s", status, ans.raw)
 	}
 
-	// A required extension. The control: the A2A route refuses a SendMessage that does not activate it.
-	eventually(t, 20*time.Second, "the served card declares the required extension", func() bool {
+	// A required extension of the seller's own. The control: the A2A route refuses a SendMessage that does not
+	// activate it.
+	eventually(t, 20*time.Second, "the served card declares the required extensions", func() bool {
 		req, _ := http.NewRequest(http.MethodGet, a.url+"/agents/escrowed/.well-known/agent-card.json", nil)
 		req.Header.Set("Authorization", "Bearer "+hire.Secret)
 		resp, err := http.DefaultClient.Do(req)
@@ -90,7 +92,7 @@ func TestGateMCPReviewFixes(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode == http.StatusOK && strings.Contains(string(b), escrow)
+		return resp.StatusCode == http.StatusOK && strings.Contains(string(b), escrow) && strings.Contains(string(b), own)
 	})
 	req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/escrowed", strings.NewReader(
 		`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-esc","role":"ROLE_USER","parts":[{"text":"hi"}]}}}`))
@@ -110,9 +112,9 @@ func TestGateMCPReviewFixes(t *testing.T) {
 	for _, call := range []string{`{"name":"hire","arguments":{"service":"escrowed","message":"hi"}}`,
 		`{"name":"hire","arguments":{"service":"escrowed","message":"hi"},"task":{}}`} {
 		_, ans = c.rpc("tools/call", call)
-		if r := ans.tool(t); !r.IsError || !strings.Contains(r.text(), escrow) || !strings.Contains(r.text(), a.url+"/agents/escrowed") ||
-			!strings.Contains(r.text(), "No task was created") {
-			t.Errorf("hire of a service requiring %s (%s): %s", escrow, call, ans.raw)
+		if r := ans.tool(t); !r.IsError || !strings.Contains(r.text(), own) || strings.Contains(r.text(), escrow) ||
+			!strings.Contains(r.text(), a.url+"/agents/escrowed") || !strings.Contains(r.text(), "No task was created") {
+			t.Errorf("hire of a service requiring %s (%s): %s", own, call, ans.raw)
 		}
 	}
 	time.Sleep(time.Second)

@@ -109,7 +109,8 @@
           "items": {
             "type": "string",
             "format": "uri"
-          }
+          },
+          "description": "The extensions the request activated: an A2A caller's A2A-Extensions that the served card declares, or, for a hire of the gate's own /mcp, the operator's required card_extensions entries the gate activated for the buyer (relay.md §12.2, D300)."
         },
         "contextId": {
           "type": "string"

@@ -355,6 +355,13 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 			}
 		}
 	}
+	// A hire of /mcp activates the operator's required extensions for its buyer (§12.2, D300): Admission is told so as
+	// it is told of an A2A caller's.
+	for _, u := range hireActivated(ctx) {
+		if !slices.Contains(ar.Extensions, u) {
+			ar.Extensions = append(ar.Extensions, u)
+		}
+	}
 	for _, part := range r.Message.Parts {
 		if part == nil {
 			continue

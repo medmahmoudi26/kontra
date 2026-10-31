@@ -14,6 +14,7 @@ import (
 
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/sealed"
 	"kontra.sh/kontra/internal/store"
 )
 
@@ -53,20 +54,31 @@ type Hirer struct {
 	Log      *store.Log
 	// RetryWindow is §12.3's retry window; zero is HireRetryWindow.
 	RetryWindow time.Duration
-	// RequiredExtensions are the URIs a service's served card marks required: true, as the A2A route reads them for
-	// §2.4's check (the gate wires a2ahttp.Server.Declared); nil: none.
-	RequiredExtensions func(svc store.ServiceRef) []string
+	// Extensions reads what a service's served card requires, as the A2A route reads it for §2.4's check, and which of
+	// those URIs the operator's card_extensions entries assert (the gate wires a2ahttp.Server.Declared and
+	// a2ahttp.Service.OperatorExtensions); nil: the card requires none.
+	Extensions func(svc store.ServiceRef) CardExtensions
 	// Starts is the service's work queue re-issuing a task's start (lifecycle.Queue.ReissueStart, as the A2A route's
 	// resend does, §14.5); nil re-issues nothing.
 	Starts func(svc store.ServiceRef) StartReissuer
 }
 
+// CardExtensions is what a service's served card requires of a request (spec §2.4), as a hire reads it (D300).
+type CardExtensions struct {
+	// Required are the URIs the served card marks required: true, in the card's order.
+	Required []string
+	// Operator are the URIs of the operator's card_extensions entries (§13.4), each of which replaces a seller's entry
+	// of the same URI on the served card.
+	Operator []string
+}
+
 // ExtensionsRequiredError refuses a hire or a reply, before anything is stored or sent, to a service whose served
-// card marks extensions required: true (spec §2.4: a request missing one is refused before any task row exists). A
-// tool call of /mcp has no A2A-Extensions to activate them with, so it always misses them (D294). It is
-// ExtensionSupportRequiredError (-32008).
+// card marks required: true an extension a hire cannot activate (spec §2.4: a request missing one is refused before
+// any task row exists): the seller's own, which a tool call of /mcp has no A2A-Extensions to activate with (D294), and
+// the sealed extension's, which hire cannot carry whoever asserts it (D272). The operator's required entries are
+// activated for the buyer instead (D300). It is ExtensionSupportRequiredError (-32008).
 type ExtensionsRequiredError struct {
-	URIs []string // the required URIs, in the card's order
+	URIs []string // the required URIs a hire cannot activate, in the card's order
 }
 
 func (e *ExtensionsRequiredError) Error() string {
@@ -79,15 +91,48 @@ func (e *ExtensionsRequiredError) Error() string {
 
 func (e *ExtensionsRequiredError) Unwrap() error { return a2a.ErrExtensionSupportRequired }
 
-// requireNone is §2.4's check of a request that activates no extension: refused when svc's served card requires any.
-func (h *Hirer) requireNone(svc store.ServiceRef) error {
-	if h.RequiredExtensions == nil {
-		return nil
+// activate is §2.4's check of a hire or a reply, whose tool call carries no A2A-Extensions (D294, D300). A required
+// URI that the operator's card_extensions entries assert is the operator's to carry, through its own hooks (Admission's
+// quote, its approve page, which every hire task goes through as an A2A task does): it is activated on the buyer's
+// behalf and returned, for Admission's extensions (§13.1). Any other required URI (the seller's own; the sealed
+// extension's, which a tool call cannot carry whoever asserts it) refuses the request with ExtensionsRequiredError,
+// before anything is stored or sent.
+func (h *Hirer) activate(svc store.ServiceRef) ([]string, error) {
+	if h.Extensions == nil {
+		return nil, nil
 	}
-	if req := h.RequiredExtensions(svc); len(req) > 0 {
-		return &ExtensionsRequiredError{URIs: slices.Clone(req)}
+	ce := h.Extensions(svc)
+	var on, unmet []string
+	for _, u := range ce.Required {
+		if u != sealed.URI && slices.Contains(ce.Operator, u) {
+			on = append(on, u)
+		} else {
+			unmet = append(unmet, u)
+		}
 	}
-	return nil
+	if len(unmet) > 0 {
+		return nil, &ExtensionsRequiredError{URIs: unmet}
+	}
+	return on, nil
+}
+
+// hireActivatedKey carries the URIs a hire activated for its buyer to the Admission interceptor (D300).
+type hireActivatedKey struct{}
+
+// withHireActivated gives Admission the URIs a hire activated for its buyer: the interceptor adds them to the
+// request's extensions (§13.1), as it adds those an A2A caller activates. They are not service parameters, so the
+// work item does not keep them and the service never receives them: the buyer activated nothing it could speak.
+func withHireActivated(ctx context.Context, uris []string) context.Context {
+	if len(uris) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, hireActivatedKey{}, slices.Clone(uris))
+}
+
+// hireActivated is what withHireActivated put on ctx, nil when nothing.
+func hireActivated(ctx context.Context) []string {
+	uris, _ := ctx.Value(hireActivatedKey{}).([]string)
+	return uris
 }
 
 func (h *Hirer) window() time.Duration {
@@ -103,8 +148,9 @@ func HireOwner(p auth.Principal) store.Owner {
 	return store.Owner{BuyerID: p.BuyerID, Principal: p.ID, Via: string(p.Via), TenantID: p.TenantID}
 }
 
-// Hire answers a hire: refused with ExtensionsRequiredError when the service's served card requires an extension
-// (§2.4, as the A2A route refuses a request that does not activate it, before anything else); the task of the same
+// Hire answers a hire: refused with ExtensionsRequiredError when the service's served card requires an extension a hire
+// cannot activate (§2.4, as the A2A route refuses a request that does not activate it, before anything else), the
+// operator's required entries being activated for the buyer and given to Admission (D300); the task of the same
 // resend key that is quoted, or left quoted less than the retry window ago, as it is (nothing is sent, Admission is
 // not asked again, and nothing changes its state: a retry never approves anything, §13.2), its start re-issued first
 // while it is quoted (§14.5: a task whose start was lost gets its workflow, as an A2A resend does); otherwise a new
@@ -118,7 +164,8 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 	if req.Message == nil || req.Message.ID == "" || len(req.Message.Parts) == 0 || req.Message.TaskID != "" {
 		return HireOutcome{}, fmt.Errorf("relay: a hire needs a new message with its id and parts: %w", a2a.ErrInvalidParams)
 	}
-	if err := h.requireNone(req.Service); err != nil {
+	activated, err := h.activate(req.Service)
+	if err != nil {
 		return HireOutcome{}, err
 	}
 	owner := HireOwner(req.Principal)
@@ -141,7 +188,7 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 	if err != nil {
 		return HireOutcome{}, err
 	}
-	hctx := lifecycle.WithHire(ctx, lifecycle.Hire{Key: req.FirstRequest, RetryWindow: h.window()})
+	hctx := withHireActivated(lifecycle.WithHire(ctx, lifecycle.Hire{Key: req.FirstRequest, RetryWindow: h.window()}), activated)
 	start, err := send(hctx, sh, req.Principal, &a2a.SendMessageRequest{Message: req.Message})
 	if err != nil {
 		return HireOutcome{}, err
@@ -160,7 +207,8 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 // Reply sends parts as the §7 follow-up of a hire task of the principal's buyer, through the service's handler: the
 // followUp interceptor and the kontra.message Update decide (spec §7: refused unless the task is input-required; a
 // quoted task is refused, its quote being accepted on the operator's page and never in the protocol, §13.2; one
-// follow-up per turn end); a service whose served card now requires an extension refuses it as Hire does (§2.4). It
+// follow-up per turn end); a service whose served card now requires an extension a hire cannot activate refuses it as
+// Hire does (§2.4; a follow-up has no Admission, so the operator's required entries need nothing more, D300). It
 // returns the task's version read before the Update (the turn the follow-up started begins after it). task is the
 // caller's row (store.Log.LoadHired).
 func (h *Hirer) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow, parts a2a.ContentParts) (int64, error) {
@@ -178,7 +226,7 @@ func (h *Hirer) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow
 	if err != nil {
 		return 0, err
 	}
-	if err := h.requireNone(svc); err != nil {
+	if _, err := h.activate(svc); err != nil {
 		return 0, err
 	}
 	sh, err := h.Handlers.For(ctx, svc)

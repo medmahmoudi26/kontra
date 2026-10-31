@@ -4089,7 +4089,8 @@ serves a quoting Admission on services without a required extension (a team gate
 not required). Proposal, not built: `hire` and `reply` take an optional `extensions: [uri]` argument that activates
 URIs as `A2A-Extensions` does (ignored unless declared, passed to Admission and the upstream as the A2A route passes
 them; activating escrow acknowledges the quote, D38, and a person still approves it); §12.4's form answers would then
-need the task's activation kept for its follow-ups.
+need the task's activation kept for its follow-ups. Amended by D300: `hire` activates the operator's required entries
+(the escrow entry among them) for the buyer, and refuses only the seller's own and the sealed extension's.
 
 ## From M4 WP-05, `/mcp` in the 2026-07-28 era (28 Oct)
 
@@ -4449,3 +4450,43 @@ Decision:
   §11.5 and a refusal for a task-augmented call over it, which a merge does not decide alone. Until it is built, a
   principal's durable tasks on a service are bounded by `limits.dispatch_slots` gate-wide and, on an anonymous
   tenant's service, by `tunnel.anonymous.tasks` (D287).
+
+## From M5's plan audit (31 Oct)
+
+### D300. `hire` activates the operator's required extensions for the buyer, and refuses only those it cannot carry — **decided under the owner's standing instruction, 31 Oct** (amends D294; carries out [`ext-escrow.md`](../spec/ext-escrow.md) §1 on `/mcp`)
+
+M5's plan audit (28 Oct) found that D294 refuses, before Admission, every `/mcp` `hire` of a service whose served card
+marks an extension `required: true`. ext-escrow §1 makes Cloud's escrow entry `required: true`, so every Cloud
+`per_task` listing would be refused through `/mcp`, and M5's gate that a stock MCP client's `hire` answers the task's
+thread URL could not pass; M5's plan had worked around it by writing the entry `required: false`, against §1. Yet
+`hire` is the escrow flow: the quote is shown through §12.3's URL elicitation, its URL is the thread on the operator's
+page, and a person accepts it there, never an API key or an MCP session (D38). Decision ([`relay.md`](../spec/relay.md)
+§12.2, §12.3 step 1, §13.4; ext-escrow §1):
+
+- **The operator's required entries are activated for the buyer.** A required URI of the service's `card_extensions`
+  annotation (§13.4) is the operator's: the operator asserts it on the card and its own hooks carry it (Admission's
+  quote, its approve page), which every `hire` task goes through as an A2A task does. `hire` activates it on the
+  buyer's behalf, and Admission receives it in `extensions` (§13.1) as it receives an A2A caller's activation; the
+  task is then created, quoted or refused as Admission decides, which stays the place where price and policy are
+  decided. The activation is not a service parameter: the work item does not keep it and the service never receives
+  it, even when its own card declares the URI (an A2A caller's own activation of such a URI does reach it, §6.2),
+  since the buyer activated nothing it could speak. A `reply` to such a task needs nothing more: a follow-up has no
+  Admission.
+- **What `hire` cannot carry is still refused.** A required URI of the seller's own card, one the operator's entries
+  do not assert, is the seller's protocol, which a tool call cannot speak: refused as D294 says, before Admission,
+  naming that URI and the service's A2A URL. So is the sealed extension's URI even as an operator's entry, beside
+  D272's refusal of a service whose sealing is required: `hire` cannot seal. The gate still names no escrow URI: it
+  activates whatever the operator's entries require (ext-escrow's "the open-source gate names no escrow key" holds),
+  and M5 can write ext-escrow §1's entry as §1 writes it, `required: true`.
+- **Why not D294's proposal.** An `extensions` argument needs a client that sends it; a stock MCP client sends only a
+  tool's documented arguments. It remains a proposal for the seller's extensions.
+
+Tested: `TestHireActivate` and `TestHireActivatesTheOperatorsExtensions` (`internal/relay`: Admission told of the
+operator's URI, the seller receiving the hire and the reply without `A2A-Extensions` although its card declares the
+URI; the seller's own URI and the sealed one refused, with no Admission, task row or message);
+`TestGateMCPHireOperatorExtension` (`internal/gate`: a `per_task` service whose card carries ext-escrow §1's entry,
+required, behind a quoting Admission server: the A2A route refuses a `SendMessage` that does not activate it, `hire`
+answers `-32042` whose url is `https://app.kontra.sh/#/t/<task>`, the hook is asked once with the escrow URI in
+`extensions`, the approved task reaches the seller without `A2A-Extensions`, and a seller-required and a
+required-sealed service are still `isError` with no task and no Admission); `TestGateMCPReviewFixes` and the e2e
+`TestGateMCPHire` (§16 `gate_mcp_hire`).

@@ -62,8 +62,9 @@ type Hirer interface {
 
 // hire answers the hire tool (§12.2, §12.3): the service a ref names when the principal may hire it (else the
 // unknown-service answer); an MCP service, one whose sealing is required, or one whose served card requires an
-// extension (D294) is a tool execution error naming the route to use, and no task; then the task through the
-// Hirer, answered as §12.3 says: quoted, -32042 to a session that declared elicitation.url and otherwise the approve
+// extension a hire cannot activate (the seller's own, D294; the Hirer activates the operator's for the buyer, D300) is
+// a tool execution error naming the route to use, and no task; then the task through the Hirer, answered as §12.3
+// says: quoted, -32042 to a session that declared elicitation.url and otherwise the approve
 // URL at once (CreateTaskResult working, or the plain text); any other task, CreateTaskResult when task-augmented,
 // else after the plain wait. A modern request's task is answered by answerModernHire (§12.5); its creation runs on a
 // context its client cannot cancel (bounded by modernHireBound), so that a client that leaves meanwhile has its task
@@ -254,9 +255,9 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 	h.waitAndAnswer(rq, row.ID, after)
 }
 
-// extensionsText is the tool execution error of a hire or a reply to a service whose served card requires extensions
-// (spec §2.4, D294): a tool call activates none, so the route is A2A with A2A-Extensions, as the required-sealed
-// answer names its route.
+// extensionsText is the tool execution error of a hire or a reply to a service whose served card requires extensions a
+// hire cannot activate (spec §2.4, D294, D300): the seller's own, which a tool call has no A2A-Extensions for, so the
+// route is A2A with A2A-Extensions, as the required-sealed answer names its route.
 func extensionsText(who, tool string, uris []string, a2aURL string) string {
 	s, them := "", "it"
 	if len(uris) != 1 {

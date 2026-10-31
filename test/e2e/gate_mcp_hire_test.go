@@ -16,7 +16,7 @@ import (
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
 )
 
-// gate_mcp_hire (spec/relay.md §16; §12.2, §12.3 step 1; D272, D289, D293, D294). Single tenant. A legacy /mcp
+// gate_mcp_hire (spec/relay.md §16; §12.2, §12.3 step 1; D272, D289, D293, D294, D300). Single tenant. A legacy /mcp
 // session with an API key on replica A; the sellers hosted by a node whose tunnel is on replica B: the TCK seller
 // (examples/sellers/tck, a stock seller that completes at once) and the in-test seller (the TCK seller's artifact
 // kinds, a slow exec, a failing exec). Asserted, clause by clause:
@@ -33,24 +33,25 @@ import (
 //     tasks/get of this buyer's task is -32602;
 //   - tasks/cancel ends a working task cancelled within 10 s and the seller receives CancelTask; an A2A SubscribeToTask
 //     of the same task with the same key shows exactly the log's carried seqs, up to the cancel;
-//   - a kind: mcp ref, a required-sealed ref, a ref whose served card requires an extension and a null data part are
-//     isError with no task row;
+//   - a kind: mcp ref, a required-sealed ref, a ref whose served card requires an extension of the seller's own and a
+//     null data part are isError with no task row (the operator's required card_extensions entry beside the seller's
+//     is not named: a hire activates it for the buyer, D300); a ref whose only required extension is the operator's
+//     is hired, and its seller receives no A2A-Extensions;
 //   - /mcp's tools write no calls rows, and every task hire created is marked hired (the A2A task is the only one not);
 //   - a request without a credential is 401 (Bearer) and opens no session; an API key with only enroll: scopes is 403.
 func TestGateMCPHire(t *testing.T) {
-	seller, esc := StartSeller(t), StartSeller(t)
+	const escrow, own = "https://kontra.sh/ext/escrow/v1", "https://seller.example.com/ext/own"
+	seller, esc, paid := StartSeller(t), StartSellerCaps(t, `{"streaming":true,"extensions":[{"uri":"`+own+`","required":true}]}`), StartSeller(t)
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	web := httptest.NewServer(up)
 	t.Cleanup(web.Close)
-	const escrow = "https://kontra.sh/ext/escrow/v1"
+	operatorEscrow := `    annotations: { card_extensions: [ { uri: "` + escrow + `", required: true } ] }` + "\n"
 	h := start(t, Options{
-		Tunnel: map[string]TunnelService{"tck": {}, "kinds": {}, "vault": {Sealed: "true"}},
-		Direct: map[string]string{"escrowed": esc.URL},
-		MCP:    map[string]MCPService{"web": {URL: web.URL + "/mcp"}},
-		ServiceYAML: map[string]string{
-			"escrowed": `    annotations: { card_extensions: [ { uri: "` + escrow + `", required: true } ] }` + "\n",
-		},
+		Tunnel:      map[string]TunnelService{"tck": {}, "kinds": {}, "vault": {Sealed: "true"}},
+		Direct:      map[string]string{"escrowed": esc.URL, "paid": paid.URL},
+		MCP:         map[string]MCPService{"web": {URL: web.URL + "/mcp"}},
+		ServiceYAML: map[string]string{"escrowed": operatorEscrow, "paid": operatorEscrow},
 	})
 	ctx := ctxFor(t, 10*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
@@ -249,12 +250,12 @@ func TestGateMCPHire(t *testing.T) {
 	for _, c := range []struct{ args, want string }{
 		{`{"service":"web","message":"hi"}`, h.Front.URL + "/mcp/web"},
 		{`{"service":"vault","message":"hi"}`, h.Front.URL + "/agents/vault"},
-		{`{"service":"escrowed","message":"hi"}`, escrow},
+		{`{"service":"escrowed","message":"hi"}`, own},
 		{`{"service":"kinds","message":{"parts":[{"data":null}]}}`, "data must not be null"},
 	} {
 		tr := Tool(t, s.Tool("hire", c.args))
-		if !tr.IsError || !strings.Contains(tr.Text(), c.want) {
-			t.Errorf("hire %s: %+v, want isError naming %q", c.args, tr, c.want)
+		if !tr.IsError || !strings.Contains(tr.Text(), c.want) || strings.Contains(tr.Text(), escrow) {
+			t.Errorf("hire %s: %+v, want isError naming %q (and not the operator's %s)", c.args, tr, c.want, escrow)
 		}
 	}
 	if n := taskCount(t, h); n != before {
@@ -262,6 +263,14 @@ func TestGateMCPHire(t *testing.T) {
 	}
 	if esc.Messages() != 0 {
 		t.Errorf("the seller behind the required extension received %d messages", esc.Messages())
+	}
+	// The operator's required entry alone: the hire activates it for the buyer (built-in Admission allows), and the
+	// seller gets the message without it (D300).
+	if pr := Tool(t, s.Tool("hire", `{"service":"paid","message":"hi"}`)); pr.IsError || pr.TaskID() == "" {
+		t.Errorf("hire of a service the operator's escrow entry requires: %+v", pr)
+	}
+	if paid.Messages() != 1 || len(paid.Activations()) != 0 {
+		t.Errorf("the seller behind the operator's entry received %d messages and A2A-Extensions %q", paid.Messages(), paid.Activations())
 	}
 
 	// D289: /mcp's tools write no calls rows; every task hire created is marked hired.

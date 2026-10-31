@@ -28,15 +28,24 @@ import (
 // hireSeller is an a2a-go v2.7.0 agent for /mcp's hire (spec §12): "hi" completes with Hello World; "kinds" answers
 // the TCK seller's artifact kinds (examples/sellers/tck: a text artifact, a data artifact, the output.txt file as raw
 // bytes and as a URL) with a data part in its final message too; "ask" asks a text-only question and completes with
-// the answer; "slow" works until the gate cancels it. It records each method and each turn's text.
+// the answer; "slow" works until the gate cancels it. It records each method, each turn's text and each A2A-Extensions
+// header it receives.
 type hireSeller struct {
 	mu      sync.Mutex
 	methods []string
 	turns   []string
+	exts    []string
 	srv     *httptest.Server
 }
 
 func newHireSeller(t *testing.T) *hireSeller {
+	t.Helper()
+	return newHireSellerCaps(t, `{"streaming":true}`)
+}
+
+// newHireSellerCaps is a hireSeller whose card's capabilities are caps (a JSON object), e.g. one that requires an
+// extension of its own.
+func newHireSellerCaps(t *testing.T, caps string) *hireSeller {
 	t.Helper()
 	s := &hireSeller{}
 	rpc := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(s))
@@ -56,6 +65,11 @@ func newHireSeller(t *testing.T) *hireSeller {
 				break
 			}
 		}
+		if v := r.Header.Values("A2A-Extensions"); len(v) > 0 {
+			s.mu.Lock()
+			s.exts = append(s.exts, v...)
+			s.mu.Unlock()
+		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		rpc.ServeHTTP(w, r)
 	})
@@ -63,9 +77,16 @@ func newHireSeller(t *testing.T) *hireSeller {
 	t.Cleanup(s.srv.Close)
 	card = `{"name":"kinds","description":"answers every kind of part","version":"1.0.0",
 "supportedInterfaces":[{"url":"` + s.srv.URL + `/base/rpc","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
-"capabilities":{"streaming":true},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],
+"capabilities":` + caps + `,"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],
 "skills":[{"id":"kinds","name":"kinds","description":"kinds","tags":["k"]}]}`
 	return s
+}
+
+// activations are the A2A-Extensions header values the seller received.
+func (s *hireSeller) activations() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.exts...)
 }
 
 func (s *hireSeller) count(method string) int {
@@ -625,6 +646,7 @@ type hookServer struct {
 	in     time.Duration
 	raw    string
 	asked  []string
+	bodies []json.RawMessage // each AdmitRequest as received
 	srv    *httptest.Server
 }
 
@@ -639,6 +661,7 @@ func newHookServer(t *testing.T) *hookServer {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.asked = append(h.asked, req.TaskID)
+		h.bodies = append(h.bodies, b)
 		w.Header().Set("Content-Type", "application/json")
 		if h.raw != "" {
 			_, _ = io.WriteString(w, h.raw)

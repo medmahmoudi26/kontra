@@ -532,12 +532,16 @@ func (r *Replica) assemble() error {
 	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
 		return err
 	}
-	// /mcp's hire is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4) and
-	// the service's work queue re-issuing a retried quoted task's start (§14.5), as the A2A routes have them.
+	// /mcp's hire is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4), with
+	// the operator's card_extensions URIs a hire activates for the buyer (D300), and the service's work queue
+	// re-issuing a retried quoted task's start (§14.5), as the A2A routes have them.
 	hirer := &relay.Hirer{Handlers: handlers, Log: r.storeLog,
-		RequiredExtensions: func(svc store.ServiceRef) []string {
+		Extensions: func(svc store.ServiceRef) relay.CardExtensions {
 			served, _ := r.services.Lookup(context.Background(), svc.Tenant, svc.Name)
-			return a2aRoutes.Declared(served).Required()
+			if served == nil {
+				return relay.CardExtensions{}
+			}
+			return relay.CardExtensions{Required: a2aRoutes.Declared(served).Required(), Operator: served.OperatorExtensions}
 		},
 		Starts: func(svc store.ServiceRef) relay.StartReissuer {
 			return lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/sealed"
 	"kontra.sh/kontra/internal/store"
 )
 
@@ -107,57 +109,111 @@ func TestHireRetryReissuesALostStart(t *testing.T) {
 	}
 }
 
-// TestHireRefusesARequiredExtension (spec §2.4, §13.4; D294; M4 WP-04 review): a tool call of /mcp activates no
-// extension, so a hire of a service whose served card marks one required: true is refused with
-// ExtensionSupportRequiredError before anything else (no Admission, no task row, nothing to the seller), and so is a
-// reply to a hire task of such a service: what the A2A route refuses a request without A2A-Extensions with.
-func TestHireRefusesARequiredExtension(t *testing.T) {
+// TestHireActivatesTheOperatorsExtensions (spec §2.4, §12.2, §13.4; D294, D300): a tool call of /mcp has no
+// A2A-Extensions. A required URI that the operator's card_extensions entries assert (Cloud's escrow entry, ext-escrow
+// §1) is activated for the buyer: the hire runs Admission, which is told of the URI in extensions, and its task runs;
+// the seller never receives the activation, even though its own card declares the URI (an A2A caller's activation
+// would reach it). A reply to that task goes through. A required URI of the seller's own, and the sealed extension's
+// whoever asserts it, refuse a hire with ExtensionSupportRequiredError before anything else (no Admission, no task
+// row, nothing to the seller), and a reply to a hire task of such a service the same way: what the A2A route refuses
+// a request without A2A-Extensions with.
+func TestHireActivatesTheOperatorsExtensions(t *testing.T) {
 	adm := &recordingAdmission{}
 	r := newResendRig(t, adm)
 	ctx := context.Background()
 	p := principal(buyerA)
-	const escrow = "https://x.example.com/ext/escrow"
-	var required []string
+	const escrow, own = "https://operator.example.com/ext/escrow", "https://seller.example.com/ext/own"
+	r.backends.mu.Lock()
+	r.backends.info.Extensions = []string{escrow, own}
+	r.backends.mu.Unlock()
+	var mu sync.Mutex
+	var ce CardExtensions
+	card := func(c CardExtensions) {
+		mu.Lock()
+		ce = c
+		mu.Unlock()
+	}
 	h := &Hirer{Handlers: r.handlers(r.lc, NewRegistry()), Log: r.log,
-		RequiredExtensions: func(svc store.ServiceRef) []string {
+		Extensions: func(svc store.ServiceRef) CardExtensions {
 			if svc != r.svc {
-				t.Errorf("RequiredExtensions asked about %+v", svc)
+				t.Errorf("Extensions asked about %+v", svc)
 			}
-			return required
+			mu.Lock()
+			defer mu.Unlock()
+			return ce
 		}}
+	asked := func() []hooks.AdmitRequest {
+		adm.mu.Lock()
+		defer adm.mu.Unlock()
+		return append([]hooks.AdmitRequest(nil), adm.got...)
+	}
+	activations := func() []string {
+		var out []string
+		for _, rec := range r.agent.recorded() {
+			out = append(out, rec.header.Values("A2A-Extensions")...)
+		}
+		return out
+	}
 
-	// A task at input-required, hired while the card required nothing.
+	// The operator's required entry: activated for the buyer, told to Admission, never sent to the seller.
+	card(CardExtensions{Required: []string{escrow}, Operator: []string{escrow, "https://operator.example.com/ext/other"}})
 	out, err := h.Hire(ctx, HireRequest{Principal: p, Service: r.svc, Message: hireMessage("book"), FirstRequest: sha256.Sum256([]byte("a"))})
+	if err != nil {
+		t.Fatalf("a hire of a service the operator's entry requires %s of: %v", escrow, err)
+	}
+	task := r.waitState(a2a.TaskID(out.Task.ID.String()), store.StateInputRequired)
+	if got := asked(); len(got) != 1 || len(got[0].Extensions) != 1 || got[0].Extensions[0] != escrow || got[0].TaskID != out.Task.ID.String() {
+		t.Fatalf("Admission was asked %+v, want once with extensions [%s]", got, escrow)
+	}
+	if _, err := h.Reply(ctx, p, task, a2a.ContentParts{a2a.NewTextPart("the blue one")}); err != nil {
+		t.Fatalf("a reply to a task of a service the operator's entry requires an extension of: %v", err)
+	}
+	r.waitState(a2a.TaskID(task.ID.String()), store.StateCompleted)
+	if sent := r.agent.sentMessages(t); len(sent) != 2 {
+		t.Fatalf("the seller received %d messages, want the hire's and the reply's", len(sent))
+	}
+	if a := activations(); len(a) != 0 {
+		t.Errorf("the seller received A2A-Extensions %q: an activation the gate made for the buyer", a)
+	}
+
+	// A task at input-required, for the refused reply below.
+	out, err = h.Hire(ctx, HireRequest{Principal: p, Service: r.svc, Message: hireMessage("book"), FirstRequest: sha256.Sum256([]byte("b"))})
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := r.waitState(a2a.TaskID(out.Task.ID.String()), store.StateInputRequired)
+	waiting := r.waitState(a2a.TaskID(out.Task.ID.String()), store.StateInputRequired)
 
-	required = []string{escrow}
-	tasks := scalarCount(t, r, `select count(*) from kontra.tasks`)
-	_, err = h.Hire(ctx, HireRequest{Principal: p, Service: r.svc, Message: hireMessage("book"), FirstRequest: sha256.Sum256([]byte("b"))})
-	var xe *ExtensionsRequiredError
-	if !errors.As(err, &xe) || !errors.Is(err, a2a.ErrExtensionSupportRequired) || len(xe.URIs) != 1 || xe.URIs[0] != escrow {
-		t.Fatalf("a hire of a service requiring %s: %v", escrow, err)
+	// The seller's own required URI, and the sealed extension's even as the operator's entry: refused before anything.
+	tasks, admitted, sent := scalarCount(t, r, `select count(*) from kontra.tasks`), len(asked()), len(r.agent.sentMessages(t))
+	for _, c := range []struct {
+		card CardExtensions
+		want string
+	}{
+		{CardExtensions{Required: []string{own, escrow}, Operator: []string{escrow}}, own},
+		{CardExtensions{Required: []string{sealed.URI}, Operator: []string{sealed.URI}}, sealed.URI},
+	} {
+		card(c.card)
+		_, err = h.Hire(ctx, HireRequest{Principal: p, Service: r.svc, Message: hireMessage("book"), FirstRequest: sha256.Sum256([]byte("c"))})
+		var xe *ExtensionsRequiredError
+		if !errors.As(err, &xe) || !errors.Is(err, a2a.ErrExtensionSupportRequired) || len(xe.URIs) != 1 || xe.URIs[0] != c.want {
+			t.Errorf("a hire of a service requiring %+v: %v, want ExtensionsRequiredError [%s]", c.card, err, c.want)
+		}
+		if _, err := h.Reply(ctx, p, waiting, a2a.ContentParts{a2a.NewTextPart("the red one")}); !errors.As(err, &xe) || xe.URIs[0] != c.want {
+			t.Errorf("a reply to a task of a service requiring %+v: %v", c.card, err)
+		}
 	}
 	if n := scalarCount(t, r, `select count(*) from kontra.tasks`); n != tasks {
-		t.Errorf("the refused hire created %d task rows", n-tasks)
+		t.Errorf("the refused hires created %d task rows", n-tasks)
 	}
-	adm.mu.Lock()
-	asked := len(adm.got)
-	adm.mu.Unlock()
-	if asked != 1 {
-		t.Errorf("Admission was asked %d times, want once (the first hire only)", asked)
-	}
-	if _, err := h.Reply(ctx, p, task, a2a.ContentParts{a2a.NewTextPart("the blue one")}); !errors.As(err, &xe) {
-		t.Fatalf("a reply to a task of a service requiring %s: %v", escrow, err)
+	if n := len(asked()); n != admitted {
+		t.Errorf("the refused hires asked Admission %d times", n-admitted)
 	}
 	time.Sleep(time.Second)
-	if sent := r.agent.sentMessages(t); len(sent) != 1 {
-		t.Errorf("the seller received %d messages, want the first hire's only", len(sent))
+	if n := len(r.agent.sentMessages(t)); n != sent {
+		t.Errorf("the refused hires and replies sent the seller %d messages", n-sent)
 	}
-	if row := r.waitState(a2a.TaskID(task.ID.String()), store.StateInputRequired); row.Version != task.Version {
-		t.Errorf("the refused reply changed the task: version %d, was %d", row.Version, task.Version)
+	if row := r.waitState(a2a.TaskID(waiting.ID.String()), store.StateInputRequired); row.Version != waiting.Version {
+		t.Errorf("the refused replies changed the task: version %d, was %d", row.Version, waiting.Version)
 	}
 }
 

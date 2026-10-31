@@ -770,11 +770,13 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 	// An enabled a2a service has a card: fetched from a direct backend, or through the replica's sessions
 	// for a tunnel one (when the registry has them). An MCP service has none (spec §3).
 	tunnelled := b.Kind == backendTunnel && s.tunnels != nil
+	var operatorURIs []string
 	if !x.disabled && x.kind == config.KindA2A && (b.Kind == config.KindA2A || tunnelled) {
 		exts, err := cardExtensions(x.annotations)
 		if err != nil {
 			return nil, err
 		}
+		operatorURIs = extensionURIs(exts)
 		in := card.Input{PublicURL: s.publicURL, ServicePath: ServicePath(x.tenant, x.name, s.multi),
 			OnlyAnonymous: allow.OnlyAnonymous(), CardExtensions: exts}
 		if x.sealed != string(config.SealedOff) {
@@ -811,7 +813,8 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 	if e.keeper != nil {
 		cards = e.keeper.Current
 	}
-	e.served = &a2ahttp.Service{Ref: e.ref, Allow: allow, Listed: x.listed, Disabled: x.disabled, Cards: cards}
+	e.served = &a2ahttp.Service{Ref: e.ref, Allow: allow, Listed: x.listed, Disabled: x.disabled, Cards: cards,
+		OperatorExtensions: operatorURIs}
 	if x.kind == config.KindMCP {
 		m, err := s.mcpService(e, x, b)
 		if err != nil {
@@ -997,6 +1000,21 @@ func cardExtensions(annotations []byte) ([]json.RawMessage, error) {
 		return nil, fmt.Errorf("services.annotations.card_extensions: %w", err)
 	}
 	return a.CardExtensions, nil
+}
+
+// extensionURIs are the uri members of card_extensions entries, in order; an entry without one is skipped (the card
+// keeper refuses it).
+func extensionURIs(exts []json.RawMessage) []string {
+	var out []string
+	for _, e := range exts {
+		var ext struct {
+			URI string `json:"uri"`
+		}
+		if json.Unmarshal(e, &ext) == nil && ext.URI != "" && !slices.Contains(out, ext.URI) {
+			out = append(out, ext.URI)
+		}
+	}
+	return out
 }
 
 // newKeeper builds the card keeper of an a2a service, seeded from its stored upstream card: a direct

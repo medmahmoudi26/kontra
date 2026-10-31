@@ -9,7 +9,8 @@ M3 plan's audit (D172–D188). Revision 7 (28 Oct) includes the M3 decisions: it
 code and its review (D191–D205, D213, D223, D224, D230), decided under the owner's standing instruction. Revision 8
 (28 Oct, M4 planning) settles the gate's own `/mcp` in both eras (§12), its resource server and the M4 tests (D268 to
 D276, D282), and was amended the same day after the M4 plan's audit: §10.3's operator-configured endpoints, one
-stream for `elicitation/complete`, the shape of a `hire` result and the anonymous limits (D284, D287 to D289).
+stream for `elicitation/complete`, the shape of a `hire` result and the anonymous limits (D284, D287 to D289). It was
+amended on 31 Oct after M5's plan audit: `hire` activates the operator's required extensions for the buyer (D300).
 Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
@@ -1416,11 +1417,19 @@ or `name` (MCP). `describe` of an MCP service whose `tools/list` is not cached a
 
 **What `hire` accepts (D272).** A ref of a `kind: mcp` service, or of a service whose sealing is required
 ([`ext-sealed.md`](ext-sealed.md) §1), is answered with a `CallToolResult` whose `isError` is true and whose text names
-the route to use (`/mcp/…`; the service's A2A URL through a node, which seals): no task is created. So is a ref of a
-service whose served card marks an extension `required: true` (§2.4, an operator's `card_extensions` entry included,
-§13.4): a tool call has no `A2A-Extensions`, so it activates none, and the text names the service's A2A URL and the
-URIs to activate there; a `reply` to a task of such a service is refused the same way, nothing sent (D294). A
-`message` part whose `data` is `null` breaks the input schema (a2a-go cannot read such a part back). A ref the
+the route to use (`/mcp/…`; the service's A2A URL through a node, which seals): no task is created. A tool call has no
+`A2A-Extensions`, so of the extensions a served card marks `required: true` (§2.4):
+
+- **the operator's are activated for the buyer (D300).** A required entry of the service's `card_extensions`
+  annotation (§13.4), such as Cloud's escrow entry ([`ext-escrow.md`](ext-escrow.md) §1), is the operator's, carried by
+  its own hooks: Admission's quote and the operator's approve page, which every `hire` task goes through (§12.3).
+  `hire` activates it on the buyer's behalf and Admission receives it in `extensions` (§13.1), as an A2A caller's
+  activation; it is not passed to the service (§6.2), which the buyer asked nothing of. A `reply` needs nothing more.
+- **any other is refused (D294).** A ref of a service whose served card requires an extension of the seller's own, or
+  the sealed extension whoever asserts it, is answered as above with the text naming the service's A2A URL and the
+  URIs to activate there; a `reply` to a task of such a service is refused the same way, nothing sent.
+
+A `message` part whose `data` is `null` breaks the input schema (a2a-go cannot read such a part back). A ref the
 principal's `allow:` does not admit is the unknown-service error (§2.1); on `/mcp`, whose tools name the service in
 their arguments, that error is one `CallToolResult` with `isError` and the text `unknown service`, the same for a ref
 that is malformed, unknown, disabled or not admitted (a `404` would end the client's session; D293), and so are
@@ -1449,8 +1458,8 @@ row and events are the record.
 
 ### 12.3 `hire` and approval
 
-1. Admission (§13.1) with operation `task` and `via`. An allow decision: the task starts `submitted` and
-   `hire` answers as above.
+1. Admission (§13.1) with operation `task`, `via`, and in `extensions` the operator's required extensions `hire`
+   activated (§12.2, D300). An allow decision: the task starts `submitted` and `hire` answers as above.
 2. A quote decision (§13.2): the task is created `quoted`. Then:
    - **The client declared `elicitation.url`:** `hire` answers with the JSON-RPC error `-32042`
      (`URLElicitationRequiredError`), `data.elicitations = [{mode: "url", elicitationId, url: <approveUrl>,
@@ -1671,7 +1680,7 @@ Operator data the gate attaches without interpreting:
 
 | Where | Key | Shows as |
 |---|---|---|
-| `services.annotations` | `card_extensions` | Appended to the served card's `capabilities.extensions` (§3), e.g. Cloud's `https://kontra.sh/ext/escrow/v1` entry with its `params`. A `required: true` entry is enforced like any other (§2.4). |
+| `services.annotations` | `card_extensions` | Appended to the served card's `capabilities.extensions` (§3), e.g. Cloud's `https://kontra.sh/ext/escrow/v1` entry with its `params`. A `required: true` entry is enforced like any other (§2.4); a `hire` of `/mcp` activates it for the buyer (§12.2, D300). |
 | | `tool_meta` | `{"<tool name>" \| "*": {<sh.kontra/… keys>}}`, applied to `tools/list` entries' `_meta` (§11.3), e.g. `sh.kontra/price`. |
 | | `initialize_meta` | `{<sh.kontra/… keys>}`, applied to the `initialize` result's `_meta` (§11.2), e.g. a `per_session` price. |
 | | `search` | The `price` and `price_model` strings `search` returns and filters on, verbatim (§12.2). |
@@ -1894,7 +1903,7 @@ met, are D297.
 | `mcp_era_fallback` | §11.12: a dual-era client's first modern request to a legacy-only service, to a sealed service and to a stdio service gets the legacy `400`, and its call succeeds after `initialize`; a legacy-only upstream receives the gate's own `server/discover` and no modern request of a client (three sent within a minute), and a sealed service is never probed; a `404` that a dual-era upstream returns to one principal's modern request reaches that client, and another principal's next modern request to the service is still forwarded and answered modern (D177); against a dual-era upstream the client stays modern, pins nothing, and two concurrent first requests write one virtual session row; a client that succeeded modern on `/mcp/a` then gets the legacy `400` from a legacy-only `/mcp/b` on the same origin (the residual of §11.12, logged, not asserted as a pass) |
 | `mcp_peer_hop` | §11.2: with the client routed to one replica and the node's tunnel on the other, `initialize`, a pinned `tools/call` and its SSE stream complete through the peer hop; a `Kontra-Peer` assertion that is forged, older than 30 s or replayed, a request whose upstream session id or forwarded headers were changed after signing, and any other path on the peer listener, are refused and open no stream; killing the replica that held only the client's connection leaves the session open |
 | `gate_mcp_search` | §12.2 (D271): `search` shows a service admitted by an entry other than `anonymous` or `listed`, never one of an anonymous tenant nor one whose only admitting entry is `anonymous`; `query`, `kind`, `price` and the cursor page as specified; `describe` of a service `search` would not return is the unknown-service error; `describe` answers the card or the cached tools with no upstream request, and a cold cache is `toolsCached: false` and drained once |
-| `gate_mcp_hire` | §12.2, §12.3 step 1 (D272): a plain `hire` answers the outcome when the task ends within 25 s and `{taskId, state}` otherwise; a task-augmented `hire` answers `CreateTaskResult`; `tasks/result` renders text, data and file parts, a failed upstream is `isError` with `sh.kontra/failure`; `tasks/list` lists only this buyer's `hire` tasks, newest first; another buyer's `tasks/get` is `-32602`; `tasks/cancel` ends the task `cancelled` within 10 s and the upstream receives `CancelTask`; the same task followed by A2A `SubscribeToTask` shows the same events; a `kind: mcp` ref, a required-sealed ref and a ref whose served card requires an extension are `isError` with no task (D294); a `null` data part is `isError` with no task; the structured result is `{taskId, state, data?}` and no `calls` row is written (D289); a request without a credential is `401`, and one from an API key with only `enroll:` scopes `403` (D293) |
+| `gate_mcp_hire` | §12.2, §12.3 step 1 (D272): a plain `hire` answers the outcome when the task ends within 25 s and `{taskId, state}` otherwise; a task-augmented `hire` answers `CreateTaskResult`; `tasks/result` renders text, data and file parts, a failed upstream is `isError` with `sh.kontra/failure`; `tasks/list` lists only this buyer's `hire` tasks, newest first; another buyer's `tasks/get` is `-32602`; `tasks/cancel` ends the task `cancelled` within 10 s and the upstream receives `CancelTask`; the same task followed by A2A `SubscribeToTask` shows the same events; a `kind: mcp` ref, a required-sealed ref and a ref whose served card requires an extension of the seller's own are `isError` with no task (D294), and a ref whose only required extension is the operator's `card_extensions` entry is hired, its seller receiving no `A2A-Extensions` (D300); a `null` data part is `isError` with no task; the structured result is `{taskId, state, data?}` and no `calls` row is written (D289); a request without a credential is `401`, and one from an API key with only `enroll:` scopes `403` (D293) |
 | `gate_mcp_hire_quote` | §12.3, §13.2 (D275, D288; D38, D45, D188), against an Admission server that quotes `https://app.kontra.sh/#/t/<taskId>`: a client that declared `elicitation.url` gets `-32042` whose `url` is byte-equal to the hook's `approveUrl`, which names the pre-minted `taskId` the gate task then has; nothing is dispatched while `quoted`; the same `hire` again gets the same `elicitationId`. While the task is `quoted`, each of these leaves it `quoted` and the seller with no request: `reply` to it (`isError`, nothing forwarded); a client's JSON-RPC response with id `k.<task>.<quoted seq>` and an `accept` result (dropped, `202`: the gate never sends a URL-mode `elicitation/create` and reads no client result as approval); the same `hire` retried, from this session and from another; an A2A message to the task (`UnsupportedOperationError`, §7). After `kontra.approval {accepted: true}`, of two `GET` streams open on the session exactly one receives `notifications/elicitation/complete`, once, and another session's streams receive none, and the retried `hire` answers the result; a declined quote is `isError` (`cancelled` task-augmented) and an expired one `quote_expired`; a client without `elicitation.url` gets `working` with the URL in `statusMessage` and `_meta`; with an Admission server whose `approveUrl` is a team gate's own page (not `app.kontra.sh`), the `-32042` and the `working` answer carry that URL unchanged; the Admission server down, and a malformed or expired quote from it, are `-32603` `admission unavailable` with no task |
 | `gate_mcp_reply` | §12.4 (D272, D274), with a seller that asks one question: a legacy client that declared form elicitation sees `input_required` and one `elicitation/create` with the `reply` schema on `tasks/result`, whose `accept` reaches the same upstream task, and `decline` leaves the task waiting; a client without it sees `working`, the question, `(answer with the reply tool, taskId <id>)` and `sh.kontra/input-required`, and `reply` answers the new state; `reply` to a task that is not `input-required` is `isError` and forwards nothing |
 | `gate_mcp_modern` | §12.5 (D269, D274, D295): a 2026-07-28 client gets the gate's `server/discover`; a `hire` declaring the tasks extension is answered in line within 2 s or with `CreateTaskResult`; a client that closes its stream during the wait gets no answer and its task is `canceled` within 10 s, a quoted one stays `quoted` and the re-issued `hire` answers it; a quoted one is `working` with the URL and no `-32042`; a question is `input_required` with one gate-keyed `inputRequests` entry that `tasks/update` answers once; a `tasks/update` on a quoted task, and one with a key that is not an outstanding gate key, is ignored (an empty result, nothing reaches the seller, a quoted task stays `quoted`); `tasks/result` and `tasks/list` are `-32601`; a legacy request without a session is `400` with `-32000`; the answers are the same from either replica |
