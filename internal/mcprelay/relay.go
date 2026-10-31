@@ -184,7 +184,8 @@ func (h *Handler) slot(rq *request, release func(), err error) (func(), bool) {
 // subscriptions/listen stream takes a stream's slot instead, takeStream). A notification and a client response take
 // none: the gate answers them 202 with no body, or the upstream's error status bare, and closes whatever the upstream
 // sends with them unread (relayAccepted, D307), so they hold no relay open. Nor does what the gate answers itself
-// (tools/list from its cache, durable tasks/*, a gate-written stream).
+// (tools/list from its cache, durable tasks/*, a gate-written stream). An initialize always has an id here: §11.12's
+// rule 1 refuses one without (mcpwire.Classify, D312).
 func (h *Handler) takeRelay(rq *request) (release func(), ok bool) {
 	if m := rq.msg; m != nil && (m.Method == "" || len(m.ID) == 0) {
 		return func() {}, true
@@ -356,7 +357,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if post && rq.msg.Method == mcpwire.MethodInitialize {
-		h.initialize(rq)
+		h.initialize(rq) // with an id: Classify refused one without (D312), which would take no slot and get no 202
 		return
 	}
 	h.pinned(rq)

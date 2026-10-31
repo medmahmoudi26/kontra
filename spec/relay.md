@@ -1187,7 +1187,11 @@ requests get this section, and the same `TaskLifecycle` and log stand behind bot
 **Classification (D158).** After §11.1's one-message rule, its strict decoding and its `Origin` check, and before
 anything is forwarded:
 
-1. A POST whose `method` is `initialize` is legacy and opens a session (§11.2), whatever its headers say.
+1. A POST whose `method` is `initialize` is legacy and opens a session (§11.2), whatever its headers say. An
+   `initialize` is a request: one without an `id` is §11.1's invalid request, `400` with `-32600` (`invalid
+   request`) and `id` `null`, and nothing is admitted, counted or forwarded (D312). It is neither a request that takes
+   a `calls` slot ([`tunnel.md`](tunnel.md) §6.2) nor a notification answered `202` (§11.2), and no response can be
+   matched to it.
 2. A POST with `MCP-Protocol-Version: 2026-07-28` is **modern**. Its `Mcp-Session-Id` and `Last-Event-ID` are
    ignored: never looked up, never forwarded, and no session id is minted for it.
 3. A POST whose header is `2025-11-25`, `2025-06-18` or absent is legacy and needs a session (§11.2). Without

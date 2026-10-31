@@ -169,47 +169,83 @@ func TestPlainCallsAreCapped(t *testing.T) {
 	}
 }
 
-// streamingBack is dualEra's upstream behind a handler that, while streamBack is set, answers a notification or a
-// client's response with an event stream that never ends, as a seller's own server may; ended receives each such
-// exchange's body once the upstream saw it end (the gate closed it).
-func streamingBack(t *testing.T, tools ...json.RawMessage) (up *mcptest.Server, url string, streamBack *atomic.Bool, ended chan string) {
+// How a backUpstream answers a POST without an id or without a method: a notification, a client's response, an
+// initialize without an id.
+const (
+	backStock   int32 = iota // as the stock server does (mcptest)
+	backEndless              // an event stream of notifications/message events, 4 KiB every 20 ms, that never ends
+	backJSON                 // a 1 MiB notifications/message as a 200 application/json body
+	backSilent               // an event stream's headers, then nothing until the exchange is ended
+)
+
+// backUpstream is dualEra's upstream behind a handler that answers a notification or a client's response as mode
+// says, as a seller's own server may; ended receives the body of each such exchange held open (backEndless,
+// backSilent) once the upstream saw it end (the gate closed it). idlessInits counts the initializes without an id it
+// received, whatever mode is.
+type backUpstream struct {
+	*mcptest.Server
+	url         string
+	mode        atomic.Int32
+	ended       chan string
+	idlessInits atomic.Int32
+}
+
+func streamingBack(t *testing.T, tools ...json.RawMessage) *backUpstream {
 	t.Helper()
-	up = mcptest.New()
+	up := &backUpstream{Server: mcptest.New(), ended: make(chan string, 16)}
 	up.Modern = true
 	up.Tools = tools
-	streamBack, ended = &atomic.Bool{}, make(chan string, 16)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && streamBack.Load() {
-			b, _ := io.ReadAll(r.Body)
-			var m map[string]json.RawMessage
-			_ = json.Unmarshal(b, &m)
-			_, hasID := m["id"]
-			_, hasMethod := m["method"]
-			if !hasID || !hasMethod {
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.WriteHeader(http.StatusOK)
-				for i := 0; ; i++ {
-					if _, err := fmt.Fprintf(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\","+
-						"\"params\":{\"level\":\"info\",\"data\":\"%d %s\"}}\n\n", i, strings.Repeat("A", 4096)); err != nil {
-						break
-					}
-					w.(http.Flusher).Flush()
-					select {
-					case <-r.Context().Done():
-					case <-time.After(20 * time.Millisecond):
-						continue
-					}
+		if r.Method != http.MethodPost {
+			up.ServeHTTP(w, r)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(b))
+		var m map[string]json.RawMessage
+		_ = json.Unmarshal(b, &m)
+		_, hasID := m["id"]
+		method, hasMethod := m["method"]
+		if !hasID && string(method) == `"initialize"` {
+			up.idlessInits.Add(1)
+		}
+		mode := up.mode.Load()
+		if (hasID && hasMethod) || mode == backStock {
+			up.ServeHTTP(w, r)
+			return
+		}
+		switch mode {
+		case backJSON:
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"%s"}}`, strings.Repeat("A", 1<<20))
+			return
+		case backSilent:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		case backEndless:
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			for i := 0; ; i++ {
+				if _, err := fmt.Fprintf(w, "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\","+
+					"\"params\":{\"level\":\"info\",\"data\":\"%d %s\"}}\n\n", i, strings.Repeat("A", 4096)); err != nil {
 					break
 				}
-				ended <- string(b)
-				return
+				w.(http.Flusher).Flush()
+				select {
+				case <-r.Context().Done():
+				case <-time.After(20 * time.Millisecond):
+					continue
+				}
+				break
 			}
-			r.Body = io.NopCloser(bytes.NewReader(b))
 		}
-		up.ServeHTTP(w, r)
+		up.ended <- string(b)
 	}))
 	t.Cleanup(srv.Close)
-	return up, srv.URL + "/mcp", streamBack, ended
+	up.url = srv.URL + "/mcp"
+	return up
 }
 
 // standaloneGET opens a legacy session's standalone GET stream, as the TypeScript SDK's client does once
@@ -239,11 +275,12 @@ func standaloneGET(t *testing.T, key, url, sid string) (*http.Response, func()) 
 // one of its streams slots, counted apart, for as long as it is open; with none free each is 429 with -32600 "rate
 // limited" and Retry-After, and the upstream sees nothing. A notification and a client response take none, and are
 // answered 202 with no body whatever the upstream answers them, an endless event stream included: the gate closes it
-// unread, so it never relays a stream no slot bounds.
+// unread, so it never relays a stream no slot bounds. An initialize without an id is no request: 400, never forwarded
+// (D312).
 func TestEveryRelayedRequestIsCapped(t *testing.T) {
 	e := newEnv(t)
-	up, url, streamBack, ended := streamingBack(t, mcptest.Tool("echo", ""))
-	e.service("svc", url, nil)
+	up := streamingBack(t, mcptest.Tool("echo", ""))
+	e.service("svc", up.url, nil)
 	calls := newFakeCalls(100, 100)
 	r := e.replica("a", replicaOpts{withDeps: func(_ *replica, deps *Deps, _ *pg.Listener, _ *slog.Logger) { deps.Calls = calls }})
 	key, _ := e.apiKey("buyer")
@@ -310,8 +347,9 @@ func TestEveryRelayedRequestIsCapped(t *testing.T) {
 	// A notification and a client response take no slot, and are answered 202 with no body: from a stock upstream, and
 	// from one that answers them with an endless event stream, whose exchange the gate ends at once (D307).
 	quick := &client{t: t, key: key, sid: c.sid, hc: &http.Client{Timeout: 5 * time.Second}}
-	for _, streams := range []bool{false, true} {
-		streamBack.Store(streams)
+	for _, mode := range []int32{backStock, backEndless} {
+		up.mode.Store(mode)
+		streams := mode == backEndless
 		for _, b := range []string{`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":1}}`,
 			`{"jsonrpc":"2.0","id":"upstream-1","result":{}}`} {
 			rep := quick.do(http.MethodPost, svcURL, b, nil)
@@ -320,14 +358,36 @@ func TestEveryRelayedRequestIsCapped(t *testing.T) {
 			}
 			if streams {
 				select {
-				case <-ended:
+				case <-up.ended:
 				case <-time.After(10 * time.Second):
 					t.Fatalf("%s: the upstream's stream was not ended", b)
 				}
 			}
 		}
 	}
-	streamBack.Store(false)
+	// An initialize without an id is no request, and is refused before anything is forwarded (D312, amending D307):
+	// 400 with -32600 "invalid request" and id null, without a session and on one, with no slot free, whatever the
+	// upstream would answer it (the stock server, a JSON body, a silent event stream, an endless one). Before, the gate
+	// forwarded it with no slot and no 202: it relayed the upstream's JSON answer, and held a silent stream, or one of
+	// events not typed message, for as long as the upstream kept it open.
+	idless := `{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},` +
+		`"clientInfo":{"name":"test","version":"1"}}}`
+	for _, mode := range []int32{backStock, backJSON, backSilent, backEndless} {
+		up.mode.Store(mode)
+		for _, sid := range []string{"", c.sid} {
+			cl := &client{t: t, key: key, sid: sid, hc: &http.Client{Timeout: 5 * time.Second}}
+			rep := cl.do(http.MethodPost, svcURL, idless, nil)
+			if rep.status != http.StatusBadRequest || rep.header.Get("Content-Type") != "application/json" ||
+				string(rep.body) != `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid request"}}` {
+				t.Fatalf("an initialize without an id (upstream mode %d, session %q): %d %q %.200s", mode, sid, rep.status,
+					rep.header.Get("Content-Type"), rep.body)
+			}
+		}
+	}
+	if n := up.idlessInits.Load(); n != 0 {
+		t.Fatalf("%d initializes without an id reached the upstream", n)
+	}
+	up.mode.Store(backStock)
 	if inFlight, _, _ := calls.counts(); inFlight != 0 || calls.streamCounts().inFlight != 0 {
 		t.Fatalf("slots in flight after the notifications: %d calls, %+v streams", inFlight, calls.streamCounts())
 	}

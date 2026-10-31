@@ -4632,7 +4632,8 @@ each answering its own).
 Tests: `TestEveryRelayedRequestIsCapped` (`internal/mcprelay`), `TestAnonymousKeyIsNotRotated` (`internal/enroll`),
 `TestAnonymousSweepsRunWithoutAnonymousSessions` (`internal/gate`). Amended by D307 (a notification or response is
 answered `202`, never relayed as a stream), D308 (streams have a limit of their own), D309 (the limits apply with the
-setting off, and `enabled: false` keeps them) and D310 (the stored-parts bound carries `tasks`).
+setting off, and `enabled: false` keeps them), D310 (the stored-parts bound carries `tasks`) and D312 (an `initialize`
+without an `id` is refused `400`, so every forwarded `initialize` takes a slot).
 
 ### D305. An authorization server issues a gate's API key only for that gate's origin — **decided under the owner's standing instruction, 31 Oct** (amends D278, D296)
 
@@ -4710,7 +4711,8 @@ when the upstream streams was the alternative; it would still relay messages a c
 read a body the transport says is empty. The body of an error status is dropped too, which the transport allows (an
 error response "MAY" carry one): reading it is a relay without a slot as well. relay.md §11.2, tunnel.md §6.2.
 Test: `TestEveryRelayedRequestIsCapped` (an upstream that answers a notification and a client response with an
-endless event stream while the cap is full: `202`, no body, the upstream's exchange ended).
+endless event stream while the cap is full: `202`, no body, the upstream's exchange ended). Amended by D312 (an
+`initialize` without an `id` was neither: it is refused `400`, never forwarded).
 
 ### D308. MCP streams relayed to an anonymous tenant have a limit of their own, `streams` — **decided under the owner's standing instruction, 31 Oct** (amends D304, D287)
 
@@ -4794,3 +4796,38 @@ already. `cardExtensions` reads `capabilities.extensions` and each entry with ex
 Tests: `TestCaseVariantsOfGateMembersAreRefused` (`internal/card`, through `Keeper.Seed` with the gate's signer: each
 variant refused; the controls install and a2a-go reads exactly the operator's entry), `TestDeclaredReadsExactKeys`
 (`internal/a2ahttp`: the variants declare nothing; an installed card declares what a2a-go reads of it).
+
+## From M4's third review (31 Oct)
+
+The third review of the branch (`3b890f3`, after D307 to D311) confirmed one finding, a minor one. D312 records how it
+was settled; its regression tests fail on `3b890f3`.
+
+### D312. An `initialize` without an `id` is refused `400`, never forwarded — **decided under the owner's standing instruction, 31 Oct** (amends D307, D304)
+
+D304 gave every forwarded request with an `id` a `calls` slot and D307 answered every forwarded notification `202`, but
+an `initialize` without an `id` was neither. `mcpwire.Parse` reads a method without an `id` as a notification, §11.12's
+rule 1 sends every `initialize` to the legacy era, and the relay routed it to the session opening on its method alone,
+where `takeRelay` takes no slot for a message without an `id` and nothing answered it `202`. So, with the `calls` cap
+full, the gate forwarded it and relayed what the upstream answered: a `2xx` JSON body up to the 8 MiB `MaxBody`, with no
+session; and an event stream that sends no response was held with no time limit, since the relay waits for a response
+whose `id` matches the request's, which an absent `id` never does, and neither the edge nor the relay sets a deadline
+on the exchange. A silent stream, or one of events typed other than `message` (dropped before they count toward
+`MaxBody`), held the exchange, an edge connection and a tunnel stream for as long as the tenant's own server kept it
+open. `message` events, comment-only ones included (they have no `event:` field, so they are messages), are held up to
+`MaxBody` and end in `502`. The node passes such an `initialize` through (`mcproots` rewrites only
+`capabilities.roots`). Only a tenant's own server could use it, a stock upstream answers at once, and nothing past
+8 MiB per exchange reached a client: concurrency beyond `calls` and holds with no slot, not an unbounded relay, so
+the review rated it minor. The reviewer reproduced it with the cap full: a 1 MiB JSON answer relayed with `200`, and a
+silent stream and 10 MiB of typed events still open after 6 s with no slot taken. The gate's own `/mcp` had the same
+gap without the relay: it opened a session for such an `initialize` and answered a result with `id` `null`.
+
+Decision: an `initialize` is a request (MCP lifecycle; a request carries an `id`), so one without an `id` is §11.1's
+invalid request, `400` with `-32600` `invalid request` and `id` `null`, refused in §11.12's rule 1
+(`mcpwire.Classify`) on `/mcp/{svc}` and `/mcp` alike, before Admission, any slot or anything is forwarded. The stdio
+bridge already refused one so. Taking a slot for it, or answering it `202` as D307 answers a notification, were the
+alternatives. Both still send the upstream a message it cannot answer, and a `202` would tell the client nothing about
+the session it asked for. relay.md §11.12, tunnel.md §6.2. Tests: `TestEveryRelayedRequestIsCapped`
+(`internal/mcprelay`: with no slot free, an `initialize` without an `id`, without a session and on one, to an upstream
+that answers it as the stock double does, with a 1 MiB JSON body, with a silent event stream and with an endless one:
+`400` with that body each time, and the upstream receives none), `TestGateMCPReviewFixes` (`internal/gate`: on `/mcp`,
+`400` and no session row), `TestClassify` (`internal/mcpwire`: whatever `MCP-Protocol-Version` says).

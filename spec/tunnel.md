@@ -367,14 +367,15 @@ relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never t
   tasks whose principal is a key of the tenant. Both are counted under a per-tenant lock when a task is created. Over
   the cap, A2A answers `429` as [`relay.md`](relay.md) §2.2 says (on JSON-RPC, `-32600` `rate limited`), a
   task-augmented MCP call `429` with `-32600`, and `hire` a `CallToolResult` with `isError`.
-- A plain MCP call is not a task. The requests the gate relays to the tenant's services, whoever sent them, are at
-  most `calls` in flight: every request with an `id` and a method that is forwarded (`initialize`, a plain
-  `tools/call`, `resources/read`, `prompts/get`, `completion/complete`, `server/discover`, a method the gate does not
-  know). Each `GET` or `subscriptions/listen` stream is one of at most `streams` open, for as long as it is open,
+- A plain MCP call is not a task. The requests the gate relays to the tenant's services, whoever sent them, are at most
+  `calls` in flight: every request with an `id` and a method that is forwarded (`initialize`, a plain `tools/call`,
+  `resources/read`, `prompts/get`, `completion/complete`, `server/discover`, a method the gate does not know). An
+  `initialize` without an `id` is refused `400` before anything is forwarded ([`relay.md`](relay.md) §11.12 rule 1,
+  D312). Each `GET` or `subscriptions/listen` stream is one of at most `streams` open, for as long as it is open,
   counted apart (D308): the TypeScript SDK's client opens its standalone `GET` once `notifications/initialized` is
   accepted and the stock server keeps it open while the client is idle, so streams counted with requests would leave
-  eight idle clients holding every slot and the service refusing every call. Over either limit the request or stream
-  is `429` with `-32600` `rate limited` and `Retry-After`, before anything is forwarded or metered, so a `--public` MCP
+  eight idle clients holding every slot and the service refusing every call. Over either limit the request or stream is
+  `429` with `-32600` `rate limited` and `Retry-After`, before anything is forwarded or metered, so a `--public` MCP
   service is not an unbounded relay (D304; a stock client's standalone `GET` stream so refused is not fatal to it). A
   notification, a client's response, and what the gate answers itself (`tools/list` from its cache, a durable service's
   `tasks/*`, a gate-written stream) take none, and are never relayed as a stream: a notification or response the

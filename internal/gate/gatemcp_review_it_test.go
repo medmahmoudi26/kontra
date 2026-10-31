@@ -35,7 +35,8 @@ import (
 //     removed, and once the service is disabled, its reply sending nothing and the task left at input-required. A row
 //     the registry refused to build is no service to search, describe or hire, and a row whose allow: does not parse
 //     fails no search;
-//   - a reply answers the turn it started, every time (a loop of hire "ask" and reply; MCP-2).
+//   - a reply answers the turn it started, every time (a loop of hire "ask" and reply; MCP-2);
+//   - M4's third review (D312): an initialize without an id is 400 with -32600 and id null, and opens no session.
 func TestGateMCPReviewFixes(t *testing.T) {
 	e := newGateEnv(t)
 	ctx := context.Background()
@@ -73,6 +74,20 @@ func TestGateMCPReviewFixes(t *testing.T) {
 	c := newMCPClient(t, a.url, hire.Secret)
 	c.initialize(`{}`)
 	tasks := func() int64 { return scalar[int64](t, e.pool, `select count(*) from kontra.tasks`) }
+
+	// An initialize without an id is no request (D312): refused by §11.12's rule 1 as on /mcp/{svc}, where the gate's
+	// own /mcp opened a session for it and answered a result with id null.
+	sessions := func() int64 { return scalar[int64](t, e.pool, `select count(*) from kontra.mcp_sessions`) }
+	sessionsBefore := sessions()
+	if status, hdr, msgs := newMCPClient(t, a.url, hire.Secret).post(`{"jsonrpc":"2.0","method":"initialize","params":{` +
+		`"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`); status != http.StatusBadRequest ||
+		hdr.Get("Mcp-Session-Id") != "" || len(msgs) != 1 ||
+		string(msgs[0]) != `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid request"}}` {
+		t.Errorf("an initialize without an id: %d %v %s", status, hdr, msgs)
+	}
+	if n := sessions(); n != sessionsBefore {
+		t.Errorf("an initialize without an id opened %d sessions", n-sessionsBefore)
+	}
 
 	// A null data part.
 	_, ans := c.call("hire", `{"service":"hello","message":"hi"}`)
