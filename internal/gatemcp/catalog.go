@@ -35,9 +35,10 @@ const DrainEvery = 10 * time.Minute
 // caches the relays keep (the served card, the MCP tools cache). It never makes an upstream request on a request's
 // time (§12.2).
 //
-// Visibility (§12.2): a service whose allow: admits the principal by an entry other than anonymous, or one the
-// operator marks listed; never a service of an anonymous tenant (spec/tunnel.md §6.2), never a disabled one, nor one
-// of a tenant that has ended. hire reaches a service by ref when its allow: admits the principal at all (any entry,
+// Visibility (§12.2): a service whose allow: admits the principal by an entry other than anonymous (oidc:* included,
+// which names every principal of the configured OIDC issuer as key:* names every API key, D301), or one the operator
+// marks listed; never a service of an anonymous tenant (spec/tunnel.md §6.2), never a disabled one, nor one of a
+// tenant that has ended. hire reaches a service by ref when its allow: admits the principal at all (any entry,
 // anonymous included), as the A2A route does.
 type Catalog struct {
 	db        *pgxpool.Pool

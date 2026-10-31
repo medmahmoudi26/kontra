@@ -129,6 +129,15 @@ func TestGateMCPOAuth(t *testing.T) {
     kind: mcp
     backend: { mcp: { url: "` + direct.URL + `/mcp", allow_private: true } }
     allow: ["anonymous"]
+  anyone:
+    kind: a2a
+    backend: { a2a: { url: "` + e.seller.srv.URL + `/base", allow_private: true } }
+    allow: ["oidc:*"]
+    task: { timeout: 10m, retries: 1 }
+  signedin:
+    kind: mcp
+    backend: { mcp: { url: "` + direct.URL + `/mcp", allow_private: true } }
+    allow: ["oidc:*"]
 `
 	port := freePort(t)
 	timing := fastTiming
@@ -229,6 +238,21 @@ func TestGateMCPOAuth(t *testing.T) {
 		t.Errorf("a token for a service whose allow: does not admit it: %d %s", status, body)
 	}
 
+	// oidc:* (D301): every principal of the configured issuer, whatever its subject. search shows the service and hire
+	// takes it on /mcp; a token for /mcp/signedin is served there. API keys are not admitted by it (below).
+	_, ans = c.call("search", `{"query":"anyone"}`)
+	if sr := ans.tool(t); sr.IsError || !strings.Contains(sr.text(), `"ref":"anyone"`) {
+		t.Errorf("search for an oidc:* service with the token: %s", ans.raw)
+	}
+	_, ans = c.call("hire", `{"service":"anyone","message":"hi"}`)
+	if hr := ans.tool(t); hr.IsError || hr.Structured.TaskID == "" {
+		t.Errorf("a hire of an oidc:* service with the token: %s", ans.raw)
+	}
+	signedTok := as.MustSign(oidctest.Token{Audience: []string{oidc.CanonicalURI(pub, "signedin")}})
+	if status, _, body := oauthSend(t, http.MethodPost, pub+"/mcp/signedin", signedTok, initialize); status != http.StatusOK || !strings.Contains(string(body), `"result"`) {
+		t.Errorf("a token on /mcp/signedin, whose allow: is oidc:*: %d %s", status, body)
+	}
+
 	// Refused tokens.
 	aud := []string{oidc.CanonicalURI(pub, "")}
 	for name, tok := range map[string]string{
@@ -247,11 +271,20 @@ func TestGateMCPOAuth(t *testing.T) {
 		t.Errorf("the key set was fetched %d times within the minute, want once", n)
 	}
 
-	// An API key still works on both.
+	// An API key still works on both; oidc:* does not admit it (D301): hire answers the unknown service, and
+	// /mcp/signedin is 404 as an unknown service is (D50).
 	key := e.mintKey("buyer")
-	newMCPClient(t, a.url, key).initialize(`{}`)
+	kc := newMCPClient(t, a.url, key)
+	kc.initialize(`{}`)
 	if status, _, body := oauthSend(t, http.MethodPost, pub+"/mcp/fs", key, initialize); status != http.StatusOK || !strings.Contains(string(body), `"result"`) {
 		t.Errorf("an API key on /mcp/fs: %d %s", status, body)
+	}
+	_, ans = kc.call("hire", `{"service":"anyone","message":"hi"}`)
+	if kr := ans.tool(t); !kr.IsError || kr.text() != "unknown service" {
+		t.Errorf("an API key's hire of an oidc:* service: %s", ans.raw)
+	}
+	if status, _, body := oauthSend(t, http.MethodPost, pub+"/mcp/signedin", key, initialize); status != http.StatusNotFound || !strings.Contains(string(body), "unknown service") {
+		t.Errorf("an API key on /mcp/signedin, whose allow: is oidc:*: %d %s", status, body)
 	}
 	if status, www, _ := oauthSend(t, http.MethodPost, pub+"/mcp", "kk_nobody_"+strings.Repeat("a", 32), initialize); status != http.StatusUnauthorized ||
 		www != challenge("")+`, error="invalid_token"` {

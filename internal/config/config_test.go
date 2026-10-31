@@ -377,7 +377,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad service name", head + "services:\n  Bad_Name:\n    kind: a2a\n    backend: { tunnel: {} }\n", "services.Bad_Name: the name must match"},
 		{"name too long", head + "services:\n  " + strings.Repeat("a", 64) + ":\n    kind: a2a\n    backend: { tunnel: {} }\n", "the name must match"},
 		{"unknown allow kind", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"user:bob\"]\n"), `unknown allow: kind "user"`},
-		{"allow without kind", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [everyone]\n"), "want key:, org:, oidc:sub:, node: or anonymous"},
+		{"allow without kind", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [everyone]\n"), "want key:, org:, oidc:sub:, oidc:*, node: or anonymous"},
 		{"PRD glob key:acme-* (D68)", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"key:acme-*\"]\n"), "write e.g. key:kk_acme_*, D68"},
 		{"short exact key prefix", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"key:kk\"]\n"), "4 to 32 characters"},
 		{"bad org", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"org:Acme\"]\n"), "org: needs a tenant name"},
@@ -768,6 +768,22 @@ func TestSellerKeysDecodeAsJSON(t *testing.T) {
 	}
 }
 
+// An oidc:* entry (D301) is accepted; on a gate without an OIDC issuer it admits nobody, which the load says.
+func TestAllowOIDCAnyWarnsWithoutAnIssuer(t *testing.T) {
+	const svc = "    allow: [\"oidc:*\", \"key:kk_acme_*\"]\n"
+	c := parse(t, minimal+svc)
+	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "services.hello.allow: oidc:* admits nobody") {
+		t.Errorf("warnings without auth.mcp_oauth = %q, want one naming services.hello.allow", c.Warnings)
+	}
+	c = parse(t, "auth: { mcp_oauth: { issuer: https://login.example.com } }\n"+minimal+svc)
+	if len(c.Warnings) != 0 || !slices.Equal(c.Services["hello"].Allow, []string{"oidc:*", "key:kk_acme_*"}) {
+		t.Errorf("with auth.mcp_oauth: warnings %q, allow %q", c.Warnings, c.Services["hello"].Allow)
+	}
+	if err := parseErr(t, minimal+"    allow: [\"oidc:sub:*\"]\n"); err == nil || !strings.Contains(err.Error(), "write oidc:*") {
+		t.Errorf("oidc:sub:*: %v, want an error naming oidc:*", err)
+	}
+}
+
 func TestParseAllowEntry(t *testing.T) {
 	for in, want := range map[string]AllowEntry{
 		"anonymous":                          {Kind: AllowAnonymous},
@@ -775,6 +791,8 @@ func TestParseAllowEntry(t *testing.T) {
 		"key:kk_acme_abc12345":               {Kind: AllowKey, Value: "kk_acme_abc12345"},
 		"org:default":                        {Kind: AllowOrg, Value: "default"},
 		"oidc:sub:auth0|abc:de":              {Kind: AllowOIDCSub, Value: "auth0|abc:de"},
+		"oidc:sub:*x":                        {Kind: AllowOIDCSub, Value: "*x"},
+		"oidc:*":                             {Kind: AllowOIDCAny},
 		"node:k1_abcdefghijklmnopqrstuvwxyz": {Kind: AllowNode, Value: "k1_abcdefghijklmnopqrstuvwxyz"},
 	} {
 		got, err := ParseAllowEntry(in)
@@ -791,7 +809,7 @@ func TestParseAllowEntry(t *testing.T) {
 	}
 	for _, in := range []string{"", " anonymous", "Anonymous", "key:", "key:acme-*", "key:kk.acme.*", "key:" + strings.Repeat("a", 33) + "*",
 		"key:ab?", "key:???", "key:" + strings.Repeat("?", 33), "key:" + strings.Repeat("a", 30) + "???*", "key:" + strings.Repeat("a", 33),
-		"org:", "org:a_b", "oidc:sub:", "oidc:", "node:", "user:x", "anonymous:x"} {
+		"org:", "org:a_b", "oidc:sub:", "oidc:", "oidc:sub:*", "oidc:**", "oidc:* ", "oidc:any", "oidc:sub", "node:", "user:x", "anonymous:x"} {
 		if got, err := ParseAllowEntry(in); err == nil {
 			t.Errorf("ParseAllowEntry(%q) = %+v, want an error", in, got)
 		}

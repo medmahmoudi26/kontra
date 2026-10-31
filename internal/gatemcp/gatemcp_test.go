@@ -470,26 +470,35 @@ func TestAcceptedReply(t *testing.T) {
 }
 
 // AdmitsNamed is search's visibility (§12.2): an allow: list that admits the principal only through anonymous does
-// not show it the service.
+// not show it the service; oidc:* shows it to every OIDC principal, as key:* to every API key, and to nobody else
+// (D301).
 func TestAdmitsNamed(t *testing.T) {
 	tid := uuid.Must(uuid.NewV7())
 	p := auth.Principal{Kind: auth.KindKey, ID: "key:kk_acme_ab12cd34", TenantID: &tid, TenantSlug: "acme",
 		BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeHire}}
+	o := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaMCP}
 	for _, tc := range []struct {
 		allow       []string
+		p           auth.Principal
 		named, hire bool
 	}{
-		{[]string{"anonymous"}, false, true},
-		{[]string{"anonymous", "org:acme"}, true, true},
-		{[]string{"key:kk_acme_*"}, true, true},
-		{[]string{"org:other"}, false, false},
+		{[]string{"anonymous"}, p, false, true},
+		{[]string{"anonymous", "org:acme"}, p, true, true},
+		{[]string{"key:kk_acme_*"}, p, true, true},
+		{[]string{"org:other"}, p, false, false},
+		{[]string{"oidc:*"}, p, false, false},
+		{[]string{"oidc:*", "key:*"}, p, true, true},
+		{[]string{"oidc:*"}, o, true, true},
+		{[]string{"anonymous", "oidc:*"}, o, true, true},
+		{[]string{"anonymous", "key:*"}, o, false, true},
+		{[]string{"oidc:sub:user-8"}, o, false, false},
 	} {
 		al, err := auth.ParseAllowList(tc.allow)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if AdmitsNamed(al, p) != tc.named || al.Admits(p) != tc.hire {
-			t.Errorf("%v: named %v admits %v", tc.allow, AdmitsNamed(al, p), al.Admits(p))
+		if AdmitsNamed(al, tc.p) != tc.named || al.Admits(tc.p) != tc.hire {
+			t.Errorf("%v, %s: named %v admits %v", tc.allow, tc.p.ID, AdmitsNamed(al, tc.p), al.Admits(tc.p))
 		}
 	}
 }

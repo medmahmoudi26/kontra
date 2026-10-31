@@ -10,8 +10,9 @@ code and its review (D191–D205, D213, D223, D224, D230), decided under the own
 (28 Oct, M4 planning) settles the gate's own `/mcp` in both eras (§12), its resource server and the M4 tests (D268 to
 D276, D282), and was amended the same day after the M4 plan's audit: §10.3's operator-configured endpoints, one
 stream for `elicitation/complete`, the shape of a `hire` result and the anonymous limits (D284, D287 to D289). It was
-amended on 31 Oct after M5's plan audit: `hire` activates the operator's required extensions for the buyer (D300).
-Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+amended on 31 Oct after M5's plan audit: `hire` activates the operator's required extensions for the buyer, and an
+`allow:` entry `oidc:*` (D300, D301). Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC
+2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
@@ -136,10 +137,13 @@ Behind a proxy, `remote` is the proxy's one address, and `rps_per_ip` would thro
 | Nothing, on a service whose `allow:` contains `anonymous` | `anonymous` | none | team gate: one fixed `buyer_id` for all anonymous callers; multi-tenant gate: UUIDv5(service tenant ‖ "anonymous") | `anonymous` |
 
 `allow:` entries (deny by default, PRD §12): `key:<prefix glob>`, `org:<tenant>` (every principal whose
-tenant is that tenant: its API keys and its nodes' keys), `oidc:sub:<subject>`, `node:<key_id>`,
-`anonymous`. `anonymous` is never implied; an `anonymous` entry admits every principal, authenticated or not,
-and an authenticated caller keeps its own principal, `buyer_id` and `via`. A service the gate creates during a
-handshake gets `allow: [org:<its tenant>]` ([`tunnel.md`](tunnel.md) §5–§6), so its owner's own nodes can call it.
+tenant is that tenant: its API keys and its nodes' keys), `oidc:sub:<subject>`, `oidc:*`, `node:<key_id>`,
+`anonymous`. `oidc:*` admits every `oidc:sub:<sub>` principal, whatever its subject: a principal a JWT of the configured
+OIDC issuer or MCP authorization server stands for (the two rows above), and never an API key, a node or `anonymous`;
+`oidc:sub:*` is refused at load, a subject being matched exactly (D301). `anonymous` is never implied; an `anonymous`
+entry admits every principal, authenticated or not, and an authenticated caller keeps its own principal, `buyer_id` and
+`via`. A service the gate creates during a handshake gets `allow: [org:<its tenant>]` ([`tunnel.md`](tunnel.md)
+§5–§6), so its owner's own nodes can call it.
 
 **Anonymous callers share a buyer.** All of them on a team gate, and all of one tenant's on a
 multi-tenant gate, are one `buyer_id`. So for the `anonymous` principal `ListTasks` and MCP `tasks/list`
@@ -1386,6 +1390,9 @@ principal: a request without a credential is `401` (§12.1); through a node, the
 - A principal that arrived through `/mcp` with OAuth has `via = mcp`. The gate passes `via` to the hooks. An
   MCP session, like an API key, can never approve anything that moves money: that is the hooks' invariant
   (Cloud), and the gate gives them what they need to keep it.
+- **Who the authorization server's principals reach (D301).** An `allow:` entry `oidc:sub:<sub>` admits one of them;
+  `oidc:*` admits all of them, and nothing else (§2.3): a listing open to every signed-in user without admitting
+  anonymous callers, `[key:*, oidc:*]` when API keys are welcome too. Price and policy stay Admission's (§13.1).
 
 ### 12.2 Tools
 
@@ -1394,7 +1401,7 @@ JSON Schema 2020-12 objects, published in `spec/schema/mcp-tools.json`.
 
 | Tool | Input | Result |
 |---|---|---|
-| `search` | `{query?: string, kind?: "a2a"\|"mcp", price?: string, cursor?: string}` | `structuredContent: {services: [{ref, kind, name, description, available, price?}], nextCursor?}`, plus the same as a text block. `available` = at least one connected session or a direct backend. `price` is the operator's annotation, verbatim. Only services whose `allow:` admits the principal by an entry other than `anonymous`, plus services the operator marks `listed`; services of an anonymous tenant never appear. |
+| `search` | `{query?: string, kind?: "a2a"\|"mcp", price?: string, cursor?: string}` | `structuredContent: {services: [{ref, kind, name, description, available, price?}], nextCursor?}`, plus the same as a text block. `available` = at least one connected session or a direct backend. `price` is the operator's annotation, verbatim. Only services whose `allow:` admits the principal by an entry other than `anonymous` (`key:*` and `oidc:*` included, D301), plus services the operator marks `listed`; services of an anonymous tenant never appear. |
 | `describe` | `{service: string}` | Only for a service `search` would return to the principal, else the unknown-service error. The served card (A2A) or the cached, filtered, annotated `tools/list` (MCP; never an upstream call per request), `sealed`, `available`, and the URLs to call it directly (`{public_url}/agents/…` or `/mcp/…`). |
 | `hire` | `{service: string, message: string \| {parts: Part[]}, contextId?: string}` | Task-augmented (`execution.taskSupport: "optional"`): a `CreateTaskResult`. Plain: a `CallToolResult` whose `structuredContent` is `{taskId, state, data?}` (below; a quoted task's approve URL in its text and `_meta`, §12.3). Only `kind: a2a` services: MCP services are called directly at `/mcp/{svc}`. |
 | `reply` | `{taskId: string, message: string \| {parts: Part[]}}` | Sends a follow-up to a task in `input-required` (§7). Answers the task's new state. |

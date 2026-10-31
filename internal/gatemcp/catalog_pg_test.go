@@ -282,6 +282,50 @@ func TestCatalogMultiTenant(t *testing.T) {
 	}
 }
 
+// oidc:* on a multi-tenant gate (D301): a listing whose allow: is [key:*, oidc:*] is searched and hired by every
+// signed-in user of the configured issuer (an MCP OAuth principal: no tenant, via mcp) and every API key, and by no
+// one else; [oidc:*] alone is not an API key's; neither is the anonymous principal's. An anonymous entry still admits
+// everyone to hire, without showing the service.
+func TestCatalogOIDCAny(t *testing.T) {
+	e := newCatalogEnv(t)
+	ctx := context.Background()
+	e.service(e.acme, "listing", "a2a", directA2A, []string{"key:*", "oidc:*"}, false, "", "", false)
+	e.service(e.acme, "signedin", "a2a", directA2A, []string{"oidc:*"}, false, "", "", false)
+	e.service(e.acme, "keys", "a2a", directA2A, []string{"key:*"}, false, "", "", false)
+	e.service(e.acme, "open", "a2a", directA2A, []string{"anonymous"}, false, "", "", false)
+	c := NewCatalog(CatalogConfig{DB: e.pool, Multi: true, PublicURL: "https://gate.example"})
+	user := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaMCP}
+	key := keyPrincipal(e.team, tenant.TeamSlug, "kk_default_ab12cd34")
+	for _, tc := range []struct {
+		who    string
+		p      auth.Principal
+		search string
+		hire   map[string]bool
+	}{
+		{"a signed-in user", user, "[acme/listing acme/signedin]", map[string]bool{"listing": true, "signedin": true, "keys": false, "open": true}},
+		{"an API key", key, "[acme/keys acme/listing]", map[string]bool{"listing": true, "signedin": false, "keys": true, "open": true}},
+		{"the anonymous principal", auth.Anonymous(uuid.Must(uuid.NewV7())), "[]", map[string]bool{"listing": false, "signedin": false, "keys": false, "open": true}},
+	} {
+		r, err := c.Search(ctx, tc.p, SearchArgs{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := []string{}
+		for _, s := range r.Services {
+			got = append(got, s.Ref)
+		}
+		if fmt.Sprint(got) != tc.search {
+			t.Errorf("search as %s: %v, want %s", tc.who, got, tc.search)
+		}
+		for name, ok := range tc.hire {
+			s, err := c.Hireable(ctx, tc.p, Ref{Tenant: "acme", Name: name})
+			if err != nil || (s != nil) != ok {
+				t.Errorf("Hireable(acme/%s) as %s = %v, %v; want %v", name, tc.who, s != nil, err, ok)
+			}
+		}
+	}
+}
+
 // One search request reads at most SearchExamine rows (M4 WP-04 review): a principal who sees none of more services
 // than that gets an early page, empty here, whose nextCursor is the last row read, never a scan of the whole table;
 // following the cursors reaches what it may see. Shown with a bound of 10 rows read 4 at a time.

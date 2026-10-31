@@ -204,6 +204,7 @@ PRD §12 principals: `key:`, `org:`, `oidc:sub:`. Hiring through a node and the 
 service, never implied). Consequence, accepted: all anonymous callers of a team gate (and of one tenant on a
 multi-tenant gate) share one buyer, so their tasks are readable and cancellable by anyone holding the task id;
 `ListTasks`, `tasks/list` and push configs are refused for them ([`relay.md`](../spec/relay.md) §2.3).
+Amended by D301 (`oidc:*`, every principal of the configured OIDC issuer).
 
 ## MCP
 
@@ -4490,3 +4491,28 @@ answers `-32042` whose url is `https://app.kontra.sh/#/t/<task>`, the hook is as
 `extensions`, the approved task reaches the seller without `A2A-Extensions`, and a seller-required and a
 required-sealed service are still `isError` with no task and no Admission); `TestGateMCPReviewFixes` and the e2e
 `TestGateMCPHire` (§16 `gate_mcp_hire`).
+
+### D301. An `allow:` entry `oidc:*` admits every principal of the configured OIDC issuer — **decided under the owner's standing instruction, 31 Oct** (amends D20)
+
+M5's audit: an MCP OAuth principal (`oidc:sub:<sub>`, no tenant, `via = mcp`, D276) is admitted only by an exact
+`oidc:sub:` entry or by `anonymous`; `org:` and `key:` never match it. So a public Cloud listing could not admit every
+signed-in user without admitting anonymous callers too (M5's plan wrote `[key:*, anonymous]`). Decision
+([`relay.md`](../spec/relay.md) §2.3, §12.1, §12.2; `spec/schema/config.json`):
+
+- **Grammar.** `oidc:*` is an entry of its own beside `oidc:sub:<subject>`. It admits every principal of kind `oidc`,
+  whatever its subject. Such a principal exists only for a JWT the configured issuer signed (`auth.mcp_oauth` on the
+  MCP routes, D276; `auth.oidc` on the A2A routes once M5 builds them), with `via` `mcp` or `oidc`; with both
+  configured and naming two issuers, it admits the principals of both, as an `oidc:sub:` entry matches a subject of
+  either. It never admits an API key, a node or the anonymous principal: a listing open to API keys too writes
+  `[key:*, oidc:*]`. `oidc:sub:*` is refused at load: a subject is matched exactly, so it would admit only the subject
+  `*`. An `oidc:*` entry on a gate without `auth.mcp_oauth` admits nobody, and the load says so in a warning.
+- **Visibility.** `oidc:*` is a named entry, as `key:*` is: `search` shows a service it is on to every OIDC principal
+  (§12.2); an `anonymous` entry still shows nothing.
+- **Admission decides the rest.** The entry says who may reach the service; price and policy stay Admission's
+  (§13.1), which receives the principal and its `via`.
+
+Tested: `TestParseAllowEntry` and `TestAllowOIDCAnyWarnsWithoutAnIssuer` (`internal/config`), `TestAllowList`
+(`internal/auth`), `TestAdmitsNamed` and `TestCatalogOIDCAny` (`internal/gatemcp`: search and hire as a signed-in user,
+an API key and the anonymous principal), `TestGateMCPOAuth` (`internal/gate`: a token of the in-repository
+authorization server finds and hires an `oidc:*` service on `/mcp` and is served on an `oidc:*` `/mcp/{svc}`; an API
+key is not admitted by the entry).

@@ -559,6 +559,11 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 			v.add("%s.allow: %v", at, err)
 		}
 	}
+	if slices.Contains(s.Allow, string(AllowOIDCAny)) && c.Auth.MCPOAuth == nil {
+		// Fails closed: no principal of kind oidc exists without an issuer (auth.oidc's are not built yet).
+		c.Warnings = append(c.Warnings, fmt.Sprintf("%s.allow: oidc:* admits nobody on this gate: no OIDC issuer is "+
+			"configured (auth.mcp_oauth, spec §12.1; D301)", at))
+	}
 
 	if s.Kind == KindA2A {
 		if s.Tools != nil {
@@ -717,6 +722,7 @@ const (
 	AllowKey       AllowKind = "key"       // key:<prefix glob>
 	AllowOrg       AllowKind = "org"       // org:<tenant>
 	AllowOIDCSub   AllowKind = "oidc:sub"  // oidc:sub:<subject>
+	AllowOIDCAny   AllowKind = "oidc:*"    // oidc:*: every principal of the configured OIDC issuer (D301)
 	AllowNode      AllowKind = "node"      // node:<key_id>
 	AllowAnonymous AllowKind = "anonymous" // anonymous
 )
@@ -724,7 +730,7 @@ const (
 // AllowEntry is one parsed allow: entry.
 type AllowEntry struct {
 	Kind AllowKind
-	// Value is the prefix glob, tenant slug, subject or key id; empty for anonymous.
+	// Value is the prefix glob, tenant slug, subject or key id; empty for anonymous and oidc:*.
 	Value string
 }
 
@@ -737,25 +743,33 @@ var (
 	NodeKeyIDRE = regexp.MustCompile(`^k1_[a-z2-7]{26}$`)
 )
 
-// ParseAllowEntry parses one allow: entry: key:<prefix glob>, org:<tenant>, oidc:sub:<subject>,
-// node:<key_id> or anonymous. An unknown kind, and a key: glob that can never match a stored prefix (a
-// prefix is [A-Za-z0-9_]{4,32}, so write key:kk_acme_*, D68), are errors.
+// ParseAllowEntry parses one allow: entry: key:<prefix glob>, org:<tenant>, oidc:sub:<subject>, oidc:*,
+// node:<key_id> or anonymous. An unknown kind, a key: glob that can never match a stored prefix (a prefix is
+// [A-Za-z0-9_]{4,32}, so write key:kk_acme_*, D68), and oidc:sub:* (a subject is matched exactly, so it would admit
+// only the subject "*"; oidc:* is every subject, D301) are errors.
 func ParseAllowEntry(s string) (AllowEntry, error) {
 	if s != strings.TrimSpace(s) || s == "" {
 		return AllowEntry{}, fmt.Errorf("%q: an entry has no surrounding spaces", s)
 	}
-	if s == string(AllowAnonymous) {
+	switch s {
+	case string(AllowAnonymous):
 		return AllowEntry{Kind: AllowAnonymous}, nil
+	case string(AllowOIDCAny):
+		return AllowEntry{Kind: AllowOIDCAny}, nil
 	}
 	if sub, ok := strings.CutPrefix(s, "oidc:sub:"); ok {
-		if sub == "" {
+		switch sub {
+		case "":
 			return AllowEntry{}, fmt.Errorf("%q: oidc:sub: needs a subject", s)
+		case "*":
+			return AllowEntry{}, fmt.Errorf("%q: a subject is matched exactly, so this admits only the subject \"*\"; "+
+				"write oidc:* for every principal of the configured OIDC issuer (D301)", s)
 		}
 		return AllowEntry{Kind: AllowOIDCSub, Value: sub}, nil
 	}
 	kind, val, ok := strings.Cut(s, ":")
 	if !ok {
-		return AllowEntry{}, fmt.Errorf("%q: want key:, org:, oidc:sub:, node: or anonymous", s)
+		return AllowEntry{}, fmt.Errorf("%q: want key:, org:, oidc:sub:, oidc:*, node: or anonymous", s)
 	}
 	switch AllowKind(kind) {
 	case AllowKey:
@@ -785,7 +799,7 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 		}
 		return AllowEntry{Kind: AllowNode, Value: val}, nil
 	}
-	return AllowEntry{}, fmt.Errorf("%q: unknown allow: kind %q (want key:, org:, oidc:sub:, node: or anonymous)", s, kind)
+	return AllowEntry{}, fmt.Errorf("%q: unknown allow: kind %q (want key:, org:, oidc:sub:, oidc:*, node: or anonymous)", s, kind)
 }
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
