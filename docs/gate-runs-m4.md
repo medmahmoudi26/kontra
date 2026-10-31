@@ -6,7 +6,8 @@ up on a clean VPS**. D282 makes the last two runs by hand, not tests in CI, and 
 WP-09 had still to do. This file records those runs: what ran, at which commit, when, the commands, what was seen, the
 ids, and how everything was torn down.
 
-The runs were made on **31 Oct 2026**, at two commits of `m4-mcp-anon-tck`. Times are UTC.
+The runs were made on **31 Oct 2026**, at two commits of `m4-mcp-anon-tck` and, after the merge, at the merge commit.
+Times are UTC.
 
 - **`3b890f3`** (`3b890f3794e4ea43532c16d8134754ccdbd46b0c`, the head after the second review, D307–D311, checked out
   clean as `m4-gate-runs`): the staging gate, `make test-kits`, the clean laptop, the TCK, `anon_limits` and the first
@@ -15,24 +16,33 @@ The runs were made on **31 Oct 2026**, at two commits of `m4-mcp-anon-tck`. Time
 - **`f9f5e61`** (`f9f5e61b3ae684dc7adab804c145b80606739eff`, the head with the third review's fix, D312 at
   `7033e0a`, the compose fix, D313 at `2eb8041`, and this record's first version): the VPS rerun, from this worktree
   of the branch, clean before and after the run.
+- **`4831e40`** (`4831e40fc3931c4aadb2f5bce0dce6c8d7b8fb7f`, [pull request #8](https://github.com/medmahmoudi26/kontra/pull/8)
+  squash-merged to `main` at 21:56:00Z): production's deploy, staging's redeploy and the published clean laptop, from a
+  clean detached checkout of `origin/main`. Its tree is the pull request's head, `4a53750`, which adds only this
+  record's second version and the documents that point at it to `f9f5e61`; the pull request's CI, the `tck` workflow
+  among it, ran at `4a53750`.
 
 ## Verdicts
 
 | Gate item | Verdict | Taken at | What remains |
 |---|---|---|---|
-| [`tck_*` green bar with expected failures](#the-tck-tck_) | **Green on this host** for the tunnel, caddy and direct variants, both bindings each: 0 failed, 0 xpassed, every listed expected failure xfailed and every listed skip skipped | `3b890f3` | **The `tck` workflow's first CI run** on the pull request, linked here: the branch is not pushed, so it has not run. The nightly `auth` variant once the workflow is on the default branch |
-| [`anon_limits`](#anon_limits) | **Passed**: `TestAnonLimits` on its own with `-v`, and in the second review's full `make test-e2e` on the same tree | `3b890f3` | CI's `e2e` workflow on the same pull request (not pushed, not run) |
-| Demo from a clean laptop against staging ([staging](#the-staging-gate-gatewaykontrarun), [the laptop](#the-clean-laptop-against-staging)) | **Passed** in source mode, against the staging gate deployed from the same commit | `3b890f3` (the laptop and the staging gate) | **Staging redeployed from the merge commit**, then **the published run**, `scripts/demo-clean-laptop.sh --published --expect <merge sha>`; **the anonymous tenant's purge** confirmed after 2026-11-01 21:28Z |
+| [`tck_*` green bar with expected failures](#the-tck-tck_) | **Green in CI** on pull request #8, [`tck` run 41243927553](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553): the direct, tunnel and caddy jobs, both bindings each, 0 failed, 0 xpassed, every listed expected failure xfailed and every listed skip skipped ([per variant](#in-ci-on-the-pull-request)). **Green on this host** before, for the same three variants | `3b890f3` (this host), **`4a53750`** (CI; the merge commit's tree) | The nightly `auth` variant's first run (the workflow's schedule first fires at 2026-11-01 03:41Z), to be linked here |
+| [`anon_limits`](#anon_limits) | **Passed**: `TestAnonLimits` on its own with `-v`, and in the second review's full `make test-e2e` on the same tree; then in CI's `e2e` workflow on pull request #8 (`--- PASS: TestAnonLimits (64.33s)`) | `3b890f3`, **`4a53750`** (CI) | nothing |
+| Demo from a clean laptop against staging ([staging](#the-staging-gate-gatewaykontrarun), [the laptop](#the-clean-laptop-against-staging)) | **Passed** in source mode against the staging gate deployed from `3b890f3`, and **passed in published mode at the merge commit** ([the published run](#the-published-run-at-the-merge-commit)): `go install kontra.sh/kontra/cmd/kontra@latest` installed `v0.0.0-20261031215600-4831e40fc393`, against the staging gate [redeployed from `4831e40`](#redeployed-from-the-merge-commit); commands 1 to 10 and the host checks passed, exit 0 | `3b890f3` (source), **`4831e40`** (published; the laptop and the staging gate) | **The first anonymous tenant's purge**, confirmed after 2026-11-01 21:28:21Z ([not due yet](#the-anonymous-tenants-after-the-merge)) |
 | [Team gate up on a clean VPS](#the-team-gate-on-a-clean-vps) | **Failed at `3b890f3`** at `docker compose up -d --build --wait`, on a defect of `compose.yaml` (two services built one image tag, which races on a fresh Ubuntu 24.04's containerd image store). **Passed at `f9f5e61`** with D313's fix: one build on Docker 29.1.3's containerd store, a Let's Encrypt certificate, a hire and an MCP `search` through the gate from another machine. Both droplets were torn down and the teardowns checked | `3b890f3` (failed), **`f9f5e61` (passed)** | nothing |
 
-Every gate item has a passing run. **M4 is not gated yet**: D306 gates it on the published clean-laptop run at the
-merge commit, and the last column's items are open ([what is still to do](#what-is-still-to-do)).
+Every gate item has a passing run, and D306's condition on the merge, the published clean-laptop run at the merge
+commit, passed at `4831e40` (22:05:54Z–22:08:42Z) against staging redeployed from it. **One item of D306's list is
+still open, and not due yet**: the first anonymous tenant's purge, which the gate makes 24 h after the tenant expired,
+at 2026-11-01 21:28:21Z. M4 is gated when it is confirmed. The nightly `auth` variant's first run is the other open
+check ([what is still to do](#what-is-still-to-do)). Production, `gateway.kontra.sh`, has run the merge commit since
+21:58:48Z ([below](#production-gatewaykontrash-at-4831e40)).
 
 Between the two commits the gate's code changed once: D312 (`7033e0a`) has `/mcp` refuse an `initialize` without an
 `id` (400, never forwarded). D313 (`2eb8041`) changed `compose.yaml`, `scripts/team-gate-vps.sh` and their tests, and
-`f9f5e61` adds this record. The TCK, `anon_limits` and the clean laptop were not run again at `f9f5e61`; `make check`
-and `make test-kits` passed with D313's change ([below](#make-test-kits)), the pull request's CI runs the TCK and
-`anon_limits` at the head, and the published laptop run is at the merge commit.
+`f9f5e61` adds this record. The TCK, `anon_limits` and the clean laptop were not run again on this host at `f9f5e61`;
+`make check` and `make test-kits` passed with D313's change ([below](#make-test-kits)), the pull request's CI ran the
+TCK and `anon_limits` at its head, `4a53750` (`f9f5e61`'s code), and the published laptop run was at the merge commit.
 
 ## The host
 
@@ -41,7 +51,9 @@ buildx 0.19.3 on the classic `overlay2` store, `GOTOOLCHAIN=go1.26.10`, one heav
 the Postgres password, the card-signing keys, the Cloudflare token and the DigitalOcean credentials stay outside the
 repository; nothing in this file is a secret. Production (`gateway.kontra.sh`, namespace `kontra`), Traefik and the
 FastAPI staging objects were not changed by any run: `gateway.kontra.sh/healthz` answered 200 after the staging apply,
-at the end of the first runs and after the VPS rerun (21:20Z).
+at the end of the first runs, after the VPS rerun (21:20Z) and after the post-merge runs (22:09Z). Production was
+deployed from the merge commit as its own step, before the post-merge runs, which only read it
+([below](#production-gatewaykontrash-at-4831e40)).
 
 ## The staging gate, `gateway.kontra.run`
 
@@ -102,7 +114,32 @@ healthz answered 200.
 records, the image in the platform worker's containerd, and `kontra-gate:m4-3b890f3` on the build host for redeploys.
 Its teardown, when staging is retired, is label-scoped (`kubectl -n kontra-staging delete <kinds> -l
 app.kubernetes.io/part-of=kontra-gateway-staging`, never `delete -f`), the two DNS records deleted by id, and
-`k3s ctr -n k8s.io images rm docker.io/library/kontra-gate:m4-3b890f3`.
+`k3s ctr -n k8s.io images rm docker.io/library/kontra-gate:m4-3b890f3` (and, since the redeploy below,
+`docker.io/library/kontra-gate:m4-4831e40`).
+
+### Redeployed from the merge commit
+
+After the merge the gate was redeployed from `4831e40`, changing only the `gate-v4` Deployment's two images.
+
+| | |
+|---|---|
+| When | checkout checked 22:01:01Z; image built 22:01:06Z (145 s) and imported 22:03:50Z; state read 22:04:07Z; server dry run and `set image` 22:04:30Z, rolled out in 7 s (22:04:37Z); checks 22:04:45Z–22:05:09Z |
+| Checkout | a clean detached worktree of `origin/main`: `HEAD`, `origin/main` and `git ls-remote origin refs/heads/main` all `4831e40fc3931c4aadb2f5bce0dce6c8d7b8fb7f`, no changed file |
+| Image | `BUILDX_BUILDER=default docker build -t kontra-gate:m4-4831e40 --build-arg VERSION=m4-4831e40 .`, exit 0: image id `sha256:c37f8b4bc63004fc53c7b810c5ffc499a71f18b37a347ab7157a9c116ec3bd8a` (37.8 MB); `docker save … \| gzip -1 \| ssh <platform worker> 'gunzip \| k3s ctr -n k8s.io images import -'` as `docker.io/library/kontra-gate:m4-4831e40` on `kontra-pool-platform-worker1`, manifest `sha256:1e05d8631c1b34195592f17ef9c9928c137ace3d87fecbed239218b8e2e5ca12`; `kontra-gate version`: `kontra-gate m4-4831e40 (go1.26.10, linux/amd64)` |
+| Change | `kubectl -n kontra-staging set image deploy/gate-v4 gate=docker.io/library/kontra-gate:m4-4831e40 migrate=docker.io/library/kontra-gate:m4-4831e40`, after the same command with `--dry-run=server`: the Deployment from generation 1 to 2, nothing else changed (the configuration, the Secrets, the StatefulSets and the routing are `3b890f3`'s; `3b890f3` to `4831e40` changes no migration and not `config.staging.json`) |
+| Result | **up**: both containers on image `sha256:c37f8b4b…`; `migrate` printed `no migrations to apply` and `database at version 3; this gate needs 3`; the gate logged `replica ready to serve`, version `m4-4831e40`, tenancy multi, services 0, the card-signing kid `Tzgy-taSXLZur0HZlbDFt8FSQ1OTQBPcxYNDcRT8cWw`; `kubectl exec … kontra-gate version`: `kontra-gate m4-4831e40 (go1.26.10, linux/amd64)`; 0 restarts, and at 22:09:15Z, after the published run, still 0 restarts and no `ERROR` log line |
+
+**Checked from the build host** (22:04:59Z), as after the first apply: `/healthz` 200 `ok` over IPv4
+(`188.245.78.192`) and IPv6 (`2a01:4f8:c2c:a550::1`); `/agents/x` 404; `/.well-known/jwks.json` 200
+`application/jwk-set+json` with one ES256 P-256 key, kid `Tzgy-…`; `POST /mcp` `initialize` with no credential 401
+with `www-authenticate: Bearer`; the same Let's Encrypt certificate (issuer `YE2`, `CN = gateway.kontra.run`, until
+29 Jan 2027), verify return code 0, TLSv1.3.
+
+**Nothing else changed.** Before and after (22:04:07Z, 22:05:09Z): `kubectl auth can-i list secrets --as
+system:serviceaccount:traefik:traefik` yes in `kontra-staging` and in `kontra`, the Traefik pod at 0 restarts; the
+FastAPI staging Deployments `console`, `gate` and `temporal` at the same generations (29, 31, 7) and images; namespace
+`kontra` only read, and `gateway.kontra.sh/healthz` 200. Left: `kontra-gate:m4-4831e40` on the build host and in the
+platform worker's containerd, and `m4-3b890f3` in both, for a rollback (`set image` back to it).
 
 ## `make test-kits`
 
@@ -121,7 +158,7 @@ the VPS does and counts the builds, but this host's Docker is not a fresh VPS's:
 ## The clean laptop against staging
 
 The plan's run B2, gate item "demo from a clean laptop against staging", in source mode (the commit is not on GitHub
-yet).
+yet). The published run, at the merge commit, is [below](#the-published-run-at-the-merge-commit).
 
 | | |
 |---|---|
@@ -194,7 +231,103 @@ $ kubectl -n kontra-staging exec statefulset/gate-v4-pg -- psql -U kontra -d kon
 overlap `10.0.0.0/8` (false): Traefik's PROXY v2 header carried the client's address to the gate, not the cluster's.
 It was the only tenant on the gate, and the run used one of the three anonymous sessions a /24 may open in two hours.
 The tenant expired at 21:28:21Z; the gate purges it 24 h later (`purge_after`), leaving a tombstone, which is still
-to be confirmed ([below](#what-is-still-to-do)).
+to be confirmed ([below](#the-anonymous-tenants-after-the-merge)).
+
+### The published run, at the merge commit
+
+D306's run after the merge: the README's block as a newcomer runs it, `kontra` from the module proxy, against the
+staging gate [redeployed from the same commit](#redeployed-from-the-merge-commit).
+
+| | |
+|---|---|
+| When | the module proxy's `@latest` checked 22:03Z; dry run 22:05:46Z; 22:05:54Z–22:08:42Z the run, 168 s (the script's own count 166 s; laptop ready in 157 s) |
+| Command | `scripts/demo-clean-laptop.sh --published --expect 4831e40fc3931c4aadb2f5bce0dce6c8d7b8fb7f --transcript <file>`, after the same with `--dry-run` (the 10 commands, substitution (a) "none", the teardown; nothing built). `--expect` takes 12 to 40 hex digits: the short `--expect 4831e40` is refused with exit 2. The host's `a2a` on its `PATH` as in the source run |
+| Module | `proxy.golang.org` already served `kontra.sh/kontra@latest` as `v0.0.0-20261031215600-4831e40fc393`, the merge commit's pseudo-version, so the run did not wait |
+| Laptop | `kontra-demo:4831e40fc393`, target `laptop` (published mode), built from `git archive 4831e40fc393`: go1.26.10, Node v22.23.4, an empty home, the default bridge, no mounts, no secrets |
+| Result | **PASS, exit 0**: commands 1 to 10 of README.md's demo block all passed at the first attempt, with no substitution but the slug; the host checks passed with no credential |
+| `kontra version` | `kontra v0.0.0-20261031215600-4831e40fc393 (go1.26.10, linux/amd64)`: the merge commit, installed by `go install kontra.sh/kontra/cmd/kontra@latest` as written (`go: downloading kontra.sh/kontra v0.0.0-20261031215600-4831e40fc393`) |
+| Slug | `anon-0d0d079ae3f6c7a5`, public URL `https://gateway.kontra.run/agents/anon-0d0d079ae3f6c7a5/hello` |
+| Teardown | the script's trap: `docker rm -f kontra-demo-4831e40fc393`, `docker image rm kontra-demo:4831e40fc393`, its temporary directory; checked at 22:09:15Z: no `kontra-demo` container or image, no `/tmp/kontra-demo.*` |
+
+| # | Command (README.md) | Decisive output |
+|---|---|---|
+| 1 | `go install kontra.sh/kontra/cmd/kontra@latest` | the module at `v0.0.0-20261031215600-4831e40fc393`; `kontra version` names it |
+| 2–4 | install `a2a-cli` v0.3.1, `PATH`, `~/docs/notes.txt` | ok |
+| 5–6 | `a2a server …`; `kontra connect --gate https://gateway.kontra.run … --public hello &` | the slug `anon-0d0d079ae3f6c7a5` |
+| 7 | `a2a send -a http://localhost:7777/agents/anon-…/hello/.well-known/agent-card.json "hi"` | `Status: completed (2026-10-31T22:07:51Z)`, artifact `Hello World` |
+| 8 | the inspector's `tools/list` on `http://localhost:7777/mcp/anon-…/fs` | lists `read_file` |
+| 9 | the inspector's `tools/call` `hire` on `http://localhost:7777/mcp`, `service=anon-…/hello` `message=hi` | `"Hello World\n"`, `TASK_STATE_COMPLETED` |
+| 10 | `curl -s https://gateway.kontra.run/agents/anon-…/hello/.well-known/agent-card.json` | the card naming the public URL, signed (ES256, kid `Tzgy-…`, `jku` `https://gateway.kontra.run/.well-known/jwks.json`), extension `https://kontra.sh/ext/anonymous/v1` with `expiresAt` `2026-11-01T00:07:49Z` |
+
+From the build host, with no credential, while the laptop's node was connected: the public card (naming the URL); a
+JSON-RPC `SendMessage` "hi" to `https://gateway.kontra.run/agents/anon-0d0d079ae3f6c7a5/hello` (a completed task,
+artifact `Hello World\n`); and `a2a send -a <the public card> "hi"` (`Status: completed (2026-10-31T22:08:37Z)`,
+`Hello World`).
+
+The transcript, abridged (the full one, 786 lines, is kept with the run's evidence):
+
+```
+demo-clean-laptop: 2026-10-31T22:05:54Z, commit 4831e40fc393, mode published (target laptop), gate https://gateway.kontra.run
+building kontra-demo:4831e40fc393 (target laptop) from git archive 4831e40fc393
+  laptop | kontra-demo: laptop on x86_64, go version go1.26.10 linux/amd64, node v22.23.4, 10 commands, mode published
+  laptop | $ go install kontra.sh/kontra/cmd/kontra@latest
+  laptop | go: downloading kontra.sh/kontra v0.0.0-20261031215600-4831e40fc393
+  …
+  laptop | kontra-demo: kontra version: kontra v0.0.0-20261031215600-4831e40fc393 (go1.26.10, linux/amd64)
+  laptop | kontra-demo: ok 1   … ok 2   … ok 3   … ok 4
+  laptop | $ a2a server --exec 'echo Hello World' --port 9999 &          # or your own agent, in docker or not
+  laptop | $ kontra connect --gate https://gateway.kontra.run --serve a2a:hello=http://127.0.0.1:9999   --serve 'mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem@1.0.0 ~/docs' --public hello &
+  laptop | kontra-demo: slug anon-0d0d079ae3f6c7a5
+  laptop | kontra-demo: substitution (b): anon-<…>  ->  anon-0d0d079ae3f6c7a5
+  laptop | $ a2a send -a http://localhost:7777/agents/anon-0d0d079ae3f6c7a5/hello/.well-known/agent-card.json "hi"
+  laptop | Status:   completed (2026-10-31T22:07:51Z)
+  laptop |   [01a19401-3afd-75ed-8292-5e3136c446b4] Hello World
+  laptop | kontra-demo: ok 7: "Hello World"
+  laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp/anon-0d0d079ae3f6c7a5/fs --transport http   --method tools/list
+  laptop | kontra-demo: ok 8: "read_file"
+  laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http   --method tools/call --tool-name hire --tool-arg service=anon-0d0d079ae3f6c7a5/hello --tool-arg message=hi
+  laptop |       "text": "Hello World\n"
+  laptop |     "state": "TASK_STATE_COMPLETED"
+  laptop | kontra-demo: ok 9: "Hello World"
+  laptop | $ curl -s https://gateway.kontra.run/agents/anon-0d0d079ae3f6c7a5/hello/.well-known/agent-card.json
+  laptop | {"supportedInterfaces":[{"url":"https://gateway.kontra.run/agents/anon-0d0d079ae3f6c7a5/hello", …}kontra-demo: ok 10: "anon-0d0d079ae3f6c7a5"
+  laptop | kontra-demo: ready
+demo-clean-laptop: the laptop is ready (157 s), slug anon-0d0d079ae3f6c7a5; checking from this host
+SendMessage to https://gateway.kontra.run/agents/anon-0d0d079ae3f6c7a5/hello: {… "parts":[{"text":"Hello World\n"}] …}
+a2a send -a https://gateway.kontra.run/agents/anon-0d0d079ae3f6c7a5/hello/.well-known/agent-card.json "hi": Status: completed (2026-10-31T22:08:37Z) … Hello World
+demo-clean-laptop: host checks passed; stopping the laptop
+  laptop | kontra-demo: stopped
+demo-clean-laptop: PASS (slug anon-0d0d079ae3f6c7a5, 166 s)
+demo-clean-laptop: torn down (docker rm -f kontra-demo-4831e40fc393; docker image rm kontra-demo:4831e40fc393; rm -rf <the run's temporary directory>); exit 0
+```
+
+**Its anonymous tenant**, read-only (`default_transaction_read_only=on`) through the staging Postgres while the node
+was connected (22:08:04Z, one live tunnel):
+
+```
+$ kubectl -n kontra-staging exec statefulset/gate-v4-pg -- env PGOPTIONS='-c default_transaction_read_only=on' psql -U kontra -d kontra -c "select now() as db_now, slug, kind, created_from, created_at, expires_at, deleted_at from kontra.tenants where slug='anon-0d0d079ae3f6c7a5'"
+ 2026-10-31 22:08:04.22815+00 | anon-0d0d079ae3f6c7a5 | anonymous | <the build host's /24> | 2026-10-31 22:07:49.608208+00 | 2026-11-01 00:07:49.608208+00 |
+```
+
+As in the source run, `created_from` is the /24 of the build host's public IPv4 (`'<host>'::inet <<= created_from`
+true, overlap with `10.0.0.0/8` false); the tenant had its two services (`hello`, `fs`) and one tunnel. It was the
+second anonymous session from that /24 on 31 Oct (19:26Z and 22:05Z); the first had expired, so one was live of the
+three a network may hold in two hours.
+
+### The anonymous tenants after the merge
+
+The source run's tenant, read-only at 22:05:30Z, before the published run:
+
+```
+$ … psql … -c "select now() as db_now, slug, kind, created_from, created_at, expires_at, deleted_at, (expires_at < now()) as expired, expires_at + interval '24 hours' as purge_due from kontra.tenants where slug='anon-2d1d2dc15fff9177'"
+ 2026-10-31 22:05:30.658183+00 | anon-2d1d2dc15fff9177 | anonymous | <the build host's /24> | 2026-10-31 19:28:21.884303+00 | 2026-10-31 21:28:21.884303+00 |  | t | 2026-11-01 21:28:21.884303+00
+```
+
+**Expired, not purged, and not due**: `deleted_at` is null, as it should be until `purge_after` (24 h) has passed,
+at 2026-11-01 21:28:21Z. It still had 2 services, 1 tunnel key, 0 tunnels and 0 rows in `anon_calls`. At 22:09:15Z,
+after the published run, the gate held exactly these two tenants, both anonymous from the same /24, neither with a
+live tunnel or `deleted_at` set; `anon-0d0d079ae3f6c7a5` expires at 2026-11-01 00:07:49Z and is due for purge at
+2026-11-02 00:07:49Z. The purge of `anon-2d1d2dc15fff9177` is still to be confirmed ([below](#what-is-still-to-do)).
 
 ## The TCK (`tck_*`)
 
@@ -218,11 +351,30 @@ HTML and compatibility reports and every process's log are kept with the run's e
 database, stopped its processes (gate, seller, node, Caddy, Temporal) and removed its directory: no `tck_` database
 and no process was left.
 
-Not run: the nightly `auth` variant, and the `tck` workflow itself. The workflow runs on pull requests that change the
-gate and needs the file on the default branch for its schedule; neither `3b890f3` nor the head, `f9f5e61`, is pushed,
-so there is no green CI run to link yet. The TCK checkout first named for the runs had a modified `uv.lock`
-(rewritten by a newer `uv`), which `scripts/tck.sh` refuses by design; the runs used a clean clone at the same pin
-(`d4d6fae`, no modified file).
+The TCK checkout first named for the runs had a modified `uv.lock` (rewritten by a newer `uv`), which `scripts/tck.sh`
+refuses by design; the runs used a clean clone at the same pin (`d4d6fae`, no modified file).
+
+### In CI on the pull request
+
+The `tck` workflow's first run: [run 41243927553](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553),
+on [pull request #8](https://github.com/medmahmoudi26/kontra/pull/8) (event `pull_request`) at its head `4a53750`
+(`4a537505f8a7a53f52f4b3799e797666ff3ba766`, the merge commit's tree), created 21:30:47Z, **success**. One job per
+variant on `ubuntu-24.04`, each fetching a2a-tck at the pin, running the kit's own tests of the xfail plugin (70
+passed) and then `make tck VARIANT=<variant>` for both bindings:
+
+| Job | Ran | jsonrpc | http_json |
+|---|---|---|---|
+| [`tck (direct)`](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553/job/124663330818) | 21:30:49Z–21:33:05Z, success | 82 passed, 173 skipped, **10 xfailed** (10 of 10 expected failures, 17 of 17 expected skips) | 76 passed, 180 skipped, **9 xfailed** (9 of 9, 16 of 16) |
+| [`tck (tunnel)`](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553/job/124663330801) | 21:30:50Z–21:33:16Z, success | 82 passed, 173 skipped, 10 xfailed (10 of 10, 17 of 17) | 76 passed, 180 skipped, 9 xfailed (9 of 9, 16 of 16) |
+| [`tck (caddy)`](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553/job/124663330549) | 21:30:49Z–21:33:12Z, success | 82 passed, 173 skipped, 10 xfailed (10 of 10, 17 of 17) | 76 passed, 180 skipped, 9 xfailed (9 of 9, 16 of 16) |
+
+0 failed and 0 xpassed in every binding, the same counts as on this host; each job's JUnit, HTML and compatibility
+reports and its processes' logs are the run's artifacts `tck-direct`, `tck-tunnel` and `tck-caddy`. The workflow has no `push` trigger, so the merge commit has no `tck` run of
+its own; its tree is `4a53750`'s. The same pull request's `check` workflow (`check` on Postgres 16 and 17, `go`,
+`race`, `integration` on 16 and 17) and `e2e` workflow ([below](#anon_limits)) were green at `4a53750`.
+
+Not run yet: the nightly `auth` variant. The workflow is on the default branch since the merge (21:56Z), and its
+schedule (`41 3 * * *`) first fires at 2026-11-01 03:41Z.
 
 ## `anon_limits`
 
@@ -240,9 +392,10 @@ are absent from `search`, and at `expires_at` the session closes `revoked` and t
 | Result | **PASS**: `--- PASS: TestAnonLimits (71.50s)`, `ok kontra.sh/kontra/test/e2e 71.544s`, the script's leftover check clean (exit 0); the runtime limits took 7 s of the session's 60 s |
 
 It also ran in the second review's full `make test-e2e` on the tree it committed as `3b890f3` (31 Oct, 18:43–19:02Z:
-`ok kontra.sh/kontra/test/e2e 1155.406s`, the whole `test/e2e` package). CI's `e2e` workflow has not run it on this
-commit (not pushed). The staging run above showed the part of §6.2 a real deployment adds, the client's /24 carried
-through Traefik by PROXY v2.
+`ok kontra.sh/kontra/test/e2e 1155.406s`, the whole `test/e2e` package), and in CI's `e2e` workflow on pull request
+#8 at `4a53750` ([run 41243927728](https://github.com/medmahmoudi26/kontra/actions/runs/41243927728), 21:30:49Z–21:49:22Z,
+success): `--- PASS: TestAnonLimits (64.33s)`, `ok kontra.sh/kontra/test/e2e 1060.938s`, no test failed. The staging
+runs showed the part of §6.2 a real deployment adds, the client's /24 carried through Traefik by PROXY v2.
 
 ## The team gate on a clean VPS
 
@@ -504,20 +657,39 @@ host: no `kontra-demo` or `kontra-teammate` container and no `kontra-demo` image
 identical to the snapshot taken before the run. `gateway.kontra.sh/healthz` and `gateway.kontra.run/healthz` answered
 200.
 
+## Production, `gateway.kontra.sh`, at `4831e40`
+
+Not a gate item: production runs the gate single-tenant, with no anonymous sessions (they need `tenancy: multi`, which
+is Cloud's at M5; D268, D280). It was deployed from the merge commit by the orchestrator right after the merge, before
+the staging redeploy, the same way as at M3: the image built from the merge commit, imported on the platform worker,
+and `kubectl -n kontra set image deploy/gateway` for the `gate` and `migrate` containers, the configuration unchanged.
+Its state was read back read-only at 22:12Z for this record.
+
+| | |
+|---|---|
+| When | merged 21:56:00Z; the new ReplicaSet created and its pod started 21:58:48Z (Deployment `gateway` revision 5, generation 6); `replica ready to serve` 21:58:59Z; checked 21:59:16Z–21:59:43Z |
+| Image | `docker.io/library/kontra-gate:4831e40`, in both containers, image id `sha256:a6cc1a36e5daf7b4c3d94d3000c41f9e448913f0279160ca1d44cee606bfc0ab` |
+| Migration | `migrate`: `OK up 0003_m4.sql (37ms)`, `database at version 3; this gate needs 3` |
+| The gate | `replica ready to serve`, version `4831e40`, tenancy single, `services` 4; 0 restarts and no `ERROR` log line at 22:12Z |
+| `/mcp` | with the owner's API key: `initialize`'s `serverInfo` names version `4831e40`; `tools/call` `search` lists the four services, `hello`, `hello-tunnel`, `everything` and `fs`; `tools/call` `hire` of `hello-tunnel` completes through the node (the gate's log: a `gate-mcp` session on `/mcp` at 21:59:40Z, `hire created a task` for `hello-tunnel` at 21:59:43Z, its tunnel attempt placed on the node's session) |
+| Unchanged | both nodes reconnected on their own: `hello-tunnel`'s at 21:59:02Z, the MCP node's (`everything`, `fs`) at 21:59:16Z, and both MCP services opened sessions through it (21:59:20Z, 21:59:24Z); the MCP services and the A2A services `hello` and `hello-tunnel` answer as at M3; `/healthz` 200 at 22:04Z and 22:09Z |
+| Rollback | M3's image `kontra-gate:98a9f25` (revision 4) stays imported |
+
 ## What is still to do
 
 Done since the first runs: `compose.yaml`'s fix with its decision entry and tests, and the record of the host's Docker
-in `team-gate-vps.sh` (D313, `2eb8041`); the VPS run on a head that has them (`f9f5e61`, passed). M4 is gated when
-these are done (D306 and the plan's binding corrections for WP-09):
+in `team-gate-vps.sh` (D313, `2eb8041`); the VPS run on a head that has them (`f9f5e61`, passed). Done after the
+merge, on 31 Oct: the `tck` workflow's first CI run on pull request #8, green for the direct, tunnel and caddy
+variants ([run 41243927553](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553)), with `anon_limits` in
+CI's `e2e` on the same pull request; production deployed from the merge commit; staging redeployed from it (only
+`gate-v4`'s images changed; healthz, the certificate and Traefik's secrets checked); and the published clean-laptop run
+at it, which passed with `kontra version` naming the merge commit.
 
-1. **The `tck` workflow's first CI run on the pull request**, green for the direct, tunnel and caddy variants, linked
-   here; CI's `e2e` workflow runs `anon_limits` on the same pull request. The nightly `auth` variant once the workflow
-   is on the default branch.
-2. **Staging redeployed from the merge commit**: build `kontra-gate:m4-<merge sha>`, import it on the platform worker,
-   set the `gate-v4` Deployment's image (label-scoped, nothing else changed), and check healthz, the certificate and
-   that Traefik can still list secrets.
-3. **The published clean-laptop run**: `scripts/demo-clean-laptop.sh --published --expect <merge sha>` against the
-   redeployed staging, which runs the README's block with no substitution but the slug; record here the `kontra
-   version` the laptop installed (it must name the merge commit) and its transcript.
-4. **The anonymous tenant's purge**: after 2026-11-01 21:28Z, the same read-only query for `anon-2d1d2dc15fff9177`
-   must show `deleted_at` set (the tombstone).
+Still to do:
+
+1. **The anonymous tenant's purge** (D306's last item): after 2026-11-01 21:28:21Z, the same read-only query for
+   `anon-2d1d2dc15fff9177` must show `deleted_at` set (the tombstone). It was not due at 22:05:30Z on 31 Oct, when the
+   tenant had expired and `deleted_at` was null ([above](#the-anonymous-tenants-after-the-merge)). The published run's
+   tenant, `anon-0d0d079ae3f6c7a5`, falls due at 2026-11-02 00:07:49Z. M4 is gated when this is confirmed.
+2. **The nightly `auth` variant's first run**, linked here: the `tck` workflow is on the default branch since the
+   merge, and its schedule first fires at 2026-11-01 03:41Z.
