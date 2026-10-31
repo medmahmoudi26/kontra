@@ -111,7 +111,7 @@ func TestDefaultsApplied(t *testing.T) {
 		{"hooks.lifecycle", c.Hooks.Lifecycle, (*LifecycleHook)(nil)},
 		{"drain_timeout", c.DrainTimeout.D(), 10 * time.Minute},
 		{"tunnel.channel_binding (no TLS)", c.Tunnel.ChannelBinding, "none"},
-		{"tunnel.anonymous", c.Tunnel.Anonymous, false},
+		{"tunnel.anonymous", c.Tunnel.Anonymous, AnonymousSessions{}},
 		{"tunnel.enroll_with_api_key", c.Tunnel.EnrollWithAPIKey, false},
 		{"edge.client_ip.from", c.Edge.ClientIP.From, ClientIPRemote},
 		{"services.hello.allow", s.Allow, []string{}},
@@ -377,7 +377,7 @@ func TestLoadErrors(t *testing.T) {
 		{"bad service name", head + "services:\n  Bad_Name:\n    kind: a2a\n    backend: { tunnel: {} }\n", "services.Bad_Name: the name must match"},
 		{"name too long", head + "services:\n  " + strings.Repeat("a", 64) + ":\n    kind: a2a\n    backend: { tunnel: {} }\n", "the name must match"},
 		{"unknown allow kind", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"user:bob\"]\n"), `unknown allow: kind "user"`},
-		{"allow without kind", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [everyone]\n"), "want key:, org:, oidc:sub:, node: or anonymous"},
+		{"allow without kind", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [everyone]\n"), "want key:, org:, oidc:sub:, oidc:*, node: or anonymous"},
 		{"PRD glob key:acme-* (D68)", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"key:acme-*\"]\n"), "write e.g. key:kk_acme_*, D68"},
 		{"short exact key prefix", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"key:kk\"]\n"), "4 to 32 characters"},
 		{"bad org", svc("    kind: a2a\n    backend: { tunnel: {} }\n    allow: [\"org:Acme\"]\n"), "org: needs a tenant name"},
@@ -470,11 +470,39 @@ func TestLoadErrors(t *testing.T) {
 		{"bad trusted CIDR", head + "edge: { client_ip: { from: x_forwarded_for, trusted: [10.0.0.0/33] } }\n", "is not a CIDR"},
 		{"bad client_ip source", head + "edge: { client_ip: { from: header } }\n", "want remote, proxy_protocol or x_forwarded_for"},
 		{"tls-exporter without TLS", head + "tunnel: { channel_binding: tls-exporter }\n", "needs the gate to terminate TLS"},
-		{"remote admission hook (M5)", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT } }\n", "remote Admission hook is not built"},
+		{"admission without secret_env", head + "hooks: { admission: { url: https://cp.example.com/admit } }\n", "hooks.admission.secret_env"},
+		{"admission secret_env not a variable name", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: \"admit-secret\" } }\n", "hooks.admission.secret_env"},
+		{"admission with an unknown operation", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, operations: [settle] } }\n", "hooks.admission.operations"},
+		{"admission without a url", head + "hooks: { admission: { secret_env: ADMIT } }\n", "hooks.admission.url"},
+		{"admission with a zero timeout", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 0s } }\n", "must be positive"},
+		// The MCP relay cuts a modern client's shared session decision at 30 s (spec §13.1, D284).
+		{"admission with a timeout over 30s", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 31s } }\n", "hooks.admission.timeout 31s: at most 30s"},
+		{"admission with a timeout of days", head + "hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 2d } }\n", "hooks.admission.timeout 48h0m0s: at most 30s"},
+		// tunnel.anonymous (tunnel.md §6, §6.2; D277, D287).
+		{"anonymous on a single-tenant gate (D277)", head + "tunnel: { anonymous: true }\n", "tunnel.anonymous: needs tenancy: multi"},
+		{"anonymous limits on a single-tenant gate (D277)", head + "tunnel: { anonymous: { ttl: 1h } }\n", "D277"},
+		{"anonymous hiring_streams over 32", head + "tenancy: multi\ntunnel: { anonymous: { hiring_streams: 33 } }\n", "hiring_streams 33: at most 32"},
+		{"anonymous zero services", head + "tenancy: multi\ntunnel: { anonymous: { services: 0 } }\n", "tunnel.anonymous.services"},
+		{"anonymous negative tasks", head + "tenancy: multi\ntunnel: { anonymous: { tasks: -1 } }\n", "tunnel.anonymous.tasks"},
+		{"anonymous zero max_tenants", head + "tenancy: multi\ntunnel: { anonymous: { max_tenants: 0 } }\n", "tunnel.anonymous.max_tenants"},
+		{"anonymous zero ttl", head + "tenancy: multi\ntunnel: { anonymous: { ttl: 0s } }\n", "must be positive"},
+		{"anonymous zero purge_after", head + "tenancy: multi\ntunnel: { anonymous: { purge_after: 0h } }\n", "must be positive"},
+		{"anonymous zero parts_bytes", head + "tenancy: multi\ntunnel: { anonymous: { parts_bytes: 0 } }\n", "must be positive"},
+		{"anonymous ttl without a unit", head + "tenancy: multi\ntunnel: { anonymous: { ttl: 7200 } }\n", "missing unit"},
+		{"anonymous unknown limit", head + "tenancy: multi\ntunnel: { anonymous: { ttl: 1h, sessions: 3 } }\n", "field sessions not found in tunnel.anonymous"},
+		{"anonymous a string", head + "tenancy: multi\ntunnel: { anonymous: \"yes\" }\n", "want true, false or"},
+		{"anonymous a list", head + "tenancy: multi\ntunnel: { anonymous: [ttl] }\n", "want true, false or"},
+		{"anonymous calls a string", head + "tenancy: multi\ntunnel: { anonymous: { calls: many } }\n", "tunnel.anonymous.calls"},
 		{"admission over http to a public host", head + "hooks: { admission: { url: http://cp.example.com/admit, secret_env: ADMIT } }\n", "https:// unless the host is loopback"},
 		{"remote lifecycle hook without a queue", head + "hooks: { lifecycle: {} }\n", "hooks.lifecycle.task_queue: required"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
+		// D296 (the M4 WP-06 review): the RFC 9728 documents of a public_url with a path are not where RFC 9728 §3.1
+		// and kontra login look for them.
+		{"mcp_oauth with a public_url path", "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/kontra\n" +
+			"auth: { mcp_oauth: { issuer: https://login.example.com } }\n", "auth.mcp_oauth needs a public_url without a path"},
+		{"mcp_oauth with a public_url path and slash", "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/a/\n" +
+			"auth: { mcp_oauth: { issuer: https://login.example.com } }\n", "auth.mcp_oauth needs a public_url without a path"},
 		// peer: (spec §11.2, §17; D163, D179).
 		{"peer without secret_env", head + "peer: { listen: \"127.0.0.1:8444\" }\n", "peer.secret_env"},
 		{"peer secret_env not a variable name", head + "peer: { listen: \"127.0.0.1:8444\", secret_env: \"peer-secret\" }\n", "peer.secret_env"},
@@ -491,6 +519,15 @@ func TestLoadErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// D296: auth.mcp_oauth takes a public_url with no path or only "/", in any case and with an explicit default port
+// (kontra login compares the resource as an origin); a path is refused only with auth.mcp_oauth.
+func TestMCPOAuthPublicURL(t *testing.T) {
+	for _, pub := range []string{"http://localhost:8080", "http://localhost:8080/", "http://LOCALHOST:8080", "http://localhost:80"} {
+		parse(t, "postgres: postgres://k@db/k\npublic_url: "+pub+"\nauth: { mcp_oauth: { issuer: https://login.example.com } }\n")
+	}
+	parse(t, "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/kontra\n")
 }
 
 // A load error never prints a password written into a URL: the gate refuses credentials in its URLs, and
@@ -648,18 +685,35 @@ peer: { listen: ":8444", advertise: "gate-0.gate.kontra.svc:8444", secret_env: K
 	}
 }
 
-// A remote Admission hook is well-formed over http:// to a loopback host (spec §13.1); this build refuses it
-// only because it is not built, never by falling back to the built-in allow.
-func TestRemoteAdmissionRefusedAsUnbuilt(t *testing.T) {
-	err := parseErr(t, minimal+"hooks: { admission: { url: \"http://127.0.0.1:7000/admit\", secret_env: ADMIT, operations: [task, call] } }\n")
-	var ve *ValidationError
-	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "remote Admission hook is not built") {
-		t.Errorf("error = %v, want only the not-built refusal", err)
+// The remote Admission hook loads (D275 lifts the M1-M3 refusal): over https://, or http:// to a loopback host
+// (spec §13.1, §10.3), with its secret_env, timeout and operations as written and their defaults otherwise, and no
+// warning. Its secret is read from the environment at start, not here: a file whose variable is unset still loads,
+// so that migrate and enroll need not hold it.
+func TestRemoteAdmissionLoads(t *testing.T) {
+	c := parse(t, minimal+"hooks: { admission: { url: \"http://127.0.0.1:7000/admit\", secret_env: ADMIT, timeout: 2s, operations: [task, call] } }\n")
+	h := c.Hooks.Admission
+	if h == nil || h.URL != "http://127.0.0.1:7000/admit" || h.SecretEnv != "ADMIT" || h.Timeout.D() != 2*time.Second ||
+		!slices.Equal(h.Operations, []string{"task", "call"}) {
+		t.Fatalf("hooks.admission = %+v", h)
+	}
+	if len(c.Warnings) != 0 {
+		t.Errorf("warnings %q, want none", c.Warnings)
+	}
+	t.Setenv("KONTRA_TEST_UNSET_ADMIT", "")
+	c = parse(t, minimal+"hooks: { admission: { url: \"https://cp.example.com/admit\", secret_env: KONTRA_TEST_UNSET_ADMIT } }\n")
+	if h := c.Hooks.Admission; h == nil || h.Timeout.D() != 5*time.Second || !slices.Equal(h.Operations, []string{"task"}) {
+		t.Errorf("hooks.admission defaults = %+v, want timeout 5s and operations [task]", h)
+	}
+	for _, ok := range []string{"https://10.0.0.7:8443/admit", "http://localhost:7000/admit", "http://[::1]:7000/admit"} {
+		parse(t, minimal+"hooks: { admission: { url: \""+ok+"\", secret_env: ADMIT } }\n")
+	}
+	if c = parse(t, minimal+"hooks: { admission: { url: https://cp.example.com/admit, secret_env: ADMIT, timeout: 30s } }\n"); c.Hooks.Admission.Timeout.D() != MaxAdmissionWait {
+		t.Errorf("a 30s timeout: %v", c.Hooks.Admission.Timeout)
 	}
 }
 
 // The remote Lifecycle hook loads (D186, M3 WP-10): its queue is kept as written, the file gives no other
-// problem, and a remote Admission hook beside it is still refused as unbuilt (C3: hooks.admission stays M5's).
+// problem, and a remote Admission hook beside it loads too (D275).
 func TestRemoteLifecycleAccepted(t *testing.T) {
 	c := parse(t, minimal+"hooks: { lifecycle: { task_queue: m3pentest-lifecycle } }\n")
 	if c.Hooks.Lifecycle == nil || c.Hooks.Lifecycle.TaskQueue != "m3pentest-lifecycle" {
@@ -673,10 +727,9 @@ func TestRemoteLifecycleAccepted(t *testing.T) {
 			t.Errorf("a warning names the accepted hook: %q", w)
 		}
 	}
-	err := parseErr(t, minimal+"hooks: { lifecycle: { task_queue: q }, admission: { url: \"http://127.0.0.1:7000/admit\", secret_env: ADMIT } }\n")
-	var ve *ValidationError
-	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "remote Admission hook is not built") {
-		t.Errorf("error = %v, want only the Admission refusal", err)
+	c = parse(t, minimal+"hooks: { lifecycle: { task_queue: q }, admission: { url: \"http://127.0.0.1:7000/admit\", secret_env: ADMIT } }\n")
+	if c.Hooks.Lifecycle == nil || c.Hooks.Admission == nil || c.Hooks.Admission.URL != "http://127.0.0.1:7000/admit" {
+		t.Errorf("hooks = %+v", c.Hooks)
 	}
 }
 
@@ -715,6 +768,22 @@ func TestSellerKeysDecodeAsJSON(t *testing.T) {
 	}
 }
 
+// An oidc:* entry (D301) is accepted; on a gate without an OIDC issuer it admits nobody, which the load says.
+func TestAllowOIDCAnyWarnsWithoutAnIssuer(t *testing.T) {
+	const svc = "    allow: [\"oidc:*\", \"key:kk_acme_*\"]\n"
+	c := parse(t, minimal+svc)
+	if len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "services.hello.allow: oidc:* admits nobody") {
+		t.Errorf("warnings without auth.mcp_oauth = %q, want one naming services.hello.allow", c.Warnings)
+	}
+	c = parse(t, "auth: { mcp_oauth: { issuer: https://login.example.com } }\n"+minimal+svc)
+	if len(c.Warnings) != 0 || !slices.Equal(c.Services["hello"].Allow, []string{"oidc:*", "key:kk_acme_*"}) {
+		t.Errorf("with auth.mcp_oauth: warnings %q, allow %q", c.Warnings, c.Services["hello"].Allow)
+	}
+	if err := parseErr(t, minimal+"    allow: [\"oidc:sub:*\"]\n"); err == nil || !strings.Contains(err.Error(), "write oidc:*") {
+		t.Errorf("oidc:sub:*: %v, want an error naming oidc:*", err)
+	}
+}
+
 func TestParseAllowEntry(t *testing.T) {
 	for in, want := range map[string]AllowEntry{
 		"anonymous":                          {Kind: AllowAnonymous},
@@ -722,6 +791,8 @@ func TestParseAllowEntry(t *testing.T) {
 		"key:kk_acme_abc12345":               {Kind: AllowKey, Value: "kk_acme_abc12345"},
 		"org:default":                        {Kind: AllowOrg, Value: "default"},
 		"oidc:sub:auth0|abc:de":              {Kind: AllowOIDCSub, Value: "auth0|abc:de"},
+		"oidc:sub:*x":                        {Kind: AllowOIDCSub, Value: "*x"},
+		"oidc:*":                             {Kind: AllowOIDCAny},
 		"node:k1_abcdefghijklmnopqrstuvwxyz": {Kind: AllowNode, Value: "k1_abcdefghijklmnopqrstuvwxyz"},
 	} {
 		got, err := ParseAllowEntry(in)
@@ -738,7 +809,7 @@ func TestParseAllowEntry(t *testing.T) {
 	}
 	for _, in := range []string{"", " anonymous", "Anonymous", "key:", "key:acme-*", "key:kk.acme.*", "key:" + strings.Repeat("a", 33) + "*",
 		"key:ab?", "key:???", "key:" + strings.Repeat("?", 33), "key:" + strings.Repeat("a", 30) + "???*", "key:" + strings.Repeat("a", 33),
-		"org:", "org:a_b", "oidc:sub:", "oidc:", "node:", "user:x", "anonymous:x"} {
+		"org:", "org:a_b", "oidc:sub:", "oidc:", "oidc:sub:*", "oidc:**", "oidc:* ", "oidc:any", "oidc:sub", "node:", "user:x", "anonymous:x"} {
 		if got, err := ParseAllowEntry(in); err == nil {
 			t.Errorf("ParseAllowEntry(%q) = %+v, want an error", in, got)
 		}
@@ -759,11 +830,13 @@ func TestUnbuiltWarnings(t *testing.T) {
     seller_keys: { url: "https://seller.example.com/jwks.json" }
 blobs: s3://kontra-parts
 signing_key: file:./kontra.key
-auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra } }
+auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra }, mcp_oauth: { issuer: "https://login.example.com" } }
+tenancy: multi
 tunnel: { anonymous: true }
 peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 `)
-	want := []string{"auth.oidc", "services.files.seller_keys", "tunnel.anonymous"}
+	// tunnel.anonymous (M4 WP-03) and auth.mcp_oauth (M4 WP-06) are built: they load with no warning.
+	want := []string{"auth.oidc", "services.files.seller_keys"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
@@ -775,6 +848,9 @@ peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 	for _, w := range c.Warnings {
 		if strings.Contains(w, "services.remote") || strings.Contains(w, "tunnel backends") {
 			t.Errorf("a served tunnel service is warned about: %q", w)
+		}
+		if strings.Contains(w, "tunnel.anonymous") || strings.Contains(w, "mcp_oauth") {
+			t.Errorf("tunnel.anonymous and auth.mcp_oauth are built, but warned about: %q", w)
 		}
 	}
 	// The plain tunnel service loads with no warning at all.
@@ -976,6 +1052,16 @@ func TestSchemaInStep(t *testing.T) {
 	}
 	resolve := func(n map[string]any) map[string]any {
 		for {
+			// A value with several shapes (tunnel.anonymous: a boolean or the limits object) is walked through its
+			// object branch, the one whose keys the Go type names.
+			if alts, ok := n["oneOf"].([]any); ok {
+				for _, a := range alts {
+					if am, ok := a.(map[string]any); ok && am["type"] == "object" {
+						n = am
+						break
+					}
+				}
+			}
 			ref, ok := n["$ref"].(string)
 			if !ok {
 				return n
@@ -1065,5 +1151,93 @@ func TestMCPExamplesLoad(t *testing.T) {
 		if c.PublicURL != "http://localhost:8080" || !c.Auth.APIKeys || len(c.Warnings) != 0 {
 			t.Errorf("%s: public_url %q auth %+v warnings %q", path, c.PublicURL, c.Auth, c.Warnings)
 		}
+	}
+}
+
+// tunnel.anonymous (tunnel.md §6, §6.2; relay.md §17; D277, D287) is false by default, true for §6.2's limits, or
+// the limits object, each absent key taking its default; the staging gate's fixture loads with its own.
+func TestTunnelAnonymous(t *testing.T) {
+	defaults := AnonymousSessions{Enabled: true, TTL: Duration(2 * time.Hour), TenantsPerNetwork: 3, Services: 4, Tasks: 4,
+		Calls: 8, Streams: 8, HiringStreams: 8, PartsBytes: 64 << 20, PurgeAfter: Duration(24 * time.Hour), MaxTenants: 1000}
+	multi := minimal + "tenancy: multi\n"
+	for _, y := range []string{"tunnel: { anonymous: true }\n", "tunnel: { anonymous: {} }\n", "tunnel:\n  anonymous:\n"} {
+		c, err := Parse([]byte(multi+y), "")
+		if y == "tunnel:\n  anonymous:\n" {
+			// A key with no value is null: absent, as everywhere in the file, so off.
+			if err != nil || c.Tunnel.Anonymous != (AnonymousSessions{}) {
+				t.Errorf("%q = %+v, %v; want off", y, c.Tunnel.Anonymous, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%q: %v", y, err)
+		}
+		if c.Tunnel.Anonymous != defaults {
+			t.Errorf("%q = %+v, want §6.2's defaults %+v", y, c.Tunnel.Anonymous, defaults)
+		}
+	}
+	if c := parse(t, multi+"tunnel: { anonymous: false }\n"); c.Tunnel.Anonymous != (AnonymousSessions{}) {
+		t.Errorf("anonymous: false = %+v", c.Tunnel.Anonymous)
+	}
+	// The object form as the e2e harness compresses it: what it names wins, the rest is defaulted.
+	c := parse(t, multi+`tunnel:
+  anonymous: { ttl: 20s, purge_after: 10s, tenants_per_network: 3, services: 4, tasks: 4, hiring_streams: 8, parts_bytes: 1MiB, calls: 2 }
+  enroll_with_api_key: true
+`)
+	want := AnonymousSessions{Enabled: true, TTL: Duration(20 * time.Second), TenantsPerNetwork: 3, Services: 4, Tasks: 4, Calls: 2,
+		Streams: 8, HiringStreams: 8, PartsBytes: 1 << 20, PurgeAfter: Duration(10 * time.Second), MaxTenants: 1000}
+	if c.Tunnel.Anonymous != want || !c.Tunnel.EnrollWithAPIKey {
+		t.Errorf("the compressed limits = %+v, want %+v", c.Tunnel.Anonymous, want)
+	}
+	if c := parse(t, multi+"tunnel: { anonymous: { hiring_streams: 32, max_tenants: 1, parts_bytes: \"512 KiB\" } }\n"); c.Tunnel.Anonymous.HiringStreams != 32 ||
+		c.Tunnel.Anonymous.MaxTenants != 1 || c.Tunnel.Anonymous.PartsBytes != 512<<10 || c.Tunnel.Anonymous.TTL.D() != 2*time.Hour {
+		t.Errorf("the bounds = %+v", c.Tunnel.Anonymous)
+	}
+	// streams is its own limit (D308).
+	if c := parse(t, multi+"tunnel: { anonymous: { streams: 3 } }\n"); c.Tunnel.Anonymous.Streams != 3 || c.Tunnel.Anonymous.Calls != 8 {
+		t.Errorf("streams: 3 = %+v", c.Tunnel.Anonymous)
+	}
+	// enabled: false (D309): off, keeping the limits it names for the anonymous tenants that live (their purge_after
+	// above all), the others left to §6.2's defaults; enabled: true is the object form's default. A disabled block's
+	// limits are not refused on a single-tenant gate, which has no anonymous tenant, but are still checked.
+	for _, y := range []string{multi, minimal} {
+		c := parse(t, y+"tunnel: { anonymous: { enabled: false, purge_after: 168h, ttl: 1h } }\n")
+		if want := (AnonymousSessions{PurgeAfter: Duration(168 * time.Hour), TTL: Duration(time.Hour)}); c.Tunnel.Anonymous != want {
+			t.Errorf("enabled: false with limits = %+v, want %+v", c.Tunnel.Anonymous, want)
+		}
+	}
+	if c := parse(t, multi+"tunnel: { anonymous: { enabled: true, calls: 3 } }\n"); !c.Tunnel.Anonymous.Enabled || c.Tunnel.Anonymous.Calls != 3 ||
+		c.Tunnel.Anonymous.TTL.D() != 2*time.Hour {
+		t.Errorf("enabled: true = %+v", c.Tunnel.Anonymous)
+	}
+	for y, want := range map[string]string{
+		"tunnel: { anonymous: { enabled: no } }\n":                        "tunnel.anonymous.enabled",
+		"tunnel: { anonymous: { enabled: 0 } }\n":                         "tunnel.anonymous.enabled",
+		"tunnel: { anonymous: { enabled: false, enabled: true } }\n":      "repeated",
+		"tunnel: { anonymous: { enabled: false, hiring_streams: 33 } }\n": "hiring_streams 33: at most 32",
+		"tunnel: { anonymous: { enabled: false, streams: 0 } }\n":         "tunnel.anonymous.streams",
+	} {
+		if err := parseErr(t, multi+y); !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: %v, want %q", y, err, want)
+		}
+	}
+	// Refused on a single-tenant gate, naming D277's rule, and nothing else is wrong with the file.
+	err := parseErr(t, minimal+"tunnel: { anonymous: true }\n")
+	var ve *ValidationError
+	if !errors.As(err, &ve) || len(ve.Problems) != 1 || !strings.Contains(ve.Problems[0], "needs tenancy: multi") || !strings.Contains(ve.Problems[0], "D277") {
+		t.Errorf("a single-tenant gate with tunnel.anonymous: %v", err)
+	}
+	// A repeated key is refused by the YAML decoder itself; an unknown one by name.
+	if _, err := Parse([]byte(multi+"tunnel:\n  anonymous:\n    ttl: 1h\n    ttl: 2h\n"), ""); err == nil {
+		t.Error("a repeated tunnel.anonymous key loaded")
+	}
+
+	staging, err := Load("../../spec/schema/examples/config.staging.json")
+	if err != nil {
+		t.Fatalf("the staging fixture: %v", err)
+	}
+	if a := staging.Tunnel.Anonymous; !a.Enabled || a.MaxTenants != 200 || a.Calls != 8 || a.TTL.D() != 2*time.Hour ||
+		a.PurgeAfter.D() != 24*time.Hour || a.PartsBytes != 64<<20 || staging.Tenancy != TenancyMulti {
+		t.Errorf("the staging fixture's tunnel.anonymous = %+v", a)
 	}
 }

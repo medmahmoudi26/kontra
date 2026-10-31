@@ -6,10 +6,10 @@
 //	kontra seal --service <service URL> [--api-key <key>] [--context <id>] [--task <id>] [file | -],
 //	kontra seal --open <part.json>
 //	(spec/ext-sealed.md §5.1; internal/sealing)
+//	kontra login [--gate URL] [--no-browser] (spec/tunnel.md §6.3; internal/login; M4 WP-06)
 //	kontra version
 //
-// The other subcommands come with their milestones (PRD §14, note 2 §4): login with the anonymous sessions on
-// the public gate (M4), publish with Cloud's listings (M5).
+// publish comes with Cloud's listings (PRD §14 M5).
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"kontra.sh/kontra/internal/login"
 	"kontra.sh/kontra/internal/node"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/sealing"
@@ -36,10 +37,11 @@ const usage = `usage:
                  [--key <path>] [--enroll <token>|@file|-] [--api-key <key>|@file|-] [--name <name>] [--rotate]
                  [--require-channel-binding] [--max-inflight <n>] [--listen <addr>|off] [--local-token <file>]
                  [--allow-origin <origin> …] [--sealed-max-age <duration>] [--sealed-required <name> …]
-                 [--pin-recipients] [--accept-change <name> …] [--log json]
+                 [--pin-recipients] [--accept-change <name> …] [--public <name> …] [--log json]
   kontra seal --service <service URL> [--api-key <key>|@<file>] [--context <id>] [--task <id>]
               [--media-type <type>] [file | -]
   kontra seal --open <part.json>
+  kontra login [--gate <url>] [--no-browser]
   kontra version
 
 kontra connect hosts the services on this machine at a gate, and lets local clients hire the gate's services,
@@ -77,8 +79,12 @@ through one outbound connection (spec/tunnel.md):
   --pin-recipients           refuse any new recipient or seller key of a sealed service this node hires
   --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME, the one
                              pending when this run first checks it (not a later one); repeatable
+  --public NAME              on an anonymous session, let anyone call the hosted service NAME (no credential); repeatable
   --log json                 JSON logs on stderr (default text)
-Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. Sealed services
+Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that gate only. A node that holds none for
+the gate and is given neither --enroll nor --api-key asks for an anonymous session, which a gate that opens them
+(Cloud's public gate) gives under an anon-<…> tenant for a limited time (spec/tunnel.md §6): kontra connect prints its
+URLs and when it ends, and exits 1 saying the anonymous session expired when it does. Sealed services
 (spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a hired job's key under ~/.kontra/jobs,
 and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints (kid:<kid> for a seller signature that
 names its key only, D223) are printed on stderr on a first sight and on every change.
@@ -89,12 +95,15 @@ plaintext of a reply's sealed parts and binds its job to the task the reply name
 follow-up of that task with its job's key. --api-key KEY|@FILE (never read from the environment) is sent to the
 --service's gate only, to read the card of a service that is not listed: on the service's card and upstream card once
 the card answered 404 without it, never on the gate's key set.
+
+kontra login gets an API key for a gate (default https://gateway.kontra.sh) from the gate's sign-in and keeps it in
+~/.kontra/credentials for that gate only; kontra connect then hires as it, and an anonymous session's next handshake
+with it becomes the account's (spec/tunnel.md §6.3). --no-browser prints the sign-in URL instead of opening it.
 `
 
 // later is when each subcommand that is not built yet comes (PRD §14, note 2 §4). There is no console
 // subcommand: the owner dropped the local console (D164).
 var later = map[string]string{
-	"login":   "M4", // turns an anonymous session into an account (tunnel.md §6.1; M4)
 	"publish": "M5", // listings (PRD §14 M5)
 }
 
@@ -150,6 +159,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "kontra seal:", tunnel.Printable(err.Error()))
 			return 1
 		}
+	case "login":
+		// tunnel.md §6.3 (D278): an API key from the gate's sign-in, kept for that gate only.
+		if err := login.Command(ctx, args[1:], stdout, stderr); err != nil {
+			fmt.Fprintln(stderr, "kontra login:", tunnel.Printable(err.Error()))
+			if errors.Is(err, login.ErrUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0

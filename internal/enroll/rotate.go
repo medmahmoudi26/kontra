@@ -29,6 +29,13 @@ import (
 // A rotate_from naming no key of this gate, or a revoked one, is refused as §12 says; the node then sends
 // its hello again without rotate_from, so that its tokens or API key may enroll the new key (SPEC-CONFLICT
 // in internal/node's connect and on nodekey.Prune, M2 WP-06 review).
+//
+// A key of an anonymous tenant, live or ended, is not rotated (spec/tunnel.md §6.1, §12; D304): enroll_invalid. A
+// rotation would admit the new key into the anonymous tenant through §5's rules, without the anonymous session's
+// decision (no welcome.anonymous, no end clock, the full hiring-stream cap) and without opening a tenant, so a chain of
+// rotations would hold any number of sessions of one anonymous tenant at once, uncounted by §6.2. The node then sends
+// its hello again without rotate_from: with no credential it asks for an anonymous session of its own (D285), which
+// §6.2's limits count, and its tokens or an API key enroll the new key as for any new key.
 func (a *admission) checkRotation(ctx context.Context) error {
 	h := a.h
 	rf := h.RotateFrom
@@ -45,6 +52,9 @@ func (a *admission) checkRotation(ctx context.Context) error {
 	switch {
 	case old == nil:
 		return tunnel.Refuse(tunnel.CodeEnrollInvalid, "rotate_from names no key of this gate")
+	case old.anonymous:
+		return tunnel.Refuse(tunnel.CodeEnrollInvalid,
+			"rotate_from: the key %s holds an anonymous session, which a rotation does not carry: the new key asks for one of its own", old.KeyID)
 	case old.RevokedAt != nil || old.tenantEnded:
 		return tunnel.Refuse(tunnel.CodeRevoked, "rotate_from: the key %s was revoked", old.KeyID)
 	case old.RevokedReason == ReasonRotated || old.RotatedTo != "":

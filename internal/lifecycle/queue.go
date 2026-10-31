@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"go.temporal.io/sdk/activity"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/ids"
 	"kontra.sh/kontra/internal/store"
@@ -48,9 +49,31 @@ type QueueOptions struct {
 	Push InlinePushSaver
 	// Hooks is the hook configuration a new task's workflow starts with (spec §13.3, D46).
 	Hooks HooksSnapshot
+	// Caps checks an anonymous tenant's concurrent tasks, as host and as hirer, in the transaction that creates a task
+	// (spec/tunnel.md §6.2; *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
+	Caps TaskCaps
 	// Now is the clock (tests); time.Now when nil.
 	Now func() time.Time
 }
+
+// TaskCaps checks the anonymous tenants' task caps (spec/tunnel.md §6.2, D277) in tx, the transaction that creates a
+// task, before its row: an error wrapping anon.ErrRateLimited when the service's tenant (as host) or the principal's
+// (as hirer) has its cap of non-terminal tasks. *anon.Caps implements it.
+type TaskCaps interface {
+	Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug, principal string) error
+}
+
+// RateLimited is the A2A answer to a task an anonymous tenant's cap refuses (spec/tunnel.md §6.2, relay.md §2.2):
+// InvalidRequest (-32600) "rate limited", which also wraps anon.ErrRateLimited, so that both bindings answer it HTTP
+// 429 with Retry-After (sse.WriteError, internal/a2ahttp).
+func RateLimited() error {
+	return rateLimitedError{a2a.NewError(a2a.ErrInvalidRequest, "rate limited")}
+}
+
+type rateLimitedError struct{ err *a2a.Error }
+
+func (e rateLimitedError) Error() string   { return e.err.Error() }
+func (e rateLimitedError) Unwrap() []error { return []error{e.err, anon.ErrRateLimited} }
 
 // Queue is the Temporal-backed a2a-go workqueue.Queue for one service (spec §8.1, §15, D6). Its Write
 // is the only Temporal call on the request path; the HandlerFn a2a-go registers is what the dispatch
@@ -90,7 +113,8 @@ func (q *Queue) now() time.Time {
 // identical requests arriving together make one task), the gate task is pre-created (the id Admission was
 // shown, gate ids, submitted, or quoted on a quote decision, the caller's message in history), the inline
 // push config is saved, and the sanitized payload is stored as a work item; after the commit,
-// StartWithMessage. payload.TaskID is set to the task's id, which Write returns.
+// StartWithMessage. payload.TaskID is set to the task's id, which Write returns. A hire's new task (WithHire,
+// relay.md §12.3) is marked hired, keyed by the hire's resend key, and answered by a retry as Hire says.
 //
 // A follow-up: the work item is stored (and the task's version V, and the turn end it answers, read in the
 // same transaction) and kontra.message sent, then kontra.push for an inline config it inserted. A refusal
@@ -142,13 +166,18 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	if !ok || adm.TaskID == "" || (adm.Decision.Outcome != hooks.Allow && adm.Decision.Outcome != hooks.Quote) {
 		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
 	}
-	// The hash of the request as the caller sent it, before the relay stored its large parts (spec §10.4, §15).
+	// The hash of the request as the caller sent it, before the relay stored its large parts (spec §10.4, §15); a
+	// hire's resend key instead (relay.md §12.3), which a retry of the same hire matches.
+	hire, hired := HireFrom(ctx)
 	hash, err := store.RequestHashOf(ctx, req)
 	if err != nil {
 		return "", err
 	}
+	if hired {
+		hash = hire.Key
+	}
 	since := q.now().Add(-ResendWindow)
-	prev, err := q.log.FindResend(ctx, q.svc, owner, req.Message.ID, hash, since)
+	prev, err := q.findResend(ctx, nil, hire, hired, owner, req.Message.ID, hash, since)
 	if err != nil {
 		return "", err
 	}
@@ -185,7 +214,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	err = pgx.BeginFunc(ctx, q.log.DB(), func(tx pgx.Tx) error {
 		// The lookup above takes no lock: an identical request arriving at the same moment missed it too.
 		// Under the resend key's lock the later one finds the earlier one's task once it committed.
-		found, err := q.log.FindResendLocked(ctx, tx, q.svc, owner, req.Message.ID, hash, since)
+		found, err := q.findResend(ctx, tx, hire, hired, owner, req.Message.ID, hash, since)
 		if err != nil {
 			return err
 		}
@@ -193,11 +222,22 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 			prev = found
 			return errResent
 		}
+		// An anonymous tenant's concurrent tasks (spec/tunnel.md §6.2), counted under its lock before the row.
+		if q.opts.Caps != nil {
+			if err := q.opts.Caps.Task(ctx, tx, q.svc.TenantID, q.svc.Tenant, owner.Principal); err != nil {
+				return err
+			}
+		}
 		if _, err := q.log.CreateTask(ctx, tx, store.NewTask{
 			ID: taskID, Service: q.svc, Protocol: store.ProtocolA2A, Owner: owner, ContextID: contextID, State: state,
 			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, QuoteExpiresAt: quoteExpires,
 		}); err != nil {
 			return err
+		}
+		if hired {
+			if err := q.log.MarkHired(ctx, tx, taskID); err != nil {
+				return err
+			}
 		}
 		// A new task's workflow lists its push configs at start: no kontra.push is needed.
 		stored, _, _, err := q.savePush(ctx, tx, taskID, owner, req)
@@ -212,6 +252,9 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	})
 	if errors.Is(err, errResent) {
 		return q.resend(ctx, p, prev)
+	}
+	if errors.Is(err, anon.ErrRateLimited) {
+		return "", RateLimited()
 	}
 	if err != nil {
 		return "", err
@@ -231,6 +274,45 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 // errResent rolls back a new task's transaction that found, under the resend key's lock, the task an
 // identical request created meanwhile.
 var errResent = errors.New("lifecycle: an identical request created the task meanwhile")
+
+// Hire is what Write needs of a task the gate's own /mcp creates with hire (spec/relay.md §12.2, §12.3): the task is
+// marked hired (tasks.hired, D272), its first_request is Key, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)), instead of the
+// request's hash, and the earlier task Write answers it with is a hire task of the same key that is quoted, or left
+// quoted less than RetryWindow ago (§12.3 Retries), instead of a resend of the same messageId (§15). The caller
+// looks the retry up first (store.Log.FindHireRetry); Write looks again under the key's lock, so two identical
+// hires arriving together make one task.
+type Hire struct {
+	Key         [32]byte
+	RetryWindow time.Duration
+}
+
+type hireKey struct{}
+
+// WithHire marks ctx as a hire's: the work queue's Write creates the task as Hire says.
+func WithHire(ctx context.Context, h Hire) context.Context {
+	return context.WithValue(ctx, hireKey{}, h)
+}
+
+// HireFrom returns the hire ctx carries, ok false for any other request.
+func HireFrom(ctx context.Context) (Hire, bool) {
+	h, ok := ctx.Value(hireKey{}).(Hire)
+	return h, ok
+}
+
+// findResend is the earlier task a new task's request repeats: a resend of the same messageId and request hash
+// (spec §15), or for a hire one of the same resend key (relay.md §12.3). With tx it looks under the key's lock.
+func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, hire Hire, hired bool, owner store.Owner, messageID string,
+	hash [32]byte, since time.Time) (*store.TaskRow, error) {
+	switch {
+	case hired && tx == nil:
+		return q.log.FindHireRetry(ctx, q.svc, owner, hire.Key, hire.RetryWindow)
+	case hired:
+		return q.log.FindHireRetryLocked(ctx, tx, q.svc, owner, hire.Key, hire.RetryWindow)
+	case tx == nil:
+		return q.log.FindResend(ctx, q.svc, owner, messageID, hash, since)
+	}
+	return q.log.FindResendLocked(ctx, tx, q.svc, owner, messageID, hash, since)
+}
 
 // admitted is what Admission's decision makes of a new task: submitted with the decision's metadata, or
 // quoted with it and the approve URL (spec §13.2). The decision's mcpMeta is rendered for MCP tasks (M3);
@@ -261,29 +343,39 @@ func admitted(d hooks.Decision) (store.State, *time.Time, map[string]any, error)
 	return store.StateQuoted, &exp, meta, nil
 }
 
-// resend answers a resend with the task it repeats and re-issues its workflow's start with the first work
-// item id: a task whose start was lost gets its workflow (spec §14.5). A refusal (the work item was
-// accepted already) and a closed workflow are what an idempotent re-issue meets, and are not errors.
+// resend answers a resend with the task it repeats and re-issues its workflow's start (ReissueStart).
 func (q *Queue) resend(ctx context.Context, p *workqueue.Payload, prev *store.TaskRow) (a2a.TaskID, error) {
 	id := a2a.TaskID(prev.ID.String())
-	wid, err := q.log.FirstWorkItemID(ctx, prev.ID)
-	switch {
-	case errors.Is(err, store.ErrWorkItemNotFound):
-	case err != nil:
+	if err := q.ReissueStart(ctx, prev); err != nil {
 		return "", err
-	default:
-		var quoteExpires *time.Time
-		if prev.SubmittedAt == nil {
-			quoteExpires = prev.QuoteExpiresAt // the task was created quoted and not yet approved
-		}
-		_, err := q.client.StartWithMessage(ctx, q.input(prev.ID, quoteExpires), wid.String())
-		if err != nil && !errors.Is(err, ErrRefused) {
-			return "", err
-		}
 	}
 	fillStreamStart(ctx, StreamStart{TaskID: id, Version: prev.Version, New: false})
 	p.TaskID = id
 	return id, nil
+}
+
+// ReissueStart re-issues the start of prev's workflow with its first work item id, as a resend does: a task whose
+// start was lost gets its workflow (spec §14.5), and one created quoted and not yet approved waits for
+// kontra.approval until its quote expires, as at its first start (§13.2). A refusal (the work item was accepted
+// already) and a closed workflow are what an idempotent re-issue meets, and are not errors; a task without a work
+// item has no start to re-issue. The relay's resend answer calls it before it answers a quoted task at once
+// (relay.StartReissuer, D290).
+func (q *Queue) ReissueStart(ctx context.Context, prev *store.TaskRow) error {
+	wid, err := q.log.FirstWorkItemID(ctx, prev.ID)
+	switch {
+	case errors.Is(err, store.ErrWorkItemNotFound):
+		return nil
+	case err != nil:
+		return err
+	}
+	var quoteExpires *time.Time
+	if prev.SubmittedAt == nil {
+		quoteExpires = prev.QuoteExpiresAt // the task was created quoted and not yet approved
+	}
+	if _, err := q.client.StartWithMessage(ctx, q.input(prev.ID, quoteExpires), wid.String()); err != nil && !errors.Is(err, ErrRefused) {
+		return err
+	}
+	return nil
 }
 
 func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner store.Owner) (a2a.TaskID, error) {

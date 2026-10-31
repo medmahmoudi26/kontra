@@ -86,6 +86,11 @@ const (
 	// for a lost replica's heartbeat timeout is for A2A CancelTask only. Only MCP tasks (Input.Protocol mcp, M3)
 	// reach it.
 	changeMCPCancel = "mcp-cancel"
+	// changeHireMCPCancel: a kontra.cancel with Mode mcp (CancelModeMCP) on an A2A task, the /mcp tasks/cancel of a
+	// hire task (relay.md §12.2, D272, D293; M4 WP-04), follows changeMCPCancel's rule (§11.6, D57): canceled within
+	// 10 s whatever the upstream answers, the upstream sent §8's CancelTask through forward_cancel. Before it, no
+	// Update carried a mode, and every A2A task's cancel followed §8's table, as it still does without one.
+	changeHireMCPCancel = "hire-mcp-cancel"
 )
 
 // mcpCancelWait is how long an MCP task's cancel waits for abort or forward_cancel before it writes canceled (spec
@@ -116,6 +121,7 @@ type call struct {
 // cancelOp is one kontra.cancel in flight; concurrent cancels share it (spec §8).
 type cancelOp struct {
 	started time.Time
+	mcp     bool // asked with Mode mcp (CancelModeMCP) by the Update that started it
 	done    bool
 	res     CancelResult
 	err     error
@@ -358,7 +364,7 @@ func (l *lc) validateCancel(ctx workflow.Context, u CancelUpdate) error {
 // cancels are coalesced; one after it completed starts anew).
 func (l *lc) onCancel(ctx workflow.Context, u CancelUpdate) (CancelResult, error) {
 	if l.cancel == nil || l.cancel.done {
-		l.cancel = &cancelOp{started: workflow.Now(ctx)}
+		l.cancel = &cancelOp{started: workflow.Now(ctx), mcp: u.Mode == CancelModeMCP}
 	}
 	op := l.cancel
 	if err := workflow.Await(ctx, func() bool { return op.done }); err != nil {
@@ -1388,10 +1394,14 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 	}
 }
 
-// mcpCancel reports whether the cancel in flight follows spec §11.6's MCP rule (changeMCPCancel): the task is a
-// gate-owned MCP task.
+// mcpCancel reports whether the cancel in flight follows spec §11.6's MCP rule: the task is a gate-owned MCP task
+// (changeMCPCancel), or the cancel was asked in MCP mode, the /mcp tasks/cancel of a hire task (changeHireMCPCancel).
+// The second version marker is read only for a cancel that asked for the mode, which no history before it holds.
 func (l *lc) mcpCancel(ctx workflow.Context) bool {
-	return l.in.Protocol == ProtocolMCP && workflow.GetVersion(ctx, changeMCPCancel, workflow.DefaultVersion, 1) >= 1
+	if l.in.Protocol == ProtocolMCP {
+		return workflow.GetVersion(ctx, changeMCPCancel, workflow.DefaultVersion, 1) >= 1
+	}
+	return l.cancel != nil && l.cancel.mcp && workflow.GetVersion(ctx, changeHireMCPCancel, workflow.DefaultVersion, 1) >= 1
 }
 
 // cancelMCP is spec §11.6's tasks/cancel (D57), while a dispatch runs (c) or none does (c nil): with no upstream

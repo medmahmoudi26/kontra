@@ -24,6 +24,26 @@ import (
 // enroll a new key.
 var ErrRevoked = errors.New("node: the gate revoked this node's key (spec/tunnel.md §12); kontra connect does not redial")
 
+// ErrAnonymousExpired is wrapped by Run's error when the gate ends the node's anonymous session at its end (spec/tunnel.md
+// §6.1: {"t": "revoked"} at expires_at, or the session closed then): kontra connect exits saying so. The key is not
+// revoked: the next kontra connect opens a new anonymous session, with a new slug.
+var ErrAnonymousExpired = errors.New("node: the anonymous session expired")
+
+// AnonymousExpiredError is the end of an anonymous session (ErrAnonymousExpired), naming when it ended.
+type AnonymousExpiredError struct{ At time.Time }
+
+func (e *AnonymousExpiredError) Error() string {
+	return fmt.Sprintf("the anonymous session expired at %s (spec/tunnel.md §6.1): its URLs answer 404 now; run kontra connect "+
+		"again for a new anonymous session (new URLs), or kontra login to keep the services under an account",
+		e.At.UTC().Format(time.RFC3339))
+}
+
+func (e *AnonymousExpiredError) Is(target error) bool { return target == ErrAnonymousExpired }
+
+// expirySlack is how far before an anonymous session's end, by the node's estimate (anonymous.go), a {"t": "revoked"}
+// or a close of the session is taken for its end rather than a revocation or a redial.
+const expirySlack = time.Minute
+
 // How often a running node looks at its key file: a rotation another `kontra connect` made (one process
 // per gate, §2.1) is carried to this gate soon (rotate_from on a new session, make-before-break), and a
 // rotated key is pruned once its 24 h overlap has passed (§12).
@@ -56,8 +76,9 @@ const (
 // from the node since M3, session.open), and dials a new session before either side's run out, or as soon as an
 // open of its own is refused ErrStreamsExhausted.
 //
-// It returns nil when ctx ends, ErrRevoked when the gate revokes the key, a *tunnel.HandshakeError for a
-// refusal that is not retried, ErrChannelBindingRequired, or an error reading the key file.
+// It returns nil when ctx ends, ErrRevoked when the gate revokes the key, an *AnonymousExpiredError when it ends the
+// node's anonymous session (§6.1), a *tunnel.HandshakeError for a refusal that is not retried,
+// ErrChannelBindingRequired, or an error reading the key file.
 func (n *Node) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -101,13 +122,13 @@ func (n *Node) Run(ctx context.Context) error {
 				return nil
 			case <-n.revoked:
 				t.Stop()
-				return ErrRevoked
+				return n.stopError()
 			case <-t.C:
 			}
 		}
 		select {
 		case <-n.revoked:
-			return ErrRevoked
+			return n.stopError()
 		default:
 		}
 		if ctx.Err() != nil {
@@ -138,11 +159,28 @@ func (n *Node) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return nil
 			case <-n.revoked:
-				return ErrRevoked
+				return n.stopError()
 			case <-s.mux.CloseChan():
 				n.clearCurrent(s)
 				lived := time.Since(s.opened)
 				n.backoff.SessionEnded(lived)
+				if !s.anonEnd.IsZero() {
+					// At an anonymous session's end the gate sends {"t": "revoked"}, then closes it: what the control
+					// stream received is read before the close is taken for anything (drainControl).
+					s.drainControl()
+					select {
+					case <-n.revoked:
+						return n.stopError()
+					default:
+					}
+				}
+				if s.anonymousOver() {
+					// An anonymous session that closed at its end, whether or not its {"t": "revoked"} arrived: it is
+					// over (§6.1), and a redial would open another one with new URLs.
+					s.log.Error("the anonymous session ended: kontra connect stops", "expires_at", s.anonEnd)
+					n.stop(&AnonymousExpiredError{At: s.anonEnd})
+					return n.stopError()
+				}
 				if s.replaced.Load() {
 					// The gate revoked the key of this session, which another `kontra connect` has rotated
 					// since it was dialed (keyRevoked): the active key's session is dialed at once.
@@ -248,6 +286,14 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		if rotateOld != "" && rotateOld != skip {
 			h.RotateFrom = &tunnel.KeyRef{KID: tunnel.KeyID(rotateOld), Recipient: rotateOld}
 		}
+		// D285: an anonymous session is asked for only by a node with no credential at this gate; never by a probe.
+		if h.RotateFrom == nil && n.asksAnonymous(cred) {
+			h.Anonymous = true
+			h.Public = n.publicDeclared()
+		} else if len(n.cfg.Public) > 0 {
+			log.Warn("--public applies to an anonymous session only: this node holds credentials for the gate, so its services "+
+				"keep their allow: lists", "public", n.cfg.Public)
+		}
 	}
 	sent := slices.Clone(h.Enroll)
 	if probe {
@@ -346,6 +392,53 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		log.Warn("the handshake failed", "err", err)
 		return nil, nextRetry, err
 	}
+}
+
+// asksAnonymous is D285's rule: the hello asks for an anonymous session only when this origin's credentials hold no
+// API key and no pending or consumed enrollment token (any key's), and the command line gave neither --enroll nor
+// --api-key. So a node that ever enrolled at this gate, or holds a token whose welcome it has not seen, never opens an
+// anonymous tenant in their place (a probe never asks either, §2.4).
+func (n *Node) asksAnonymous(c Credential) bool {
+	if n.cfg.APIKey != "" || len(n.cfg.Enroll) > 0 || c.APIKey != "" || len(c.Consumed) > 0 {
+		return false
+	}
+	for _, k := range c.Keys {
+		if !k.empty() {
+			return false
+		}
+	}
+	return true
+}
+
+// publicDeclared is hello.public: the --public names still declared (a service whose binding the gate revoked is not).
+func (n *Node) publicDeclared() []string {
+	var out []string
+	for _, s := range n.declaredServices() {
+		if slices.Contains(n.cfg.Public, s.Name) {
+			out = append(out, s.Name)
+		}
+	}
+	return out
+}
+
+// stop ends Run with err (ErrRevoked, or an *AnonymousExpiredError), once.
+func (n *Node) stop(err error) {
+	n.revokeOnce.Do(func() {
+		n.mu.Lock()
+		n.stopErr = err
+		n.mu.Unlock()
+		close(n.revoked)
+	})
+}
+
+// stopError is what Run returns once revoked is closed.
+func (n *Node) stopError() error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.stopErr == nil {
+		return ErrRevoked
+	}
+	return n.stopErr
 }
 
 // welcomed records what a welcome of the active key settles at this gate:
@@ -594,6 +687,11 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 		ctx:     sctx,
 		auth:    auth,
 		slots:   make(chan struct{}, limit),
+
+		controlDone: make(chan struct{}),
+	}
+	if w.Anonymous != nil {
+		s.setAnonymousEnd(w.Anonymous.ExpiresAt, n.now())
 	}
 	s.proxy = n.proxy.forSession(served, log)
 	s.proxy.onControl = s.readControl
@@ -648,7 +746,16 @@ func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 		fmt.Fprintln(n.out, "  no service is served on this session")
 	}
 	for _, s := range w.Services {
-		fmt.Fprintf(n.out, "  %s %s  %s\n", p(s.Kind), p(s.Name), p(s.URL))
+		note := ""
+		if w.Anonymous != nil && slices.Contains(n.cfg.Public, s.Name) {
+			note = "  (public: anyone may call it)"
+		}
+		fmt.Fprintf(n.out, "  %s %s  %s%s\n", p(s.Kind), p(s.Name), p(s.URL), note)
+	}
+	if a := w.Anonymous; a != nil {
+		// §6.1: an anonymous session's URLs end with it.
+		fmt.Fprintf(n.out, "  anonymous session: it ends at %s (in %s); its URLs then answer 404 (kontra login keeps the services)\n",
+			a.ExpiresAt.UTC().Format(time.RFC3339), time.Until(a.ExpiresAt).Round(time.Second))
 	}
 }
 
@@ -689,6 +796,13 @@ func (n *Node) closeAll() {
 // then revoke the old key: D125, D128) closes the old key's session, which Run then replaces at once with a
 // session of the new key (session.replaced), as maintain would have (M2 review, tunnel-spec-2).
 func (n *Node) keyRevoked(s *session) {
+	if s.revokeEndsAnonymous() {
+		// §6.1: at an anonymous session's end the gate sends {"t": "revoked"} and closes it; the key is not revoked.
+		s.log.Error("the gate ended the anonymous session at its end: kontra connect stops", "expires_at", s.anonEnd)
+		n.stop(&AnonymousExpiredError{At: s.anonEnd})
+		_ = s.mux.Close()
+		return
+	}
 	if s.key != n.activeRecipient() {
 		s.log.Info("the gate revoked the session's rotated key: closing that session; the new key's goes on")
 		s.replaced.Store(true)
@@ -696,7 +810,7 @@ func (n *Node) keyRevoked(s *session) {
 		return
 	}
 	s.log.Error("the gate revoked this node's key: kontra connect stops and does not redial (§12)")
-	n.revokeOnce.Do(func() { close(n.revoked) })
+	n.stop(ErrRevoked)
 }
 
 // authRevoked is {"t": "auth_revoked"} on a session's control stream (§12, §13): the gate revoked the API key the

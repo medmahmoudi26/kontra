@@ -1,0 +1,112 @@
+# The pinned A2A TCK against the gate (`make tck`, scripts/tck.sh; spec/relay.md §0, §16 tck_jsonrpc, tck_rest,
+# tck_behind_caddy; D18, D279): a2aproject/a2a-tck at d4d6fae, fetched and verified, under uv 0.11.7 and Python
+# 3.12 from its own uv.lock, against a gate built from this checkout, the seller examples/sellers/tck, a Temporal
+# development server from the pinned CLI and Postgres 17, one job per variant: direct and tunnel (the bare gate on
+# the direct and the tunnel backend) and caddy (behind examples/front/caddy, Caddy 2.11.7 from its release
+# tarball, verified), and nightly also auth (a loopback front that adds a tck API key, so ListTasks and push run
+# through the TCK). Each job runs both bindings (--transport jsonrpc, then http_json); test/tck/kontra_xfail.py
+# fails a binding whose outcomes differ from test/tck/expected-failures.txt in any way (an unexpected failure, a
+# listed test that passed or skipped, an unlisted xfail, an entry naming no test), and the JUnit and HTML reports
+# and the processes' logs are uploaded either way. It blocks pull requests that change the gate, the node, the
+# migrations, the seller, the front or the TCK kit, and runs nightly and on demand; schedule and workflow_dispatch
+# need the file on the default branch.
+name: tck
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "cmd/**"
+      - "internal/**"
+      - "migrations/**"
+      - "examples/sellers/tck/**"
+      - "examples/front/caddy/**"
+      - "test/tck/**"
+      - "scripts/tck.sh"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/tck.yml"
+concurrency:
+  group: tck-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  tck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # auth is nightly (and on demand) only: three jobs on a pull request.
+        variant: ${{ fromJSON(github.event_name == 'pull_request' && '["direct","tunnel","caddy"]' || '["direct","tunnel","caddy","auth"]') }}
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env: { POSTGRES_USER: kontra, POSTGRES_PASSWORD: kontra, POSTGRES_DB: kontra }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kontra" --health-interval 2s --health-timeout 2s --health-retries 30
+    env:
+      KONTRA_TEST_PG: postgres://kontra:kontra@localhost:5432/kontra?sslmode=disable
+      TCK_PIN: d4d6fae7887f88ef607fb461c13e3b0e1802f19b
+      TEMPORAL_CLI_VERSION: "1.9.1"
+      TEMPORAL_CLI_ARCHIVE_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
+      TEMPORAL_CLI_BINARY_SHA256: 712217694cac9f786a72d4b6c876cd15f3dcf1bf31434d9fed6af25242a327a0
+      CADDY_VERSION: "2.11.7"
+      CADDY_ARCHIVE_SHA256: 727b91701a392de6ebc5027509f548bf39979e5216340d0faed8fa5e69c84f8b
+      CADDY_BINARY_SHA256: 678ade3bfc088749c81a681adc603333ee0bb023b6a6cfe3c0f58bef8ff854e9
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26.10"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
+        with:
+          version: "0.11.7"
+          python-version: "3.12"
+      # psql creates and drops the run's database on KONTRA_TEST_PG.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client-16
+      - name: Install the pinned Temporal CLI
+        run: |
+          archive="temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/$archive"
+          echo "${TEMPORAL_CLI_ARCHIVE_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/temporal"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/temporal" temporal
+          echo "${TEMPORAL_CLI_BINARY_SHA256}  $RUNNER_TEMP/temporal/temporal" | sha256sum -c -
+          "$RUNNER_TEMP/temporal/temporal" --version | grep -q 'Server 1\.32\.'
+          echo "KONTRA_TEMPORAL_CLI=$RUNNER_TEMP/temporal/temporal" >> "$GITHUB_ENV"
+      # Caddy's release tarball, checked against the sha256 recorded here (the release's own checksums file is
+      # sha512: caddy_2.11.7_checksums.txt), and the binary in it too.
+      - name: Install the pinned Caddy
+        if: matrix.variant == 'caddy' || matrix.variant == 'auth'
+        run: |
+          archive="caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/$archive"
+          echo "${CADDY_ARCHIVE_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/caddy"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/caddy" caddy
+          echo "${CADDY_BINARY_SHA256}  $RUNNER_TEMP/caddy/caddy" | sha256sum -c -
+          "$RUNNER_TEMP/caddy/caddy" version | grep -q "^v${CADDY_VERSION} "
+          echo "KONTRA_CADDY=$RUNNER_TEMP/caddy/caddy" >> "$GITHUB_ENV"
+      # The TCK at its pinned commit (D18), never a branch: the fetched HEAD must be the pin, and its environment
+      # comes from its own uv.lock (--frozen: the lock is used as it is, never rewritten).
+      - name: Fetch a2a-tck at the pinned commit
+        run: |
+          dir="$RUNNER_TEMP/a2a-tck"
+          git init -q "$dir"
+          git -C "$dir" fetch -q --depth 1 https://github.com/a2aproject/a2a-tck "$TCK_PIN"
+          git -C "$dir" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$TCK_PIN"
+          (cd "$dir" && uv sync --frozen --python 3.12)
+          echo "KONTRA_TCK_DIR=$dir" >> "$GITHUB_ENV"
+      - run: make tck VARIANT=${{ matrix.variant }}
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tck-${{ matrix.variant }}
+          path: ${{ env.KONTRA_TCK_DIR }}/reports
+          if-no-files-found: warn

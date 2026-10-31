@@ -55,8 +55,12 @@ type (
 	MessageResult struct {
 		Turn int `json:"turn"`
 	}
-	// CancelUpdate is kontra.cancel.
-	CancelUpdate struct{}
+	// CancelUpdate is kontra.cancel. Mode CancelModeMCP asks for MCP's tasks/cancel (spec §11.6, D57) on a task of
+	// any protocol: the /mcp tasks/cancel of a hire task, an A2A task followed over MCP (relay.md §12.2). Empty, a
+	// task's cancel follows its protocol: §8's table for an A2A task, §11.6's for an MCP task.
+	CancelUpdate struct {
+		Mode string `json:"mode,omitempty"`
+	}
 	// CancelResult is kontra.cancel's result.
 	CancelResult struct {
 		Outcome       CancelOutcome  `json:"outcome"`
@@ -104,6 +108,9 @@ type (
 		Seq int64 `json:"seq"`
 	}
 )
+
+// CancelModeMCP is CancelUpdate.Mode for MCP's cancel semantics (spec §11.6, D57; relay.md §12.2).
+const CancelModeMCP = "mcp"
 
 // CancelOutcome is kontra.cancel's outcome.
 type CancelOutcome string

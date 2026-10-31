@@ -222,10 +222,18 @@ func TestSealedReplay(t *testing.T) {
 	if t4done == nil || t4done.ID != t4 || t4done.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("the retried task: %+v", t4done)
 	}
+	// The answer is the task's terminal event, which the dispatch writes before it ends its attempt (relay.md §6:
+	// ended_at and outcome are written when the attempt ends): the attempts are read once the last one has ended.
 	atts, err := h.Attempts(ctx, t4)
 	if err != nil {
 		t.Fatal(err)
 	}
+	eventually(t, 10*time.Second, "the retried task's last attempt ended", func() bool {
+		if atts, err = h.Attempts(ctx, t4); err != nil {
+			t.Fatal(err)
+		}
+		return len(atts) > 0 && atts[len(atts)-1].Outcome != ""
+	})
 	if len(atts) < 2 || atts[0].Outcome != "tunnel_lost" || atts[len(atts)-1].Outcome != "completed" {
 		t.Fatalf("the retried task's attempts: %+v, want attempt 1 tunnel_lost and the last completed", atts)
 	}

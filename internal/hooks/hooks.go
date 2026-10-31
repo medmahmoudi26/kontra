@@ -3,9 +3,9 @@
 //
 // The open-source gate contains no money code (PRD §13). Each hook has a built-in implementation, which
 // is what this repository ships (Admission allows whatever passed allow:; the Lifecycle activities are
-// no-ops and ReviewWindow answers {open: false}), and a remote one an operator selects in kontra.yaml
-// (M5): Admission over HTTPS, failing closed; Lifecycle as five activities by type name on the operator's
-// Temporal queue.
+// no-ops and ReviewWindow answers {open: false}), and a remote one an operator selects in kontra.yaml:
+// Admission over HTTPS, failing closed (RemoteAdmission, M4 D275); Lifecycle as five activities by type name
+// on the operator's Temporal queue (D186).
 package hooks
 
 import (

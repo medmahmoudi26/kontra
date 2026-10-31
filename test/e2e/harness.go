@@ -56,6 +56,19 @@
 // gofakes3 bucket when a test asks (Options.Peer, Options.Blobs); nodes host MCP services and hire; the stock npm
 // servers and every other server the harness starts listen on 127.0.0.1 only, which each test asserts at its end
 // (D185, CheckLoopback).
+//
+// M4's (D282, D297; m4_test.go lists them and each test's tenancy): the six gate_mcp_* tests and anon_limits,
+// anon_lifecycle and login_converts. For them the harness also runs a multi-tenant gate (Options.Multi: no services:
+// block; tenants, services and API keys are rows it writes, followed by NOTIFY kontra_services, tenants.go, D116), with
+// tunnel.anonymous compressed in the test's own configuration (Options.Anonymous) and tunnel.enroll_with_api_key; the
+// Front as a PROXY v2 forwarder whose connections name the source address the test chooses (Options.ProxyProtocol,
+// Front.SetSource, proxyproto.go), so nodes come from chosen /24s and /48s; an Admission double on loopback whose
+// quotes name the pre-minted task id, with approvals sent as kontra.approval through the harness's Temporal client
+// (admission.go); internal/oidc/oidctest as auth.mcp_oauth's authorization server over HTTPS, trusted through
+// SSL_CERT_FILE by the replicas and kontra login (authserver.go, Harness.Login); clients of the gate's own /mcp in both
+// eras (gatemcp_client.go); a third replica configured otherwise on the same database (StartReplica); and the sellers
+// (sellers.go): examples/sellers/tck and booking built from this checkout and run unmodified, and an in-test a2a-go
+// seller standing in for hello-exec.
 package e2e
 
 import (
@@ -164,6 +177,32 @@ type Options struct {
 	Peer bool
 	// SellerKeys is services.<name>.seller_keys of a direct A2A service (spec §3): a JWKS document, inline.
 	SellerKeys map[string]string
+
+	// M4 (WP-07). Direct adds direct A2A services at any agent's root URL (a Seller, an example seller), beside the
+	// slowagents of Upstream and Services.
+	Direct map[string]string
+	// Allow replaces a service's allow: (default org:default) in the services: block.
+	Allow map[string][]string
+	// ServiceYAML adds lines to a service's entry of the services: block, each already indented four spaces (listed,
+	// annotations, sealed …).
+	ServiceYAML map[string]string
+	// Multi makes the gate multi-tenant (tenancy: multi): no services: block; the team tenant, buyer A's and B's keys
+	// and the direct services of Upstream, Services and Direct are rows the harness writes (tenants.go, D116), and a
+	// test seeds more with SeedServices and MintKey. A service's ref is <tenant>/<name> there.
+	Multi bool
+	// Anonymous is tunnel.anonymous as a YAML flow mapping of its limits ("{ttl: 20s, …}"; spec/tunnel.md §6.2); ""
+	// leaves it off. It needs Multi.
+	Anonymous string
+	// EnrollWithAPIKey is tunnel.enroll_with_api_key (spec/tunnel.md §5, §6.3).
+	EnrollWithAPIKey bool
+	// ProxyProtocol puts the Front's PROXY v2 headers in front of every connection it forwards (Front.SetSource) and
+	// makes the replicas take a client's address from them: edge.client_ip {from: proxy_protocol, trusted:
+	// [127.0.0.1/32]} (D69).
+	ProxyProtocol bool
+	// Admission is hooks.admission at the double (admission.go); its secret is in the replicas' environment only.
+	Admission *Admission
+	// AuthServer is auth.mcp_oauth's issuer (authserver.go); the replicas trust its CA through SSL_CERT_FILE.
+	AuthServer *AuthServer
 }
 
 // TunnelService is one tunnel service of Options.Tunnel.
@@ -243,6 +282,7 @@ type Harness struct {
 	cleanup []func() error     // what tests added (sellers, fake doubles), run at Close, last first
 	agents  []*slowagent.Agent // slowagents started for a test (Agent), closed at Close
 	pgids   []int              // process groups of the stock servers the harness started (CheckLoopback)
+	extra   []*Gate            // replicas a test started besides the two (StartReplica), killed at Close
 }
 
 // Gate is one kontra-gate replica subprocess.
@@ -395,6 +435,9 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 	if h.Pool, err = pgxpool.New(ctx, h.PostgresURL); err != nil {
 		return h, err
 	}
+	if o.Anonymous != "" && !o.Multi {
+		return h, errors.New("e2e: Options.Anonymous needs Options.Multi (tunnel.anonymous needs tenancy: multi)")
+	}
 	if err := h.startTemporal(ctx); err != nil {
 		return h, err
 	}
@@ -459,11 +502,18 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 			return h, err
 		}
 	}
-	if h.APIKey, err = h.enroll(ctx, "e2e-a"); err != nil {
-		return h, err
-	}
-	if h.APIKeyB, err = h.enroll(ctx, "e2e-b"); err != nil {
-		return h, err
+	if o.Multi {
+		// The operator's rows (D116, D37): the team tenant, the two buyers' keys and the direct services.
+		if err := h.seedTeam(ctx); err != nil {
+			return h, err
+		}
+	} else {
+		if h.APIKey, err = h.enroll(ctx, "e2e-a"); err != nil {
+			return h, err
+		}
+		if h.APIKeyB, err = h.enroll(ctx, "e2e-b"); err != nil {
+			return h, err
+		}
 	}
 	for i, name := range []string{"A", "B"} {
 		peerPort := 0
@@ -478,6 +528,12 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 	// A tunnel service has no card before a node connects, and an MCP service none at all: readiness waits on
 	// the direct A2A ones only.
 	direct := slices.DeleteFunc(slices.Sorted(mapKeys(services)), o.tunnelled)
+	for name := range o.Direct {
+		direct = append(direct, name)
+	}
+	for i, name := range direct {
+		direct[i] = h.refOf(name)
+	}
 	for _, g := range h.Gates {
 		if err := h.waitReady(ctx, g, direct); err != nil {
 			return h, err
@@ -556,6 +612,14 @@ func (h *Harness) gateEnv() []string {
 	if h.PeerSecret != "" {
 		env = append(env, PeerSecretEnv+"="+h.PeerSecret)
 	}
+	if a := h.opts.Admission; a != nil {
+		env = append(env, AdmissionSecretEnv+"="+a.Secret)
+	}
+	if as := h.opts.AuthServer; as != nil {
+		// The replicas' operator client trusts the authorization server's throwaway CA (spec §10.3, D284).
+		env = append(slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "SSL_CERT_FILE=") }),
+			"SSL_CERT_FILE="+as.CAFile)
+	}
 	return env
 }
 
@@ -623,24 +687,48 @@ func (h *Harness) writeConfig(temporalAddr string, listenPort int) error {
 		drain = h.opts.DrainTimeout
 	}
 	var b strings.Builder
+	// M4 (WP-07): auth.mcp_oauth, tunnel.anonymous and enroll_with_api_key, edge.client_ip and hooks.admission.
+	authYAML := "{ api_keys: true }"
+	if as := h.opts.AuthServer; as != nil {
+		authYAML = fmt.Sprintf("{ api_keys: true, mcp_oauth: { issuer: %q } }", as.Issuer())
+	}
+	tunnelYAML := "channel_binding: none"
+	if h.opts.Anonymous != "" {
+		tunnelYAML += ", anonymous: " + h.opts.Anonymous
+	}
+	if h.opts.EnrollWithAPIKey {
+		tunnelYAML += ", enroll_with_api_key: true"
+	}
 	fmt.Fprintf(&b, `# kontra.yaml of an e2e run: both replicas share it; each sets --listen and --metrics-listen.
 listen: 127.0.0.1:%d
 public_url: %s
 postgres: %q
 temporal: { address: %q, namespace: %s }
 metrics: { listen: "127.0.0.1:0" }
-auth: { api_keys: true }
+auth: %s
 drain_timeout: %s
 push: { allow_private: %t }
-tunnel: { channel_binding: none }
+tunnel: { %s }
 signing_key: %q
-`, listenPort, h.Front.URL, h.PostgresURL, temporalAddr, Namespace, drain, h.opts.PushAllowPrivate, "file:"+h.SigningKey)
+`, listenPort, h.Front.URL, h.PostgresURL, temporalAddr, Namespace, authYAML, drain, h.opts.PushAllowPrivate, tunnelYAML, "file:"+h.SigningKey)
 	if h.Bucket != nil {
 		fmt.Fprintf(&b, "blobs: %q\n", h.Bucket.URL)
 	}
 	if h.opts.Peer {
 		// Each replica's own --peer-listen replaces this one, which only has to be valid.
 		fmt.Fprintf(&b, "peer: { listen: \"127.0.0.1:1\", secret_env: %s }\n", PeerSecretEnv)
+	}
+	if h.opts.ProxyProtocol {
+		b.WriteString("edge: { client_ip: { from: proxy_protocol, trusted: [\"127.0.0.1/32\"] } }\n")
+	}
+	if a := h.opts.Admission; a != nil {
+		b.WriteString(a.configYAML())
+	}
+	if h.opts.Multi {
+		// D116: a multi-tenant gate's services are rows (tenants.go), never a services: block.
+		b.WriteString("tenancy: multi\n")
+		h.configPath = filepath.Join(h.Dir, "kontra.yaml")
+		return os.WriteFile(h.configPath, []byte(b.String()), 0o600)
 	}
 	b.WriteString("services:\n")
 	names := slices.Collect(mapKeys(h.Upstreams))
@@ -649,7 +737,18 @@ signing_key: %q
 			names = append(names, name)
 		}
 	}
+	for name := range h.opts.Direct {
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
 	slices.Sort(names)
+	allowOf := func(name string) string {
+		if a, ok := h.opts.Allow[name]; ok {
+			return yamlList(a)
+		}
+		return `["org:default"]`
+	}
 	for _, name := range names {
 		if ts, ok := h.opts.Tunnel[name]; ok {
 			r := retries
@@ -659,26 +758,32 @@ signing_key: %q
 			fmt.Fprintf(&b, `  %s:
     kind: a2a
     backend: { tunnel: {} }
-    allow: ["org:default"]
+    allow: %s
     task: { timeout: 10m, retries: %d }
-`, name, r)
+`, name, allowOf(name), r)
 			if ts.Sealed != "" {
 				fmt.Fprintf(&b, "    sealed: %s\n", ts.Sealed)
 			}
 			if ts.Listed {
 				b.WriteString("    listed: true\n")
 			}
+			b.WriteString(h.opts.ServiceYAML[name])
 			continue
+		}
+		u, ok := h.opts.Direct[name]
+		if !ok {
+			u = h.Upstreams[name].URL()
 		}
 		fmt.Fprintf(&b, `  %s:
     kind: a2a
     backend: { a2a: { url: %q, allow_private: true } }
-    allow: ["org:default"]
+    allow: %s
     task: { timeout: 10m, retries: %d }
-`, name, h.Upstreams[name].URL(), retries)
+`, name, u, allowOf(name), retries)
 		if keys, ok := h.opts.SellerKeys[name]; ok {
 			fmt.Fprintf(&b, "    seller_keys: %s\n", keys)
 		}
+		b.WriteString(h.opts.ServiceYAML[name])
 	}
 	for _, name := range slices.Sorted(mapKeys(h.opts.MCP)) {
 		m := h.opts.MCP[name]
@@ -717,6 +822,7 @@ signing_key: %q
 			r = *m.Retries
 		}
 		fmt.Fprintf(&b, "    task: { timeout: 10m, retries: %d }\n", r)
+		b.WriteString(h.opts.ServiceYAML[name])
 	}
 	h.configPath = filepath.Join(h.Dir, "kontra.yaml")
 	return os.WriteFile(h.configPath, []byte(b.String()), 0o600)
@@ -800,6 +906,37 @@ func (h *Harness) startGate(name, configPath string, port, metricsPort, peerPort
 		case <-time.After(100 * time.Millisecond):
 		}
 		g.ReplicaID = readyReplica(g.LogPath)
+	}
+	return g, nil
+}
+
+// StartReplica starts one more replica, named name, from a copy of the shared kontra.yaml that edit rewrites (M4
+// WP-07: a gate configured otherwise on the same database, e.g. without auth.mcp_oauth), on loopback ports of its
+// own, and waits until it answers /healthz; Close kills it. The Front does not route to it.
+func (h *Harness) StartReplica(ctx context.Context, name string, edit func(config string) string) (*Gate, error) {
+	b, err := os.ReadFile(h.configPath)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(h.Dir, "kontra-"+name+".yaml")
+	if err := os.WriteFile(path, []byte(edit(string(b))), 0o600); err != nil {
+		return nil, err
+	}
+	ports, err := freePorts(2)
+	if err != nil {
+		return nil, err
+	}
+	g, err := h.startGate(name, path, ports[0], ports[1], 0)
+	if g != nil {
+		h.mu.Lock()
+		h.extra = append(h.extra, g)
+		h.mu.Unlock()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := h.waitReady(ctx, g, nil); err != nil {
+		return nil, err
 	}
 	return g, nil
 }
@@ -927,6 +1064,15 @@ func (h *Harness) Close() error {
 		}
 		if h.Front != nil {
 			h.Front.Close()
+		}
+		h.mu.Lock()
+		extra := slices.Clone(h.extra)
+		h.mu.Unlock()
+		for _, g := range extra {
+			if err := g.Kill(); err != nil {
+				errs = append(errs, err)
+			}
+			g.logFile.Close()
 		}
 		for _, g := range h.Gates {
 			if g != nil {

@@ -440,6 +440,7 @@ type legacyRun struct {
 	upstreamID map[int64]json.RawMessage // an input request's seq → the upstream's id for it
 	sent       map[int64]bool            // input_response seqs written upstream (by this dispatch, or recorded by one before it)
 	bytes      int64
+	limit      int64 // what bytes may reach: TaskBytes, or an anonymous tenant's parts_bytes budget (budget)
 	nextN      int
 	idTag      string // the run's own prefix of its ids (id)
 	msgs       chan streamMsg
@@ -493,6 +494,9 @@ func (r *legacyRun) run(ctx context.Context) (res lifecycle.DispatchResult) {
 		return lifecycle.DispatchResult{}
 	}
 	r.bytes = b
+	if err := r.budget(ctx); err != nil {
+		return lifecycle.DispatchResult{}
+	}
 	if err := r.loadRequests(ctx); err != nil {
 		return lifecycle.DispatchResult{}
 	}
@@ -972,6 +976,24 @@ func (r *legacyRun) ended(err error, reason string) (lifecycle.DispatchResult, b
 	return lifecycle.DispatchResult{}, true
 }
 
+// budget sets the dispatch's byte limit (spec §6.6): limits.task_bytes, or for a task of an anonymous tenant's
+// service its parts_bytes, counting the tenant's other tasks' bytes in r.bytes (spec/tunnel.md §6.2, D287).
+func (r *legacyRun) budget(ctx context.Context) error {
+	r.limit = r.d.taskBytes()
+	if r.d.Tenants == nil || r.row == nil {
+		return nil
+	}
+	others, limit, applies, err := r.d.Tenants.Budget(ctx, r.row.TenantID, "", r.taskID, r.d.taskBytes())
+	if err != nil {
+		return err
+	}
+	if applies {
+		r.bytes += others
+		r.limit = limit
+	}
+	return nil
+}
+
 // errOverTaskBytes is an event that would carry the task past limits.task_bytes (spec §6.6).
 var errOverTaskBytes = errors.New("mcprelay: the task's bytes would pass limits.task_bytes")
 
@@ -1007,7 +1029,7 @@ func (r *legacyRun) append(ctx context.Context, src writeSource, build func(row 
 				return store.Write{}, errCancelling
 			}
 			n = len(w.Payload)
-			if src == upstreamWrite && r.bytes+int64(n) > r.d.taskBytes() {
+			if src == upstreamWrite && r.bytes+int64(n) > r.limit {
 				return store.Write{}, errOverTaskBytes
 			}
 			return w, nil
@@ -1131,7 +1153,7 @@ func (r *legacyRun) inputRequest(ctx context.Context, m *mcpwire.Message) {
 	seq, err := r.d.Log.AppendInputRequest(context.WithoutCancel(ctx), r.fence, r.taskID, m.ID, func(gateID string) (json.RawMessage, error) {
 		b := rpcBody(gateID, m.Method, params)
 		n = len(b) + len(m.ID) + 32
-		if r.bytes+int64(n) > r.d.taskBytes() {
+		if r.bytes+int64(n) > r.limit {
 			return nil, errOverTaskBytes
 		}
 		return b, nil

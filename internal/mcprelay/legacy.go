@@ -48,6 +48,11 @@ func (h *Handler) initialize(rq *request) {
 		writeRefusal(rq.w, ref)
 		return
 	}
+	release, ok := h.takeRelay(rq)
+	if !ok {
+		return
+	}
+	defer release()
 	clientID, hash, err := MintID()
 	if err != nil {
 		h.internal(rq, "mint a session id", err)
@@ -383,6 +388,12 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 	if rq.r.Method == http.MethodGet {
+		// An anonymous tenant's stream slot for as long as the stream is open (§6.2, D304, D308).
+		release, ok := h.takeStream(rq)
+		if !ok {
+			return
+		}
+		defer release()
 		h.forward(rq, t, nil)
 		return
 	}
@@ -397,6 +408,11 @@ func (h *Handler) pinned(rq *request) {
 			writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "Method not found", nil)
 			return
 		}
+		release, ok := h.takeRelay(rq)
+		if !ok {
+			return
+		}
+		defer release()
 		h.forward(rq, t, nil)
 	}
 }
@@ -533,6 +549,9 @@ func (h *Handler) forward(rq *request, t target, meter *callMeter) {
 			return
 		}
 		o.method, o.reqID = m.Method, m.ID
+		// A notification or a client's response takes no calls slot (takeRelay): it is answered 202, never with what
+		// the upstream streams back (D307).
+		o.accepted = m.Method == "" || len(m.ID) == 0
 		if m.Method == mcpwire.MethodToolsCall {
 			x.RequestID = idString(m.ID)
 		}
@@ -803,6 +822,11 @@ func (h *Handler) toolsCall(rq *request, t target) {
 		writeRefusal(rq.w, ref)
 		return
 	}
+	release, ok := h.takeCall(rq)
+	if !ok {
+		return
+	}
+	defer release()
 	hash := rq.sess.Hash
 	meter := &callMeter{
 		start: rq.start, task: task,

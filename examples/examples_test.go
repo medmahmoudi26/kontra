@@ -47,8 +47,10 @@ func TestNoExampleImportsKontra(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A walk that saw nothing proves nothing: the booking seller must be among the files read.
-	if !slices.Contains(files, "sellers/booking/main.go") {
-		t.Fatalf("walked %q under examples/, want sellers/booking/main.go among them", files)
+	// A walk that saw nothing proves nothing: the Go sellers must be among the files read.
+	for _, want := range []string{"sellers/booking/main.go", "sellers/tck/main.go"} {
+		if !slices.Contains(files, want) {
+			t.Fatalf("walked %q under examples/, want %s among them", files, want)
+		}
 	}
 }

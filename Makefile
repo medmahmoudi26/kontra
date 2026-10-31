@@ -1,5 +1,5 @@
 # `make check` is what CI runs and what runs before every PR.
-.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e pentest-image pentest
+.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e tck test-kits pentest-image pentest
 
 # The system Go may be older than the module's toolchain (go 1.26, a2a-go v2.7.0 needs it); pin the one
 # the module names so every go command, and gofmt, come from the same toolchain.
@@ -50,9 +50,35 @@ test-race:
 test-e2e:
 	GO="$(GO)" scripts/test_e2e.sh $(ARGS)
 
+# The pinned A2A TCK against the gate (spec/relay.md §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, D279),
+# one variant per run: VARIANT=direct (the default) or tunnel (the seller examples/sellers/tck on the direct
+# backend, or hosted through `kontra connect`), caddy (the direct backend behind examples/front/caddy), auth (behind
+# a loopback front that adds a tck API key: ListTasks and push through the TCK, nightly). scripts/tck.sh starts a
+# Temporal development server from $KONTRA_TEMPORAL_CLI, a fresh database on $KONTRA_TEST_PG (or a postgres:17-alpine
+# container), the gate, the seller, the node and Caddy ($KONTRA_CADDY, 2.11.7) as processes, runs the TCK checkout
+# $KONTRA_TCK_DIR (a2a-tck d4d6fae) under uv for each binding with test/tck/kontra_xfail.py enforcing
+# test/tck/expected-failures.txt, and removes everything it started. One run at a time, never beside the e2e tests.
+VARIANT ?= direct
+tck:
+	GO="$(GO)" scripts/tck.sh $(VARIANT)
+
+# The gate-run kits (M4 WP-08, D298): test/vps and test/demo with Docker (KONTRA_KIT_TESTS=1). The gate image is built
+# once from the working tree with the docker driver's builder (kontra-gate:kit-<pid>) for both packages; then compose.yaml's
+# ACME variant comes up and writes its cache, scripts/team-gate-vps.sh --host runs its steps 4 and 5 against a stand-in
+# VPS on this host (its docker compose up --build builds the gate once more, as on the VPS, from `git archive HEAD`:
+# commit first; D313), the clean laptop's image is checked, and scripts/demo-clean-laptop.sh is rehearsed against a local
+# multi-tenant gate answering for gateway.kontra.run on a docker network (about 40 minutes; needs the internet for Go
+# modules and npm). Every image, container and volume is removed. One run at a time, never beside the e2e tests or a
+# pentest; nothing touches staging, DigitalOcean or Cloudflare (the runs are WP-09's).
+test-kits:
+	@set -u; img="kontra-gate:kit-$$$$"; \
+	clean() { docker image rm "$$img" >/dev/null 2>&1; true; }; trap clean EXIT INT TERM; \
+	BUILDX_BUILDER=default docker build -q --build-arg VERSION=kit -t "$$img" . && \
+	KONTRA_KIT_TESTS=1 KONTRA_KIT_GATE_IMAGE="$$img" $(GO) test -p 1 -count=1 -timeout 120m ./test/vps ./test/demo -v $(ARGS)
+
 # The pentest (M3 WP-10, D168, D186): PRD §12's list and M3's own surface against the compose team gate, built from
 # this repository under the compose project $(KONTRA_PENTEST_PROJECT) (m3pentest by default). pentest-image builds the
-# gate's image, $(KONTRA_PENTEST_IMAGE) (kontra-gate:m3 by default), once, with the docker driver's builder
+# gate's image, $(KONTRA_PENTEST_IMAGE) (kontra-gate:m4 by default), once, with the docker driver's builder
 # (BUILDX_BUILDER=default: never another project's builder); `go test` never builds it. Another checkout running its
 # pentest on the same Docker sets both to names of its own: one project would tear the other's stack down, one tag
 # run the other's gate. pentest runs
@@ -61,7 +87,7 @@ test-e2e:
 # processes the run starts die with the test binary (a parent-death signal). KONTRA_PENTEST_REPORT names the file the probe table is written to.
 KONTRA_PENTEST_TIMEOUT ?= 90m
 KONTRA_PENTEST_PROJECT ?= m3pentest
-KONTRA_PENTEST_IMAGE ?= kontra-gate:m3
+KONTRA_PENTEST_IMAGE ?= kontra-gate:m4
 export KONTRA_PENTEST_PROJECT KONTRA_PENTEST_IMAGE
 PENTEST_COMPOSE = docker compose -p $(KONTRA_PENTEST_PROJECT) -f compose.yaml -f compose.pentest.yaml
 

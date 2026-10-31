@@ -390,7 +390,7 @@ func (c *Config) validateSigningKey(v *validator, pub *url.URL) {
 	}
 }
 
-func (c *Config) validateAuth(v *validator) {
+func (c *Config) validateAuth(v *validator, pub *url.URL) {
 	if o := c.Auth.OIDC; o != nil {
 		if err := checkHTTPSURL(o.Issuer, false); err != nil {
 			v.add("auth.oidc.issuer: %v", err)
@@ -402,6 +402,13 @@ func (c *Config) validateAuth(v *validator) {
 	if m := c.Auth.MCPOAuth; m != nil {
 		if err := checkHTTPSURL(m.Issuer, false); err != nil {
 			v.add("auth.mcp_oauth.issuer: %v", err)
+		}
+		// D296: the resource server's RFC 9728 documents are at {public_url}/.well-known/oauth-protected-resource/mcp…,
+		// which is where RFC 9728 §3.1 puts them (the well-known path inserted after the host) only for a public_url
+		// without a path; kontra login reads them there, at the gate's origin (spec/tunnel.md §6.3).
+		if pub != nil && strings.Trim(pub.EscapedPath(), "/") != "" {
+			v.add("public_url %q: auth.mcp_oauth needs a public_url without a path (its RFC 9728 documents are at the "+
+				"origin's /.well-known/oauth-protected-resource/mcp, RFC 9728 §3.1; spec §12.1, D296)", redactURL(c.PublicURL))
 		}
 	}
 }
@@ -478,9 +485,13 @@ func (c *Config) validateHooks(v *validator) {
 				v.add("hooks.admission.operations: %q is not task, session or call", op)
 			}
 		}
-		// Not built until M5. Using the built-in hook instead would admit what the operator's hook
-		// would deny, so the gate refuses to start rather than fail open.
-		v.add("hooks.admission: the remote Admission hook is not built in this release (M5); remove it to use the built-in")
+		// The MCP relay bounds a modern client's shared Admission session decision at 30 s; a longer timeout would be
+		// cut there, with nothing logged, and kept on A2A and legacy MCP (spec §13.1, D284).
+		if h.Timeout.D() > MaxAdmissionWait {
+			v.add("hooks.admission.timeout %s: at most %s (spec §13.1)", h.Timeout, Duration(MaxAdmissionWait))
+		}
+		// Built in M4 (D275). The replica reads the secret from secret_env at start and refuses to start without it,
+		// as it does peer.secret_env's, so that `kontra-gate migrate` and `enroll` load the same file without it.
 	}
 	// The remote Lifecycle hook is accepted (D186): the five activities are scheduled by type name on the operator's
 	// queue (spec §13.3, lifecycle.WorkerConfig.RemoteHooks), and the built-in no-ops are then not registered.
@@ -498,6 +509,13 @@ func (c *Config) validateTunnel(v *validator) {
 		}
 	default:
 		v.add("tunnel.channel_binding %q: want tls-exporter or none", c.Tunnel.ChannelBinding)
+	}
+	a := c.Tunnel.Anonymous
+	if a.Enabled && c.Tenancy != TenancyMulti {
+		v.add("tunnel.anonymous: needs tenancy: multi, since an anonymous service's URL names its tenant (tunnel.md §6, D277)")
+	}
+	if a.HiringStreams > MaxAnonHiringStreams {
+		v.add("tunnel.anonymous.hiring_streams %d: at most %d, the gate's per-session stream cap (tunnel.md §14)", a.HiringStreams, MaxAnonHiringStreams)
 	}
 }
 
@@ -539,6 +557,11 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		if _, err := ParseAllowEntry(e); err != nil {
 			v.add("%s.allow: %v", at, err)
 		}
+	}
+	if slices.Contains(s.Allow, string(AllowOIDCAny)) && c.Auth.MCPOAuth == nil {
+		// Fails closed: no principal of kind oidc exists without an issuer (auth.oidc's are not built yet).
+		c.Warnings = append(c.Warnings, fmt.Sprintf("%s.allow: oidc:* admits nobody on this gate: no OIDC issuer is "+
+			"configured (auth.mcp_oauth, spec §12.1; D301)", at))
 	}
 
 	if s.Kind == KindA2A {
@@ -698,6 +721,7 @@ const (
 	AllowKey       AllowKind = "key"       // key:<prefix glob>
 	AllowOrg       AllowKind = "org"       // org:<tenant>
 	AllowOIDCSub   AllowKind = "oidc:sub"  // oidc:sub:<subject>
+	AllowOIDCAny   AllowKind = "oidc:*"    // oidc:*: every principal of the configured OIDC issuer (D301)
 	AllowNode      AllowKind = "node"      // node:<key_id>
 	AllowAnonymous AllowKind = "anonymous" // anonymous
 )
@@ -705,7 +729,7 @@ const (
 // AllowEntry is one parsed allow: entry.
 type AllowEntry struct {
 	Kind AllowKind
-	// Value is the prefix glob, tenant slug, subject or key id; empty for anonymous.
+	// Value is the prefix glob, tenant slug, subject or key id; empty for anonymous and oidc:*.
 	Value string
 }
 
@@ -718,25 +742,33 @@ var (
 	NodeKeyIDRE = regexp.MustCompile(`^k1_[a-z2-7]{26}$`)
 )
 
-// ParseAllowEntry parses one allow: entry: key:<prefix glob>, org:<tenant>, oidc:sub:<subject>,
-// node:<key_id> or anonymous. An unknown kind, and a key: glob that can never match a stored prefix (a
-// prefix is [A-Za-z0-9_]{4,32}, so write key:kk_acme_*, D68), are errors.
+// ParseAllowEntry parses one allow: entry: key:<prefix glob>, org:<tenant>, oidc:sub:<subject>, oidc:*,
+// node:<key_id> or anonymous. An unknown kind, a key: glob that can never match a stored prefix (a prefix is
+// [A-Za-z0-9_]{4,32}, so write key:kk_acme_*, D68), and oidc:sub:* (a subject is matched exactly, so it would admit
+// only the subject "*"; oidc:* is every subject, D301) are errors.
 func ParseAllowEntry(s string) (AllowEntry, error) {
 	if s != strings.TrimSpace(s) || s == "" {
 		return AllowEntry{}, fmt.Errorf("%q: an entry has no surrounding spaces", s)
 	}
-	if s == string(AllowAnonymous) {
+	switch s {
+	case string(AllowAnonymous):
 		return AllowEntry{Kind: AllowAnonymous}, nil
+	case string(AllowOIDCAny):
+		return AllowEntry{Kind: AllowOIDCAny}, nil
 	}
 	if sub, ok := strings.CutPrefix(s, "oidc:sub:"); ok {
-		if sub == "" {
+		switch sub {
+		case "":
 			return AllowEntry{}, fmt.Errorf("%q: oidc:sub: needs a subject", s)
+		case "*":
+			return AllowEntry{}, fmt.Errorf("%q: a subject is matched exactly, so this admits only the subject \"*\"; "+
+				"write oidc:* for every principal of the configured OIDC issuer (D301)", s)
 		}
 		return AllowEntry{Kind: AllowOIDCSub, Value: sub}, nil
 	}
 	kind, val, ok := strings.Cut(s, ":")
 	if !ok {
-		return AllowEntry{}, fmt.Errorf("%q: want key:, org:, oidc:sub:, node: or anonymous", s)
+		return AllowEntry{}, fmt.Errorf("%q: want key:, org:, oidc:sub:, oidc:*, node: or anonymous", s)
 	}
 	switch AllowKind(kind) {
 	case AllowKey:
@@ -766,30 +798,21 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 		}
 		return AllowEntry{Kind: AllowNode, Value: val}, nil
 	}
-	return AllowEntry{}, fmt.Errorf("%q: unknown allow: kind %q (want key:, org:, oidc:sub:, node: or anonymous)", s, kind)
+	return AllowEntry{}, fmt.Errorf("%q: unknown allow: kind %q (want key:, org:, oidc:sub:, oidc:*, node: or anonymous)", s, kind)
 }
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
 // (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
-// Validate instead (the remote hooks, sealed on a direct backend). seller_keys on an MCP service, which has no card
+// Validate instead (sealed on a direct backend). seller_keys on an MCP service, which has no card
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
 // served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
-// M3 WP-04; sealed: on tunnel services since M3 WP-08.
+// M3 WP-04; sealed: on tunnel services since M3 WP-08; tunnel.anonymous since M4 WP-03; auth.mcp_oauth since M4 WP-06
+// (D276).
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
 	if c.Auth.OIDC != nil {
 		note("auth.oidc: OIDC callers are not built in this release; their bearer tokens are refused (401)")
-	}
-	if c.Auth.MCPOAuth != nil {
-		// D170: the MCP OAuth resource server comes with the OIDC principals in M5; until then /mcp/{svc} accepts API
-		// keys and node principals, and a bearer JWT is refused (401).
-		note("auth.mcp_oauth: the MCP OAuth resource server is not built in this release (M5, D170); /mcp/{svc} accepts API keys and node principals")
-	}
-	if c.Tunnel.Anonymous {
-		// Fails closed: an M2 gate creates no anonymous tenant, so a hello with neither enroll nor auth from an
-		// unknown key is unknown_key (spec/tunnel.md §4, §6).
-		note("tunnel.anonymous: anonymous sessions are not built in this release (M4); a node key that is not enrolled is refused unknown_key")
 	}
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]

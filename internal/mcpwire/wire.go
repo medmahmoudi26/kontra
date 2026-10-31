@@ -71,6 +71,9 @@ const (
 	ExtTasks               = "io.modelcontextprotocol/tasks"
 	// KontraPrefix is the prefix of Kontra's own _meta keys (D27), which only the gate or the operator writes.
 	KontraPrefix = "sh.kontra/"
+	// MetaServerInfo is the _meta key of a 2026-07-28 server/discover result that names the server (DiscoverResult;
+	// the gate's own /mcp writes it, M4 WP-05).
+	MetaServerInfo = "io.modelcontextprotocol/serverInfo"
 	// MetaSessionIdle is the initialize result's _meta key in which the gate states the service's session_idle_s,
 	// the seconds an idle session is kept (spec/relay.md §11.2, D224): a hiring node keeps a sealed session's key
 	// that long.
@@ -503,6 +506,9 @@ type Refusal struct {
 	Body   []byte
 }
 
+// initializeNotificationBody is the answer to an initialize without an id (D312): §11.1's invalid request, id null.
+var initializeNotificationBody = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid request"}}`)
+
 // LegacyNoSessionBody is §11.12 rule 3's answer, what a legacy server sends a request without a session: a
 // dual-era client reads it as "not a modern server" and falls back to initialize.
 var LegacyNoSessionBody = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Bad Request: No valid session ID provided"}}`)
@@ -511,6 +517,11 @@ var LegacyNoSessionBody = []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32
 // initialize is legacy; MCP-Protocol-Version 2026-07-28 is modern; a legacy or absent header needs
 // Mcp-Session-Id, else the legacy 400 (-32000); any other version is -32022; GET and DELETE without a session
 // are 405.
+//
+// An initialize is a request (MCP lifecycle): one without an id is 400 with -32600 "invalid request" and id null,
+// as §11.1 refuses an invalid message, before anything is forwarded (D312). Routed on its method alone, it would
+// open a session no response can be matched to, and the relay would forward it as neither a request, which takes a
+// calls slot (D304), nor a notification, which is answered 202 (D307).
 //
 // GET and DELETE with a session take §11.1's versions as a POST does: 2025-11-25, 2025-06-18 or none is legacy, and
 // anything else is 400 with -32022 (id null), not forwarded with the pinned request.
@@ -547,6 +558,9 @@ func Classify(r *http.Request, m *Message) (Era, *Refusal) {
 		}
 	}
 	if m != nil && m.Method == MethodInitialize {
+		if len(m.ID) == 0 {
+			return 0, &Refusal{Status: http.StatusBadRequest, Body: initializeNotificationBody}
+		}
 		return EraLegacy, nil // rule 1, whatever the headers say
 	}
 	switch v := fieldValue(r.Header, HeaderProtocolVersion); v {

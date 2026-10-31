@@ -17,6 +17,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv/eventqueue"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/hooks"
@@ -59,8 +60,14 @@ type ReviewMessenger interface {
 //     (ext-sealed.md §3); a sealed: required service refuses an unsealed part with InvalidRequest
 //     (sealed_unsealed_part), and an optional one marks it metadata["kontra.sealed"] = false (§5). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
 //     blobs", §10.4), and so is a contextId or messageId over 256 characters (§4), before any task row.
-//  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow in M1. The pre-minted task
-//     id and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
+//     Then an anonymous tenant's storage (spec/tunnel.md §6.2, D287; anonStorage): a message to an anonymous
+//     tenant's service whose encoding would take what the tenant stores past parts_bytes is InvalidParams
+//     "anonymous storage limit", before Admission and any task row.
+//  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow, or the remote hook
+//     (hooks.RemoteAdmission, M4 D275). It fails closed: a hook error, a decision whose maps break §13.2's rules,
+//     and a quote whose approveUrl is not an absolute https:// URL or whose expiresAt is not in the future
+//     (hooks.CheckQuote, D284) are -32603 "admission unavailable", HTTP 503 on HTTP+JSON. The pre-minted task id
+//     and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
 //  5. Follow-up checks (spec §7): a message with a taskId is refused UnsupportedOperationError unless the
 //     task is input-required; a taskId/contextId disagreement is InvalidParams; a terminal task is
 //     UnsupportedOperationError (a2a-go itself answers InvalidParams there); a review-window message is
@@ -71,6 +78,9 @@ type ReviewMessenger interface {
 //     the work queue saves an inline config with the task. A follow-up's inline config is checked only
 //     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
 //     is never refused for a DNS change.
+//     Then resends (spec §9, §15; resendAnswer, D290): a blocking SendMessage that repeats a request whose
+//     task stands at input-required, quoted or auth-required is answered with that task as an early response (a
+//     quoted task's start re-issued first, through Starts).
 //  7. Large parts (spec §10.4, D167; largeParts): with a bucket, each part over 256 KiB of a new task's first
 //     message (an object of the pre-minted task) or of an input-required task's follow-up is stored and replaced
 //     by its url part kontra-blob:<ref>; the rows are pending on the context for the transaction that creates
@@ -101,6 +111,29 @@ type Interceptors struct {
 	Bucket blob.Store
 	// Render renders the kontra-blob: parts of every answer as presigned GETs; nil renders nothing.
 	Render *blob.Renderer
+	// Logger logs why Admission refused a message (the caller sees only "admission unavailable"); nil logs nothing.
+	Logger *slog.Logger
+	// Starts re-issues a resend's start before a resend of a quoted task is answered at once (resendAnswer,
+	// D290): the service's lifecycle.Queue. Nil leaves such a resend to the work queue, which waits for the end
+	// of the quote.
+	Starts StartReissuer
+	// Anon checks a message to an anonymous tenant's service against its parts_bytes (spec/tunnel.md §6.2;
+	// *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
+	Anon AnonStorage
+}
+
+// AnonStorage checks a caller's message of n bytes to a service of tenant svcTenant (slug svcSlug) against an
+// anonymous tenant's parts_bytes, before any task row: an error wrapping anon.ErrStorageFull when it would not fit.
+// *anon.Caps implements it.
+type AnonStorage interface {
+	Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string, n int64) error
+}
+
+// StartReissuer re-issues the start of the task a resend repeats, with its first work item, as the work queue does
+// for a resend (spec §14.5): idempotent, and a task whose start was lost gets its workflow. lifecycle.Queue
+// implements it.
+type StartReissuer interface {
+	ReissueStart(ctx context.Context, prev *store.TaskRow) error
 }
 
 // interceptor adapts a Before function to a2asrv.CallInterceptor.
@@ -126,9 +159,11 @@ func (i *Interceptors) Chain() []a2asrv.CallInterceptor {
 		&finishedTurn{i: &ii},
 		interceptor(ii.anonymous),
 		interceptor(ii.callerKeys),
+		interceptor(ii.anonStorage),
 		interceptor(ii.admission),
 		interceptor(ii.followUp),
 		interceptor(ii.pushURLs),
+		interceptor(ii.resendAnswer),
 		&largeParts{i: &ii},
 		&CancelInterceptor{Svc: ii.Svc, Log: ii.Log, Canceler: ii.Canceler},
 		interceptor(extendedCard),
@@ -172,6 +207,33 @@ func (i *Interceptors) anonymous(ctx context.Context, cc *a2asrv.CallContext, re
 		if r, ok := req.Payload.(*a2a.SendMessageRequest); ok && r.Config != nil && r.Config.PushConfig != nil {
 			return ctx, nil, unsupported("push notifications are not available to anonymous callers")
 		}
+	}
+	return ctx, nil, nil
+}
+
+// anonStorage refuses a message to an anonymous tenant's service that would take the tenant's stored bytes past
+// parts_bytes (spec/tunnel.md §6.2, D287): InvalidParams "anonymous storage limit", before Admission and any task
+// row. The message counts as its encoding, as relay.md §6.6 counts each logged event (D103).
+func (i *Interceptors) anonStorage(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	if i.Anon == nil || !anon.IsSlug(i.Svc.Tenant) {
+		return ctx, nil, nil
+	}
+	p, ok := req.Payload.(*a2a.SendMessageRequest)
+	if !ok || p == nil || p.Message == nil {
+		return ctx, nil, nil
+	}
+	b, err := json.Marshal(p.Message)
+	if err != nil {
+		return ctx, nil, invalid("the message does not encode")
+	}
+	switch err := i.Anon.Message(ctx, i.Svc.TenantID, i.Svc.Tenant, int64(len(b))); {
+	case errors.Is(err, anon.ErrStorageFull):
+		return ctx, nil, invalid(anon.ErrStorageFull.Error())
+	case err != nil:
+		if i.Logger != nil {
+			i.Logger.Warn("relay: an anonymous tenant's storage could not be read; the message is refused", "service", i.Svc.Name, "error", err)
+		}
+		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "the gate could not check the anonymous session's storage")
 	}
 	return ctx, nil, nil
 }
@@ -293,6 +355,13 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 			}
 		}
 	}
+	// A hire of /mcp activates the operator's required extensions for its buyer (§12.2, D300): Admission is told so as
+	// it is told of an A2A caller's.
+	for _, u := range hireActivated(ctx) {
+		if !slices.Contains(ar.Extensions, u) {
+			ar.Extensions = append(ar.Extensions, u)
+		}
+	}
 	for _, part := range r.Message.Parts {
 		if part == nil {
 			continue
@@ -304,16 +373,19 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 	d, err := i.Admit.Admit(ctx, ar)
 	if err != nil {
 		// Admission fails closed (spec §13.1).
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		i.logRefusal("admission failed; the message is refused (it fails closed)", "service", i.Svc.Name, "error", err)
+		return ctx, nil, admissionUnavailable()
 	}
 	if err := i.Rules.CheckOperatorMaps(d.Metadata, d.MCPMeta); err != nil {
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		i.logRefusal("an Admission decision's metadata was refused; the message is refused", "service", i.Svc.Name, "error", err)
+		return ctx, nil, admissionUnavailable()
 	}
 	switch d.Outcome {
 	case hooks.Allow:
 	case hooks.Quote:
-		if d.Quote == nil || !strings.HasPrefix(d.Quote.ApproveURL, "https://") || d.Quote.ExpiresAt == "" {
-			return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		if err := hooks.CheckQuote(d.Quote, time.Now()); err != nil {
+			i.logRefusal("an Admission quote was refused; the message is refused", "service", i.Svc.Name, "error", err)
+			return ctx, nil, admissionUnavailable()
 		}
 	case hooks.Deny:
 		code, msg := a2a.ErrUnauthorized, "admission denied"
@@ -327,9 +399,23 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 		}
 		return ctx, nil, a2a.NewError(code, msg)
 	default:
-		return ctx, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
+		return ctx, nil, admissionUnavailable()
 	}
 	return hooks.WithAdmitted(ctx, hooks.Admitted{TaskID: string(taskID), Decision: d}), nil, nil
+}
+
+// admissionUnavailable is Admission failing closed (spec §13.1): -32603 "admission unavailable", which the HTTP+JSON
+// binding answers 503 (the error carries lifecycle.ErrUnavailable for sse.HTTPError, as an Update not accepted in
+// time does).
+func admissionUnavailable() error {
+	return unavailableError{a2a.NewError(a2a.ErrInternalError, "admission unavailable")}
+}
+
+// logRefusal logs why a message was refused when the interceptors have a logger.
+func (i *Interceptors) logRefusal(msg string, args ...any) {
+	if i.Logger != nil {
+		i.Logger.Warn("relay: "+msg, args...)
+	}
 }
 
 // errorForCode maps a JSON-RPC error code (an Admission refusal's, an upstream's) to a2a-go's sentinel.

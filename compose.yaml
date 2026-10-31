@@ -1,32 +1,39 @@
 # The team gate on one host (D43, D168): the gate built from this repository's Dockerfile, terminating TLS itself
-# from a provided certificate (no proxy in front, as on a VPS), temporalio/server 1.32.1 with its dynamic
-# configuration and two one-shot temporalio/admin-tools jobs (the schema, the kontra namespace), and Postgres 16.
-# Only the gate's public listener is published, and its metrics on loopback; Temporal and Postgres are reachable on
-# the compose network only (spec/relay.md §14.4).
+# (no proxy in front, as on a VPS), temporalio/server 1.32.1 with its dynamic configuration and two one-shot
+# temporalio/admin-tools jobs (the schema, the kontra namespace), and Postgres 16. Only the gate's public listener is
+# published, and its metrics on loopback; Temporal and Postgres are reachable on the compose network only
+# (spec/relay.md §14.4).
 #
-#   # deploy/compose/kontra.yaml says what to edit and where the certificate and the signing key go.
+# Two configurations, chosen with KONTRA_CONFIG (each file says what to edit):
+#   - deploy/compose/kontra.yaml (the default): TLS from a certificate you provide, in deploy/compose/tls/;
+#   - deploy/compose/kontra.vps.yaml: built-in ACME (TLS-ALPN-01, D82) for a fresh VPS with a DNS name and no
+#     certificate yet (D281). Publish it on port 443 (KONTRA_PORT=443): the CA validates there. The certificate
+#     and the ACME account key stay in the named volume acme, mounted at /var/lib/kontra-gate (the image creates that
+#     directory owned by the gate's uid, 65532, so a new volume is writable).
+#
 #   docker compose up -d --build --wait
 #   docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml --api-key me     # an API key, once
 #   docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml hello            # a node's token
 #   kontra connect --gate https://<public_url host> --enroll <token> --serve a2a:hello=http://127.0.0.1:9999
-#   docker compose down            # -v also drops the databases
+#   docker compose down            # -v also drops the databases and the ACME cache
 #
 # Settings, from the environment or an .env file beside this one:
-#   KONTRA_LISTEN_ADDR, KONTRA_PORT   where the public listener is published (default 0.0.0.0:8443)
+#   KONTRA_LISTEN_ADDR, KONTRA_PORT   where the public listener is published (default every address, IPv4 and IPv6,
+#                                    port 8443; 443 for ACME); an address restricts it (127.0.0.1, or [::1])
 #   KONTRA_METRICS_PORT              the metrics listener, on 127.0.0.1 (default 9090)
 #   KONTRA_CONFIG                    the configuration file (default deploy/compose/kontra.yaml)
 #   KONTRA_TLS_DIR, KONTRA_SIGNING_DIR   the certificate's and the signing key's directories (default
 #                                    deploy/compose/tls and deploy/compose/signing), mounted read-only
 #   KONTRA_DB_PASSWORD, TEMPORAL_DB_PASSWORD, POSTGRES_PASSWORD   the database roles' passwords, read when the
-#                                    Postgres volume is first initialised (kontra's is also in kontra.yaml)
+#                                    Postgres volume is first initialised (kontra's is also in the configuration)
 #
-# The pentest (test/pentest, M3 WP-10) runs this file with compose.pentest.yaml under the project m3pentest.
+# The healthcheck dials the gate's own listener with public_url's host as the TLS server name (-f): built-in ACME
+# refuses a handshake without one. The pentest (test/pentest, M3 WP-10) runs this file with compose.pentest.yaml under
+# the project m3pentest; test/vps runs the ACME variant (KONTRA_KIT_TESTS=1).
 
+# The gate's settings, shared by gate-migrate and gate. The image is built by the gate service alone (D313).
 x-gate: &gate
-  image: kontra-gate:m3
-  build:
-    context: .
-    args: { VERSION: m3 }
+  image: kontra-gate:m4
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -34,6 +41,7 @@ x-gate: &gate
     - ${KONTRA_CONFIG:-./deploy/compose/kontra.yaml}:/etc/kontra/kontra.yaml:ro
     - ${KONTRA_TLS_DIR:-./deploy/compose/tls}:/etc/kontra/tls:ro
     - ${KONTRA_SIGNING_DIR:-./deploy/compose/signing}:/etc/kontra/signing:ro
+    - acme:/var/lib/kontra-gate # built-in ACME's cache (tls.acme.cache_dir); unused with a provided certificate
 
 x-temporal-env: &temporal-env
   DB: postgres12
@@ -120,7 +128,9 @@ services:
     restart: "no"
 
   # One-shot: the gate's own schema (kontra-gate migrate, D28), before any replica serves. migrate waits up to a minute
-  # for a database that refuses connections (one still starting) before it gives up.
+  # for a database that refuses connections (one still starting) before it gives up. It runs the image the gate service
+  # builds and builds none itself (D313); compose builds every image before it creates any container. Run alone, it
+  # needs that image first: docker compose build gate && docker compose run --rm gate-migrate.
   gate-migrate:
     <<: *gate
     command: ["migrate", "-f", "/etc/kontra/kontra.yaml", "up"]
@@ -130,12 +140,19 @@ services:
 
   gate:
     <<: *gate
+    # The one service that builds kontra-gate:m4; gate-migrate runs the image it builds (D313). Two services building
+    # one tag race on Docker 29's containerd image store (a fresh Ubuntu 24.04's docker.io, compose 2.40): the second
+    # export fails with image "docker.io/library/kontra-gate:m4": already exists (the M4 VPS gate run, 31 Oct).
+    build:
+      context: .
+      args: { VERSION: m4 }
     command: ["serve", "-f", "/etc/kontra/kontra.yaml"]
     ports:
-      - "${KONTRA_LISTEN_ADDR:-0.0.0.0}:${KONTRA_PORT:-8443}:8443"
+      - "${KONTRA_LISTEN_ADDR:+${KONTRA_LISTEN_ADDR:-}:}${KONTRA_PORT:-8443}:8443"
       - "127.0.0.1:${KONTRA_METRICS_PORT:-9090}:9090"
     healthcheck:
-      test: ["CMD", "/usr/local/bin/kontra-gate", "health", "--url", "https://127.0.0.1:8443/healthz"]
+      test: ["CMD", "/usr/local/bin/kontra-gate", "health", "--url", "https://127.0.0.1:8443/healthz",
+             "-f", "/etc/kontra/kontra.yaml"]
       interval: 3s
       timeout: 6s
       retries: 60
@@ -148,3 +165,4 @@ services:
 
 volumes:
   postgres: {}
+  acme: {}

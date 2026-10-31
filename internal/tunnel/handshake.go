@@ -64,6 +64,7 @@ type Hello struct {
 	Auth       string    `json:"auth,omitempty"`        // an API key: the hiring principal, and with an enroll: scope an authority to enroll
 	RotateFrom *KeyRef   `json:"rotate_from,omitempty"` // the key this one replaces (§12)
 	Public     []string  `json:"public,omitempty"`      // anonymous sessions only (§6, M4)
+	Anonymous  bool      `json:"anonymous,omitempty"`   // true only: the node asks for an anonymous session (§4, §6, D285)
 	Agent      string    `json:"agent"`                 // kontra/<version> (<os>/<arch>)
 
 	Raw []byte `json:"-"` // the message exactly as received or sent

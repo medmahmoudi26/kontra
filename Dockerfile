@@ -5,7 +5,10 @@
 #
 # The image holds the binary only: kontra.yaml is mounted (charts/kontra mounts it at /etc/kontra), the
 # migrations are embedded (kontra-gate migrate), and the ACME directory cache, when built-in ACME is on, is a
-# volume (charts/kontra mounts one at /var/lib/kontra-gate). The root filesystem can be read-only.
+# volume at /var/lib/kontra-gate (charts/kontra and compose.yaml mount one there). The root filesystem can be
+# read-only. /var/lib/kontra-gate exists in the image, empty and owned by nonroot (65532:65532): Docker initialises a
+# new named volume from the directory it is mounted on, ownership included, so the gate can write its cache into
+# compose's volume (the M4 plan's audit, gaps 17).
 
 # The module's toolchain (go.mod: toolchain go1.26.10). Pinned by version; a digest is not required.
 ARG GO_VERSION=1.26.10
@@ -22,9 +25,12 @@ ARG VERSION=dev
 RUN go build -trimpath -buildvcs=false \
       -ldflags "-s -w -X kontra.sh/kontra/internal/version.Version=${VERSION}" \
       -o /out/kontra-gate ./cmd/kontra-gate
+# The final stage has no shell to mkdir with: an empty directory, copied with its owner.
+RUN mkdir -p /out/var-lib-kontra-gate
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/kontra-gate /usr/local/bin/kontra-gate
+COPY --from=build --chown=65532:65532 /out/var-lib-kontra-gate /var/lib/kontra-gate
 USER nonroot:nonroot
 # The public listener (listen:, 8443 behind a TCP passthrough) and the metrics listener (metrics.listen).
 EXPOSE 8443 9090

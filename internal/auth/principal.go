@@ -4,9 +4,10 @@
 // M1 accepts API keys (Authorization: Bearer <key>, stored as sha256) and the anonymous principal on
 // services whose allow: list contains `anonymous`. M3 adds the requests a node opens on its tunnel session
 // (spec/tunnel.md §9): they carry no credential of their own and take the session's principal, the handshake's
-// API key re-validated on every request or node:<key_id> (HireSource). OIDC JWTs and MCP OAuth are later
-// milestones; their kinds are declared here so allow: lists parse the same way from M1 on, and a bearer token
-// that is not an API key of this gate is 401.
+// API key re-validated on every request or node:<key_id> (HireSource). M4 makes the MCP routes an OAuth resource
+// server when auth.mcp_oauth is set (spec §12.1; AuthenticateMCP, internal/oidc): a JWT for the route's canonical URI
+// is oidc:sub:<sub> with via mcp there. OIDC JWTs on the A2A routes are M5's: there a bearer token that is not an API
+// key of this gate is 401.
 //
 // Revocation is checked on every request against a per-replica RevocationCache, refreshed by NOTIFY
 // kontra_revoke and re-read from Postgres at least every 5 s; APIKeys keeps verified keys in memory for a

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -11,6 +12,8 @@ import (
 
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/gatemcp"
+	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/store"
 )
 
@@ -26,6 +29,11 @@ const (
 	// IdleInterval is how often the MCP sessions idle past their service's session_idle_s are closed (spec
 	// §11.2).
 	IdleInterval = time.Minute
+	// AnonExpireInterval is how often every replica ends the anonymous tenants past their expires_at (spec/tunnel.md
+	// §6.1): their services answer 404 within it, or at once when the replica holding the session ended it (its
+	// clock kicks the sweep). AnonPurgeInterval is how often the tenants expired purge_after ago are purged.
+	AnonExpireInterval = 5 * time.Second
+	AnonPurgeInterval  = time.Minute
 )
 
 // Per-pass bounds. A pass checks at most OrphanBudget candidates (one Temporal DescribeWorkflowExecution
@@ -45,8 +53,24 @@ type WorkflowChecker interface {
 }
 
 // RunSweeps runs the sweeps until ctx ends, each once at start and then on its interval. Any replica may
-// run them; each pass is idempotent.
+// run them; each pass is idempotent. It returns once every sweep has stopped.
 func (r *Replica) RunSweeps(ctx context.Context) error {
+	// The anonymous sweeps (a gate with tunnel.anonymous only) run on goroutines of their own, the expiry apart from
+	// the purge: a purge waiting on the bucket holds neither the expiry, which disables the services of the tenants
+	// past their end, nor the sweeps below (the M4 WP-03 review).
+	var anonSweeps sync.WaitGroup
+	defer anonSweeps.Wait()
+	if r.anonSweeper != nil {
+		anonSweeps.Add(2)
+		go func() {
+			defer anonSweeps.Done()
+			r.runAnonExpiry(ctx)
+		}()
+		go func() {
+			defer anonSweeps.Done()
+			r.runAnonPurge(ctx)
+		}()
+	}
 	orphans := time.NewTicker(r.opts.orphanEvery)
 	defer orphans.Stop()
 	retention := time.NewTicker(r.opts.retentionEvery)
@@ -76,6 +100,69 @@ func (r *Replica) RunSweeps(ctx context.Context) error {
 	}
 }
 
+// runAnonExpiry runs the anonymous expiry sweep until ctx ends: at once, on its interval, and when kicked.
+func (r *Replica) runAnonExpiry(ctx context.Context) {
+	every := time.NewTicker(r.opts.anonExpireEvery)
+	defer every.Stop()
+	r.sweepAnonExpiry(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-every.C:
+			r.sweepAnonExpiry(ctx)
+		case <-r.anonKick:
+			r.sweepAnonExpiry(ctx)
+		}
+	}
+}
+
+// runAnonPurge runs the anonymous purge until ctx ends: at once, then on its interval (a pass is bounded,
+// anon.Sweeper.Purge; a tick that comes during a pass is dropped).
+func (r *Replica) runAnonPurge(ctx context.Context) {
+	every := time.NewTicker(r.opts.anonPurgeEvery)
+	defer every.Stop()
+	r.sweepAnonPurge(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-every.C:
+			r.sweepAnonPurge(ctx)
+		}
+	}
+}
+
+// kickAnonExpiry asks the anonymous expiry sweep to run now (a session this replica holds reached its end).
+func (r *Replica) kickAnonExpiry() {
+	select {
+	case r.anonKick <- struct{}{}:
+	default:
+	}
+}
+
+// sweepAnonExpiry ends the anonymous tenants past their expires_at (spec/tunnel.md §6.1, anon.Sweeper.Expire): their
+// bindings revoked and services disabled on every replica, their sessions told {"t": "revoked"}.
+func (r *Replica) sweepAnonExpiry(ctx context.Context) {
+	n, err := r.anonSweeper.Expire(ctx)
+	if err != nil && ctx.Err() == nil {
+		r.log.Warn("anonymous expiry sweep", "error", err, "ended", n)
+	} else if n > 0 {
+		r.log.Info("anonymous expiry sweep: anonymous sessions ended", "tenants", n)
+	}
+}
+
+// sweepAnonPurge purges the anonymous tenants expired purge_after ago (spec/tunnel.md §6.1, anon.Sweeper.Purge),
+// bucket objects first; the tenant rows stay as tombstones.
+func (r *Replica) sweepAnonPurge(ctx context.Context) {
+	n, err := r.anonSweeper.Purge(ctx)
+	if err != nil && ctx.Err() == nil {
+		r.log.Warn("anonymous purge sweep", "error", err, "purged", n)
+	} else if n > 0 {
+		r.log.Info("anonymous purge sweep: expired anonymous tenants purged", "tenants", n)
+	}
+}
+
 // sweepIdle closes the MCP sessions idle past their service's session_idle_s, with a best-effort upstream DELETE
 // (spec §11.2): those whose tunnels this replica holds, and those of direct backends.
 func (r *Replica) sweepIdle(ctx context.Context) {
@@ -84,6 +171,10 @@ func (r *Replica) sweepIdle(ctx context.Context) {
 	}
 	if _, err := r.mcp.SweepIdle(ctx); err != nil && ctx.Err() == nil {
 		r.log.Warn("mcp idle sweep", "error", err)
+	}
+	// The gate's own /mcp's sessions (relay.md §12; M4 WP-04): service NULL, an hour idle.
+	if _, err := mcprelay.NewSessions(r.pool).SweepGateIdle(ctx, gatemcp.SessionIdle, time.Now()); err != nil && ctx.Err() == nil {
+		r.log.Warn("/mcp idle sweep", "error", err)
 	}
 }
 

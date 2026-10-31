@@ -194,6 +194,47 @@ func classify(err error, msg string) error {
 // has ended (the validator's refusal, or a workflow that has closed) is an error wrapping
 // a2a.ErrTaskNotCancelable; a cancel not accepted in time wraps ErrUnavailable.
 func (c *Client) Cancel(ctx context.Context, taskID a2a.TaskID) (res CancelResult, ok bool, err error) {
+	return c.cancel(ctx, taskID, CancelUpdate{})
+}
+
+// CancelMCP is Cancel in MCP mode (CancelModeMCP): MCP's tasks/cancel of a task of any protocol (spec §11.6, D57), the
+// /mcp tasks/cancel of a hire task (relay.md §12.2). The workflow writes canceled within 10 s whatever the upstream
+// answers; a task that has ended is an error wrapping a2a.ErrTaskNotCancelable.
+func (c *Client) CancelMCP(ctx context.Context, taskID a2a.TaskID) (res CancelResult, ok bool, err error) {
+	return c.cancel(ctx, taskID, CancelUpdate{Mode: CancelModeMCP})
+}
+
+// RequestCancelMCP sends kontra.cancel in MCP mode and returns once the workflow has accepted it, within AcceptWait,
+// without waiting for its result: the workflow writes canceled within 10 s whatever the upstream answers (spec §11.6,
+// D57), so the /mcp cancels nobody waits for (a modern tasks/cancel, a modern hire whose client left; relay.md §12.5)
+// need no more. A task that has ended is an error wrapping a2a.ErrTaskNotCancelable; a cancel not accepted in time
+// wraps ErrUnavailable.
+func (c *Client) RequestCancelMCP(ctx context.Context, taskID a2a.TaskID) error {
+	id, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	actx, cancel := context.WithTimeout(ctx, AcceptWait)
+	defer cancel()
+	h, err := c.c.UpdateWorkflow(actx, client.UpdateWorkflowOptions{
+		WorkflowID: WorkflowID(taskID), UpdateName: UpdateCancel, UpdateID: "cancel-" + id.String(),
+		Args: []any{CancelUpdate{Mode: CancelModeMCP}}, WaitForStage: client.WorkflowUpdateStageAccepted,
+	})
+	if err != nil {
+		return classifyCancel(err)
+	}
+	// The validator's refusal comes back with the handle, which the SDK answers at once; an accepted cancel's Get would
+	// poll for its result, so it is asked on a context that has already ended and its timeout means accepted.
+	ended, end := context.WithCancel(ctx)
+	end()
+	var timeout *client.WorkflowUpdateServiceTimeoutOrCanceledError
+	if err := h.Get(ended, nil); err != nil && !errors.As(err, &timeout) && !errors.Is(err, context.Canceled) {
+		return classifyCancel(err)
+	}
+	return nil
+}
+
+func (c *Client) cancel(ctx context.Context, taskID a2a.TaskID, u CancelUpdate) (res CancelResult, ok bool, err error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return CancelResult{}, false, err
@@ -202,7 +243,7 @@ func (c *Client) Cancel(ctx context.Context, taskID a2a.TaskID) (res CancelResul
 	defer cancel()
 	h, err := c.c.UpdateWorkflow(actx, client.UpdateWorkflowOptions{
 		WorkflowID: WorkflowID(taskID), UpdateName: UpdateCancel, UpdateID: "cancel-" + id.String(),
-		Args: []any{CancelUpdate{}}, WaitForStage: client.WorkflowUpdateStageAccepted,
+		Args: []any{u}, WaitForStage: client.WorkflowUpdateStageAccepted,
 	})
 	if err != nil {
 		return CancelResult{}, false, classifyCancel(err)

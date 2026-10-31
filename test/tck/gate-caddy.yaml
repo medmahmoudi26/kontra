@@ -1,0 +1,25 @@
+# The TCK's gate behind examples/front/caddy: tck_behind_caddy (spec/relay.md §2.2, §16; D18, D279). A template
+# that scripts/tck.sh fills (@LISTEN@, @PUBLIC_URL@, @POSTGRES@, @TEMPORAL@, @SELLER@) and runs from a fresh
+# database: `make tck VARIANT=caddy`. Caddy terminates TLS for public_url (https, on loopback, with its local CA)
+# and proxies to the gate's plaintext listener; the TCK only ever talks to Caddy, whose URL the served card names.
+#
+# tls.terminated_by_proxy lets the gate listen in plaintext with an https public_url; the client address is the
+# rightmost X-Forwarded-For hop that is not Caddy's, and only Caddy's connections are trusted for it (D69).
+# Anonymous and push.allow_private as in gate-direct.yaml (D18, D20, D67).
+listen: "@LISTEN@"
+public_url: "@PUBLIC_URL@"
+tls: { terminated_by_proxy: true }
+edge:
+  client_ip: { from: x_forwarded_for, trusted: ["127.0.0.1/32", "::1/128"] }
+postgres: "@POSTGRES@"
+temporal: { address: "@TEMPORAL@", namespace: kontra }
+metrics: { listen: "127.0.0.1:0" }
+drain_timeout: 2s
+push: { allow_private: true }
+
+services:
+  tck:
+    kind: a2a
+    backend: { a2a: { url: "@SELLER@", allow_private: true } }
+    allow: [anonymous]
+    task: { timeout: 10m, retries: 2 }

@@ -204,6 +204,7 @@ PRD §12 principals: `key:`, `org:`, `oidc:sub:`. Hiring through a node and the 
 service, never implied). Consequence, accepted: all anonymous callers of a team gate (and of one tenant on a
 multi-tenant gate) share one buyer, so their tasks are readable and cancellable by anyone holding the task id;
 `ListTasks`, `tasks/list` and push configs are refused for them ([`relay.md`](../spec/relay.md) §2.3).
+Amended by D301 (`oidc:*`, every principal of the configured OIDC issuer).
 
 ## MCP
 
@@ -2188,7 +2189,7 @@ Five things stopped the pentest from running as D168 and D169 describe it. The D
 Temporal's frontend, which `compose.yaml` does not publish; and the `hooks.lifecycle` key it needs is refused at
 load until M5 (`internal/config/validate.go`), although the gate's half (the hooks snapshot, and the five
 activities scheduled by type name on the configured queue, `lifecycle.WorkerConfig.RemoteHooks`) is built since
-M1. Port 8333, SeaweedFS's S3 default, is held on this host by `windmill-seaweedfs`. SigV4 presigning signs the
+M1. Port 8333, SeaweedFS's S3 default, is held on the build host by another container. SigV4 presigning signs the
 host, so a presigned GET works only through the endpoint the gate signed it for, which the gate's container and
 the host's attackers must both reach. `go test`'s default 10-minute timeout is shorter than building the gate
 image on 2 CPUs and running the targets, and would panic with the stack left up. And a key file bind-mounted
@@ -3543,3 +3544,1353 @@ review of sealing against a dishonest gate continues after the merge on its own 
 fix until a round confirms no blocker or major, starting with a review of round 4's fixes (D252–D265); it is tracked in
 an issue that lists the open residuals of [`ext-sealed.md`](../spec/ext-sealed.md) §7 (D227, D251, D252, D253, D255,
 D256). Sealing stays opt-in, and §7 states what it does not yet withstand.
+
+## From M4 planning (28 Oct)
+
+M4 builds the gate's own `/mcp`, anonymous sessions, `kontra login`, the pinned TCK in CI, the compose team gate on a
+VPS and the README demo against a staging gate. The owner's M4 goal (26 Oct): "the gate's own /mcp (search, describe,
+hire -> URL elicitation whose URL is the task thread, reply, MCP Tasks); anonymous sessions; pinned TCK in CI with
+expected-failures; compose.yaml team gate; README demo. Gate: tck_* green bar expected-failures, anon_limits, demo
+from a clean laptop against staging, team gate up on a clean VPS." The owner's final decisions (kontra-cloud#60, 26
+Oct) stand: the thread URL is `https://app.kontra.sh/#/t/<task>` (D188), there is no local console (D164),
+`gateway.kontra.sh` is the gate and `app.kontra.sh` the console, `kontra.run` is development and staging, the gate
+accepts Cloud's JWTs as OIDC principals, and the MCP authorization server lives in Cloud's control plane (M5). The
+owner said "Don't ask me anything": the entries below are **decided under the owner's standing instruction, 28 Oct**.
+They were built under provisional labels while M3's review added D entries on `main`, and were renumbered D268 to
+D298, after M3's last (D267), in every file of the repository when M4 was merged onto M3's final tree (29 Oct).
+
+### D268. What M4 builds, and what it leaves to M5 — **decided under the owner's standing instruction, 28 Oct** (amends D170, D225)
+
+D170 left [`relay.md`](../spec/relay.md) §12, `kontra login`, `--public` and anonymous sessions to M4, and the MCP
+OAuth resource server (§12.1) to M5 with the OIDC principals; the remote Admission hook has been refused at load since
+M1 (C3, D186). Decision: M4 builds §12 in both MCP eras (D269 to D274), the remote Admission hook of §13.1 (D275),
+the resource server of §12.1 (D276), [`tunnel.md`](../spec/tunnel.md) §6 with `--public`, expiry, tombstones and the
+§6.2 limits (D277), `kontra login` and the conversion it leads to (D278), the TCK job (D279), the README demo
+against a staging gate (D280) and the compose team gate on a VPS (D281). M5 keeps the authorization server, the
+accounts and the page on which a person accepts a quote (Cloud's control plane), OIDC principals on the A2A routes
+(`auth.oidc`, audience `kontra`) with Cloud's revocation feed, listings and `kontra publish`, anonymous sessions on
+`gateway.kontra.sh` (production keeps its team configuration until M5 swaps the deployment), and packaged installs
+(Homebrew, `curl | sh`). Why: every gate item of the goal can then be tested in this repository with in-repository
+doubles (an Admission server, an authorization server), and the gate code M5 needs from this repository (the
+resource server, the Admission client) is open-source code M5 would otherwise write here while its own work is in
+kontra-cloud. The open-source gate still contains no money code: Admission decides and never moves money (D45).
+Amended by D299 (what M3's review rounds, D225 and D231, left to M4: the two-replica test of D199's notice is built,
+the cap of a principal's durable tasks is not).
+
+### D269. The gate's own `/mcp` serves both eras, with the gate as the only server — **decided under the owner's standing instruction, 28 Oct** (carries out D24)
+
+§12 said "same transport and session rules as §11.1–§11.2, with the gate as the server", written before D24 put
+2026-07-28 on every MCP endpoint. `/mcp` has no upstream: nothing to pin, hop to or learn an era from. Decision
+([`relay.md`](../spec/relay.md) §12, §12.5): §11.1's rules and §11.12's classification (rules 1–5) apply as on
+`/mcp/{svc}`; a legacy session is an `mcp_sessions` row with `service` NULL and the principal's tenant (0001 already
+allows it), served by any replica; the gate answers `server/discover` itself, advertising the tasks extension; a
+modern `hire` that declares the extension is a task answered as §11.12 step 4 (in line within 2 s, else
+`CreateTaskResult`), one that does not is a plain call; `-32042` is legacy only (D161). No virtual session is opened
+and Admission's `session` operation is not consulted: `per_session` prices a service's sessions, and `/mcp` is not a
+service; Admission is asked about each `hire` (operation `task`).
+
+### D270. `/mcp` has no anonymous principal — **decided under the owner's standing instruction, 28 Oct**
+
+[`relay.md`](../spec/relay.md) §2.3 grants the `anonymous` principal only on a service whose `allow:` contains
+`anonymous`; `/mcp` is not a service, and its `tasks/list` would be refused to `anonymous` anyway (D20). Decision: a
+request to `/mcp` without a credential is `401` (with §12.1's challenge when `auth.mcp_oauth` is configured). A laptop
+on an anonymous session still reaches `/mcp` through its node, as the session's principal (`node:<key_id>`,
+[`tunnel.md`](../spec/tunnel.md) §9).
+
+### D271. Service refs, `search` and `describe` — **decided under the owner's standing instruction, 28 Oct**
+
+§12.2 names `ref`, `description`, `available`, the `price` filter and a cursor without saying what they are.
+Decision ([`relay.md`](../spec/relay.md) §12.2): a ref is the service's path segment (`<name>`, or `<tenant>/<name>` on
+a multi-tenant gate, the pattern [`mcp-tools.json`](../spec/schema/mcp-tools.json) already has); `query` matches a
+case-insensitive substring of the ref, the name or the description; `kind` and `price` filter by equality, `price` on
+the `price_model` annotation (§13.4), `free` matching a service without one; results are ordered by ref, 50 a page,
+and the cursor is an opaque keyset position that grants nothing, since every page is filtered for the principal. A
+description is the served card's (A2A), else the operator's `search.description` annotation, else the upstream's
+cached `serverInfo` (MCP). `describe` of an MCP service whose `tools/list` is not cached answers without `tools`
+(`toolsCached: false`) and starts §11.3's background drain, at most one per service per 10 minutes, so no request
+costs an upstream call, as §12.2 requires.
+
+### D272. What `hire` accepts, what plain calls wait for, and which tasks `/mcp` shows — **decided under the owner's standing instruction, 28 Oct**
+
+§12.2 has a plain `hire` answer `{taskId, state, approveUrl?}` at once, which leaves a client without MCP Tasks (most
+stock clients) no way to read a result; it does not say which tasks `tasks/list` on `/mcp` lists, nor what `hire`
+does with a sealed service, whose required sealing the gate cannot apply to MCP tool arguments. Decision
+([`relay.md`](../spec/relay.md) §12.2): a plain `hire` and every `reply` wait up to 25 s (below the 60 s request
+timeout of the MCP SDKs) for the task to end, ask a question or be quoted, and answer what the task then is, the
+ended task rendered as `tasks/result` renders it; a quoted task is answered at once (§12.3); a task still running is
+`{taskId, state}` with the A2A URL that follows it. A ref of an MCP service, or of a service whose sealing is
+required, is a `CallToolResult` with `isError` naming the route to use (sealing tool arguments is envelope v2's) and
+creates no task. Every task `hire` creates is marked (`tasks.hired`, migration 0003): the MCP Tasks of `/mcp` see only
+those, of the principal's buyer, and `tasks/list` lists them across services; `tasks/cancel` is §11.6's (D57), the
+upstream receiving §8's `CancelTask`. Amended by D289 (the structured result, and no `calls` rows).
+
+### D273. `notifications/elicitation/complete` reaches each open stream of the session once — **decided under the owner's standing instruction, 28 Oct**
+
+§12.3 sends the notification "on that session's `GET` stream, if one is open", but a session's stream may be on any
+replica, may be reopened by the client after a dropped connection, and the client's retry window is 10 minutes.
+Decision ([`relay.md`](../spec/relay.md) §12.3): each `GET` stream of the session that received the `-32042`, open
+when the task leaves `quoted` or opened within the 10 minutes after, gets the notification once, written by the
+replica holding the stream, which the task's events wake (§9); never another session's stream. `/mcp`'s `GET`
+streams carry no event ids and are not resumed: a client that missed the notification retries `hire`, which §12.3
+answers with the task's state. Amended by D288: one stream per session, never each stream.
+
+### D274. A modern reader of a `hire` task that asks a question — **decided under the owner's standing instruction, 28 Oct** (amends D58)
+
+§12.4 delivers the question as a form elicitation through `tasks/result`, which 2026-07-28 removed. The tasks
+extension carries server requests in `inputRequests` and their answers in `tasks/update` (§11.12). Decision
+([`relay.md`](../spec/relay.md) §12.4): a modern reader whose request declares form elicitation sees a text-only
+question as `input_required` with one form `elicitation/create` in `inputRequests`, keyed by the gate id
+`k.<taskId>.<seq>`; `tasks/update` with `accept` becomes the §7 follow-up once; anything else is `working` with the
+reply-tool text, as for a legacy reader without the capability. The capability is the reader's, read per request.
+
+### D275. The remote Admission hook is built in M4 — **decided under the owner's standing instruction, 28 Oct** (lifts the refusal kept by D186)
+
+§12.3's URL elicitation exists only for a quoted task, and only an Admission that returns `quote` creates one
+(§13.2); the open-source built-in always allows. With `hooks.admission` refused at load, no `-32042`, no retry rule
+and no `notifications/elicitation/complete` could be exercised before M5. Decision: M4 builds
+[`relay.md`](../spec/relay.md) §13.1's remote hook as written (HTTPS unless loopback, `Authorization: Bearer
+<secret>`, fail closed with `-32603` `admission unavailable`, the key and size rules of §13.2, a `quote` refused
+outside operation `task` on a gate-owned task) for A2A tasks, MCP operations and `hire`, and the e2e tests drive it
+with an in-repository Admission server whose quotes carry `https://app.kontra.sh/#/t/<taskId>`. Cloud points it at its
+control plane in M5. The approval itself stays the operator's `kontra.approval` Update (§13.2); the tests send it
+through Temporal, as a control plane would.
+
+### D276. The MCP OAuth resource server is built in M4, and how a token is verified — **decided under the owner's standing instruction, 28 Oct** (amends D170)
+
+D170 put §12.1's resource server in M5 with the OIDC principals. It is code in this repository, testable against an
+in-repository authorization server, and M5's control plane builds the authorization server it trusts
+(kontra-cloud#60: authorization code with PKCE, RFC 8414, RFC 9728, DCR). §12.1 says what is checked, not how the key
+set is found. Decision ([`relay.md`](../spec/relay.md) §12.1): M4 builds the resource server on `/mcp` and every
+`/mcp/{svc}`; the issuer's RFC 8414 metadata (else its OpenID configuration) and its `jwks_uri` are fetched over
+`https://` as §10.3's operator-configured endpoints (D284: no address check, since the issuer is the operator's and
+never derived from a request and a team's IdP may be on a private network; no redirect followed, no proxy, bounded
+bodies), and cached 10 minutes, an unknown `kid` refetching the key set at most once a minute; `iss`, `aud`
+(the route's canonical URI), `exp` and `nbf` are checked with 60 s of skew; ES256, RS256 and EdDSA are accepted, never
+`none` or HMAC; `scope` is not checked. The principal is `oidc:sub:<sub>` with no tenant and `via = mcp`. OIDC
+principals on the A2A routes (`auth.oidc`) and Cloud's revocation feed stay in M5, on the same verifier.
+
+### D277. Anonymous sessions: who opens them, how they end, and how the limits count — **decided under the owner's standing instruction, 28 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §6 says what an anonymous session is; it does not say that its URLs need a
+multi-tenant gate, which hellos open one, what happens to the key at expiry, or how §6.2's limits are counted and
+configured. Read literally, expiry revokes the key (`revoked`, §12), so the same laptop could not start a new session
+for the next 24 h, and "a 5th concurrent task is `429`" names no counter. Decision ([`tunnel.md`](../spec/tunnel.md)
+§6, [`relay.md`](../spec/relay.md) §17): `tunnel.anonymous` needs `tenancy: multi` and takes either `true` or an object
+of §6.2's limits (`ttl`, `tenants_per_network`, `services`, `tasks`, `hiring_streams`, `parts_bytes`,
+`purge_after`), which tests compress and staging may tune. A hello with neither `enroll` nor `auth` opens one when its
+key is unknown at the gate or belongs to an anonymous tenant; the same key before expiry gets its tenant back. The
+gate sends `expiring` 10 minutes before the end; at the end it revokes the key's bindings, disables the tenant's
+services (`404`; tasks in flight fail `service_unavailable`, D117), sends `revoked` and closes the session, but does
+not revoke the key: its next hello opens a new tenant with a new slug. 24 h later the tenant's services, enrollments,
+tasks, calls and bucket objects are deleted and the tenant row stays as a tombstone. Tenants per network count the
+live anonymous tenants created from it; tasks as host count the non-terminal tasks of the tenant's services, as hirer
+those whose principal is one of its keys, under a per-tenant lock at creation; over a cap A2A answers `429` as §2.2
+does, MCP `429` with `-32600`, and `hire` an `isError` result. `public` names must be declared services. Services of an
+anonymous tenant are never `listed` and never in `search`. Amended by D285 (only a hello carrying `anonymous: true`
+opens one), D286 (what a key of an anonymous tenant may present), D287 (the limits per tenant and gate-wide,
+the purge, the reserved slug) and D297 (at the end a dispatch in flight is aborted as a revoked binding's is: its
+task fails `tunnel_lost` once an upstream task exists, else `service_unavailable` at its next dispatch).
+
+### D278. `kontra login` gets an API key through the gate's authorization server, and a handshake with it converts the anonymous tenant — **decided under the owner's standing instruction, 28 Oct**
+
+[`tunnel.md`](../spec/tunnel.md) §6.1: "`kontra login` turns the anonymous tenant into the person's account (Cloud's
+flow); the services keep their names under the account's slug and stop expiring." Nothing says what the CLI speaks,
+what it gets, or where the tenant changes; the owner's decisions put the authorization server in Cloud's control plane
+(authorization code with PKCE, RFC 8414/9728, DCR) and keep the CLI to `connect`, `login`, `seal` and `publish`. An
+OAuth access token for `/mcp` cannot be the tunnel's credential (its audience is `/mcp`), while every gate already
+takes API keys in the handshake (§4 `auth`). Decision ([`tunnel.md`](../spec/tunnel.md) §6.3): `kontra login` finds the
+authorization server through the gate's RFC 9728 document for `/mcp`, registers once per gate (RFC 7591), runs the
+authorization code flow with PKCE S256 and a loopback redirect (RFC 8252) for `resource` = the gate's origin (RFC
+8707), and accepts only an access token that is an API key of the gate (`kk_…`), which it keeps as the gate's
+credential (§2.4). Cloud's authorization server issues such a key for the person's account, with `hire` and
+`enroll:*`. The conversion happens at the gate, in the next handshake whose key belongs to a live anonymous tenant and
+whose `auth` is that key: the declared services are created in the account under the same names (`allow:
+[org:<account>]`), the key moves to the account with bindings to them, and the anonymous tenant expires at once. The
+anonymous URLs then answer `404`: a converted service is a new service at a new URL, and its old tasks fail
+`service_unavailable`. A gate without `auth.mcp_oauth` has no sign-in, and `kontra login` says to ask its operator for
+an API key. A device flow for machines without a browser is later work.
+
+### D279. The TCK runs anonymous, three ways, from a script; its expected failures name their cause — **decided under the owner's standing instruction, 28 Oct** (amends D18)
+
+D18 has the TCK target opt in to the `anonymous` principal and `push.allow_private`, because the pinned TCK
+(`d4d6fae`) sends no credential (a2a-tck#163); D20 refuses `ListTasks` and push configs to `anonymous`, so the TCK's
+`CORE-LIST-*` and push tests fail against the gate by design, which D18's seed list of five did not foresee. The
+baseline against a2a-go v2.7.0 (M0 research) was 26 failed, 141 passed, 95 skipped and 3 xfailed; the gate already
+fixes its card-cache, subscribe and SSE-validation rows (M1). Decision: the TCK runs against a `tck` service with
+`allow: [anonymous]`, on the seller `examples/sellers/tck` (a2a-go v2.7.0), three ways: the direct backend and the
+tunnel backend bare (`tck_jsonrpc`, `tck_rest`), and the direct backend behind `examples/front/caddy`
+(`tck_behind_caddy`), each binding a separate run with its own JUnit report. `test/tck/expected-failures.txt` lists
+D18's five TCK bugs and the anonymous refusals, each with its reason and upstream issue; the strict-xfail plugin
+(`test/tck/kontra_xfail.py`, from M0) fails a run on an unexpected pass and on an entry that names no collected test
+of the binding run. The runs are `make tck VARIANT=…` (`scripts/tck.sh`: the gate, the seller and the node as host
+processes, a Temporal development server from the pinned CLI, a fresh database), not `go test`; a blocking `tck`
+workflow runs them on pull requests that change the gate and nightly. Re-pin when a2a-tck #200, #232 and #197 merge,
+and drop the anonymous entries then by running the TCK with an API key.
+
+### D280. The README demo, how a clean laptop installs the CLI, and the staging gate — **decided under the owner's standing instruction, 28 Oct** (amends note 2 §2 and the README's M4 target)
+
+Note 2 §2 and the README's "Five minutes" show `brew install kontra`, `a2a serve`, `a2a send <url>`, a console on
+`:7778` and a short slug `anon-7f3a`; there is no Homebrew tap or release yet, a2a-cli's subcommand is `server` and
+its agent flag `-a` (D15), there is no local console (D164), and a slug is `anon-` and 16 hex digits (§6.1). The owner's
+gate is "demo from a clean laptop against staging". Decision: the demo installs with `go install
+kontra.sh/kontra/cmd/kontra@<version>` (Go 1.26 is its one prerequisite, Node 22 for the MCP lines), a2a-cli v0.3.1 by
+`go install` as `examples/sellers/hello-exec` says, and runs `a2a server --exec`, `kontra connect --gate
+https://gateway.kontra.run --serve a2a:hello=… --serve 'mcp:fs=stdio:…' --public hello`, `a2a send -a
+http://localhost:7777/agents/anon-…/hello`, a stock MCP client on the node's `/mcp/anon-…/fs` and on the gate's own
+`/mcp` (`hire`), and a call of the public URL without a credential. The staging gate is `gateway.kontra.run`, a
+multi-tenant gate with `tunnel.anonymous` in the cluster's `kontra-staging` namespace; until M5 opens anonymous
+sessions on `gateway.kontra.sh`, the demo names `--gate https://gateway.kontra.run`, and the README says so. The
+README block between its `demo` markers is what the clean-laptop run executes, so the two cannot drift. Amended by
+D298 (`@latest`, the slug placeholder, the run's two substitutions, the pinned MCP client).
+
+### D281. The compose team gate gets an ACME variant, and runs on a throwaway VPS — **decided under the owner's standing instruction, 28 Oct** (completes D168)
+
+D168 made the compose file terminate TLS from a provided certificate, as on a VPS with no proxy, and left the run
+"from a clean VPS" to M4. A team bringing a gate up on a fresh VPS has no certificate yet; the gate's built-in ACME
+(TLS-ALPN-01, D82) needs only port 443 and a writable cache. Decision: `compose.yaml` mounts a named volume for the
+ACME cache and `deploy/compose/kontra.yaml` documents the ACME variant beside the provided certificate; the gate run
+brings the file up on a new DigitalOcean droplet under a throwaway `kontra.run` name, connects a node and hires through
+it from another machine, and destroys the droplet and the name afterwards (the run's record says how long it lived).
+Completed by D298 (the healthcheck's server name, the image's `/var/lib/kontra-gate`, `kontra.vps.yaml`).
+
+### D282. The named tests M4 runs, and the gate runs — **decided under the owner's standing instruction, 28 Oct**
+
+Like D154 and D171. `test/e2e` gains `anon_limits` ([`tunnel.md`](../spec/tunnel.md) §16), `anon_lifecycle`,
+`login_converts`, and [`relay.md`](../spec/relay.md) §16's `gate_mcp_search`, `gate_mcp_hire`, `gate_mcp_hire_quote`,
+`gate_mcp_reply`, `gate_mcp_modern` and `gate_mcp_oauth`, on two replicas behind the Front wherever the row allows, with
+an in-repository Admission server and authorization server, and anonymous limits compressed through
+`tunnel.anonymous`. `tck_jsonrpc`, `tck_rest` and `tck_behind_caddy` are `make tck` (D279). The two runs the owner's
+gate names are not tests in CI: the clean-laptop demo against the staging gate (`scripts/demo-clean-laptop.sh`, a
+container image built from `golang` with nothing else) and the team gate on a clean VPS (`scripts/team-gate-vps.sh`);
+both are to be recorded in `docs/gate-runs-m4.md` with what was run, what was seen and when everything was torn down
+(written by WP-09 on 31 Oct: [`gate-runs-m4.md`](gate-runs-m4.md); the VPS run failed at `3b890f3` on a defect of
+`compose.yaml` and passed at `f9f5e61` with its fix, D313; D306 lists what is left).
+
+### D283. PRD §14's other M4 examples stay skeletons — **decided under the owner's standing instruction, 28 Oct**
+
+PRD §14's M4 row also lists `kontra dev` with embedded Temporal (removed by note 2), the sellers
+`examples/sellers/{temporal-harness,adk,claude-cli}` and the fronts `examples/front/{agentgateway,ingress}`. The owner's
+M4 goal names none of them, and no gate item needs them. Decision: M4 builds `examples/sellers/tck` and
+`examples/front/caddy`, which `tck_*` need (D279); the other three sellers and two fronts keep their skeleton
+READMEs until a milestone needs them.
+
+## From the M4 plan's audit (28 Oct)
+
+The audit of the M4 plan (seven blockers, all accepted by the orchestrator) found that §10.3 still sent every operator
+URL through the SSRF dialer, that the anonymous rules broke the lost-welcome probe, that `elicitation/complete` was
+broadcast across streams, and several holes in the anonymous limits. These entries settle them before the code that
+depends on them. Like D268 to D283 they are **decided under the owner's standing instruction, 28 Oct**.
+
+### D284. The operator-configured endpoints, and what the gate accepts from the Admission hook — **decided under the owner's standing instruction, 28 Oct** (amends D67, D192; corrects D276)
+
+[`relay.md`](../spec/relay.md) §10.3 (D67) sent every operator URL through the SSRF dialer, with one exception for
+`http://` on loopback for `hooks.*` URLs. Yet a team's Admission hook, its IdP and its object store are usually on a
+private network; D276 had the issuer "dialed as configured, like the Admission URL", which §10.3 contradicted, and
+M3 dialed the bucket as configured under a `SPEC-CONFLICT` (D189), which D192 settled for the bucket alone (dialed as
+configured, no proxy, no redirect). Decision ([`relay.md`](../spec/relay.md) §10.3):
+`hooks.admission.url`, `auth.mcp_oauth.issuer` with its RFC 8414 or OpenID metadata and the `jwks_uri` that metadata
+names, and the bucket's endpoint are **operator-configured endpoints**. They need `https://`, except `http://` on a
+loopback host (connected to a loopback address only; the bucket keeps the scheme its URL is written with), follow no
+redirect, ignore the environment's proxy and skip the private-address check. The hook's and the issuer's answers are
+bounded (an Admission decision at 64 KiB, the metadata and the key set at 256 KiB each) and each of their requests
+has a timeout (5 s; `hooks.admission.timeout` for Admission, at most 30 s: the MCP relay bounds the one `session`
+decision a modern client's first requests share at 30 s, so a longer timeout would be cut there and nowhere else).
+The bucket is not given these bounds: its requests carry parts as large as the storage limits allow, so it keeps its
+S3 client's own dial, TLS-handshake and response-header timeouts and the context of the work that makes each request
+(the corrections' "timeouts 5 s" for the whole class, read for the bucket, would cut large-part uploads; M4 WP-01's
+review). Every other operator URL (`seller_keys` URLs) stays on the SSRF dialer. `internal/ssrf` builds the class
+(`ssrf.NewOperatorClient`), and `hooks.RemoteAdmission` and the resource server (M4 WP-06) use it.
+
+What the gate accepts from the hook ([`relay.md`](../spec/relay.md) §13.1): the answer is read as
+[`schema/hooks.json`](../spec/schema/hooks.json)'s `decision` with exact keys (no repeated or case-variant key, no
+unknown member, a `deny` with its `refusal`, a `quote` with its terms, a `refusal.code` that is an integer and not
+`null`); a quote's `approveUrl` must be an absolute `https://` URL without userinfo, and its `expiresAt` an RFC 3339
+`date-time` in the future, written with upper-case `T` and `Z` as every reader of it parses it (Go's `time.RFC3339`;
+a comma fraction, a one-digit hour and an offset of `+24:00` or minute 60, which that parser alone also takes, are
+refused). Anything else, like a timeout, a non-`2xx` (a `3xx` included) or maps that break §13.2's rules, is
+`-32603` `admission unavailable` (`503`): it fails closed. The URL itself is passed through untouched (D188), so a
+team gate configures its own approve page.
+
+### D285. A hello asks for an anonymous session with `anonymous: true` — **decided under the owner's standing instruction, 28 Oct** (amends D277)
+
+Under D277 a hello with neither `enroll` nor `auth` from an unknown key opened an anonymous tenant. That is also the
+shape of [`tunnel.md`](../spec/tunnel.md) §2.4's lost-welcome probe, on which `internal/enroll` and `internal/node`
+rely: on a gate with `tunnel.anonymous`, a probe after an enrollment that did not commit would open an anonymous
+tenant, the node would record its unconfirmed tokens as consumed and never send them again, and a network slot and a
+tombstone would be spent. Decision ([`tunnel.md`](../spec/tunnel.md) §4, §6): the hello gains an optional field
+`anonymous: true`. `kontra connect` sends it only when the origin's credentials hold no API key and no pending or
+consumed enrollment token and neither `--enroll` nor `--api-key` was given; a probe never sends it. The gate opens or
+resumes an anonymous session only on such a hello; without it an unknown key stays `unknown_key`. A gate without
+`tunnel.anonymous` answers it, from a key it does not know, `anonymous_unavailable`.
+
+### D286. What a key of a live anonymous tenant may present, and how a key moves — **decided under the owner's standing instruction, 28 Oct** (amends D277, D278)
+
+[`tunnel.md`](../spec/tunnel.md) §6.3 converts an anonymous key on an `auth` key with `enroll:*`; nothing said what
+`enroll` tokens or a hire-only API key from such a key do, and `key_services`' foreign key `(key_id, tenant_id)` has no
+`ON UPDATE`, so moving a key with its bindings in place fails. Decision ([`tunnel.md`](../spec/tunnel.md) §6.1):
+`enroll` tokens from a key of a live anonymous tenant convert it into the tokens' tenant (bound as §5 says, the
+anonymous tenant expired at once), as §6.3 does; a hire-only `auth` is admitted as the anonymous session with that key
+as its hiring principal (§9), and nothing is converted. Every move of a key to another tenant (these conversions,
+§6.3's, and a new anonymous tenant after expiry) is one transaction under the key's row lock that deletes the key's
+old `key_services` rows before it updates `tunnel_keys.tenant_id`.
+
+### D287. Anonymous tenants are bounded per tenant and gate-wide, and the purge leaves only the tombstone — **decided under the owner's standing instruction, 28 Oct** (amends D277)
+
+D277 counted services per hello while undeclared services kept their rows, so reconnecting with new names grew a
+tenant without bound; plain MCP calls to a `--public` service were bounded only by the node; nothing capped the live
+anonymous tenants of the gate (an IPv6 /32 holds 65,536 /48 networks); the `anon-` slug could be taken by an account;
+the purge kept the node keys and the gate's own `/mcp` sessions; [`tunnel.md`](../spec/tunnel.md) §12 still listed
+anonymous expiry as a key revocation; and "parts over the total are refused" named no answer. Decision
+([`tunnel.md`](../spec/tunnel.md) §6.1, §6.2, §12; [`relay.md`](../spec/relay.md) §13.5, §17):
+
+- services are counted per tenant (those not disabled), and a resumed hello disables what it no longer declares;
+- two new limits in `tunnel.anonymous`: `calls` (8, concurrent plain MCP calls to the tenant's services as host,
+  over it `429` with `-32600`) and `max_tenants` (1000, live anonymous tenants gate-wide, over it
+  `anonymous_unavailable`; the staging gate sets 200);
+- a caller's message whose parts would pass `parts_bytes` is `InvalidParams` `anonymous storage limit` before any
+  task row, and upstream bytes past it fail the task `upstream_error` (§6.6);
+- migration 0003 adds the check `(kind = 'anonymous') = (slug ~ '^anon-[0-9a-f]{16}$')` on `tenants`, and a new slug
+  that collides is drawn again;
+- the purge deletes the keys still in the tenant (their bindings and tunnels go with them), the MCP sessions whose
+  `tenant_id` is the tenant (`service` NULL included), its services with their calls (an exception to §13.5's "the
+  gate never deletes calls"), enrollments, tasks and bucket objects, and keeps only the tenants row;
+- §12's key revocation no longer names anonymous expiry: expiry revokes the bindings, not the key.
+
+### D288. `notifications/elicitation/complete` goes on one stream of the session — **decided under the owner's standing instruction, 28 Oct** (amends D273)
+
+D273 sent the notification on each open `GET` stream of the session. MCP 2025-11-25 transports, "Multiple
+Connections": the server "MUST send each of its JSON-RPC messages on only one of the connected streams; that is, it
+MUST NOT broadcast the same message across multiple streams." Decision ([`relay.md`](../spec/relay.md) §12.3):
+migration 0003 adds `tasks.elicitation_notified_at`; a replica holding an open `GET` stream of the session claims the
+notification with `UPDATE … SET elicitation_notified_at = now() WHERE id = $1 AND elicitation_notified_at IS NULL`
+and writes it on that one stream only if its update won; a stream opened within the 10 minutes after the task left
+`quoted` gets it only if nothing claimed it. A client that missed it retries `hire` (§12.3).
+
+### D289. The structured result of `hire`, `reply` and `tasks/result`, and `/mcp`'s metering — **decided under the owner's standing instruction, 28 Oct** (amends D272)
+
+§12.2 put data parts "in `structuredContent`" while D272 put `{taskId, state}` there beside the content: both cannot
+be one object, and several data parts had no shape. Nor did anything say what `/mcp` meters, while `calls.service` is
+`NOT NULL` with a foreign key to `services`. Decision ([`relay.md`](../spec/relay.md) §12.2): a plain `hire`, every
+`reply` and `tasks/result` of a `hire` task carry `structuredContent` `{taskId, state, data?}`, `data` being the
+values of the rendered data parts in order (message first, then each artifact's), present only when there are some.
+`search`, `describe`, `hire`, `reply` and the MCP Tasks of `/mcp` write no `calls` rows: a `hire` is accounted as its
+A2A task.
+
+## From M4 WP-02's TCK runs (28 Oct)
+
+The first measured runs of the pinned TCK through the gate (`make tck`, four variants, two bindings each) found one
+gate defect and corrected the predicted expected failures. Like the entries above they are **decided under the
+owner's standing instruction, 28 Oct**.
+
+### D290. A blocking resend of a task at `input-required` or `quoted` is answered at once — **decided under the owner's standing instruction, 28 Oct** (completes D108)
+
+D108 closes the stream of a resend whose task already ended a turn; nothing said the same of a blocking
+`SendMessage`. The work queue answers a resend with its task, a2a-go subscribes at the log's tail, and a turn that
+ended at `input-required` before that sends nothing more: the call waited until the task's next turn, its deadline or
+the caller's timeout. The pinned TCK hit it in every run (its prerequisite tasks are resends, D291): a dozen tests per
+binding ran into its 30 s read timeout. Decision ([`relay.md`](../spec/relay.md) §9): a resend whose task stands at
+`input-required`, `quoted` or `auth-required` is answered at once with the task as it stands (`internal/relay`
+`resendAnswer`, after Admission and the other checks, with the work queue's own lookup), the states on which D108's
+stream of the same resend closes at once. A task reaches `input-required` or `auth-required` only by a turn its
+workflow ran, so the start a resend re-issues (§14.5) is moot there; a `quoted` task's start may be the lost one, so
+it is re-issued first, as the work queue does for a resend (`lifecycle.Queue.ReissueStart`, which the gate hands the
+interceptors as `relay.StartReissuer`): a lost start gets its workflow, which waits for `kontra.approval` until the
+quote expires, and nothing is approved by the resend (D38, D45). A resend of a terminal task is still answered by
+a2a-go after the re-issue, and one of a `submitted` or `working` task, whose start may be the lost one, still goes
+through the work queue and waits for the turn. Tests: `TestBlockingResendAtTurnEnd` (10 s deadline exceeded before,
+under a second after) and `TestBlockingResendOfAQuotedTask` (a quoted task, and one whose start was lost: the resend
+answered at once, the lost start's workflow re-issued and running once approved; 10 s deadline exceeded before), and
+`TestRemoteAdmissionThroughTheGate` through a replica. Amended by M4 WP-02's review (28 Oct), which found the
+`quoted` resend still waiting for the quote's end.
+
+### D291. What the TCK measures through the gate, per variant — **decided under the owner's standing instruction, 28 Oct** (amends D279)
+
+D279's expected failures were predicted; the audit showed that the plugin let a listed test skip and an unlisted test
+xfail. Measured: (1) `CORE-SEND-003` passes through the gate (a2a-tck#202 asserts success, and the gate relays the
+seller's `ContentTypeNotSupportedError` as a failed task, §6.4), and `DM-MSG-001` fails by D5; (2) the TCK's message ids
+are per session (`tck_id`; #250 fixed follow-ups only), so its prerequisite tasks after the first are resends, answered
+with the first task (§15; A2A §3.3.1 lets an agent detect duplicates by message id): once an early test completed or
+canceled that task, the tests that need a fresh one skipped, eight or nine per binding (CORE-CANCEL-001, CORE-MULTI-005,
+STREAM-SUB-001/002 and the history tests, MUSTs among them, and with an API key two of the three push deliveries); (3)
+the JSON-RPC client's snake_case `task_id` on push configs, a2a-tck#242's defect not filed for push. Decision:
+`test/tck/expected-failures.txt` is the measured list of the tests that do not pass, expected failures and expected
+skips (`skip <node id>`), in sections per variant, each reason citing an issue or a decision; `kontra_xfail.py` fails a
+binding whose outcomes differ from its entries in any way (an expected failure that passes, errors or skips; an unlisted
+xfail; an expected skip that does not skip; an unlisted skip of a test of the run's binding, since the TCK skips
+whenever a prerequisite request fails, so a regression would otherwise hide as a skip; an entry naming no test) and a
+malformed file; a test's binding is its id's suffix, its directory, its function's name suffix (`_jsonrpc`, `_rest`) or
+its class's name prefix (`TestJsonRpc`, `TestRest`), so the other bindings' tests, which skip "not configured", need no
+entry. The harness gives each test fresh TCK ids (`test/tck/kontra_tck_ids.py`, an autouse fixture setting
+`tck.requirements.base._SESSION` per test; no TCK file changed), so the tests of (2) run through the gate; they showed
+CORE-HIST-002 failing on JSON-RPC by #242 and CORE-HIST-003 (a SHOULD) by a2a-go v2.7.0, which applies `historyLength`
+to GetTask only (D7; the seller alone fails it too), both now entries. A fourth variant, `auth`, runs nightly behind a
+loopback front that adds a tck API key, so ListTasks, push CRUD and push delivery run through the TCK. Each run uploads
+JUnit and HTML reports per variant and binding, and the processes' logs. The seller is `examples/sellers/tck`, the front
+`examples/front/caddy` (Caddy 2.11.7). Measured by WP-02's review on 28 Oct with fresh ids, each variant once per
+binding: direct, tunnel and caddy 82 passed, 10 xfailed and 17 expected skips (jsonrpc), 76 passed, 9 xfailed and 16
+expected skips (http_json); auth 90 passed, 5 xfailed and 14 expected skips (jsonrpc), 90 passed, 3 xfailed and 8
+expected skips (http_json); the rest are the other bindings' tests. Amended by M4 WP-02's review (28 Oct): skips are
+entries, and the ids are fresh per test (before, "skips are not entries", and the tests of (2) never ran).
+
+## From M4 WP-03, anonymous sessions (28 Oct)
+
+### D292. How the gate keeps anonymous sessions' limits and ends them — **decided under the owner's standing instruction, 28 Oct** (completes D277, D285 to D287)
+
+[`tunnel.md`](../spec/tunnel.md) §6 says what is limited and refused; it does not say how a gate of several replicas
+counts plain MCP calls in flight, what the 429s carry, how the parts total is kept across a tenant's tasks, or how the
+replica holding a session learns that its tenant ended. Decision (`internal/anon`, `internal/enroll/anonymous.go`,
+`internal/tunnelgate`; [`tunnel.md`](../spec/tunnel.md) §6.1, §6.2, [`relay.md`](../spec/relay.md) §3):
+
+- **Calls, gate-wide.** A plain `tools/call` relayed to an anonymous tenant's service holds a row of `anon_calls`
+  (migration 0003: `id`, `tenant_id`, `replica_id` referencing `gate_replicas` with `on delete cascade`, `started_at`)
+  from before it is forwarded until its answer has been relayed, inserted under a lock on the tenant's row only while
+  the tenant has fewer than `calls`. A replica that dies takes its rows with it when it is reaped (§11); the purge deletes
+  a tenant's. A passthrough task-augmented call counts too: it holds the same relay while its answer comes back. A
+  per-replica count would have allowed `calls` × replicas.
+- **The 429s.** A task over `tasks` (A2A, as host or hirer) is `-32600` `rate limited` on JSON-RPC and HTTP 429 with
+  `Retry-After: 5` on both bindings and on the streaming methods, as the edge answers its own rate limits on a JSON-RPC
+  route (§2.2); on HTTP+JSON the body is a `google.rpc.Status` `RESOURCE_EXHAUSTED` with reason `INVALID_REQUEST`. An MCP
+  task-augmented call over `tasks`, and a plain call over `calls`, are HTTP 429 with `-32600` and the same `Retry-After`.
+  A caller's message or call over `parts_bytes` is `InvalidParams` (`-32602`) `anonymous storage limit`, HTTP 200 on
+  JSON-RPC and MCP, before any task row.
+- **The parts total.** A message to an anonymous tenant's service counts as its encoding against what the tenant's
+  tasks store (each event's payload encoding and each bucket object, §6.6, D103, D194); a dispatch of one of its tasks counts
+  the other tasks' bytes as they stood when it started, and its limit is `min(task_bytes + others, parts_bytes)`. So
+  tasks dispatched together may store up to `tasks` × the room left between them (SPEC-CONFLICT in `anon.Caps.Budget`;
+  an exact total would read every other task's bytes under a lock at every event).
+- **The end.** The replica holding an anonymous session runs its clock: `expiring` 10 minutes before the end (at once
+  when less is left), and at the end `{"t": "revoked"}` and the close; it then asks its expiry sweep to run. Every
+  replica's sweep (every 5 s) ends the tenants past `expires_at` in one transaction each: `NOTIFY kontra_tunnel,
+  'expired:<tenant_id>'` first (a gate-internal payload like M2's, which the holder of a session of that tenant applies
+  at once), then the services disabled and the bindings revoked with their `kontra_services` and `kontra_revoke`
+  notices, and an audit row; a session whose tenant ended never gets one `{"t": "revoked", "service"}` per binding. A
+  conversion (D286) ends the anonymous tenant the same way.
+- **The purge** runs every minute on every replica, on a goroutine of its own (the expiry on another), so a bucket that
+  hangs holds neither the expiry nor the gate's other sweeps. A pass takes up to 100 due tenants and claims each with a
+  session advisory lock (a tenant another replica is purging is skipped); it deletes the bucket objects of every task
+  of the tenant by the task's prefix, whether or not the task has a `blobs` row (D167: an object stored for an event
+  that was then refused, such as an upstream part past `parts_bytes`, has none), 8 tasks at once and each within a
+  minute, then the rows in one transaction. It stops at the first bucket failure (that tenant keeps its rows) and after
+  5 minutes; the next pass goes on (the M4 WP-03 review).
+- **Lock order.** A transaction that takes a key and its anonymous tenant takes the key's row first, then the
+  tenant's, before anything else: the admission locks the anonymous tenant of the hello's key, live or ended, right
+  after the key. The sweeps take a tenant with `SKIP LOCKED`, and the purge takes the tenant's keys with `NOWAIT`,
+  leaving to its next pass a tenant one of whose keys an admission holds. So a resume, a key's move and a conversion
+  never deadlock with the sweeps (the M4 WP-03 review's 40P01s).
+- **A gate that stopped opening them.** On a gate without `tunnel.anonymous` (turned off while anonymous tenants live),
+  a hello from a key of a live anonymous tenant that asks for a session is `anonymous_unavailable`; any other is §5's,
+  as a new key's: the probe (§2.4) is `unknown_key`, so the node sends its full hello; a hello §5 admits (enroll tokens,
+  a hire-only `auth` key with no service) moves the key, and the anonymous tenant ends at once as D286's conversions
+  end it. Answering every hello `anonymous_unavailable` kept a probing node probing forever (the M4 WP-03 review).
+- **The card.** The served card of an anonymous tenant's service carries the gate-asserted extension
+  `https://kontra.sh/ext/anonymous/v1` (`required: false`, `params.expiresAt`), written into the service's
+  `annotations.card_extensions` when the session creates or enables it, so a card the gate signs says the service is
+  an ephemeral anonymous session's (the M4 corrections' recommendation).
+- **The node.** `kontra connect` exits 1 with "the anonymous session expired at <time>" when the gate ends its anonymous
+  session, and also when such a session closes within a minute of its end without the message (a redial would open
+  another session with new URLs). `expires_at` is the gate's time, and the node's clock may be off by more than that
+  minute, so the node measures the end on its monotonic clock: from the welcome by its own wall clock, then from the
+  gate's `expiring`, which the gate sends ten minutes before the end by its own clock (at once when less is left); a
+  `{"t": "revoked"}` without a service after `expiring` is the end, and a close of an anonymous session is judged only
+  once the control stream has been read (the end's `{"t": "revoked"}` comes just before the close, which the node may
+  see first). A revocation of the key in the session's last ten minutes therefore reads as its end: the node stops
+  either way, and its next hello learns `revoked` (the M4 WP-03 review).
+
+Tests: `internal/anon` (`TestOpenCountsNetworks`, `TestOpenServicesPerTenant`, `TestCapsTask`, `TestCapsCall`,
+`TestCapsStorage`, `TestPurgeLeavesTheTombstone`, `TestPurgeDeletesTheObjectsOfEveryTask`,
+`TestPurgeNeverWaitsOnAnAdmissionOfItsKey`, `TestPurgePassStopsAtTheFirstBucketFailure`, `TestPurgePassEndsAtItsBudget`,
+`TestPurgeClaimsATenant`, `TestNoTableHoldsTheClientAddress`), `internal/enroll` (`TestAdmitAnonymous*`,
+`TestAdmitEnrollFromAnAnonymousKeyConverts`, `TestConversionAndExpiryNeverWaitOnEachOther`,
+`TestEnrollFromAnEndedAnonymousKeyAndExpiryNeverWaitOnEachOther`), `internal/tunnelgate`
+(`TestAnonymousSessionEnds`, `TestAnonymousTenantEndClosesItsSession`, `TestAnonymousHiringStreamsCap`),
+`internal/mcprelay` (`TestPlainCallsAreCapped`), `internal/gate` (`TestAnonymousTenantLimitsThroughTheGate`,
+`TestAnonymousPurgeDeletesObjectsWithoutRows`, `TestAnonymousSweepsRunApart`), `internal/node` and `cmd/kontra`
+(`TestRealAdmissionProbeOnAnAnonymousGate`, `TestAnonymousExpiryWithASkewedClock`, `TestAnonymousEndEstimate`,
+`TestConnectExitsWhenTheAnonymousSessionExpires`).
+
+## From M4 WP-04, the gate's own `/mcp` (28 Oct)
+
+Building [`relay.md`](../spec/relay.md) §12's legacy era settled what §12 left open. Like the entries above it is
+**decided under the owner's standing instruction, 28 Oct**.
+
+### D293. How `/mcp` hires, cancels and answers — **decided under the owner's standing instruction, 28 Oct** (completes D272, D288, D289)
+
+§12.2 has `tasks/cancel` of a `hire` task follow §11.6 (canceled within 10 s whatever the upstream answers, D57), but a
+`hire` task is an A2A task, whose `kontra.cancel` follows §8 (D79's wait, "the task continues"); and several answers of
+the tools were not written down. Decision ([`relay.md`](../spec/relay.md) §12.2, §14.1):
+
+- **The cancel's MCP mode.** `kontra.cancel` takes an optional `mode: "mcp"`; `/mcp`'s `tasks/cancel` of a `hire` task
+  sends it, and TaskLifecycle then applies §11.6's rule to the A2A task: `abort` (no upstream task yet) or
+  `forward_cancel` (which sends the upstream §8's `CancelTask`), waited for at most 8 s, then `canceled` (`client`). The
+  change is behind `workflow.GetVersion("hire-mcp-cancel")`, read only for a cancel that asked for the mode, which no
+  history recorded before it holds; those histories replay unchanged (D46: `TestReplayHistoriesBeforeTheCancelMode`), and
+  the mode's own runs are recorded (`hire_mcp_cancel_*.json`). An A2A `CancelTask` of the same task keeps §8; a cancel
+  that joins one in flight shares its result and so its mode (§8: concurrent cancels are coalesced).
+- **A `hire` is an A2A request.** The task is created by the service's own a2a-go handler (`SendStreamingMessage` with
+  the principal on the context, the first event taken): the interceptors (identity, §2.5's stripping, sealed and part
+  checks, an anonymous tenant's storage, Admission with operation `task`, protocol `a2a` and the principal's `via`,
+  `CheckQuote`, large parts) and the work queue's write are the A2A route's. The work queue marks it `hired`, keys it by
+  §12.3's hash, and under that key's lock answers a retry with the earlier task; the retry is looked up before
+  Admission too, so a retry never asks Admission again and never changes the task's state. A retry of a task still
+  `quoted` re-issues its start (the service's work queue, as an A2A resend does, §14.5), so a task whose first `hire`
+  committed its row, lost its start and answered `503` gets the workflow the person's approval reaches. §2.4's
+  required extensions, which the A2A routes check in front of a2a-go, are checked by the hirer too (D294).
+- **Tool execution errors.** Arguments that break a tool's input schema, the unknown-service answer (one for every
+  ref that is malformed, unknown, disabled, of an ended tenant or not admitted), an MCP or required-sealed ref, a ref
+  whose served card requires an extension (D294), a `reply` to a task that is quoted or takes no input, and an
+  unknown task in `reply` are a `CallToolResult` with `isError` (MCP 2025-11-25 answers input validation errors so; an
+  HTTP `404` on `/mcp` would end the client's session). A `message` part is one a2a-go reads back from what it writes:
+  a `data` of JSON `null` is no content to it (`{"data":null}` is written and not read back), so a task holding one
+  could never be loaded (`hire` answered `503`, the task stayed `submitted` past its deadline, counted against an
+  anonymous host's tasks cap, and every later `tasks/list` of the buyer failed); `mcp-tools.json`'s `data` excludes
+  `null`, and the gate checks each built part's round trip besides. Admission's refusal is the JSON-RPC error it names; `admission unavailable` and a lifecycle that does not
+  accept in time are `503` with `-32603`; an anonymous tenant's caps `429` with `-32600` (D292).
+- **Rendering.** A raw file part is an embedded `resource` (`uri` `kontra:task/<taskId>/<filename>`, else
+  `part-<n>`, its media type, the bytes as `blob`); a URL file part is a `resource_link`. A plain answer's
+  `structuredContent.state` is the A2A state (a `quoted` task's is `TASK_STATE_INPUT_REQUIRED`, its approve URL in the
+  text and `_meta`). A plain wait whose request accepts `text/event-stream` is answered as one event of a stream kept
+  alive every 15 s. A `rejected` task (MCP `failed`) carries `sh.kontra/failure: "rejected"` in its result's and its
+  `tasks/get`'s `_meta`: §12.2 gives every failed, rejected or canceled `hire` task one of the two keys, and §11.8's
+  reasons are the gate's own failures, none of which an agent's rejection is.
+- **Sessions.** `initialize` negotiates `2025-11-25` or `2025-06-18` (the client's when it asks one of them, else
+  `2025-11-25`) and asks no Admission; a `2025-06-18` session has no tasks (`tasks/*` `-32601`, `hire` without
+  `execution`). The negotiated version decides that, never a request's header: a request whose `MCP-Protocol-Version`
+  names the other version is `400` with `-32022` (`data.supported` the session's), as MCP's transport answers a version
+  the session may not use. Any replica closes a `/mcp` session idle for an hour (§11.2's default `session_idle_s`).
+- **Who may use `/mcp`.** A principal that may not call services (`auth.Principal.MayHire`: an API key with only
+  `enroll:` scopes, which §2.3 gives node enrollment only) is `403` (`-32600`, the A2A identity interceptor's words)
+  on every request, before parsing and before any session, in both eras. Keys of one account may share a `buyer_id`,
+  and `/mcp`'s task surfaces are keyed by the buyer: without this, an enroll-only key listed, read and cancelled the
+  hire key's tasks. `HireTasks` answers such a principal as having no tasks too, whatever calls it.
+- **§12.4's answer.** A client response to `k.<taskId>.<seq>` is the follow-up only when it is `accept` with
+  `content.reply` a string, from a session of the task's buyer that declared form elicitation, and `seq` is the event
+  that asked the question outstanding now; anything else (a quoted task's gate id included) is `202` and dropped.
+- **`elicitation/complete`.** An open `GET` stream reads its session's elicitations at open, every 2 s and on each
+  wake of a quoted one; it claims and writes each that left `quoted` (D288).
+- **Descriptions.** An MCP service's description falls back to its upstream's `serverInfo` title or name as the
+  replica's last background drain (started by `describe`) read it.
+- **Search's bound.** A page is filtered for the principal after the read, so one request reads at most 1000 services
+  (five queries of 200); one that reaches the bound answers what it found, fewer than 50 services or none, with
+  `nextCursor` at the last service read, which grants nothing. Without it a principal who sees few of many services
+  made each request read the whole table, sorted by the computed ref (no index applies to `slug || '/' || name`).
+
+### D294. A `hire` of a service whose card requires an extension is refused — **decided under the owner's standing instruction, 28 Oct** (completes D293; §2.4 on `/mcp`)
+
+§2.4 refuses an A2A request missing a URI the served card marks `required: true` (`-32008`, before any task row), and
+§13.4 enforces an operator's `card_extensions` entry "like any other". The check is HTTP middleware in front of
+a2a-go, so a `hire`, which runs through the service's a2a-go handler (D293), skipped it: a task was created and
+dispatched to a service that requires an extension no tool call can activate. Decision ([`relay.md`](../spec/relay.md)
+§12.2): `hire` and `reply` read the service's required URIs as the A2A routes read them (the replica's served card,
+`a2ahttp.Server.Declared`), and a service that has any is refused before anything else (no Admission, no task row,
+nothing sent), as a `CallToolResult` with `isError` naming the URIs and the service's A2A URL, where a client
+activates them in `A2A-Extensions`; the required-sealed answer is the precedent. A form answer to a question
+(§12.4) goes through `reply`'s path and is dropped the same way.
+
+Consequence, for the owner: Cloud's `per_task` services carry the escrow entry with `required: true`
+([`ext-escrow.md`](../spec/ext-escrow.md) §1), so they cannot be hired through `/mcp`: §12.3's quote flow on `/mcp` then
+serves a quoting Admission on services without a required extension (a team gate's, or Cloud's if its escrow entry is
+not required). Proposal, not built: `hire` and `reply` take an optional `extensions: [uri]` argument that activates
+URIs as `A2A-Extensions` does (ignored unless declared, passed to Admission and the upstream as the A2A route passes
+them; activating escrow acknowledges the quote, D38, and a person still approves it); §12.4's form answers would then
+need the task's activation kept for its follow-ups. Amended by D300: `hire` activates the operator's required entries
+(the escrow entry among them) for the buyer, and refuses only the seller's own and the sealed extension's.
+
+## From M4 WP-05, `/mcp` in the 2026-07-28 era (28 Oct)
+
+### D295. How `/mcp` answers a 2026-07-28 client — **decided under the owner's standing instruction, 28 Oct** (completes D269, D274; one SPEC-CONFLICT with §11.12 step 4)
+
+D269 and D274 have `/mcp` serve the modern era, but left five things unsaid that building it had to settle
+([`relay.md`](../spec/relay.md) §12.5, §16 `gate_mcp_modern`):
+
+- **What the gate's own modern results carry.** 2026-07-28 gives every result a `resultType` and every list and
+  `server/discover` result `ttlMs` and `cacheScope` (CacheableResult). The tool results, the empty acknowledgements of
+  `tasks/update` and `tasks/cancel`, and `tasks/get`'s DetailedTask carry `resultType: "complete"`, a
+  `CreateTaskResult` `"task"`; `server/discover` and the modern `tools/list` carry `ttlMs` 600000 (§11.12's bound on a
+  relayed list; the four tools change only with the gate's version) and `cacheScope: "private"`, and `server/discover`
+  names the gate in `_meta["io.modelcontextprotocol/serverInfo"]` (a SHOULD) with `initialize`'s instructions.
+- **Methods `/mcp` does not serve.** `ping` (removed by 2026-07-28), `tasks/result` and `tasks/list` (removed by the
+  extension) and every method other than `server/discover`, `tools/list`, `tools/call` and the three `tasks/*` are `404`
+  with `-32601` (2026-07-28 Streamable HTTP: a method the server does not implement). `subscriptions/listen` asking for
+  `taskIds` without declaring the extension is `-32021` (the extension's MUST, D176); any other is `404` with
+  `-32601`: `/mcp` has no notification to offer (its tools never change while it runs; `notifications/tasks` is not
+  offered, D161), and `server/discover` declares no `listChanged`.
+- **A failed `hire` task to a modern reader.** §12.2 makes every terminal `hire` task a `CallToolResult`, never a
+  JSON-RPC error; the tasks extension forbids `failed` for a tool result with `isError` ("MUST NOT be used for
+  non-JSON-RPC errors") and requires `error` with it. So a task that ended `failed` or `rejected` is `completed` to a
+  modern reader, its `result` the `isError` `CallToolResult` with `sh.kontra/failure` in both `_meta`s, as §11.12's
+  table already says for a stored `CallToolResult` whatever its `isError`; `canceled` is `cancelled`, without `result`.
+  A legacy reader keeps §11.8's `failed`.
+- **`tasks/update`.** Only the gate id of the question outstanding now, as the request's own `tasks/get` would show it
+  (D274: input-required, a text-only question, form elicitation declared in that request), is read; its `accept` with
+  a string `content.reply` is the §7 follow-up through the Hirer, the path `reply` and a legacy client's response take,
+  so the workflow's one-follow-up-per-turn-end rule (§7, D105) makes a second answer a no-op. Everything else (a quoted
+  task's keys, an earlier turn's, another task's, a malformed key, a decline, a cancel, an answer to a working or
+  ended task) is the empty acknowledgement and forwards nothing (the corrections' rule: a quoted task is never
+  approved by a client). So is an answer to the outstanding key that §7 refuses as no longer outstanding (another
+  follow-up of the turn accepted first: a2a's UnsupportedOperation). Any other refusal is an error, never the
+  acknowledgement, since the extension has clients track keys and never answer one twice, so an acknowledged answer
+  that was not taken would be lost while the task waits: a lifecycle that did not accept it in time and the gate's own
+  failure `503` with `-32603`, an anonymous limit `429`, another A2A refusal (the anonymous storage limit, D294's
+  required extension) its JSON-RPC error, as `hire` and `reply` answer them. The key's seq is read in the statement that
+  reads the task (`store.Log.LoadHiredAsked`), so `tasks/get` never pairs one question's text with a later question's
+  key (the extension: a key MUST NOT name two distinct requests); `tasks/result`'s form elicitation reads them the same
+  way.
+- **A client that leaves.** 2026-07-28 says a server MUST treat a closed response stream as the cancellation of that
+  request. A `hire` that created a task and whose client leaves before the answer is written (the 2 s wait of a
+  task-augmented call, D178, or the 25 s plain wait) sends that task `kontra.cancel` in MCP mode, not awaited; the
+  task's creation runs on a context the client cannot cancel (bounded to a minute), so a task created while the client
+  left is learnt and cancelled rather than left running unseen. A task a retry found again (§12.3) is the earlier
+  request's and is never cancelled; neither is a `reply`'s task, whose id its client knows. A plain wait is cut so that
+  the answer is written within 50 s of the request's arrival (at least 1 s): Admission (30 s at most) and the start
+  (`AcceptWait`) come before it, and without the cut a slow Admission would push the answer past the MCP SDKs' 60 s
+  request timeout, turning a task that runs normally into a cancelled one.
+- **The cancels nobody waits for** (a modern `tasks/cancel`, a client that left) wait only for the workflow's
+  acceptance (`lifecycle.Client.RequestCancelMCP`), and a replica sends one per task at a time: none while one is being
+  sent, none for 10 s (D57's bound) after one was accepted, so a client repeating `tasks/cancel` at the edge's rate
+  cannot pile Updates onto the task's history, whose per-workflow Update limits would then refuse the task's own
+  `kontra.message` and `kontra.approval`. The drain waits for them, and for the modern hires still being answered, at
+  most `AcceptWait` + 1 s after the listener stopped and before the Temporal client closes. Measured on the pinned
+  development server: an Update admitted before the client closes is still accepted later by another worker, so the
+  wait's guarantee is that each cancel is accepted and in the history when the replica exits (and none is cut before
+  Temporal admitted it); a gate of one replica has no worker left to accept it, waits out the bound, and the admitted
+  Update waits for the next worker.
+
+SPEC-CONFLICT, resolved by this entry: §11.12 step 4, which §12.5 applies to `hire`, cancels the task of any client
+that leaves before "either answer", a quoted task's `CreateTaskResult` included. On `/mcp` that breaks §12.3's retry:
+2026-07-28 makes a client re-issue a request whose stream broke, and a re-issued `hire` within 10 minutes of its quoted
+task's end answers that task, so the client would be told "the task was canceled" for 10 minutes, and a person could
+never approve the quote. A quoted task runs nothing until a person approves it, and ends by itself when its quote
+expires. Decision: a quoted task is not cancelled when its client leaves; the re-issued `hire` answers it with its
+approve URL (`TestGateMCPModernClientLeaves`). §11.12 step 4 stands for `/mcp/{svc}`, whose MCP tasks have no retry.
+
+## From M4 WP-06, the MCP resource server and `kontra login` (28 Oct)
+
+### D296. How the MCP routes answer OAuth clients, how `kontra login` defends itself, and what a conversion binds — **decided under the owner's standing instruction, 28 Oct** (completes D276, D278, D286; one SPEC-CONFLICT between §12.1 and §2.3)
+
+Building [`relay.md`](../spec/relay.md) §12.1 and [`tunnel.md`](../spec/tunnel.md) §6.3 left choices the text did not
+make. Decisions:
+
+- **A request without a credential on `/mcp/{svc}` (SPEC-CONFLICT, §12.1 with §2.3 and tunnel.md §6.1).** §12.1 has
+  every request without a credential answer `401` once `auth.mcp_oauth` is set; §2.3 gives such a request the
+  `anonymous` principal on a service whose `allow:` contains `anonymous`, and §6.1's `--public` MCP services are
+  "callable by anyone". Taken: a service that admits `anonymous` still serves it; every other request without a
+  credential, to an existing service or not, gets the `401` challenge instead of §2.1's `404`, so an OAuth client can
+  sign in and nothing says which services exist (D50). `/mcp` itself has no anonymous principal (D270).
+- **The challenge.** Without a credential, exactly `Bearer resource_metadata="…", scope="mcp"`; a credential that was
+  presented and refused adds `error="invalid_token"` (RFC 6750 §3.1); a name that is not well formed has no document
+  and gets `Bearer scope="mcp"` (nothing a client sends is quoted into the header).
+- **JWT or API key.** On the MCP routes, with a resource server, a bearer of a JWT's shape (three base64url segments,
+  at most 16 KiB) is verified as the authorization server's token; any other is an API key, as on every route. A
+  key the gate mints never has that shape, and an operator's own key (D37) with two dots between base64url segments is
+  not one anyone writes. The A2A routes never ask the resource server: a JWT there stays `401` until M5.
+- **An issuer the gate cannot read** is its own failure: `503` with `-32603`, never `401` (a client would discard a
+  valid token). It is asked again at most every 5 s, and a refetch for an unknown `kid` that fails keeps the fresh set.
+  The metadata is looked for at RFC 8414's well-known URI (inserted before an issuer's path, §3.1), then as §12.1
+  writes it, then the OpenID configuration appended and inserted; a document naming another issuer is not used.
+  Headers with `crit`, RSA keys under 2048 bits and keys that are not signing keys are refused or skipped.
+- **`kontra login` against mix-up and leaks** (RFC 8414 §3.3, RFC 9207, RFC 9700; the M4 audit). The gate's RFC 9728
+  document must be for `{origin}/mcp` (§3.3), compared as an origin (lower-case scheme and host, the default port
+  elided, as `tunnel.md` §4 writes origins: the gate writes its `resource` from `public_url` as configured) and the
+  path `/mcp`, with no userinfo, query or fragment; the metadata's `issuer` must be the `authorization_servers` entry,
+  the endpoints `https://` (`http://` only on a loopback host, as `--gate` allows), PKCE `S256` offered; an answer's
+  `state` must match and an `iss` must be the issuer (required when the metadata says it is sent); no request follows
+  a redirect; the code and the verifier are never printed, even when the server echoes them. The environment's proxy
+  is honoured, as `kontra connect` honours it. The DCR `client_id` is kept per origin with the issuer it was
+  registered at, and forgotten when the token endpoint answers `invalid_client`, or when a login that reused it gets
+  no answer before its bound or an interrupt: an authorization server that no longer knows a client must not redirect
+  to it (RFC 6749 §4.1.2.1), so a reset client table would otherwise lock every person who logged in there out until
+  they edited `~/.kontra/credentials` (the M4 WP-06 review). The CLI says it forgot it; a login merely left unfinished
+  costs one registration more. No `--register` flag: the next login registers by itself. The loopback listener is
+  closed as soon as an answer arrives, before the token request (§6.3 step 3).
+- **`auth.mcp_oauth` needs a `public_url` without a path** (the M4 WP-06 review). The RFC 9728 documents are served at
+  `{public_url}/.well-known/oauth-protected-resource/mcp…`, which is RFC 9728 §3.1's location (the well-known path
+  inserted after the host) only when `public_url` has no path, and `kontra login` reads them at the gate's origin. The
+  configuration is refused at load; a `public_url` in upper case or with its default port is accepted (the
+  documents' `resource` keeps it as written, and `kontra login` compares origins).
+- **The `kk_` rule is this revision's.** The access token must be an API key of the gate (`kk_` then letters, digits
+  and `_`, at most 4096 bytes), checked in one function of `internal/login`; M5 may revise it with Cloud's
+  authorization server (kontra-cloud#60 accepts Cloud's JWTs as principals).
+- **What a conversion binds.** §6.3's conversion is §5's enrollment by the API key's `enroll:*` scope, with two
+  differences: a declared service the tenant does not have is created there (`allow: [org:<tenant>]`) when the
+  anonymous session serves it (an enabled service of the anonymous tenant of that name and kind, bound to the key:
+  §6.1's "the services keep their names"), and the key moves (D286) with the anonymous tenant ended at once. Any
+  other declared name the tenant lacks is §5's `service_denied` "no such service" (the M4 WP-06 review): an anonymous
+  session costs no credential, so creating every declared name would let any `enroll:*` key create services in its
+  tenant, which §5 leaves to tenant tokens and the operator (M2's C10), and past §6.2's `services` limit. So an
+  existing service of the same kind is bound, not created again; one that is disabled or not a tunnel service is
+  `service_denied`; another kind is `kind_mismatch`; nothing moves on a refusal; a service's other nodes are told of
+  the new key (§5); a hello declaring no service converts the key hire-only when the API key may hire. A team tenant's
+  `enroll:*` key converts into the team as an account's does, and a gate that stopped opening anonymous sessions still
+  converts (§6.3 does not depend on `tunnel.anonymous`). Every conversion, by an API key or by enrollment tokens
+  (D286), ends the anonymous tenant with reason `converted` and writes a `tunnel.anonymous_converted` audit row
+  naming both tenants, the authority and the services bound.
+
+## From M4 WP-07, the M4 end-to-end tests (28 Oct)
+
+### D297. The named tests M4 runs, how the harness runs them, and the spec conflicts met — **decided under the owner's standing instruction, 28 Oct** (like D189 for M3; completes D282; one SPEC-CONFLICT in tunnel.md §6.1)
+
+Like D189 for M3. **The tests** (`test/e2e`, `make test-e2e`; [`relay.md`](../spec/relay.md) §16,
+[`tunnel.md`](../spec/tunnel.md) §16): `gate_mcp_search` (`TestGateMCPSearch`), `gate_mcp_hire` (`TestGateMCPHire`),
+`gate_mcp_hire_quote` (`TestGateMCPHireQuote`), `gate_mcp_reply` (`TestGateMCPReply`), `gate_mcp_modern`
+(`TestGateMCPModern`), `gate_mcp_oauth` (`TestGateMCPOAuth`), `anon_limits` (`TestAnonLimits`), `anon_lifecycle`
+(`TestAnonLifecycle`) and `login_converts` (`TestLoginConverts`), each with one assertion per clause of its §16 row and
+of the M4 corrections' WP-07 list (the quote-acceptance invariant item by item, each asserting the task still quoted and
+the seller without a request; the `-32042` URL byte-equal to the hook's `approveUrl` and naming the pre-minted id; a
+team gate's own approve URL; exactly one of a session's two `GET` streams notified and another session's none; a
+malformed, past or unreachable Admission answer `-32603` with no task; `tasks/update` on a quoted task ignored; no
+`calls` row and the `{taskId, state, data?}` shape; the per-tenant services cap across a reconnect, the `calls` cap,
+`max_tenants`, both parts-over-total outcomes; the probe, a conversion by enrollment tokens, the purge of a key still in
+its tenant, the widened address scan with its positive control, and the `anon-` slug refused for an account). Each runs
+on two replicas behind the Front with the client on one replica and the tunnel on the other wherever the row allows;
+D185's loopback check and `scripts/test_e2e.sh`'s leftover check hold for every one.
+
+**Tenancy.** Single tenant (a `services:` block): the five `gate_mcp_*` tests other than search. Multi-tenant
+(`tenancy: multi`): `gate_mcp_search`, `anon_limits`, `anon_lifecycle`, `login_converts`; their tenants, services and API
+keys are rows the harness writes as Cloud would, each service followed by `NOTIFY kontra_services` (D116, D37), and
+refs are `<tenant>/<name>`.
+
+**The harness's M4 additions.** `tunnel.anonymous` compressed in the test's own configuration only (never `deploy/`):
+`ttl` 60 s (`anon_limits`), 40 s (`anon_lifecycle`), 10 min (`login_converts`), `purge_after` 10 s, the caps 3/4/4/8/8,
+`parts_bytes` 1 MiB, `max_tenants` 12 (`anon_limits`); the Front as a PROXY v2 forwarder (`edge.client_ip`
+`proxy_protocol`, trusted `127.0.0.1/32`) naming the source the test sets, so nodes come from chosen /24s and /48s (its
+header is checked against the gate's own edge parser, `TestFrontProxyHeaderIsTheClientAddress`); an Admission double on
+loopback quoting `https://app.kontra.sh/#/t/<taskId>` or a team gate's own page, approvals sent as `kontra.approval`
+through the harness's Temporal client; `internal/oidc/oidctest` over HTTPS as the issuer, trusted through
+`SSL_CERT_FILE` by the replica processes and `kontra login`; peer listeners where an MCP request crosses replicas
+(§11.2); a third replica without `auth.mcp_oauth` on the same database for `login_converts`' last clause.
+
+**Where the tests differ from the plan's steps** (the rows hold; the means differ):
+
+- **The exec sellers.** hello-exec through a2a-cli v0.3.1 is installed neither on this host nor in CI's e2e job, so an
+  a2a-go seller in the test process, keyed on the message text, stands in for it (a slow exec working until cancelled,
+  a failing exec, a question) and serves the TCK seller's artifact kinds. `examples/sellers/tck` and
+  `examples/sellers/booking` run unmodified, as processes built from the checkout (`e2e.yml`'s paths name both).
+- **The TCK seller's artifact kinds.** It keys every scenario on the message id, and `hire` mints that id (§12.3), so
+  through `/mcp` it answers every message "Unhandled messageId prefix" completed: the fast hire uses it; the artifact
+  kinds come from the in-test seller.
+- **"The booking seller logs one task id."** booking logs nothing at its level; the test reads it from the gate:
+  the task's attempts carry one `upstream_task_id`.
+- **`max_tenants`.** The gate is filled with live anonymous tenant rows rather than nodes, and tested at its boundary:
+  the network checks' tenants are ended first (their 60 s `ttl` would otherwise move the count while the gate fills),
+  11 rows go in, a node then takes the 12th place, and the next node is `anonymous_unavailable`.
+- **The probe.** An enrollment that did not commit is reproduced by the node's own state (its credentials hold the token
+  unconfirmed, as after a connection lost after the proof): splitting the WebSocket frames at the Front to lose a proof
+  would test the Front. The probe gets `unknown_key` on the anonymous gate, opens no tenant, and the token is sent again.
+
+**The spec conflict met (SPEC-CONFLICT, marked in `test/e2e/anon_lifecycle_test.go`).** tunnel.md §6.1 and its §16
+`anon_lifecycle` row said that at an anonymous session's end "tasks in flight fail `service_unavailable` at their next
+dispatch". The end revokes the session's bindings and closes it, and §12 says a revoked binding's in-flight dispatches
+"fail `tunnel_lost`, or are retried if no upstream task exists" (relay.md §6.4 fails a task `tunnel_lost` once an
+upstream task exists). The gate does what §12 and §6.4 say: a working task fails `tunnel_lost`, and one whose dispatch
+had no upstream task id yet is retried and fails `service_unavailable` at that next dispatch (its service disabled,
+relay.md §13.5). Decision: the gate is right; §6.1 and the row now say so. The test asserts both.
+
+**Measured** (28-29 Oct, this host, 2 CPUs at a load of 5 to 9 beside the M3 review): `make test-e2e ARGS='-run
+"TestAnon|TestLoginConverts|TestGateMCP" -v'` passes the nine in 329 s (6 min 15 s with the builds), the longest
+`TestAnonLifecycle` (77 s, the end and the purge), `TestAnonLimits` (66 s, a session's end) and `TestGateMCPOAuth`
+(66 s, the key set's minute); the leftover check found nothing. Mutations checked red: the `elicitation/complete` claim
+without its `is null` guard (`TestGateMCPHireQuote`: both of S1's streams notified), and a 4th tenant per network let in
+(`TestAnonLimits`).
+
+**Review fixes (29 Oct).** Seven assertions passed without testing their clause; each now has an input only the rule
+under test decides. `gate_mcp_hire`: the buyer also sends an ordinary A2A `SendMessage` with the same API key, and that
+task is neither in `tasks/list` nor answered by `tasks/get` (`-32602`). `gate_mcp_search`: the anonymous tenant's service
+is `listed` and admits `org:default`, so only the anonymous-tenant rule hides it from search and describe.
+`gate_mcp_hire_quote`: each A2A message to the quoted task, a plain one included, must be §7's
+`UnsupportedOperationError` (`-32004`). `gate_mcp_modern`: the input-required task gets keys that are not the outstanding
+one, and they are ignored. `anon_limits`: `max_tenants` is tested at its boundary (above). `anon_lifecycle`: the address
+scan also runs while both sessions are live, with a plain call held in flight, and an operator's service and tenant
+enrollment tokens make the purge's enrollments clause real. The harness's `hostOn` fails when it cannot read the node's
+replica, where it skipped the check before. Each assertion was checked red against a mutation of the gate, in one run of a
+mutated copy: `ListHired`, `LoadHired` and `LoadHiredAsked` without `hired`; search and describe without the
+anonymous-tenant rule; the quoted refusal as `-32602`; `tasks/update` taking any `k.<task>.*` key; `all > max_tenants`;
+the client's address appended to `tunnels.cli_version`; the purge without its `enrollment_tokens` delete. `hostOn` was
+checked with a node redialling to replica A after `StartNode`: the old check passed, and the new one fails.
+
+## From M4 WP-08, the gate-run kits (29 Oct)
+
+M4's two gate runs that are not tests in CI, the README demo from a clean laptop against staging and the team gate on a
+clean VPS (D280 to D282), are kits in this repository that M4 WP-09 runs after the merge. Building them settled what
+the plan and its audit left open.
+
+### D298. What the README demo runs, how the clean laptop runs it, and what the compose ACME variant needs — **decided under the owner's standing instruction, 29 Oct** (amends D280; completes D281, D282)
+
+**The ACME variant's two defects (the plan's audit, gaps 17).** Built-in ACME (autocert) refuses a TLS handshake without
+a server name, and compose's healthcheck dialled `https://127.0.0.1:8443/healthz` with none; and a new named volume
+mounted on a path the image does not have is root's, while the gate runs as 65532. Decision: `kontra-gate health` sends
+`--server-name`, else the host of `public_url` in the configuration `-f` names, else the URL's host, and still skips
+verification on a loopback dial; compose's healthcheck passes `-f /etc/kontra/kontra.yaml`, which works for both
+configurations (a provided certificate is served whatever the name). The image creates `/var/lib/kontra-gate`, empty
+and owned by 65532:65532 (`COPY --chown` from the build stage, no `--chmod`, so the classic builder builds it too), and
+Docker initialises a new named volume from it. `compose.yaml` mounts the volume `acme` there in both gate services;
+`deploy/compose/kontra.vps.yaml` is `kontra.yaml` with `tls.acme` (cache `/var/lib/kontra-gate/acme`), `public_url`
+`https://gate.example.com` to edit, and one tunnel service, `hello`; a test keeps the two in step. The container keeps
+listening on 8443 (no privilege) and `KONTRA_PORT=443` publishes it where TLS-ALPN-01 is validated (D82).
+
+**The README's block** (amends D280's `@<version>`, as the audit asks): `go install kontra.sh/kontra/cmd/kontra@latest`
+(proxy.golang.org already resolves `kontra.sh/kontra` through the vanity import), a2a-cli v0.3.1 by `go install` renamed
+to `a2a`, `export PATH="$PATH:$(go env GOPATH)/bin"` (a fresh Go install does not put it on PATH), a directory for the
+filesystem server, `a2a server --exec`, `kontra connect --gate https://gateway.kontra.run … --public hello`, then the
+clients naming the slug as the placeholder `anon-<…>` (the README says what it stands for): `a2a send -a
+…/.well-known/agent-card.json`, `@modelcontextprotocol/inspector@2.13.0 --cli` on the node's `/mcp/anon-<…>/fs`
+(`tools/list`) and on `/mcp` (`tools/call hire`), and `curl` of the public card. The inspector is pinned to 2.13.0, not
+the 1.x line the plan had in mind: 1.x prints that it is deprecated and receives security fixes only, and 2.x's CLI keeps
+`--cli <url> --transport http --method … --tool-name … --tool-arg k=v` and negotiates the 2025-11-25 era by default, which
+the node's stdio bridge needs (D161). `test/demo` checks the block: the markers, the commands, the pins, the placeholder,
+and no Homebrew, `:7778` console, `a2a serve`, short slug or production gate.
+
+**The clean-laptop run** (`scripts/demo-clean-laptop.sh`; the plan's gate run B2 and the audit's gaps 12 and 13). The
+laptop is `test/demo/Dockerfile`: `golang:1.26.10-bookworm` pinned by its index digest (the one this host pulled on 21 Oct;
+the tag has moved since, and both stay pullable), Node 22.23.4 from nodejs.org's tarball with its sha256, a user `laptop`
+with an empty home, GOPATH the default and off PATH; target `laptop-src` adds `git archive HEAD` at `/src` for the run
+before the merge, `laptop` has none. `test/demo/laptop.sh` runs the block's commands one at a time in one shell, with
+exactly two substitutions, both printed: (a) before the merge, the kontra install runs as `(cd /src && go install
+./cmd/kontra)`; after it (`--published --expect <merge commit>`), as written, again a minute apart for up to 30 minutes
+until `kontra version` names the commit; (b) `anon-<…>` is the slug kontra connect printed. A client command is tried
+three times, 15 s apart, because the first `npx` of each package downloads it and the node starts server-filesystem
+through `npx` on the first session; every attempt is in the transcript. The laptop then prints the slug and holds the
+node connected while the host checks the public URL with no credential (the card, and a JSON-RPC `SendMessage` "hi"
+answering Hello World; `a2a send` too when a2a is on the host's PATH, which the plan assumed and this host lacks), then
+stops it: it copies a file named `stop` into the laptop, which stops its node and exits 0 (`docker stop` is the
+fallback). A file and not only a signal, because on this host runc cannot signal a container's init ("unable to signal
+init: permission denied"), so `docker stop` kills it after its timeout and a TERM trap never runs. The script prints its
+teardown first and runs it in a trap. Options `--network`, `--ca-file` and `--resolve` exist for a rehearsal against a
+local gate only.
+
+**`kontra version` names the commit of a `go install`ed binary.** A module-mode build has no VCS stamp, so it printed
+`dev`; the post-merge check could not read the commit. `internal/version` now reports the main module's version when
+there is no stamp (a pseudo-version ends with the commit's 12-digit prefix).
+
+**The VPS run** (`scripts/team-gate-vps.sh`; the plan's gate run C and the corrections' WP-09 pre-flight). The script
+does the corrections' pre-flight itself (the DigitalOcean key's MD5 fingerprint against this host's key, the size, no
+droplet tagged `kontra-m4-gaterun`, no record for the name), waits until 1.1.1.1 resolves the name (DNS over HTTPS)
+before compose asks Let's Encrypt, publishes on 443, checks the ports with bash's `/dev/tcp` (no nc), and hires through
+the gate with `curl` (A2A JSON-RPC and an MCP `search` on `/mcp`) from this host while a `kontra-demo` container is the
+team member's node. Droplets are only ever listed by the run's tag, `--teardown-only` reaps by tag and by the record's
+comment, and a droplet the operator names in `KONTRA_VPS_PROTECTED` is refused even if tagged (D306). The droplet's user data adds `docker-buildx` to
+the plan's `docker.io` and `docker-compose-v2`: Ubuntu packages buildx separately, and without it Docker builds with its
+deprecated legacy builder.
+
+**Staging.** The manifests are private (kept outside this repository), named `gate-v4` and `gate-v4-*` with the
+labels the corrections give, the signing key mounted at `/etc/kontra-signing` as in production; `config.staging.json`
+names the same hosts and path.
+
+**Tested here, nothing run against staging, DigitalOcean or Cloudflare** (O2). `make test-kits` (`KONTRA_KIT_TESTS=1`)
+runs compose's ACME variant on this host (the gate writes its account key into a fresh volume as 65532; once the cache
+holds a certificate for the name, compose's own healthcheck turns the gate healthy, and health without a server name
+fails), checks the laptop image, and rehearses the whole demo run against a local multi-tenant gate with anonymous
+sessions that answers for `gateway.kontra.run` on a docker network (`--network`, `--ca-file`, `--resolve`). Without
+Docker, `test/demo` and `test/vps` check the README block, the scripts (bash -n, shellcheck, the prerequisites each
+refuses without, the teardown each prints, `--dry-run` and `--teardown-only` against stubs of docker, doctl, ssh and
+Cloudflare's API) and the user data's ASCII.
+
+**Measured** (29 Oct, this host, 2 CPUs at a load of 3 to 19 beside other sessions): `make test-kits` passes, exit 0:
+`TestACMEVariantWritesItsCache` 113 s (the gate wrote `acme/` 0700 and `acme_account+key` as 65532 in a fresh volume;
+the attempt to reach Let's Encrypt was refused at 127.0.0.1; healthy once the cache held the name's certificate),
+`TestDemoImage` 3 s, `TestDemoRehearsal` 265 s (the laptop ready in 162 to 443 s, every command passing at its first
+attempt, the public card and `SendMessage` from the host, the stop file, one anonymous tenant created from a /24).
+Checked red: the old healthcheck without `-f` (the gate never healthy, 4 minutes); a fresh volume on `kontra-gate:m3`
+(root's, 65532 cannot write); README blocks with a short slug, `-a` without the card path and a `:7778` console; the
+first rehearsal failing at its `docker stop` (exit 137, the runc refusal above).
+
+**Review fixes** (WP-08's review, 29 Oct). The VPS script fails closed. The droplet and record listings fail loudly
+when doctl or Cloudflare does not answer (a 429, an expired token). Every check treats that as "could not verify",
+never as "nothing left", and the pre-flight refuses to start on it. DNS goes before the droplet, in the trap and in
+`--teardown-only`: first the run's record by id, then every record with the run's comment, including one whose POST
+answer was lost. A droplet is deleted only once that succeeded, so the name never points at an address DigitalOcean may
+give to someone else, who could then serve it and get a certificate for it. The price is a droplet that keeps billing
+until `--teardown-only` succeeds; the run says so ("KEPT"). The reap deletes only records with the run's comment. A
+record named the name with another comment is reported and left, and the reap fails. `KONTRA_VPS_NAME` must be
+`m4-teamgate<…>` in the zone (the review deleted staging's records with a mistyped one). No secret is on a command line:
+curl reads the Cloudflare token on its stdin (`-H @-`) and the gate's key from a 0600 file in the run's 0700 directory,
+and `a2a send` reads `A2ACLI_AUTH`. The payloads both kits `docker cp` for the image's non-root user get explicit modes
+(directory 0755, files 0644). The build context keeps the archive's modes (`tar -p`), and the remote configure step sets
+`umask 022`. So a hardened umask (027, 077) on this host or on the VPS breaks neither kit. Steps 4 and 5 also run on a
+host one already has (`--host ADDR`: nothing created or deleted on DigitalOcean or Cloudflare, the gate stays up, a
+configured host refused), and `make test-kits` rehearses them as written (`TestTeamGateRehearsal`). The stand-in VPS is
+this host: an ssh that runs the remote commands here with `/opt/kontra` as the stack's directory; an `edge` forwarder
+that answers for the name's port 443 on the project's network, as the published port does on the VPS; the name's
+certificate in the ACME cache from the run's CA; and the rehearsal flags `--network`, `--ca-file` and `--connect-to`.
+Only steps 1 to 3 (covered by stubs), the Let's Encrypt issuance and issuer, and the port probe remain the real VPS's.
+Measured (29 Oct, this host, beside other sessions' runs): `make test-kits` exit 0. `TestTeamGateRehearsal` took 274 s:
+compose up 18 s with the configured files, then the team member's node connected about 3 minutes later (it builds kontra
+from `/src` and a2a-cli), then SendMessage answered Hello World and `search` listed `hello`, all under umask 077.
+`TestDemoRehearsal` took 346 s, also under umask 077. Checked red against the scripts as they were: the fail-open reap
+and pre-flight (exit 0, "nothing of a run is left"), the droplet deleted before its record, the staging records deleted
+with `KONTRA_VPS_NAME=gateway.kontra.run`, the token in curl's argv, and the payload copied 0700/0600 under umask 077.
+
+## The merge onto M3's final tree (29 Oct)
+
+### D299. M4 merges onto M3's final tree, and what M3's review left to M4 — **decided under the owner's standing instruction, 29 Oct** (amends D268; carries out D225)
+
+M4's branch was cut from M3's at `25faac5`, before M3's review rounds 2 to 4 (D191–D267); M3 then merged to `main` as
+`98a9f25`, the tree of `m3-sealing-mcp` at `6a2dba2`. Merging that tree into M4 met eleven conflicting files, the
+interfaces the rounds changed under M4's code, and two items M3's decisions leave to M4 that M4's plan predates: D225's
+gate-level test of D199's notice across two replicas, and D231's cap of a principal's durable tasks per service.
+Decision:
+
+- **Both sides are kept.** M3's revisions of the specs stand ([`relay.md`](../spec/relay.md) revision 7,
+  [`tunnel.md`](../spec/tunnel.md) revision 5) and M4's follow them (8 and 6). tunnel.md §5's `unknown_key` rule
+  names both of its exceptions, a node that only hires (D206) and a node that asks for an anonymous session (D285);
+  relay.md §10.3's operator-configured endpoints (D284) take in the bucket that D192 dials as configured. The MCP
+  relay's dependencies carry M3's `ToolsChanged` beside M4's anonymous `Calls` and `Tenants`; the CLI keeps M3's
+  `kontra seal` usage and help beside `kontra login` and `--public`; the README keeps M3's sealing, MCP and
+  second-pentest text beside M4's demo and team-gate sections. M4's provisional labels are D268 to D298.
+- **What the rounds changed under M4's code holds.** An anonymous tenant's `calls` slot (D287) is taken after
+  Admission and before a call is metered, in both eras, where D196 and D265 leave metering. The sessions of `/mcp`
+  itself (service `NULL`, no tunnel) are neither counted nor evicted by `max_sessions_per_principal` (D213, D231,
+  D249), and have their own idle sweep. The streams `/mcp` writes keep D265's rule: a plain `hire`'s answer and a
+  `GET` stream carry no event id, a `tasks/result` stream its `k.` ids (§11.7). A hiring node's `/mcp` is no service
+  path, so its sealing of MCP sessions (D219, D260, D263) leaves it alone, and D260's removal of `Mcp-Session-Id` from
+  every answer but an `initialize`'s takes nothing from a client of `/mcp`, whose answers name the session they
+  answer on.
+- **D225's test is built.** `TestToolsListChangedAcrossReplicas` (`internal/gate`) has replica B drain a direct
+  service's `tools/list`, replica A relay the upstream's `notifications/tools/list_changed` on the `POST` stream of a
+  call, and B relay a call of the tool the upstream added within 5 seconds, where B's drained list would answer it
+  `Unknown tool` for up to 10 minutes ([`relay.md`](../spec/relay.md) §11.3).
+- **D231's cap of a principal's durable tasks per service is not built in M4**, and is follow-up work beside D267's.
+  The owner's M4 goal does not name it, and it needs a service setting with its schema, spec text in relay.md §11.2 and
+  §11.5 and a refusal for a task-augmented call over it, which a merge does not decide alone. Until it is built, a
+  principal's durable tasks on a service are bounded by `limits.dispatch_slots` gate-wide and, on an anonymous
+  tenant's service, by `tunnel.anonymous.tasks` (D287).
+
+## From M5's plan audit (31 Oct)
+
+### D300. `hire` activates the operator's required extensions for the buyer, and refuses only those it cannot carry — **decided under the owner's standing instruction, 31 Oct** (amends D294; carries out [`ext-escrow.md`](../spec/ext-escrow.md) §1 on `/mcp`)
+
+M5's plan audit (28 Oct) found that D294 refuses, before Admission, every `/mcp` `hire` of a service whose served card
+marks an extension `required: true`. ext-escrow §1 makes Cloud's escrow entry `required: true`, so every Cloud
+`per_task` listing would be refused through `/mcp`, and M5's gate that a stock MCP client's `hire` answers the task's
+thread URL could not pass; M5's plan had worked around it by writing the entry `required: false`, against §1. Yet
+`hire` is the escrow flow: the quote is shown through §12.3's URL elicitation, its URL is the thread on the operator's
+page, and a person accepts it there, never an API key or an MCP session (D38). Decision ([`relay.md`](../spec/relay.md)
+§12.2, §12.3 step 1, §13.4; ext-escrow §1):
+
+- **The operator's required entries are activated for the buyer.** A required URI of the service's `card_extensions`
+  annotation (§13.4) is the operator's: the operator asserts it on the card and its own hooks carry it (Admission's
+  quote, its approve page), which every `hire` task goes through as an A2A task does. `hire` activates it on the
+  buyer's behalf, and Admission receives it in `extensions` (§13.1) as it receives an A2A caller's activation; the
+  task is then created, quoted or refused as Admission decides, which stays the place where price and policy are
+  decided. The activation is not a service parameter: the work item does not keep it and the service never receives
+  it, even when its own card declares the URI (an A2A caller's own activation of such a URI does reach it, §6.2),
+  since the buyer activated nothing it could speak. A `reply` to such a task needs nothing more: a follow-up has no
+  Admission.
+- **What `hire` cannot carry is still refused.** A required URI of the seller's own card, one the operator's entries
+  do not assert, is the seller's protocol, which a tool call cannot speak: refused as D294 says, before Admission,
+  naming that URI and the service's A2A URL. So is the sealed extension's URI even as an operator's entry, beside
+  D272's refusal of a service whose sealing is required: `hire` cannot seal. The gate still names no escrow URI: it
+  activates whatever the operator's entries require (ext-escrow's "the open-source gate names no escrow key" holds),
+  and M5 can write ext-escrow §1's entry as §1 writes it, `required: true`.
+- **Why not D294's proposal.** An `extensions` argument needs a client that sends it; a stock MCP client sends only a
+  tool's documented arguments. It remains a proposal for the seller's extensions.
+
+Tested: `TestHireActivate` and `TestHireActivatesTheOperatorsExtensions` (`internal/relay`: Admission told of the
+operator's URI, the seller receiving the hire and the reply without `A2A-Extensions` although its card declares the
+URI; the seller's own URI and the sealed one refused, with no Admission, task row or message);
+`TestGateMCPHireOperatorExtension` (`internal/gate`: a `per_task` service whose card carries ext-escrow §1's entry,
+required, behind a quoting Admission server: the A2A route refuses a `SendMessage` that does not activate it, `hire`
+answers `-32042` whose url is `https://app.kontra.sh/#/t/<task>`, the hook is asked once with the escrow URI in
+`extensions`, the approved task reaches the seller without `A2A-Extensions`, and a seller-required and a
+required-sealed service are still `isError` with no task and no Admission); `TestGateMCPReviewFixes` and the e2e
+`TestGateMCPHire` (§16 `gate_mcp_hire`).
+
+### D301. An `allow:` entry `oidc:*` admits every principal of the configured OIDC issuer — **decided under the owner's standing instruction, 31 Oct** (amends D20)
+
+M5's audit: an MCP OAuth principal (`oidc:sub:<sub>`, no tenant, `via = mcp`, D276) is admitted only by an exact
+`oidc:sub:` entry or by `anonymous`; `org:` and `key:` never match it. So a public Cloud listing could not admit every
+signed-in user without admitting anonymous callers too (M5's plan wrote `[key:*, anonymous]`). Decision
+([`relay.md`](../spec/relay.md) §2.3, §12.1, §12.2; `spec/schema/config.json`):
+
+- **Grammar.** `oidc:*` is an entry of its own beside `oidc:sub:<subject>`. It admits every principal of kind `oidc`,
+  whatever its subject. Such a principal exists only for a JWT the configured issuer signed (`auth.mcp_oauth` on the
+  MCP routes, D276; `auth.oidc` on the A2A routes once M5 builds them), with `via` `mcp` or `oidc`; with both
+  configured and naming two issuers, it admits the principals of both, as an `oidc:sub:` entry matches a subject of
+  either. It never admits an API key, a node or the anonymous principal: a listing open to API keys too writes
+  `[key:*, oidc:*]`. `oidc:sub:*` is refused at load: a subject is matched exactly, so it would admit only the subject
+  `*`. An `oidc:*` entry on a gate without `auth.mcp_oauth` admits nobody, and the load says so in a warning.
+- **Visibility.** `oidc:*` is a named entry, as `key:*` is: `search` shows a service it is on to every OIDC principal
+  (§12.2); an `anonymous` entry still shows nothing.
+- **Admission decides the rest.** The entry says who may reach the service; price and policy stay Admission's
+  (§13.1), which receives the principal and its `via`.
+
+Tested: `TestParseAllowEntry` and `TestAllowOIDCAnyWarnsWithoutAnIssuer` (`internal/config`), `TestAllowList`
+(`internal/auth`), `TestAdmitsNamed` and `TestCatalogOIDCAny` (`internal/gatemcp`: search and hire as a signed-in user,
+an API key and the anonymous principal), `TestGateMCPOAuth` (`internal/gate`: a token of the in-repository
+authorization server finds and hires an `oidc:*` service on `/mcp` and is served on an `oidc:*` `/mcp/{svc}`; an API
+key is not admitted by the entry).
+
+### D302. §13.3's metric of the oldest pending hook activity is not built in M4 — **decided under the owner's standing instruction, 31 Oct**
+
+[`relay.md`](../spec/relay.md) §13.3 says the gate exports the age of the oldest pending Lifecycle hook activity, so an
+operator can alert on a hook that never completes (its activities are retried forever, a typo in a type name
+included). M5's audit found that the metric does not exist. It is not cheap. The hook activities are scheduled by each
+task's `TaskLifecycle` on the operator's queue, so whether one is pending, and since when, is in Temporal, per
+workflow. The queue's backlog age (Temporal's `DescribeTaskQueue`) counts only activities no worker has picked up: an
+activity a worker polls and fails, which a type name no worker registers is, waits out its retry backoff outside the
+backlog, so the typo case would not show. Describing every open workflow for its pending activities costs one request
+per running task on every scrape. Measuring it needs the workflow to record when each hook call began and ended, a
+change to `TaskLifecycle`'s commands that goes behind `workflow.GetVersion` (§14.4), either a Temporal search
+attribute the operator registers or a gate table, and spec text for the metric's name and labels. Decision: not built
+in M4. It is follow-up work, beside D299's, for a public-repo issue, and §13.3 says the metric is not built yet. Until
+it is, an operator alerts on the hook queue's backlog age and on its own hook worker's activity failures (M5's plan
+alerts on `kontra-settlement`'s backlog age), and the gate's `kontra_gate_operator_patches_refused_total` counts the
+patches it drops.
+
+## From M4's review (31 Oct)
+
+The review of the merged M4 branch (`69bd5f0`) confirmed twenty findings, two of them twice. D303 to D306 record how
+each was settled.
+
+### D303. `/mcp` serves what the replica's registry serves, and its waits, sessions, streams and parts hold as the other routes' do — **decided under the owner's standing instruction, 31 Oct** (amends D271, D293, D299; completes D272, D288)
+
+The review found five places where the gate's own `/mcp` departed from the routes beside it. Decision:
+
+- **What `/mcp` serves is the registry's.** The A2A route resolves every request, `GetTask`, `CancelTask` and a
+  follow-up included, through the replica's in-memory registry: an enabled entry of kind `a2a` whose `allow:` admits
+  the principal, else `404` "unknown service". `/mcp` read the services table instead, and its task surfaces were keyed
+  by `buyer_id` only, so a key sharing the buyer of the key that hired (an operator-written key, or `MintRequest.BuyerID`)
+  but refused by `allow:` could read, cancel and answer the task, and so could the hiring key after its `allow:` entry
+  was removed; a reply to a task whose service was disabled was sent and failed the task `service_unavailable`.
+  `search`, `describe` and `hire` now see exactly what the registry serves, with its `allow:` (`gatemcp.Served`, wired
+  to `gate.Services.LookupByID`); a hire task is the reader's only while its service is so served and admits the
+  reader (`reply` "unknown task", `tasks/*` `-32602`, left out of `tasks/list`, nothing sent or cancelled); and the
+  hirer checks it again before a hire or a follow-up is sent (`relay.Hirer.Serves`, `relay.ErrNotServed`). A row the
+  registry refused to build (an annotation it cannot read) or has not loaded yet is an unknown service to `/mcp`, as to
+  the A2A route, instead of a hire that ran Admission without the operator's required extensions activated (D300) or
+  the seller's checked (D294). The answer is the unknown service, not `503`: the registry cannot tell a row it has not
+  loaded from one it refused, and the A2A route answers both the same. relay.md §12.2.
+- **A row that cannot be read is left out, never a failed request.** A services row whose `allow:` no longer parses (a
+  stored `oidc:sub:*`, a literal subject before D301 and refused since) made every `search` whose scan reached it `503`,
+  for every tenant's buyers on a multi-tenant gate. `search` now logs it (once per row per 10 minutes) and goes on past
+  it, and `describe` and `hire` answer it as an unknown service, as the registry leaves it out. No data step rewrites
+  such rows: on a team gate config refuses them at load and the sync rewrites the row; on a multi-tenant gate the rows
+  are the operator's, and the log names each.
+- **A plain wait reads a state and the event it comes from together.** A reply's wait read the row and then, in a
+  second statement, the seq of the task's last status event; a turn's terminal event committed between the two made the
+  wait end on the row's earlier question, so `reply` answered "Which date?" for a task that had completed (6 of 150 in
+  the reviewer's run) and the client's next reply was refused. The wait now reads both in one statement
+  (`store.Log.LoadHiredAsked`), and ends at `input-required` only on a question asked after the reply's own message.
+- **A session in use is not idle.** §11.2 keeps a session whose stream is open from the idle sweep; `/mcp` wrote
+  `last_seen_at` only when a request started, so a stock client whose standalone `GET` stream stayed open for an hour
+  had its session closed under it, and its next request was `404` (the TypeScript SDK does not re-initialize on `404`).
+  The replica serving a `/mcp` session's `GET` stream or a blocking `tasks/result` now keeps its `last_seen_at` fresh
+  (`mcprelay.Sessions.KeepSeen`, every `IdleWrite/2`). relay.md §12.
+- **`tasks/result` streams carry no event ids** (amends D299's bullet that kept their `k.` ids). D299 kept them under
+  §11.7, but `/mcp` never resumes a stream: its `GET` is always the session's notification stream, so a client whose
+  `tasks/result` stream was cut and that reconnected with `Last-Event-ID`, as the TypeScript SDK does once it has seen
+  an id, waited on a stream that never carries the answer. Without ids the client asks `tasks/result` again, which is
+  what §11.7's resumed stream would have made it do too (D203). The `elicitation/create` keeps its JSON-RPC id
+  `k.<taskId>.<seq>`, which a response names. relay.md §12.3.
+- **A bucketed part reaches an `/mcp` client as a presigned GET, through a node too.** A request on a hiring stream
+  keeps `kontra-blob:` refs, which the hiring node inlines for `/agents/…` answers only, so a `hire` result fetched
+  through a node carried a `resource_link` to `kontra-blob:<ref>` that no client can fetch. `/mcp` now renders a hire
+  task's parts for a caller whatever stream the request came on (`blob.ForCaller`): the node relays an MCP answer as
+  it is, its local client is a caller, and the node dials nothing a part names (D56). The node does not inline them
+  instead: a `resource_link` with a fetchable URL is what an MCP client expects for large content, where an embedded
+  resource of up to 64 MiB would land whole in a model's context, and `hire` cannot be sealed (D272), so there is
+  nothing for the node to open. relay.md §10.4, and the hiring node's comment.
+
+Tests: `TestReplyAnswersTheTurnItStarted` (the terminal event committed between the wait's read and its decision),
+`TestHireTaskSurfacesFollowTheRegistry`, `TestCatalogServesWhatTheRegistryServes`, `TestGateSessionInUseOutlivesTheIdleSweep`,
+`TestGateTasksResultStreamHasNoEventIDs`, `TestGateMCPRendersBlobsThroughANode` (`internal/gatemcp`), and through a whole
+replica in `TestGateMCPReviewFixes` (a key of the same buyer refused by `allow:`, the `allow:` entry removed, the
+service disabled, a row the registry refused, a row whose `allow:` does not parse, and forty `hire` and `reply` turns
+each answering its own).
+
+### D304. What an anonymous tenant's `calls` limit counts, an anonymous key is not rotated, and the sweeps run without the setting — **decided under the owner's standing instruction, 31 Oct** (amends D287, D292; completes D286)
+
+- **`calls` counts every relayed request and stream.** §6.2 gave `calls` the purpose of keeping a `--public` MCP
+  service from being an unbounded relay, but its mechanism counted plain `tools/call` only: `resources/read`,
+  `prompts/get`, `completion/complete`, any made-up method, an `initialize` and every `GET` or `subscriptions/listen`
+  stream went through with no slot. Every request with an `id` and a method that the relay forwards to an anonymous
+  tenant's service, and every `GET` or listen stream for as long as it is open, now takes one of the tenant's `calls`
+  slots (`mcprelay.Handler.takeRelay`, the same gate-wide `anon_calls` rows), with `429` `-32600` and `Retry-After`
+  over it; a notification, a client's response and what the gate answers itself (`tools/list` from its cache, durable
+  `tasks/*`, a gate-written stream) take none. Streams share the limit with calls rather than having one of their own:
+  a second limit would need a column of `anon_calls`, a key and its spec, for the same bound, and a stock client's
+  standalone `GET` refused `429` is not fatal to it (the TypeScript SDK reports it and goes on). The anonymous
+  principal still has no `max_sessions_per_principal` (relay.md §11.2): that is deliberate. tunnel.md §6.2.
+- **A key of an anonymous tenant is not rotated.** `kontra connect --rotate` sends `rotate_from` and never
+  `anonymous`, and the gate admitted the new key into the anonymous tenant through §5's rules, without the anonymous
+  decision: no `welcome.anonymous`, no end clock on the session, the 32-stream hiring cap instead of `hiring_streams`,
+  and no tenant counted. A chain of rotations held any number of sessions of one tenant at once until its end (the
+  sweeper's end still closed them all). A `rotate_from` naming a key of an anonymous tenant, live or ended, is now
+  `enroll_invalid`, and nothing is written; the node then sends its hello without `rotate_from`, which with no
+  credential asks for an anonymous session of its own, counted by §6.2. Rotating inside the tenant was the
+  alternative; an anonymous key has nothing a rotation protects that a new session does not give. tunnel.md §6.1, §12.
+- **The sweeps run on every multi-tenant gate.** They were built only with `tunnel.anonymous`, so a gate that turned
+  the setting off while anonymous tenants lived, typically against abuse, never ended them in the database nor purged
+  their tasks, objects, sessions and keys. The expiry and the purge now run on every multi-tenant gate, with the
+  block's values or §6.2's defaults; with no anonymous tenant they find nothing. tunnel.md §6.
+- **What anonymous tenants can keep stored is documented, not changed.** The creation limits count live tenants and an
+  ended tenant keeps its parts until its purge, so about (1 + `purge_after` / `ttl`) generations coexist: 13 with the
+  defaults, about 2.4 GiB per /24 and 0.8 TiB gate-wide. Counting unpurged tenants toward `tenants_per_network` would
+  give a network three anonymous sessions a day instead of three at a time, which the demo and the purpose of the
+  setting do not survive; deleting parts at the end would take away the day an operator has to look at an abusive
+  tenant before its purge. tunnel.md §6.2 states the bound and what lowers it (`purge_after`, `parts_bytes`, the
+  creation limits); a gate-wide cap on anonymous stored bytes is follow-up work if Cloud's figures need one.
+
+Tests: `TestEveryRelayedRequestIsCapped` (`internal/mcprelay`), `TestAnonymousKeyIsNotRotated` (`internal/enroll`),
+`TestAnonymousSweepsRunWithoutAnonymousSessions` (`internal/gate`). Amended by D307 (a notification or response is
+answered `202`, never relayed as a stream), D308 (streams have a limit of their own), D309 (the limits apply with the
+setting off, and `enabled: false` keeps them), D310 (the stored-parts bound carries `tasks`) and D312 (an `initialize`
+without an `id` is refused `400`, so every forwarded `initialize` takes a slot).
+
+### D305. An authorization server issues a gate's API key only for that gate's origin — **decided under the owner's standing instruction, 31 Oct** (amends D278, D296)
+
+`kontra login` takes the authorization server from the gate's own RFC 9728 document and stores the `kk_` key it gets
+under that gate's origin, and `kontra connect` sends it there. Nothing bound the key to the gate: an API key has no
+audience, so a hostile gate whose document named Cloud's authorization server would receive the person's Cloud key
+once they signed in through it and connected. RFC 8707 makes the binding the authorization server's to keep.
+Decision: tunnel.md §6.3 step 4 now says the authorization server MUST issue a gate API key only when `resource` is the
+origin of the gate whose keys it issues, answer any other `invalid_target` (RFC 8707 §2), and name that origin on its
+consent page; this is a requirement of M5's authorization server (kontra-cloud#60), to be carried into that contract
+when it is written (this branch does not reach that repository). The in-repository doubles keep it
+(`oidctest.ForResource`; `DBMinter` and the e2e authorization server mint only for their gate's origin), and
+`kontra login` prints the authorization server's origin beside the gate's. It does not warn when the two are not the
+same site: Cloud's own sign-in is on another host than its gate, and the CLI cannot know an operator's sites. Tests:
+`TestLoginThroughAnotherGatesDocumentStoresNothing` (`internal/login`), and `login_converts` (another gate's document
+naming the gate's authorization server: refused `invalid_target`, nothing stored).
+
+### D306. The compose gate is M4's, published on both address families, its secrets ignored, the kits neutral, and the gate runs not done yet — **decided under the owner's standing instruction, 31 Oct** (amends D282, D298)
+
+- **The compose image is `kontra-gate:m4`, built with `VERSION m4`.** It was still `kontra-gate:m3`, so every M4 compose
+  gate reported `m3` (`kontra-gate version`, `gate_replicas.version`, `/mcp`'s `serverInfo`, the hook clients'
+  User-Agent, the VPS run's record), and an M3 host that upgraded with `docker compose up -d` and no `--build` kept
+  running its M3 image, whose embedded migrations never apply `0003_m4.sql`. The pentest's default image follows
+  (`KONTRA_PENTEST_IMAGE`, `test/pentest`); its project stays `m3pentest` by default, which D266 already lets a run
+  beside another checkout's override. The README's upgrade is `git pull && docker compose up -d --build --wait`.
+  Amended by D313: only the `gate` service builds the image, which `gate-migrate` runs.
+- **The gate is published on IPv4 and IPv6.** `kontra.vps.yaml` advises an AAAA record, but compose published on
+  `0.0.0.0`, which Docker binds on IPv4 only, so IPv6 clients were refused. The default now names no host address
+  (`${KONTRA_LISTEN_ADDR:+${KONTRA_LISTEN_ADDR:-}:}${KONTRA_PORT:-8443}:8443`), which Docker publishes on both families;
+  `KONTRA_LISTEN_ADDR` still restricts it, and set but empty means the default, never `0.0.0.0`.
+- **An operator's secrets stay out of git and of the build.** The README's VPS steps write `.env`, the operator's copy
+  of the configuration and the card-signing key into the working tree; a root `.gitignore` now ignores them (and a
+  provided certificate), keeping the shipped configurations tracked, and `.dockerignore` keeps `.env` and `deploy/` out
+  of the build context.
+- **The kits name no one's infrastructure.** `scripts/team-gate-vps.sh` defaulted to the owner's DigitalOcean key id
+  and SSH key file and refused to delete one droplet by its name. `KONTRA_VPS_DO_KEY` and `KONTRA_VPS_SSH_KEY` are now
+  required (exit 2 when unset), the droplets never deleted are those `KONTRA_VPS_PROTECTED` names (none by default),
+  and the tests use neutral values; the public files no longer name a host's fleet or a private secrets path.
+- **The gate runs are not done.** The README's demo is written for the staging gate, `gateway.kontra.run`, which is
+  not deployed: it does not resolve, the clean-laptop and VPS runs (WP-09) have not been made on this head, and
+  `docs/gate-runs-m4.md` does not exist. The README now says the staging gate is not up yet and points at the
+  from-source gate meanwhile; `docs/README.md` and D282 say the record will be written. **M4 is not gated until
+  WP-09 has deployed staging from this head, run `make test-kits`, the clean laptop in source mode and the VPS run
+  (dry run, then a real droplet with Let's Encrypt), committed `gate-runs-m4.md`, and, after the merge, run
+  `demo-clean-laptop.sh --published --expect <merge commit>`.** None of that is this review's to do: it touches
+  staging, DigitalOcean and Cloudflare, which the orchestrator runs (O2). WP-09 ran them on 31 Oct and
+  [`gate-runs-m4.md`](gate-runs-m4.md) records them, with each gate item's verdict and commit: staging deployed,
+  `make test-kits`, the clean laptop in source mode, the TCK and `anon_limits` passed at `3b890f3`; the VPS run failed
+  there on a defect of `compose.yaml` (`gate-migrate` and `gate` both build `kontra-gate:m4`, which races on a fresh
+  Ubuntu 24.04's containerd image store), fixed by D313, and passed at `f9f5e61`. The `tck` workflow's first CI run on
+  the pull request, staging's redeploy from the merge commit, the published laptop run and the anonymous tenant's
+  purge are still to do.
+- **Smaller corrections.** The demo's prerequisite is Node 22.19 or later (the pinned inspector and its undici need
+  it); compose has three one-shot jobs; M4's decisions run from D268 under their headings. `demo-clean-laptop.sh`
+  creates the laptop's log before its follower starts: under load the loop read it first and failed
+  (`TestDemoPayloadModes` failed once in `make check` on this host for that reason).
+
+Tests: `TestComposeTeamGate` (the image, its version and the publish default), `TestOperatorSecretsAreIgnored` and the
+VPS kit's refusals without `KONTRA_VPS_DO_KEY` or `KONTRA_VPS_SSH_KEY` and its protected-droplet case (`test/vps`).
+
+## From M4's second review (31 Oct)
+
+The second review of the branch (`ea50cec`, after D303 to D306) confirmed six findings. D307 to D311 record how each
+was settled; every one has a regression test that fails on `ea50cec`.
+
+### D307. A client's notification or response is answered `202`, never relayed as a stream — **decided under the owner's standing instruction, 31 Oct** (amends D304)
+
+D304 gave a notification and a client's response no `calls` slot because "they hold no relay open", but on the legacy
+pinned path the gate forwarded them and relayed whatever the upstream answered: an event stream on a notification was
+relayed until the upstream or the client closed it, with no slot and no timeout. The stock node passes
+`text/event-stream` through for any exchange, so an anonymous tenant only had to make its own local server stream on
+a notification to hold any number of relayed streams open for its `--public` service, bounded only by the edge's
+per-address limits (an anonymous caller has no key for `inflight_per_key`). The reviewer relayed 144 events, 600 KB, in
+3 s with the cap full. The 2026-07-28 path was not affected: it answers a notification `202` and a response `400`
+before forwarding anything.
+
+Decision: the gate answers a forwarded notification or response as the MCP transport says a server answers one, whatever
+the upstream sent: `202` with no body when the upstream answered `2xx`, its error status bare otherwise (the 404 that
+closes the session and the `401`/`403`/`407` → `502` rule as before), and it closes the upstream's body unread, which
+ends the exchange (the tunnel stream, the peer hop, the direct backend's connection). Taking a slot for such a POST
+when the upstream streams was the alternative; it would still relay messages a client does not expect there and
+read a body the transport says is empty. The body of an error status is dropped too, which the transport allows (an
+error response "MAY" carry one): reading it is a relay without a slot as well. relay.md §11.2, tunnel.md §6.2.
+Test: `TestEveryRelayedRequestIsCapped` (an upstream that answers a notification and a client response with an
+endless event stream while the cap is full: `202`, no body, the upstream's exchange ended). Amended by D312 (an
+`initialize` without an `id` was neither: it is refused `400`, never forwarded).
+
+### D308. MCP streams relayed to an anonymous tenant have a limit of their own, `streams` — **decided under the owner's standing instruction, 31 Oct** (amends D304, D287)
+
+D304 made each `GET` or `subscriptions/listen` stream take one of the tenant's `calls` slots for as long as it is open,
+and nothing ends an idle stream (keep-alives every 15 s, no write timeout on SSE, its session kept fresh while it is
+open, D303). The TypeScript SDK's client (1.32.2) opens its standalone `GET` as soon as `notifications/initialized` is
+accepted, and the stock server keeps it open until it is cancelled. So eight idle stock clients held the eight default
+slots, and every `tools/call` and every new `initialize`, from any client, was `429` for as long as they stayed: an
+anonymous `--public` service, which takes callers without a credential and has no `max_sessions_per_principal`, could be
+shut off for its whole `ttl` at no cost. D304's rationale considered only a refused ninth stream, not open streams
+starving requests.
+
+Decision: streams are counted apart from requests, at most `streams` per tenant (default 8, a new `tunnel.anonymous`
+key), gate-wide in the same `anon_calls` rows with a `stream` column (migration 0003, M4's own and not yet released).
+Requests keep `calls`; a ninth stream is `429`, which a stock client reports and goes on from (D304). Reserving part of
+`calls` for requests would leave the same starvation at a lower count, and bounding a stream's lifetime frees nothing
+for long, since the SDK reconnects its `GET`. tunnel.md §6.2, relay.md §17. Tests: `TestIdleStreamsLeaveCallsTheirSlots`
+(eight stock-shaped clients with their `GET` open still get `tools/call` served, and a ninth client's `initialize`; its
+`GET` is `429`), `TestEveryRelayedRequestIsCapped` (a request is served while a stream holds its slot; a second stream
+is refused), `TestCapsStreamsApartFromCalls` (`internal/anon`).
+
+### D309. An anonymous tenant's limits apply on every multi-tenant gate, and `enabled: false` keeps them — **decided under the owner's standing instruction, 31 Oct** (amends D277, D292, D304)
+
+D304 ran the sweeps on every multi-tenant gate, but the runtime limits (`anon.Caps`: `tasks`, `parts_bytes`, `calls`)
+were still built only with `tunnel.anonymous` on, while the registry serves a live anonymous tenant's services until
+its `expires_at` whatever the setting says. After an operator turned the setting off, typically against abuse, a live
+tenant's `--public` service took any number of tasks and parts from unauthenticated callers until its end (the reviewer
+had 11 of 11 accepted against the default `tasks` of 4), and a replica with it off took no `calls` slot for a session
+another replica serves. And the setting off could not carry the operator's limits: `false` is §6.2's defaults, and the
+object form always meant on, so an operator who kept `purge_after: 168h` for evidence had that data purged 24 h after
+each end once the setting was off.
+
+Decision: the caps are built on every multi-tenant gate, with the sweeps' limits (they act on anonymous slugs only, so
+on a gate with no anonymous tenant they cost one indexed lookup for a task a node's key creates and one for an MCP
+task's dispatch), and the object form takes an
+`enabled` key (default `true`): `{enabled: false, purge_after: 168h, …}` opens no anonymous session and keeps those
+limits for the tenants that live and for their purge, the others at §6.2's defaults. Recording each tenant's purge
+deadline on its row was the alternative; it would take the operator's later change of `purge_after` away from tenants
+already ended, and the gate keeps no other per-tenant copy of a limit. A purge reads `purge_after` when it runs, so on
+a gate whose replicas disagree the shortest wins; tunnel.md §6 says so. A disabled block's limits are still checked
+(`hiring_streams` at most 32) but not refused on a single-tenant gate. tunnel.md §6, relay.md §17,
+`spec/schema/config.json`. Tests: `TestAnonymousLimitsHoldWithTheSettingOff` (`internal/gate`, through a replica:
+`enabled: false, tasks: 2`, a third task `429`, a message past `parts_bytes` refused), the `enabled: false` case of
+`TestAnonymousSweepsRunWithoutAnonymousSessions`, and `TestTunnelAnonymous` (`internal/config`).
+
+### D310. What anonymous tenants can keep stored carries the `tasks` factor — **decided under the owner's standing instruction, 31 Oct** (amends D304)
+
+D304's bound, about (1 + `purge_after` / `ttl`) × `tenants_per_network` × `parts_bytes`, left out D292's Budget
+SPEC-CONFLICT: a dispatch counts the tenant's other tasks' bytes as they stood when it started, so its `tasks`
+concurrent tasks started together may each store up to `parts_bytes`. The tenant controls its upstream and its callers,
+so it reaches that. Decision: the conflict stands (re-reading the total at each externalized part is D292's open
+proposal, for the spec's owner), and tunnel.md §6.2 states the bound it gives: (1 + `purge_after` / `ttl`) ×
+`tenants_per_network` × `tasks` × `parts_bytes`, 13 × 3 × 4 × 64 MiB ≈ 9.75 GiB per /24 or /48 with the defaults, and
+13 × 1000 × 4 × 64 MiB ≈ 3.2 TiB gate-wide, with `tasks` among what lowers it. `Caps.Budget`'s comment already said
+"tasks × the room left"; its "64 MiB, the default task_bytes" now says `parts_bytes` (task_bytes is 256 MiB, and
+the `min(…, parts_bytes)` caps each task at 64 MiB). Documentation only, so no regression test.
+
+### D311. A seller's case variant of a member the gate owns refuses its card, and §2.4 reads the served card with exact keys — **decided under the owner's standing instruction, 31 Oct** (amends D52, D300; carries D172 to cards)
+
+`card.Rewrite` set and removed members by their exact keys, while a2a-go's card parser and the gate's own §2.4 reader
+(`a2ahttp.cardExtensions`, which backs the A2A route's required extensions and `Server.Declared`, hence hire's
+activation, D300) decode with `encoding/json`, which matches names case-insensitively and keeps the last match. A seller
+whose `capabilities` held `"Extensions"` after `"extensions"` had the operator's entries written at the first place and
+its own read in their place, on a card the gate signed and a2a-go verified: an operator's optional entry made required
+(hire activates it for every buyer, the route refuses callers without it), a required one (Cloud's escrow) hidden (the
+route stops requiring it, hire stops activating it, a buyer's URI is dropped as undeclared before Admission), an escrow
+entry's quote replaced, the gate's anonymous extension removed or forged. Money still moved only through the operator's
+own quote on its own page, and the node's strict readers refuse such a card. The reviewer's third claim, a top-level
+`"SupportedInterfaces"` or `"Capabilities"` shadow, does not reach a client: signing refuses a pair of top-level keys
+equal under case folding (`jws.CardPayload`), so such a card was never installed. A lone top-level variant of a member
+the gate removes (`"Signatures"`, `"URL"`, an only-anonymous service's `"SecuritySchemes"`) did pass signing.
+
+Decision: `Rewrite` reads the normalized card with exact keys at the levels the gate acts on and refuses it
+(`ErrBadCard`: not installed, no card until the seller publishes another, as for a card JCS refuses, D193) when its top
+level, `capabilities` or a `capabilities.extensions` entry holds a repeated key, two keys equal under case folding, or a
+lone case variant of a member the gate writes, removes or reads there: `supportedInterfaces`, `capabilities`,
+`securitySchemes`, `securityRequirements`, `signatures` and the 0.x members at the top; `pushNotifications`,
+`streaming`, `extendedAgentCard` and `extensions` in `capabilities`; `uri` and `required` in an entry. Dropping the
+variants instead would serve a card the seller did not write in a way it did not mean, and the hosting node refuses them
+already. `cardExtensions` reads `capabilities.extensions` and each entry with exact keys, as the node does. relay.md §3.
+Tests: `TestCaseVariantsOfGateMembersAreRefused` (`internal/card`, through `Keeper.Seed` with the gate's signer: each
+variant refused; the controls install and a2a-go reads exactly the operator's entry), `TestDeclaredReadsExactKeys`
+(`internal/a2ahttp`: the variants declare nothing; an installed card declares what a2a-go reads of it).
+
+## From M4's third review (31 Oct)
+
+The third review of the branch (`3b890f3`, after D307 to D311) confirmed one finding, a minor one. D312 records how it
+was settled; its regression tests fail on `3b890f3`.
+
+### D312. An `initialize` without an `id` is refused `400`, never forwarded — **decided under the owner's standing instruction, 31 Oct** (amends D307, D304)
+
+D304 gave every forwarded request with an `id` a `calls` slot and D307 answered every forwarded notification `202`, but
+an `initialize` without an `id` was neither. `mcpwire.Parse` reads a method without an `id` as a notification, §11.12's
+rule 1 sends every `initialize` to the legacy era, and the relay routed it to the session opening on its method alone,
+where `takeRelay` takes no slot for a message without an `id` and nothing answered it `202`. So, with the `calls` cap
+full, the gate forwarded it and relayed what the upstream answered: a `2xx` JSON body up to the 8 MiB `MaxBody`, with no
+session; and an event stream that sends no response was held with no time limit, since the relay waits for a response
+whose `id` matches the request's, which an absent `id` never does, and neither the edge nor the relay sets a deadline
+on the exchange. A silent stream, or one of events typed other than `message` (dropped before they count toward
+`MaxBody`), held the exchange, an edge connection and a tunnel stream for as long as the tenant's own server kept it
+open. `message` events, comment-only ones included (they have no `event:` field, so they are messages), are held up to
+`MaxBody` and end in `502`. The node passes such an `initialize` through (`mcproots` rewrites only
+`capabilities.roots`). Only a tenant's own server could use it, a stock upstream answers at once, and nothing past
+8 MiB per exchange reached a client: concurrency beyond `calls` and holds with no slot, not an unbounded relay, so
+the review rated it minor. The reviewer reproduced it with the cap full: a 1 MiB JSON answer relayed with `200`, and a
+silent stream and 10 MiB of typed events still open after 6 s with no slot taken. The gate's own `/mcp` had the same
+gap without the relay: it opened a session for such an `initialize` and answered a result with `id` `null`.
+
+Decision: an `initialize` is a request (MCP lifecycle; a request carries an `id`), so one without an `id` is §11.1's
+invalid request, `400` with `-32600` `invalid request` and `id` `null`, refused in §11.12's rule 1
+(`mcpwire.Classify`) on `/mcp/{svc}` and `/mcp` alike, before Admission, any slot or anything is forwarded. The stdio
+bridge already refused one so. Taking a slot for it, or answering it `202` as D307 answers a notification, were the
+alternatives. Both still send the upstream a message it cannot answer, and a `202` would tell the client nothing about
+the session it asked for. relay.md §11.12, tunnel.md §6.2. Tests: `TestEveryRelayedRequestIsCapped`
+(`internal/mcprelay`: with no slot free, an `initialize` without an `id`, without a session and on one, to an upstream
+that answers it as the stock double does, with a 1 MiB JSON body, with a silent event stream and with an endless one:
+`400` with that body each time, and the upstream receives none), `TestGateMCPReviewFixes` (`internal/gate`: on `/mcp`,
+`400` and no session row), `TestClassify` (`internal/mcpwire`: whatever `MCP-Protocol-Version` says).
+
+## From M4's gate runs (31 Oct)
+
+The team gate on a clean VPS (gate run C, WP-09, at `3b890f3`) failed at `docker compose up -d --build --wait` on a
+defect of `compose.yaml`. D313 records the fix, with which the run passed at `f9f5e61`; the gate runs' record,
+`docs/gate-runs-m4.md`, holds both runs.
+
+### D313. Only the `gate` service builds the gate's image, and `gate-migrate` runs it — **decided under the owner's standing instruction, 31 Oct** (amends D306; completes D281)
+
+`compose.yaml`'s `x-gate` anchor carried `image: kontra-gate:m4` and `build`, and `gate-migrate` and `gate` both merge
+it, so compose built one tag twice, in parallel. On the droplet the second export failed:
+`#18 ERROR: image "docker.io/library/kontra-gate:m4": already exists`, `target gate: failed to solve`. A fresh Ubuntu
+24.04 now installs `docker.io` 29.1.3 (containerd 2.2.1; compose 2.40.3 and buildx 0.30.1 from Ubuntu's packages, as
+`test/vps/cloud-init.yaml` asks), whose fresh install uses the containerd image store (storage driver `overlayfs`,
+`driver-type io.containerd.snapshotter.v1`); there the second export of a tag the first has just named fails. On the
+classic `overlay2` store (this host: Docker 24.0.5, compose 2.24.6) retagging is idempotent and nothing showed. It is a
+race: the shape at `3b890f3` failed 5 of 15 fresh tries in an `ubuntu:24.04` container with the droplet's packages.
+The kits could not see it: they gave both services the kit's image and reset the build (`build: !reset null`) or came
+up with `--no-build`, and the record kept only compose's last 20 lines, where the error happened to be. The droplet
+lived 5 min 34 s and was torn down and checked; nothing past step 4 ran.
+
+Decision: `build` moves from the anchor to the `gate` service, the one service that builds `kontra-gate:m4`;
+`gate-migrate` keeps the image and runs what `gate` built. Compose builds the images a command needs before it creates
+any container, so the image exists when `gate-migrate` starts (`gate` depends on `gate-migrate`, not the reverse, and
+no `depends_on` could order a build). Before it builds, compose tries to pull `gate-migrate`'s image and, because a
+service builds that image, ignores the failure (compose 2.24.6 prints `gate-migrate Pulling` and `gate-migrate Error`,
+and goes on). Run alone, `gate-migrate` needs the image first: `docker compose build gate && docker compose run --rm
+gate-migrate`, which the README's upgrade now says (before, `run` built it). A second tag for `gate-migrate`, built
+from the same Dockerfile, was the alternative: two builds of one binary, and two images to keep in step.
+
+The VPS run's record says which Docker it met and keeps what compose said. `scripts/team-gate-vps.sh` records, in
+step 4 and so also with `--host`, the server's components (engine, containerd, runc), the storage driver and its
+status, compose and buildx (step 2 recorded compose and buildx only, and only on a droplet). It keeps compose's whole
+output: on success the images compose built (its `naming to … done` lines) and the last 20 lines; on failure every
+line, then `docker compose ps -a` and each service's last 40 log lines. The rehearsal (`TestTeamGateRehearsal`) no
+longer resets the gate's build: the script's `docker compose up --build` builds the gate from the shipped archive, as
+on the VPS, under a tag of the run's (`kontra-gate:kitvps-<pid>`, never `kontra-gate:m4`, which another checkout may
+hold), and the test requires one build of it in the record, `kontra-gate m4`, and `gate-migrate` exited 0 on the image
+the gate runs. This host's `overlay2` store would retag a second build silently, so the builds are counted.
+
+Verified before this change (the gate runs' evidence, 31 Oct): the one-build shape 0 failures in 15 fresh tries on
+Docker 29.1.3 and compose 2.40.3, an upgrade (`up --build` over a running stack) and `build` then `up --no-build`;
+this `compose.yaml` with the whole stack and a real gate build on the same Docker (1 CPU): `up -d --build --wait`
+exit 0 in 366 s, one `naming to`, every service healthy or exited 0, `kontra-gate version` m4, `/healthz` 200, an API
+key and an enrollment token minted. A named volume over the image's 65532-owned `/var/lib/kontra-gate` is 65532's and
+writable on the containerd store too. Tests: `TestComposeTeamGate` (`test/pentest`, in `make check`: no service but
+`gate` declares `build`, and `gate-migrate` runs the gate's image; fails on `7033e0a` with `service gate-migrate builds
+"kontra-gate:m4" too`), `TestComposeConfigResolves` (the same, as `docker compose config` resolves the file with either
+configuration; fails there with `the services that build [gate gate-migrate]`), `TestTeamGateHostMode` and
+`TestTeamGateRecordsComposeFailure` (`test/vps`, against stubs: the versions, the storage driver and the built image in
+the record; on a failure all 31 lines of compose's output and the stack's state, and no step 5; both fail on the
+script as it was), `TestTeamGateRehearsal` (`make test-kits`). The VPS run was made again with this fix at `f9f5e61`
+(31 Oct, droplet 614610093: Docker 29.1.3 on the containerd image store, compose 2.40.3) and passed: `up -d --build
+--wait` exit 0 in 232 s with one build, `gate-migrate` and `gate` on the one image, the Let's Encrypt certificate, and
+a hire and an MCP `search` through the gate from another machine ([`gate-runs-m4.md`](gate-runs-m4.md)).

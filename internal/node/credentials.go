@@ -23,7 +23,7 @@ const CredentialsFile = "credentials"
 // maxCredentialsFile bounds what LoadCredentials reads; the file holds a few keys and token hashes.
 const maxCredentialsFile = 1 << 20
 
-// Credentials is ~/.kontra/credentials (0600, §2.4): API keys (--api-key; `kontra login` from M4) and
+// Credentials is ~/.kontra/credentials (0600, §2.4): API keys (--api-key; `kontra login`, internal/login) and
 // enrollment tokens (--enroll) per gate origin, sent only to the origin they were issued for: a node never
 // sends a credential issued by one gate to another. A flag's credential is issued by the gate of the same
 // command line's --gate, and is kept under that gate's origin.
@@ -55,6 +55,16 @@ type Credential struct {
 	Consumed []string `json:"consumed,omitempty"`
 	// Keys are the tokens waiting for a welcome, by the key id (§2.2) of the node they were given to.
 	Keys map[string]*KeyCredential `json:"keys,omitempty"`
+	// OAuthClient is the client kontra login registered at this gate's authorization server (§6.3, RFC 7591), kept so
+	// that the next login registers no other. It is no credential: it never goes into a hello.
+	OAuthClient *OAuthClient `json:"oauth_client,omitempty"`
+}
+
+// OAuthClient is a public client registered by kontra login: the authorization server's issuer and the client_id it
+// issued there (spec/tunnel.md §6.3).
+type OAuthClient struct {
+	Issuer   string `json:"issuer"`
+	ClientID string `json:"client_id"`
 }
 
 // KeyCredential is one key's enrollment tokens at one origin that no welcome has confirmed yet.
@@ -78,7 +88,7 @@ func (k *KeyCredential) clone() *KeyCredential {
 
 // empty reports whether c holds nothing worth a line in the file.
 func (c Credential) empty() bool {
-	if c.APIKey != "" || len(c.Consumed) > 0 {
+	if c.APIKey != "" || len(c.Consumed) > 0 || c.OAuthClient != nil {
 		return false
 	}
 	for _, k := range c.Keys {
@@ -91,6 +101,10 @@ func (c Credential) empty() bool {
 
 func (c Credential) clone() Credential {
 	out := Credential{APIKey: c.APIKey, Consumed: slices.Clone(c.Consumed)}
+	if c.OAuthClient != nil {
+		oc := *c.OAuthClient
+		out.OAuthClient = &oc
+	}
 	if c.Keys != nil {
 		out.Keys = make(map[string]*KeyCredential, len(c.Keys))
 		for kid, k := range c.Keys {

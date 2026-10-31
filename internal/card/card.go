@@ -29,6 +29,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"kontra.sh/kontra/internal/strictjson"
 )
 
 // Refresh is how often a serving replica re-fetches a card (spec §3).
@@ -527,6 +529,9 @@ func Rewrite(in Input) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkGateKeys(norm); err != nil {
+		return nil, err
+	}
 	endpoint := strings.TrimRight(in.PublicURL, "/") + in.ServicePath
 	o = o.set("supportedInterfaces", mustJSON([]iface{
 		{URL: endpoint, ProtocolBinding: "JSONRPC", ProtocolVersion: "1.0"},
@@ -561,6 +566,46 @@ func Rewrite(in Input) ([]byte, error) {
 	}
 	o = o.set("capabilities", caps.marshal()).del("signatures")
 	return o.marshal(), nil
+}
+
+// gateLevels and gateReads are what checkGateKeys reads with exact keys (spec §3, D172, D311): the top level, the
+// capabilities object and each capabilities.extensions entry; at each, the members the gate writes there, removes
+// there or reads there.
+var (
+	gateLevels = []strictjson.Path{{"capabilities"}, {"capabilities", "extensions", "*"}}
+	gateReads  = []strictjson.Path{
+		// Written: supportedInterfaces, capabilities, and securitySchemes and securityRequirements unless only anonymous
+		// callers are admitted. Removed: signatures (the gate adds its own), the 0.x members Normalize converts, and the
+		// security fields of an only-anonymous service.
+		{"supportedInterfaces"}, {"capabilities"}, {"securitySchemes"}, {"securityRequirements"}, {"signatures"},
+		{"url"}, {"preferredTransport"}, {"additionalInterfaces"}, {"protocolVersion"},
+		{"supportsAuthenticatedExtendedCard"}, {"security"},
+		// capabilities: every member the gate writes.
+		{"capabilities", "pushNotifications"}, {"capabilities", "streaming"}, {"capabilities", "extendedAgentCard"},
+		{"capabilities", "extensions"},
+		// An extension entry: what the gate reads of it (which entries the operator's replace; §2.4's required).
+		{"capabilities", "extensions", "*", "uri"}, {"capabilities", "extensions", "*", "required"},
+	}
+)
+
+// checkGateKeys refuses (ErrBadCard) a normalized card whose top level, capabilities object or capabilities.extensions
+// entries hold a repeated key, two keys equal under case folding, or a lone key equal under case folding to a member
+// the gate writes, removes or reads there without being it ("Extensions", "Signatures", "SecuritySchemes", an entry's
+// "Required"). The gate sets and removes members by their exact keys, while a decoder that matches names
+// case-insensitively (encoding/json, so a2a-go's card parser and the gate's own §2.4 reader before D311) takes the last
+// of the variants: a seller's "Extensions" after the gate's "extensions" would replace the operator's entries for such
+// a reader, on a card the gate signs, and a lone "Signatures" or "SecuritySchemes" would stand in for a member the gate
+// removed. The hosting node refuses such a card already (internal/sealing's cardExtension, D172); the gate serves
+// none.
+func checkGateKeys(norm []byte) error {
+	top, err := strictjson.Members(norm)
+	if err == nil {
+		err = strictjson.CheckReads(top, gateLevels, gateReads)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrBadCard, err)
+	}
+	return nil
 }
 
 // extensions is the seller's capabilities.extensions with every entry whose URI the gate or the operator

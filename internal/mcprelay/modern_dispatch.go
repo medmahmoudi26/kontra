@@ -79,6 +79,9 @@ func (r *modernRun) run(ctx context.Context) lifecycle.DispatchResult {
 		return lifecycle.DispatchResult{}
 	}
 	r.bytes = b
+	if err := r.budget(ctx); err != nil {
+		return lifecycle.DispatchResult{}
+	}
 	if err := r.loadModern(ctx); err != nil {
 		return lifecycle.DispatchResult{}
 	}
@@ -385,7 +388,7 @@ func (r *modernRun) logInput(ctx context.Context, entry json.RawMessage, up mode
 	seq, err := r.d.Log.AppendInputRequestUpstream(context.WithoutCancel(ctx), r.fence, r.taskID, upb, func(gateID string) (json.RawMessage, error) {
 		b := rpcBody(gateID, method, params)
 		n = len(b) + len(upb) + 32
-		if r.bytes+int64(n) > r.d.taskBytes() {
+		if r.bytes+int64(n) > r.limit {
 			return nil, errOverTaskBytes
 		}
 		return b, nil

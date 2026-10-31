@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/pg"
@@ -74,6 +75,16 @@ const (
 //     exists is enroll_invalid; an old key stored with another public key is bad_proof, a revoked one
 //     revoked, a rotated one enroll_invalid;
 //  4. auth_invalid: an auth API key that is unknown, revoked or expired (or any, when the gate takes none);
+//     then anonymous sessions (spec/tunnel.md §6, D285, D286; anonymousSession): a hello asking for one
+//     (anonymous: true, neither enroll nor auth) from an unknown key, or from a key of an anonymous tenant, opens or
+//     resumes it (anonymous_unavailable, rate_limited, service_denied, kind_mismatch from its limits), or
+//     anonymous_unavailable on a gate without tunnel.anonymous; a key of a live anonymous tenant presenting no
+//     tokens converts on an auth API key with enroll:* of an account (§6.3, with tunnel.enroll_with_api_key: below as
+//     a new key of that account, the session's services it lacks created there; anonymous.go's convert), is resumed
+//     on another auth key (a hire-only one) and is otherwise unknown_key; one presenting tokens, of an ended
+//     anonymous tenant, or of a live one on a gate without tunnel.anonymous (a hello that does not ask), goes on below
+//     as a new key would, and is moved (anon.MoveKey) if admitted; a live anonymous tenant a key leaves ends at once
+//     (anon.Convert);
 //  5. enroll_invalid: a token that is malformed, unknown, used or expired, of another tenant than the key's
 //     or the other authorities', or that applies to no declared service (a service token for a service the
 //     hello does not declare; a tenant token listing none of them);
@@ -203,12 +214,27 @@ type admission struct {
 	// hireOnly: a new key admitted on its auth API key alone, with no service (step 6's second
 	// SPEC-CONFLICT).
 	hireOnly bool
+
+	// Anonymous sessions (spec/tunnel.md §6, D285, D286; anonymous.go). anonKey is the key's row when it belongs
+	// to an anonymous tenant, live or ended, and is neither revoked nor rotated: what the hello makes of it is decided
+	// after the rotation and API key checks (anonymousSession). moveFrom is such a key that §5's rules below enroll as
+	// if it were new: write moves it (anon.MoveKey) instead of inserting it; endTenant is the live anonymous tenant
+	// that move converts, ended at once (anon.End).
+	anonKey   *keyRow
+	moveFrom  *Key
+	endTenant uuid.UUID
+	// converting is §6.3's conversion by the auth API key's enroll:* scope (anonymous.go's convert): the declared
+	// services the account does not have are created there when the anonymous session serves them (anonServes:
+	// name → kind of the anonymous tenant's enabled services bound to the key).
+	converting bool
+	anonServes map[string]string
 }
 
 // keyRow is a tunnel_keys row with its tenant's state.
 type keyRow struct {
 	Key
 	tenantEnded bool
+	anonymous   bool // its tenant is an anonymous tenant (kind anonymous)
 }
 
 // consumed is one token this handshake consumed.
@@ -243,10 +269,18 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 		return nil, err
 	}
 	if key != nil {
-		if herr := refuseUnusable(key, "the key"); herr != nil {
-			return nil, herr
+		if key.anonymous && key.RevokedAt == nil && key.RevokedReason != ReasonRotated && key.RotatedTo == "" && h.RotateFrom == nil {
+			// A key of an anonymous tenant: its tenant's end does not revoke it (§6.1, §12; D277).
+			if err := a.lockAnonymousTenant(ctx, key); err != nil {
+				return nil, err
+			}
+			a.anonKey = key
+		} else {
+			if herr := refuseUnusable(key, "the key"); herr != nil {
+				return nil, herr
+			}
+			a.key = &key.Key
 		}
-		a.key = &key.Key
 	}
 
 	// 3. The rotation (§12).
@@ -259,6 +293,12 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	// 4. The API key.
 	if a.authErr != nil {
 		return nil, a.authErr
+	}
+
+	// An anonymous session (spec/tunnel.md §6): opened or resumed here, or the key of an anonymous tenant handed to
+	// §5's rules below as a key to move.
+	if d, err := a.anonymousSession(ctx); d != nil || err != nil {
+		return d, err
 	}
 
 	// 5. The tokens, and the tenant they and the key name.
@@ -431,10 +471,18 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 			}
 		case !p.exists && p.via == viaTenantToken:
 			p.create = true
+		case !p.exists && p.via == viaAPIKey && a.converting && a.anonServes[p.svc.Name] == p.svc.Kind:
+			// §6.3 (D278, D296): a conversion creates the services the anonymous session serves that the account
+			// does not have, under the same names; any other declared name is §5's (below).
+			p.create = true
 		case !p.exists:
 			// SPEC-CONFLICT (M2 plan, C10): §5 does not say what an enroll: scope naming a missing service
 			// does. Only tenant tokens (and the operator) create services.
-			denied = append(denied, p.svc.Name+": no such service")
+			why := ": no such service"
+			if a.converting {
+				why += ", and the anonymous session does not serve it (a conversion creates only the session's services)"
+			}
+			denied = append(denied, p.svc.Name+why)
 		case !p.enabled || !p.tunnel:
 			denied = append(denied, p.svc.Name+": not an enabled tunnel service")
 		case p.kind != p.svc.Kind:
@@ -461,7 +509,7 @@ func (a *admission) lockKey(ctx context.Context, kid string, pub []byte, what st
 	rows, err := a.tx.Query(ctx, `
 		select k.key_id, k.tenant_id, t.slug, k.pubkey, k.node_name, k.revoked_at, coalesce(k.revoked_reason, ''),
 		       coalesce(k.rotated_to, ''), k.overlap_until,
-		       t.deleted_at is not null or (t.expires_at is not null and t.expires_at <= now())
+		       t.deleted_at is not null or (t.expires_at is not null and t.expires_at <= now()), t.kind = 'anonymous'
 		  from kontra.tunnel_keys k join kontra.tenants t on t.id = k.tenant_id
 		 where k.key_id = $1 or k.pubkey = $2
 		 order by k.key_id
@@ -472,7 +520,7 @@ func (a *admission) lockKey(ctx context.Context, kid string, pub []byte, what st
 	found, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (*keyRow, error) {
 		var k keyRow
 		err := r.Scan(&k.KeyID, &k.TenantID, &k.Tenant, &k.PubKey, &k.NodeName, &k.RevokedAt, &k.RevokedReason,
-			&k.RotatedTo, &k.OverlapUntil, &k.tenantEnded)
+			&k.RotatedTo, &k.OverlapUntil, &k.tenantEnded, &k.anonymous)
 		return &k, err
 	})
 	if err != nil {
@@ -485,6 +533,22 @@ func (a *admission) lockKey(ctx context.Context, kid string, pub []byte, what st
 		return nil, tunnel.Refuse(tunnel.CodeBadProof, "%s: this gate stores %s with another public key", what, kid)
 	}
 	return found[0], nil
+}
+
+// lockAnonymousTenant locks the tenant of a key of an anonymous tenant (FOR NO KEY UPDATE), live or ended, right after
+// the key's row and before anything else the admission locks or writes, and reads again under the lock whether it has
+// ended (an expiry committed meanwhile is seen). Every transaction that takes a key and its anonymous tenant takes them
+// in that order, and the anonymous sweeps take a tenant with SKIP LOCKED and its keys with NOWAIT (anon.Sweeper): so a
+// resume, a key's move (anon.MoveKey) and a conversion's end of the tenant (anon.End) never wait on a sweep that waits
+// on them (the M4 WP-03 review's 40P01s: the expiry sweep updating the bindings MoveKey deleted, the purge deleting
+// the key this admission holds). The expiry sweep skips the tenant until this admission commits.
+func (a *admission) lockAnonymousTenant(ctx context.Context, k *keyRow) error {
+	err := a.tx.QueryRow(ctx, `select deleted_at is not null or (expires_at is not null and expires_at <= now())
+		from kontra.tenants where id = $1 for no key update`, k.TenantID).Scan(&k.tenantEnded)
+	if err != nil {
+		return fmt.Errorf("enroll: lock the anonymous tenant of key %s: %w", k.KeyID, err)
+	}
+	return nil
 }
 
 // refuseUnusable is revoked for a key that may open no new session: revoked, of an ended tenant, or rotated.
@@ -650,7 +714,17 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 	h := a.h
 	newKey := a.key == nil
 	keyID := h.KID
-	if newKey {
+	if newKey && a.moveFrom != nil {
+		// A key of an anonymous tenant, enrolled here as §5 enrolls a new key: it moves (D286), its old bindings
+		// deleted first.
+		if err := anon.MoveKey(ctx, a.tx, keyID, a.tenant); err != nil {
+			return nil, err
+		}
+		if _, err := a.tx.Exec(ctx, `update kontra.tunnel_keys set node_name = $2 where key_id = $1`, keyID, h.Name); err != nil {
+			return nil, err
+		}
+		a.key = &Key{KeyID: keyID, TenantID: a.tenant, Tenant: a.slug, PubKey: a.req.PubKey, NodeName: h.Name}
+	} else if newKey {
 		k := Key{KeyID: keyID, TenantID: a.tenant, Tenant: a.slug, PubKey: a.req.PubKey, NodeName: h.Name}
 		_, err := a.tx.Exec(ctx, `insert into kontra.tunnel_keys (key_id, tenant_id, pubkey, node_name) values ($1, $2, $3, $4)`,
 			keyID, a.tenant, a.req.PubKey, h.Name)
@@ -739,6 +813,10 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 		if a.hireOnly {
 			f["hire_only"] = true
 		}
+		if a.moveFrom != nil {
+			f["moved_from"] = a.moveFrom.Tenant
+			f["moved_from_id"] = a.moveFrom.TenantID
+		}
 		if len(toks) > 0 {
 			ids := make([]string, len(toks))
 			for i, t := range toks {
@@ -765,6 +843,26 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			continue
 		}
 		if _, err := a.tx.Exec(ctx, `select pg_notify($1, $2)`, string(pg.ChannelServices), a.slug+"/"+name); err != nil {
+			return nil, err
+		}
+	}
+	// §6.3 and D286: a key of a live anonymous tenant that moved here converts it; that tenant ends at once (its URLs
+	// 404, its session told revoked), with the conversion's audit row.
+	if a.endTenant != uuid.Nil && a.endTenant != a.tenant {
+		cr := anon.ConvertRequest{KeyID: keyID, From: a.endTenant, To: a.tenant, ToSlug: a.slug, Via: anon.ViaAPIKey}
+		if len(toks) > 0 {
+			cr.Via = anon.ViaTokens
+		}
+		if a.principal != nil {
+			cr.APIKey = a.principal.ID
+		}
+		for _, p := range plans {
+			if p.bound && p.exists && p.tunnel && p.enabled && p.kind == p.svc.Kind {
+				cr.Services = append(cr.Services, p.svc.Name)
+			}
+		}
+		sort.Strings(cr.Services)
+		if err := anon.Convert(ctx, a.tx, cr); err != nil {
 			return nil, err
 		}
 	}

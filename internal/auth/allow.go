@@ -9,7 +9,7 @@ import (
 )
 
 // AllowList is a parsed services.<name>.allow (spec §2.3, D20): deny by default; entries key:<prefix glob>,
-// org:<tenant>, oidc:sub:<subject>, node:<key_id>, anonymous. `anonymous` is never implied; when present
+// org:<tenant>, oidc:sub:<subject>, oidc:*, node:<key_id>, anonymous. `anonymous` is never implied; when present
 // it admits every principal, and an authenticated caller keeps its own principal, buyer and via (the
 // authenticator, not the list, decides who the caller is). The zero value denies everyone.
 type AllowList struct {
@@ -38,6 +38,9 @@ func ParseAllowList(entries []string) (AllowList, error) {
 //   - key:<glob>: an API key principal whose prefix the glob matches (* any run, ? one character);
 //   - org:<tenant>: any principal whose tenant has that slug (its API keys, and from M2 its nodes' keys);
 //   - oidc:sub:<subject>: that OIDC subject, arriving over oidc or mcp;
+//   - oidc:*: every OIDC principal, whatever its subject: a principal of kind oidc exists only for a JWT the
+//     configured issuer signed (auth.mcp_oauth on the MCP routes; auth.oidc on the A2A routes from M5), so this is
+//     every principal that issuer authenticated, and never an API key, a node or the anonymous principal (D301);
 //   - node:<key_id>: that node key hiring without an API key (M2);
 //   - anonymous: everyone, authenticated or not.
 func (a AllowList) Admits(p Principal) bool {
@@ -69,6 +72,8 @@ func entryMatches(e config.AllowEntry, p Principal) bool {
 		return p.TenantID != nil && p.TenantSlug != "" && p.TenantSlug == e.Value
 	case config.AllowOIDCSub:
 		return p.Kind == KindOIDC && p.ID == "oidc:sub:"+e.Value
+	case config.AllowOIDCAny:
+		return p.Kind == KindOIDC && strings.HasPrefix(p.ID, "oidc:sub:")
 	case config.AllowNode:
 		return p.Kind == KindNode && p.ID == "node:"+e.Value
 	}

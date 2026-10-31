@@ -33,11 +33,13 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/edge"
@@ -121,10 +123,90 @@ type Deps struct {
 	// Tasks serves gate-owned MCP tasks (§11.5–§11.8); nil, a durable service advertises no tasks (as tasks: off
 	// does) and answers a task-augmented call and tasks/* -32601.
 	Tasks *Tasks
+	// Calls bounds the requests relayed at once to an anonymous tenant's services, and apart from them the streams
+	// open to them (spec/tunnel.md §6.2, D287, D304, D308: calls and streams, gate-wide; *anon.Caps); nil bounds
+	// nothing.
+	Calls CallCaps
 	// ToolsChanged, when set, tells the other replicas that a service's tools changed (an upstream's
 	// notifications/tools/list_changed this replica relayed; toolsnotify.go). Tools is invalidated here first.
 	ToolsChanged func(ToolsKey)
 	now          func() time.Time
+}
+
+// CallCaps takes one of an anonymous tenant's slots (*anon.Caps): Call for a relayed request, Stream for a relayed
+// GET or subscriptions/listen stream, each counted apart (D308); an error wrapping anon.ErrRateLimited when they are
+// all taken; release frees the slot once the answer is relayed or the stream ends. A service of a tenant that is not
+// anonymous takes none.
+type CallCaps interface {
+	Call(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (release func(), err error)
+	Stream(ctx context.Context, svcTenant uuid.UUID, svcSlug string) (release func(), err error)
+}
+
+// takeCall takes the call's slot of an anonymous tenant's calls (spec/tunnel.md §6.2): over it the call is 429 with
+// -32600 "rate limited" and Retry-After, before anything is forwarded or metered. Every tools/call the relay forwards
+// counts, a passthrough task-augmented one too (it holds the same relay while its answer comes back), and so does every
+// other request it forwards (takeRelay); a stream takes a stream's slot (takeStream). ok is false when the answer was
+// written.
+func (h *Handler) takeCall(rq *request) (release func(), ok bool) {
+	if h.deps.Calls == nil {
+		return func() {}, true
+	}
+	release, err := h.deps.Calls.Call(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Tenant)
+	return h.slot(rq, release, err)
+}
+
+// takeStream takes a stream's slot of an anonymous tenant's streams (spec/tunnel.md §6.2, D308) for as long as a GET
+// or subscriptions/listen stream relayed to its service is open: over it the stream is 429 with -32600 "rate limited"
+// and Retry-After, before anything is forwarded. Streams are counted apart from the calls requests take, so the
+// standalone GET a stock client keeps open while it is idle never leaves requests without a slot.
+func (h *Handler) takeStream(rq *request) (release func(), ok bool) {
+	if h.deps.Calls == nil {
+		return func() {}, true
+	}
+	release, err := h.deps.Calls.Stream(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Tenant)
+	return h.slot(rq, release, err)
+}
+
+// slot is the outcome of taking a slot: its release, or the answer written (a limit's 429, else 500).
+func (h *Handler) slot(rq *request, release func(), err error) (func(), bool) {
+	if err != nil {
+		if !anonRefused(rq.w, rq.id(), err) {
+			h.internal(rq, "take an anonymous call slot", err)
+		}
+		return nil, false
+	}
+	return release, true
+}
+
+// takeRelay is takeCall for a client request the relay forwards to the service other than a tools/call
+// (spec/tunnel.md §6.2, D304): an initialize, resources/read, prompts/get, completion/complete, any method the gate
+// does not know, server/discover, so that a --public MCP service of an anonymous tenant is no unbounded relay (a GET or
+// subscriptions/listen stream takes a stream's slot instead, takeStream). A notification and a client response take
+// none: the gate answers them 202 with no body, or the upstream's error status bare, and closes whatever the upstream
+// sends with them unread (relayAccepted, D307), so they hold no relay open. Nor does what the gate answers itself
+// (tools/list from its cache, durable tasks/*, a gate-written stream). An initialize always has an id here: §11.12's
+// rule 1 refuses one without (mcpwire.Classify, D312).
+func (h *Handler) takeRelay(rq *request) (release func(), ok bool) {
+	if m := rq.msg; m != nil && (m.Method == "" || len(m.ID) == 0) {
+		return func() {}, true
+	}
+	return h.takeCall(rq)
+}
+
+// anonRefused writes the answer to an anonymous tenant's limit (spec/tunnel.md §6.2, D287) and reports whether err
+// was one: a runtime cap is 429 with -32600 "rate limited" and Retry-After (as the edge answers, relay.md §2.2), a
+// caller's call over parts_bytes -32602 "anonymous storage limit".
+func anonRefused(w http.ResponseWriter, id json.RawMessage, err error) bool {
+	switch {
+	case errors.Is(err, anon.ErrRateLimited):
+		w.Header().Set("Retry-After", strconv.Itoa(int(anon.RetryAfter/time.Second)))
+		writeError(w, http.StatusTooManyRequests, id, mcpwire.CodeInvalidRequest, anon.ErrRateLimited.Error(), nil)
+		return true
+	case errors.Is(err, anon.ErrStorageFull):
+		writeError(w, http.StatusOK, id, mcpwire.CodeInvalidParams, anon.ErrStorageFull.Error(), nil)
+		return true
+	}
+	return false
 }
 
 // Handler serves POST, GET and DELETE on /mcp/{name} (and /mcp/{tenant}/{name} on a multi-tenant gate) after
@@ -210,15 +292,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rq.body = b
 	}
 
-	p, authenticated, err := h.deps.Auth.Authenticate(r, uuid.Nil)
+	// §12.1 (M4 WP-06): with auth.mcp_oauth, a bearer JWT is verified for this route's canonical URI (oauth.go).
+	route := routeSvc(r, h.deps.Multi)
+	p, authenticated, err := h.deps.Auth.AuthenticateMCP(r, uuid.Nil, route)
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated):
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		if post {
-			writeError(w, http.StatusUnauthorized, nil, codeUnauthenticated, "unauthenticated", nil)
-		} else {
-			writeEmpty(w, http.StatusUnauthorized)
-		}
+		h.unauthorized(rq, route, true)
 		return
 	case err != nil:
 		h.internal(rq, "authenticate", err)
@@ -230,7 +309,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if svc == nil || svc.Disabled || svc.Ref.Kind != config.KindMCP {
-		h.unknownService(rq)
+		h.notServed(rq, route, authenticated)
 		return
 	}
 	if !authenticated {
@@ -246,7 +325,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p = auth.Anonymous(buyer)
 	}
 	if !svc.Allow.Admits(p) {
-		h.unknownService(rq)
+		h.notServed(rq, route, authenticated)
 		return
 	}
 	rq.svc, rq.p = svc, p
@@ -278,7 +357,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if post && rq.msg.Method == mcpwire.MethodInitialize {
-		h.initialize(rq)
+		h.initialize(rq) // with an id: Classify refused one without (D312), which would take no slot and get no 202
 		return
 	}
 	h.pinned(rq)

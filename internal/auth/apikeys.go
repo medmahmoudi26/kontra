@@ -721,9 +721,11 @@ func (k *APIKeys) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 }
 
 // Authenticator turns a request's credential into a principal: an API key, or none (the anonymous
-// principal, admitted only by a service whose allow: list says so).
+// principal, admitted only by a service whose allow: list says so). On the MCP routes, with a resource server, also a
+// JWT of the MCP authorization server (AuthenticateMCP, mcp_oauth.go; M4 WP-06).
 type Authenticator struct {
 	keys *APIKeys
+	mcp  MCPResourceServer // nil without auth.mcp_oauth
 }
 
 // NewAuthenticator returns the edge's authenticator. keys nil (auth.api_keys: false) refuses every bearer

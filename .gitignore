@@ -1,0 +1,8 @@
+# What an operator writes when following the README's "A team gate on your own VPS" (D306): secrets and the local
+# configuration, never committed. The shipped configurations stay tracked.
+/.env
+/deploy/compose/signing/
+/deploy/compose/tls/
+/deploy/compose/kontra.*.yaml
+!/deploy/compose/kontra.vps.yaml
+!/deploy/compose/kontra.lifecycle.yaml

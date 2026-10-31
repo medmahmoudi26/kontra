@@ -1,0 +1,93 @@
+package mcprelay
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// OpenGate inserts a legacy session of the gate's own /mcp (spec/relay.md §12, D269): an mcp_sessions row whose
+// service is NULL and whose tenant_id is the principal's (NULL when it has none), pinning nothing (no upstream, no
+// tunnel session, no replica), so any replica serves any request of it. Lookup finds it with service "" and the
+// principal's tenant (uuid.Nil for none). row gives the buyer, principal, via, version and the client's
+// capabilities; its other fields are ignored. (M4 WP-04: a file of its own, so M3's sessions.go is unchanged.)
+func (s *Sessions) OpenGate(ctx context.Context, clientID string, row Session) error {
+	if len(clientID) != 22 {
+		return fmt.Errorf("mcprelay: a client id has 22 characters, not %d", len(clientID))
+	}
+	h := HashID(clientID)
+	caps := row.ClientCaps
+	if len(caps) == 0 || !json.Valid(caps) {
+		caps = []byte("{}")
+	}
+	var tenant *uuid.UUID
+	if row.TenantID != uuid.Nil {
+		t := row.TenantID
+		tenant = &t
+	}
+	_, err := s.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal,
+			via, protocol_version, client_capabilities)
+		values ($1, $2, null, $3, $4, $5, $6, $7::jsonb)`,
+		h[:], tenant, row.BuyerID, row.Principal, row.Via, row.ProtocolVersion, string(caps))
+	if err != nil {
+		return fmt.Errorf("mcprelay: open a session of /mcp: %w", err)
+	}
+	return nil
+}
+
+// SweepGateIdle closes the sessions of the gate's own /mcp idle for longer than idle (close_reason idle; §11.2's
+// default session_idle_s, /mcp being no service with one of its own). They pin nothing, so any replica closes them,
+// each once. It returns how many it closed.
+func (s *Sessions) SweepGateIdle(ctx context.Context, idle time.Duration, now time.Time) (int, error) {
+	tag, err := s.pool.Exec(ctx, `update kontra.mcp_sessions set closed_at = now(), close_reason = 'idle'
+		 where service is null and closed_at is null and last_seen_at < $1::timestamptz - $2::bigint * interval '1 microsecond'`,
+		now, idle.Microseconds())
+	if err != nil {
+		return 0, fmt.Errorf("mcprelay: sweep the idle sessions of /mcp: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// KeepSeen keeps the last_seen_at of a session of the gate's own /mcp fresh while a stream of it is open on this
+// replica (its GET stream, a blocking tasks/result): Touch every IdleWrite/2 (it writes at most once per IdleWrite),
+// until stop runs. SweepGateIdle then never closes a session in use, as §11.2 says of every session (on /mcp/{svc}, D231's
+// Handler.hold does the same): a stock client whose GET stream outlived the idle period would otherwise get 404 on its
+// next request (relay.md §12, D303).
+func (s *Sessions) KeepSeen(hash [32]byte, now func() time.Time, log *slog.Logger) (stop func()) {
+	if now == nil {
+		now = time.Now
+	}
+	every := s.idleWrite / 2
+	if every <= 0 {
+		every = time.Second
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				err := s.Touch(ctx, hash, now())
+				cancel()
+				if err != nil && log != nil {
+					log.Debug("mcp: the last_seen_at of a session in use was not written", "error", err)
+				}
+			}
+		}
+	}()
+	var closed bool
+	return func() {
+		if !closed {
+			closed = true
+			close(done)
+		}
+	}
+}

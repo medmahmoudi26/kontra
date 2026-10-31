@@ -100,9 +100,22 @@ func (h *Handler) modern(rq *request) {
 		h.modernToolsList(rq)
 	case mcpwire.MethodToolsCall:
 		h.modernToolsCall(rq)
-	case mcpwire.MethodServerDiscover:
-		h.modernForward(rq, nil, h.discoverResult(rq))
 	default:
+		// An anonymous tenant's slot while the request is relayed, or a stream's slot for as long as a
+		// subscriptions/listen stream is open (§6.2, D304, D308).
+		take := h.takeRelay
+		if m.Method == mcpwire.MethodListen {
+			take = h.takeStream
+		}
+		release, ok := take(rq)
+		if !ok {
+			return
+		}
+		defer release()
+		if m.Method == mcpwire.MethodServerDiscover {
+			h.modernForward(rq, nil, h.discoverResult(rq))
+			return
+		}
 		h.modernForward(rq, nil, nil)
 	}
 }
@@ -694,6 +707,11 @@ func (h *Handler) modernToolsCall(rq *request) {
 		writeRefusal(rq.w, ref)
 		return
 	}
+	release, ok := h.takeCall(rq)
+	if !ok {
+		return
+	}
+	defer release()
 	meter := &callMeter{start: rq.start, call: Call{TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name, Tool: name,
 		BuyerID: rq.p.BuyerID, Principal: rq.p.ID}}
 	if rq.vsess != nil {
@@ -748,6 +766,8 @@ func (h *Handler) modernTaskCall(rq *request, name string) {
 	case errors.Is(err, lifecycle.ErrUnavailable):
 		h.log.Warn("mcp: a task's lifecycle did not start in time; the orphan sweep ends it", "service", rq.svc.Ref.Name, "task_id", id, "error", err)
 		writeError(rq.w, http.StatusServiceUnavailable, m.ID, mcpwire.CodeInternal, "the task's lifecycle is unavailable", nil)
+		return
+	case anonRefused(rq.w, m.ID, err):
 		return
 	case err != nil:
 		h.internal(rq, "create the task", err)

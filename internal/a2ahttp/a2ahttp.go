@@ -63,6 +63,9 @@ type Service struct {
 	// extensions A2A-Extensions is checked against (spec §2.4). An error, or a card marked Unavailable,
 	// makes the card routes answer 503 (spec §3).
 	Cards func() (*card.Served, error)
+	// OperatorExtensions are the URIs of the operator's card_extensions entries (spec §13.4) the served card was
+	// built with: a hire of the gate's own /mcp activates those the card requires for the buyer (§12.2, D300).
+	OperatorExtensions []string
 }
 
 // Services resolves a path's tenant and name to a service (nil when there is none). On a single-tenant
@@ -507,7 +510,9 @@ func (s *Server) serveJSONRPC(w http.ResponseWriter, r *http.Request, rt route, 
 			s.internal(w, rt, id, "build the service handler", err)
 			return
 		}
-		boundWrites(t.jsonrpc, ResponseWriteTimeout).ServeHTTP(w, r)
+		n := &note{}
+		r = r.WithContext(context.WithValue(r.Context(), noteKey{}, n))
+		boundWrites(t.jsonrpc, ResponseWriteTimeout).ServeHTTP(&rpcWriter{ResponseWriter: w, note: n, id: id}, r)
 	})
 	s.a2a(svc, next).ServeHTTP(w, r)
 }
@@ -680,35 +685,47 @@ func (s *Server) declared(svc *Service) func(*http.Request) *ExtensionSet {
 	}
 }
 
-// cardExtensions reads capabilities.extensions of a served card, entry by entry: an entry that is not an
-// object with a string uri is skipped, so one malformed seller entry cannot hide the operator's.
-func cardExtensions(body []byte) (all, required []string) {
-	var c struct {
-		Capabilities struct {
-			Extensions []json.RawMessage `json:"extensions"`
-		} `json:"capabilities"`
+// Declared is what svc's served card declares in capabilities.extensions, read as Extensions reads it for the
+// service's routes (spec §2.4); nil (none) for no service or one without a servable card. The gate's own /mcp checks a
+// hire against it (relay.Hirer.Extensions, with Service.OperatorExtensions: D294, D300).
+func (s *Server) Declared(svc *Service) *ExtensionSet {
+	if svc == nil {
+		return nil
 	}
-	if json.Unmarshal(body, &c) != nil {
-		var loose struct {
-			Capabilities json.RawMessage `json:"capabilities"`
-		}
-		if json.Unmarshal(body, &loose) != nil || json.Unmarshal(loose.Capabilities, &c.Capabilities) != nil {
-			return nil, nil
-		}
+	return s.declared(svc)(nil)
+}
+
+// cardExtensions reads capabilities.extensions of a served card, entry by entry, with exact keys (D311): the
+// capabilities object and each entry as the gate wrote them (card.Rewrite refuses a card with a case variant of any of
+// them), never a seller's "Extensions" or "Required" that a case-insensitive decoder would take for them. An entry that
+// is not an object with a string uri is skipped, so one malformed seller entry cannot hide the operator's.
+func cardExtensions(body []byte) (all, required []string) {
+	top, err := strictjson.Members(body)
+	if err != nil {
+		return nil, nil
+	}
+	caps, err := strictjson.Members(top["capabilities"])
+	if err != nil {
+		return nil, nil
+	}
+	var list []json.RawMessage
+	if raw, ok := caps["extensions"]; !ok || json.Unmarshal(raw, &list) != nil {
+		return nil, nil
 	}
 	seen := map[string]bool{}
-	for _, raw := range c.Capabilities.Extensions {
-		var e struct {
-			URI      string          `json:"uri"`
-			Required json.RawMessage `json:"required"`
-		}
-		if json.Unmarshal(raw, &e) != nil || e.URI == "" || seen[e.URI] {
+	for _, raw := range list {
+		e, err := strictjson.Members(raw)
+		if err != nil {
 			continue
 		}
-		seen[e.URI] = true
-		all = append(all, e.URI)
-		if string(bytes.TrimSpace(e.Required)) == "true" {
-			required = append(required, e.URI)
+		var uri string
+		if json.Unmarshal(e["uri"], &uri) != nil || uri == "" || seen[uri] {
+			continue
+		}
+		seen[uri] = true
+		all = append(all, uri)
+		if string(bytes.TrimSpace(e["required"])) == "true" {
+			required = append(required, uri)
 		}
 	}
 	return all, required
@@ -954,8 +971,9 @@ func emptyNotFound(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNotFound)
 }
 
-// note records, for one HTTP+JSON request, an error that a2a-go's REST handler would write as 500 but the
-// gate answers 503: an Update the task's lifecycle did not accept in time (spec §14.1).
+// note records, for one request a2a-go's JSON-RPC or REST handler answers, an error the gate answers otherwise: an
+// Update the task's lifecycle did not accept in time (a2a-go writes 500, the gate 503 on HTTP+JSON, spec §14.1), and a
+// task an anonymous tenant's cap refused (HTTP 429 with Retry-After on both bindings, spec/tunnel.md §6.2).
 type note struct {
 	mu  sync.Mutex
 	err error
@@ -964,7 +982,7 @@ type note struct {
 type noteKey struct{}
 
 func noteError(ctx context.Context, err error) {
-	if err == nil || !sse.Unavailable(err) {
+	if err == nil || (!sse.Unavailable(err) && !sse.RateLimited(err)) {
 		return
 	}
 	if n, ok := ctx.Value(noteKey{}).(*note); ok {
@@ -1115,10 +1133,20 @@ type restWriter struct {
 }
 
 func (w *restWriter) WriteHeader(code int) {
+	w.note.mu.Lock()
+	noted := w.note.err
+	w.note.mu.Unlock()
+	if noted != nil && sse.RateLimited(noted) {
+		status, body := sse.HTTPError(noted)
+		w.ResponseWriter.Header().Set("Content-Type", "application/json")
+		w.ResponseWriter.Header().Set("Retry-After", sse.RetryAfter)
+		w.ResponseWriter.WriteHeader(status)
+		_, _ = w.ResponseWriter.Write(body)
+		w.swallow = true
+		return
+	}
 	if code == http.StatusInternalServerError {
-		w.note.mu.Lock()
-		err := w.note.err
-		w.note.mu.Unlock()
+		err := noted
 		if err != nil {
 			status, body := sse.HTTPError(err)
 			w.ResponseWriter.Header().Set("Content-Type", "application/json")
@@ -1140,3 +1168,47 @@ func (w *restWriter) Write(b []byte) (int, error) {
 
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (w *restWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// rpcWriter turns a2a-go's JSON-RPC answer to a noted RateLimited error (HTTP 200 with -32600) into the gate's: HTTP
+// 429 with Retry-After and the same JSON-RPC error, as the edge answers its own rate limits on a JSON-RPC route
+// (relay.md §2.2, spec/tunnel.md §6.2); it drops what a2a-go writes after it. Any other answer passes unchanged.
+type rpcWriter struct {
+	http.ResponseWriter
+	note    *note
+	id      json.RawMessage
+	checked bool
+	swallow bool
+}
+
+func (w *rpcWriter) check() {
+	if w.checked {
+		return
+	}
+	w.checked = true
+	w.note.mu.Lock()
+	err := w.note.err
+	w.note.mu.Unlock()
+	if err != nil && sse.RateLimited(err) {
+		sse.WriteError(w.ResponseWriter, sse.JSONRPC, w.id, 0, err)
+		w.swallow = true
+	}
+}
+
+func (w *rpcWriter) WriteHeader(code int) {
+	w.check()
+	if w.swallow {
+		return
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *rpcWriter) Write(b []byte) (int, error) {
+	w.check()
+	if w.swallow {
+		return len(b), nil
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (w *rpcWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

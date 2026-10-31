@@ -9,3 +9,7 @@ test
 *.md
 Dockerfile
 .dockerignore
+# An operator's secrets and local configuration (.env, deploy/compose/signing and tls, its copy of the configuration):
+# never in the build context, which needs none of deploy/ (D306).
+.env
+deploy

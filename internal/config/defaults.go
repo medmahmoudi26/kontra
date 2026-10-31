@@ -31,6 +31,7 @@ const (
 	DefaultSessionIdle    = 3600 // seconds
 	DefaultDrainTimeout   = 10 * time.Minute
 	DefaultAdmissionWait  = 5 * time.Second
+	MaxAdmissionWait      = 30 * time.Second // hooks.MaxAdmissionTimeout: the MCP relay's bound on a shared session decision
 	DefaultTasksMode      = TasksDurable
 
 	// DefaultMaxSessionsPerPrincipal is services.<name>.max_sessions_per_principal's default (spec §11.2, D213, D231:
@@ -39,6 +40,21 @@ const (
 	// 0002).
 	DefaultMaxSessionsPerPrincipal = 4
 	MaxSessionsPerPrincipal        = 10000
+)
+
+// tunnel.anonymous's defaults (spec/tunnel.md §6.2, D277, D287).
+const (
+	DefaultAnonTTL               = 2 * time.Hour
+	DefaultAnonTenantsPerNetwork = 3
+	DefaultAnonServices          = 4
+	DefaultAnonTasks             = 4
+	DefaultAnonCalls             = 8
+	DefaultAnonStreams           = 8
+	DefaultAnonHiringStreams     = 8
+	MaxAnonHiringStreams         = 32 // the gate's per-session stream cap (tunnel.md §14)
+	DefaultAnonPartsBytes        = 64 << 20
+	DefaultAnonPurgeAfter        = 24 * time.Hour
+	DefaultAnonMaxTenants        = 1000
 )
 
 // Defaults returns a configuration holding every default that does not depend on another key. Parse
@@ -110,6 +126,7 @@ func (c *Config) applyDerivedDefaults() {
 			h.Operations = []string{"task"}
 		}
 	}
+	c.Tunnel.Anonymous.applyDefaults()
 	if c.Tunnel.ChannelBinding == "" {
 		c.Tunnel.ChannelBinding = ChannelBindingNone
 		if c.TLS.TerminatesTLS() {

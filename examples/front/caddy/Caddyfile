@@ -1,0 +1,42 @@
+# Caddy in front of a Kontra gate: Caddy terminates TLS and proxies everything to the gate's plaintext listener
+# (spec/relay.md §2.2). `make tck VARIANT=caddy` runs the pinned A2A TCK through this file unchanged
+# (tck_behind_caddy, D279). The environment fills it in (Caddy substitutes {$VAR} when it reads the file):
+#
+#   KONTRA_FRONT_SITE  the site: the host of the gate's public_url (gateway.example.com), or a full https:// address
+#   KONTRA_GATE        the gate's listen address (127.0.0.1:8080)
+#   KONTRA_CADDY_ADMIN Caddy's admin API (default localhost:2019; "off" for none)
+#   KONTRA_CADDY_BIND  the addresses Caddy listens on (default: every interface; the TCK run uses 127.0.0.1)
+#   KONTRA_CADDY_HTTP_PORT, KONTRA_CADDY_HTTPS_PORT  Caddy's ports (default 80 and 443)
+#
+#   KONTRA_FRONT_SITE=gateway.example.com KONTRA_GATE=127.0.0.1:8080 caddy run --config Caddyfile
+#
+# The gate's side (kontra.yaml):
+#
+#   public_url: https://gateway.example.com
+#   listen: 127.0.0.1:8080
+#   tls: { terminated_by_proxy: true }
+#   edge: { client_ip: { from: x_forwarded_for, trusted: ["127.0.0.1/32"] } }
+{
+	admin {$KONTRA_CADDY_ADMIN:localhost:2019}
+	default_bind {$KONTRA_CADDY_BIND}
+	http_port {$KONTRA_CADDY_HTTP_PORT:80}
+	https_port {$KONTRA_CADDY_HTTPS_PORT:443}
+	# A public name gets its certificate from an ACME CA. A loopback or private address gets one from Caddy's own
+	# local CA, which a front never installs in the machine's trust store.
+	skip_install_trust
+}
+
+{$KONTRA_FRONT_SITE} {
+	reverse_proxy {$KONTRA_GATE} {
+		# Server-sent events (message:stream, subscribe, MCP streams) and long polls: pass every byte on at once.
+		flush_interval -1
+		# The tunnel is a WebSocket (GET /v1/tunnel) a node keeps open for hours. When the configuration is
+		# reloaded, Caddy closes upgraded connections at once by default; keep them for 5 minutes instead, so
+		# that the nodes reconnect over a while rather than all together.
+		stream_close_delay 5m
+		# The gate counts rps_per_ip and conns_per_ip by the client address it reads from X-Forwarded-For, on
+		# this proxy's connections only (edge.client_ip.trusted). Caddy's default is the right one: it sets
+		# X-Forwarded-For to the client's address and drops what an untrusted client sent (no trusted_proxies
+		# here), and sets X-Forwarded-Proto and X-Forwarded-Host; the Host header passes unchanged.
+	}
+}

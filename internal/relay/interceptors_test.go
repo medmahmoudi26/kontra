@@ -338,6 +338,27 @@ func TestAdmissionRefusals(t *testing.T) {
 	if err := send(); !errors.Is(err, a2a.ErrInternalError) {
 		t.Errorf("a decision with a forbidden key: %v", err)
 	}
+	// A quote the gate may not create a task from, whatever Admission gave it (hooks.CheckQuote, D284): -32603
+	// "admission unavailable", which the HTTP+JSON binding answers 503 (it carries lifecycle.ErrUnavailable).
+	soon := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	for name, q := range map[string]*hooks.QuoteTerms{
+		"no terms":                nil,
+		"an http approveUrl":      {ApproveURL: "http://app.kontra.sh/#/t/1", ExpiresAt: soon},
+		"an approveUrl with user": {ApproveURL: "https://u:p@app.kontra.sh/#/t/1", ExpiresAt: soon},
+		"a relative approveUrl":   {ApproveURL: "/approve", ExpiresAt: soon},
+		"an expired quote":        {ApproveURL: "https://app.kontra.sh/#/t/1", ExpiresAt: "2020-01-01T00:00:00Z"},
+		"an unparsable expiry":    {ApproveURL: "https://app.kontra.sh/#/t/1", ExpiresAt: "in an hour"},
+	} {
+		adm.decision, adm.err = hooks.Decision{Outcome: hooks.Quote, Quote: q}, nil
+		err := send()
+		if !errors.Is(err, a2a.ErrInternalError) || !strings.Contains(err.Error(), "admission unavailable") || !errors.Is(err, lifecycle.ErrUnavailable) {
+			t.Errorf("%s: %v, want -32603 admission unavailable (503)", name, err)
+		}
+	}
+	adm.decision, adm.err = hooks.Decision{}, errors.New("hook down")
+	if err := send(); !errors.Is(err, lifecycle.ErrUnavailable) {
+		t.Errorf("a hook error does not carry the 503: %v", err)
+	}
 	if e.countRows("tasks") != 0 {
 		t.Error("a refused admission created a task")
 	}

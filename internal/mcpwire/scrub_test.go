@@ -221,7 +221,7 @@ func TestIsKontraKey(t *testing.T) {
 	}
 }
 
-// §11.12's rules 1, 3, 4 and 5 (the legacy era's), and rule 2's classification.
+// §11.12's rules 1, 3, 4 and 5 (the legacy era's), rule 2's classification, and an initialize without an id (D312).
 func TestClassify(t *testing.T) {
 	req := func(method, version, sid string) *http.Request {
 		r := httptest.NewRequest(method, "/mcp/x", nil)
@@ -279,6 +279,14 @@ func TestClassify(t *testing.T) {
 	_, ref := Classify(req("POST", "", ""), msg("tools/list"))
 	if string(ref.Body) != `{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"Bad Request: No valid session ID provided"}}` {
 		t.Errorf("rule 3 body: %s", ref.Body)
+	}
+	// An initialize is a request: one without an id is §11.1's invalid request, 400 with -32600 and id null, whatever
+	// its headers say (D312).
+	for _, r := range []*http.Request{req("POST", "", ""), req("POST", V20251125, "s"), req("POST", V20260728, ""), req("POST", "1999-01-01", "s")} {
+		if _, ref = Classify(r, &Message{JSONRPC: "2.0", Method: MethodInitialize}); ref == nil || ref.Status != 400 ||
+			string(ref.Body) != `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid request"}}` {
+			t.Errorf("an initialize without an id, MCP-Protocol-Version %q: %+v", r.Header.Get(HeaderProtocolVersion), ref)
+		}
 	}
 	_, ref = Classify(req("POST", "2024-11-05", "s"), msg("tools/list"))
 	var e struct {

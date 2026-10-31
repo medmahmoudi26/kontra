@@ -23,14 +23,14 @@ to leak (D185).
 | `sellers/hello-exec` | `a2a server --exec 'echo Hello World'` (a2a-cli v0.3.1): the README demo seller, as a direct backend (`kontra.yaml`) and through `kontra connect` (`kontra-tunnel.yaml`) | M1 (direct), M2 (tunnel): built |
 | `sellers/helloworld` | a2a-samples helloworld at `6603ba3` (a2a-sdk 1.1.0, a 1.0 card), run unmodified by `run.sh` and hosted through `kontra connect`; `test/e2e` `TestHelloworldTunnel` runs it through two gate replicas. The 0.2.5 seller at `08dde55c070f` that `card_compat` names is not built: `card_compat` runs against `slowagent`'s stand-in for it (D122, D154) | M2: built |
 | `sellers/booking` | A small a2a-go v2.7.0 agent that asks for a date (`input-required`) and confirms, over JSON-RPC and HTTP+JSON: the `input-required` seller (`input_required_sticky`), directly or through `kontra connect` | M2: built |
-| `sellers/tck` | An a2a-go v2.7.0 seller that implements the TCK's Gherkin scenarios (keyed on `messageId` prefixes), for `tck_*` | M4 |
+| `sellers/tck` | An a2a-go v2.7.0 seller that implements the pinned TCK's Gherkin scenarios (keyed on `messageId` prefixes): the target of `make tck` (`tck_*`, D279), as a direct backend and through `kontra connect` | M4: built |
 | `sellers/temporal-harness` | An OpenAI Agents SDK agent in a Temporal workflow of the seller's own, served as A2A (PRD §16: survives as an example, not core) | M4 |
 | `sellers/adk` | A Google ADK agent served as A2A | M4 |
 | `sellers/claude-cli` | A `summarize` agent that runs the `claude` CLI as a subprocess, served as A2A | M4 |
 | `mcp/fs-stdio` | `@modelcontextprotocol/server-filesystem@1.0.0` over stdio, bridged by `kontra connect` with its allowed directory on the command line and `--roots`; the write tools denied at the gate (`kontra.yaml`) | M3: built |
 | `mcp/everything` | `@modelcontextprotocol/server-everything@1.0.0 streamableHttp`, run on loopback with a minimal environment (`run.sh`) and hosted through `kontra connect`: an upstream with 2025-11-25 tasks, for `mcp_task_resume`; `get-env` and `gzip-file-as-resource` denied at the gate | M3: built |
 | `sealing` | End-to-end sealing between two `kontra connect` (`sellers/hello-exec/kontra-sealed.yaml`, `sellers/booking/kontra-sealed.yaml`), `kontra seal` and `--open`, and the age calls (Go `filippo.io/age`, Python `pyrage`) for sealing in-process ([`spec/ext-sealed.md`](../spec/ext-sealed.md)) | M3: built |
-| `front/caddy` | Caddy in front of a gate, for `tck_behind_caddy` | M4 |
+| `front/caddy` | Caddy 2.11.7 in front of a gate: TLS terminated by Caddy, the gate behind it with `tls.terminated_by_proxy` and `edge.client_ip: x_forwarded_for`; `make tck VARIANT=caddy` runs the TCK through it (`tck_behind_caddy`) | M4: built |
 | `front/agentgateway` | agentgateway as an optional front proxy | M4 |
 | `front/ingress` | Kubernetes ingress (ingress-nginx) with the WebSocket timeouts the tunnel needs | M4 |
 

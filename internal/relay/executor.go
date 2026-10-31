@@ -62,6 +62,17 @@ type ExecutorOptions struct {
 	// RecordBackoff is the first wait before the attempt's first upstream task id is recorded again after
 	// the gate's store failed to record it, doubling to 5 s (recordFirst). 250 ms.
 	RecordBackoff time.Duration
+	// Tenants is an anonymous tenant's parts total (spec/tunnel.md §6.2, relay §6.6: "an anonymous tenant: 64 MiB in
+	// all"; *anon.Caps): a dispatch of its service's task counts the bytes the tenant's other tasks store, and
+	// upstream bytes past parts_bytes fail the task upstream_error as task_bytes does. Nil: task_bytes alone.
+	Tenants TenantBudget
+}
+
+// TenantBudget is what a dispatch counts against an anonymous tenant's parts_bytes (*anon.Caps.Budget): others, the
+// bytes the tenant's other tasks store, added to the task's own, and limit, the most they may reach; applies is false
+// for a service of a tenant that is not anonymous.
+type TenantBudget interface {
+	Budget(ctx context.Context, svcTenant uuid.UUID, svcSlug string, task uuid.UUID, taskBytes int64) (others, limit int64, applies bool, err error)
 }
 
 func (o ExecutorOptions) withDefaults() ExecutorOptions {
@@ -216,7 +227,8 @@ type run struct {
 	client    *a2aclient.Client
 	ex        *upstream.Exchange
 	firstTask bool  // no upstream event of the attempt has been handled yet (no upstream task id at the start)
-	bytes     int64 // the bytes the task stores (overLimit)
+	bytes     int64 // the bytes the task stores (overLimit); an anonymous tenant's: with its other tasks' (TenantBudget)
+	limit     int64 // what bytes may reach: TaskBytes, or an anonymous tenant's parts_bytes budget
 	finished  bool  // a final event was yielded, or an error
 	logger    *slog.Logger
 
@@ -267,6 +279,20 @@ func (r *run) execute(ctx context.Context) {
 			return
 		}
 		r.bytes += objects
+	}
+	r.limit = r.e.opts.TaskBytes
+	if r.e.opts.Tenants != nil {
+		// An anonymous tenant's parts total (spec/tunnel.md §6.2): the dispatch counts its tenant's other tasks too.
+		others, limit, applies, err := r.e.opts.Tenants.Budget(ctx, d.svc.TenantID, d.svc.Tenant, id, r.e.opts.TaskBytes)
+		if err != nil {
+			d.running.SetOutcome(lifecycle.DispatchContextLost, "")
+			r.finish(nil, err)
+			return
+		}
+		if applies {
+			r.bytes += others
+			r.limit = limit
+		}
 	}
 	attempt, err := r.e.log.GetAttempt(ctx, id, d.n)
 	if err != nil {
@@ -1118,7 +1144,7 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 	for _, out := range evs {
 		out, err := r.externalize(ctx, out)
 		if errors.Is(err, errOverTaskBytes) {
-			r.fail(store.ReasonUpstreamError, fmt.Sprintf("the task's stored bytes exceed limits.task_bytes (%d bytes)", r.e.opts.TaskBytes))
+			r.fail(store.ReasonUpstreamError, r.overText())
 			return true
 		}
 		if err != nil {
@@ -1290,11 +1316,20 @@ func (r *run) overLimit(ev a2a.Event) (string, bool) {
 		}
 	}
 	n := encodedSize(ev)
-	if r.bytes+n > r.e.opts.TaskBytes {
-		return fmt.Sprintf("the task's stored bytes exceed limits.task_bytes (%d bytes)", r.e.opts.TaskBytes), true
+	if r.bytes+n > r.limit {
+		return r.overText(), true
 	}
 	r.bytes += n
 	return "", false
+}
+
+// overText is the failure of a task whose stored bytes would pass its limit: limits.task_bytes, or an anonymous
+// tenant's parts_bytes (spec/tunnel.md §6.2).
+func (r *run) overText() string {
+	if r.limit < r.e.opts.TaskBytes {
+		return "the anonymous session's stored bytes exceed its limit (spec/tunnel.md §6.2)"
+	}
+	return fmt.Sprintf("the task's stored bytes exceed limits.task_bytes (%d bytes)", r.e.opts.TaskBytes)
 }
 
 // encodedSize is the length of v's JSON encoding: what the log and the projection store for it.
@@ -1386,7 +1421,7 @@ func (r *run) storePart(ctx context.Context, p *a2a.Part) (*a2a.Part, error) {
 	if size > blob.MaxObject {
 		return nil, fmt.Errorf("relay: an upstream part of %d bytes is over the bucket's %d", size, blob.MaxObject)
 	}
-	if r.bytes+size > r.e.opts.TaskBytes {
+	if r.bytes+size > r.limit {
 		return nil, errOverTaskBytes
 	}
 	np, row, err := blob.Externalize(ctx, r.e.opts.Bucket, r.d.task.TenantID, r.taskUUID, p)

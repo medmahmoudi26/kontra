@@ -162,7 +162,7 @@ type OIDC struct {
 	Audience string `yaml:"audience"`
 }
 
-// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). M3.
+// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). Built in M4 (D276).
 type MCPOAuth struct {
 	Issuer string `yaml:"issuer"`
 }
@@ -202,7 +202,9 @@ type Hooks struct {
 	Lifecycle *LifecycleHook `yaml:"lifecycle"` // nil: built in
 }
 
-// AdmissionHook is the remote Admission (spec §13.1). M5.
+// AdmissionHook is the remote Admission (spec §13.1), built in M4 (D275): url is §10.3's operator-configured endpoint
+// (https://, or http:// on a loopback host, D284), and secret_env names the variable holding the bearer secret, which
+// the replica reads at start (it refuses to start when the variable is unset or empty).
 type AdmissionHook struct {
 	URL        string   `yaml:"url"`
 	SecretEnv  string   `yaml:"secret_env"`
@@ -211,7 +213,7 @@ type AdmissionHook struct {
 }
 
 // LifecycleHook is the remote Lifecycle (spec §13.3): the five activities by type name on that queue. Accepted
-// since M3 (D186); the remote Admission hook stays refused until M5.
+// since M3 (D186); the remote Admission hook since M4 (D275).
 type LifecycleHook struct {
 	TaskQueue string `yaml:"task_queue"`
 }
@@ -220,9 +222,145 @@ type LifecycleHook struct {
 type Tunnel struct {
 	// ChannelBinding is tls-exporter or none; the default is tls-exporter when the gate terminates TLS
 	// itself and none otherwise (tunnel.md §4, D69).
-	ChannelBinding   string `yaml:"channel_binding"`
-	Anonymous        bool   `yaml:"anonymous"`
-	EnrollWithAPIKey bool   `yaml:"enroll_with_api_key"`
+	ChannelBinding   string            `yaml:"channel_binding"`
+	Anonymous        AnonymousSessions `yaml:"anonymous"` // tunnel.md §6, D277; M4
+	EnrollWithAPIKey bool              `yaml:"enroll_with_api_key"`
+}
+
+// AnonymousSessions is tunnel.anonymous (spec/tunnel.md §6, §6.2; relay.md §17; D277, D287, D309): false (the
+// default, off), true (on, with §6.2's limits), or an object of those limits, each absent key taking its default, on
+// unless it says enabled: false. Off, the gate opens no anonymous session, but a multi-tenant gate still applies the
+// limits to the anonymous tenants that live and ends and purges them: an object with enabled: false keeps its limits
+// for that (its ttl and purge_after, typically), where false is §6.2's defaults. On, it needs tenancy: multi. The
+// integers are at least 1 and hiring_streams at most 32; ttl, purge_after and parts_bytes are positive (a zero is
+// refused when decoded, so after decoding a zero always means "absent, use the default").
+type AnonymousSessions struct {
+	Enabled           bool     `yaml:"enabled"`             // the object form's default true; false and an absent block are off
+	TTL               Duration `yaml:"ttl"`                 // default 2h
+	TenantsPerNetwork int      `yaml:"tenants_per_network"` // default 3: live anonymous tenants per IPv4 /24 or IPv6 /48
+	Services          int      `yaml:"services"`            // default 4: a tenant's services that are not disabled
+	Tasks             int      `yaml:"tasks"`               // default 4: concurrent tasks as host and as hirer, each
+	Calls             int      `yaml:"calls"`               // default 8: concurrent MCP requests relayed to its services (D287, D304)
+	Streams           int      `yaml:"streams"`             // default 8: GET and subscriptions/listen streams open to them (D308)
+	HiringStreams     int      `yaml:"hiring_streams"`      // default 8, at most 32: node-opened streams per session
+	PartsBytes        ByteSize `yaml:"parts_bytes"`         // default 64 MiB: parts stored per tenant
+	PurgeAfter        Duration `yaml:"purge_after"`         // default 24h after expiry
+	MaxTenants        int      `yaml:"max_tenants"`         // default 1000: live anonymous tenants gate-wide (D287)
+}
+
+// anonymousKeys are the keys of tunnel.anonymous's object form, which UnmarshalYAML decodes one by one.
+var anonymousKeys = map[string]bool{"enabled": true, "ttl": true, "tenants_per_network": true, "services": true, "tasks": true,
+	"calls": true, "streams": true, "hiring_streams": true, "parts_bytes": true, "purge_after": true, "max_tenants": true}
+
+// UnmarshalYAML accepts true, false or the limits object. An unknown key, a repeated key and an integer below 1 are
+// refused, as Load refuses them everywhere else.
+func (a *AnonymousSessions) UnmarshalYAML(n *yaml.Node) error {
+	const want = "tunnel.anonymous: want true, false or {enabled, ttl, tenants_per_network, services, tasks, calls, streams, hiring_streams, parts_bytes, purge_after, max_tenants}"
+	switch n.Kind {
+	case yaml.ScalarNode:
+		if n.ShortTag() != "!!bool" {
+			return fmt.Errorf("line %d: %s", n.Line, want)
+		}
+		var b bool
+		if err := n.Decode(&b); err != nil {
+			return err
+		}
+		*a = AnonymousSessions{Enabled: b}
+		return nil
+	case yaml.MappingNode:
+		out := AnonymousSessions{Enabled: true}
+		seen := map[string]bool{}
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			k, v := n.Content[i], n.Content[i+1]
+			if k.Kind != yaml.ScalarNode || !anonymousKeys[k.Value] {
+				return fmt.Errorf("line %d: field %s not found in tunnel.anonymous (%s)", k.Line, k.Value, want)
+			}
+			if seen[k.Value] {
+				return fmt.Errorf("line %d: tunnel.anonymous.%s: repeated", k.Line, k.Value)
+			}
+			seen[k.Value] = true
+			var err error
+			switch k.Value {
+			case "enabled":
+				if v.Kind != yaml.ScalarNode || v.ShortTag() != "!!bool" {
+					err = fmt.Errorf("line %d: want true or false", v.Line)
+				} else {
+					err = v.Decode(&out.Enabled)
+				}
+			case "ttl":
+				err = v.Decode(&out.TTL)
+			case "purge_after":
+				err = v.Decode(&out.PurgeAfter)
+			case "parts_bytes":
+				err = v.Decode(&out.PartsBytes)
+			default:
+				var n int
+				if err = v.Decode(&n); err == nil && n < 1 {
+					err = fmt.Errorf("line %d: %d; want a whole number of at least 1", v.Line, n)
+				}
+				switch k.Value {
+				case "tenants_per_network":
+					out.TenantsPerNetwork = n
+				case "services":
+					out.Services = n
+				case "tasks":
+					out.Tasks = n
+				case "calls":
+					out.Calls = n
+				case "streams":
+					out.Streams = n
+				case "hiring_streams":
+					out.HiringStreams = n
+				case "max_tenants":
+					out.MaxTenants = n
+				}
+			}
+			if err != nil {
+				return fmt.Errorf("tunnel.anonymous.%s: %w", k.Value, err)
+			}
+		}
+		*a = out
+		return nil
+	}
+	return fmt.Errorf("line %d: %s", n.Line, want)
+}
+
+// applyDefaults fills the limits an enabled block leaves out with §6.2's defaults. A disabled one keeps what it names
+// (enabled: false with limits, D309) and nothing else: anon.LimitsFrom takes §6.2's default for each zero.
+func (a *AnonymousSessions) applyDefaults() {
+	if !a.Enabled {
+		return
+	}
+	if a.TTL == 0 {
+		a.TTL = Duration(DefaultAnonTTL)
+	}
+	if a.TenantsPerNetwork == 0 {
+		a.TenantsPerNetwork = DefaultAnonTenantsPerNetwork
+	}
+	if a.Services == 0 {
+		a.Services = DefaultAnonServices
+	}
+	if a.Tasks == 0 {
+		a.Tasks = DefaultAnonTasks
+	}
+	if a.Calls == 0 {
+		a.Calls = DefaultAnonCalls
+	}
+	if a.Streams == 0 {
+		a.Streams = DefaultAnonStreams
+	}
+	if a.HiringStreams == 0 {
+		a.HiringStreams = DefaultAnonHiringStreams
+	}
+	if a.PartsBytes == 0 {
+		a.PartsBytes = DefaultAnonPartsBytes
+	}
+	if a.PurgeAfter == 0 {
+		a.PurgeAfter = Duration(DefaultAnonPurgeAfter)
+	}
+	if a.MaxTenants == 0 {
+		a.MaxTenants = DefaultAnonMaxTenants
+	}
 }
 
 // Channel binding values (spec/tunnel.md §4).
@@ -716,7 +854,7 @@ func (e *ValidationError) Error() string {
 // URL ports from 1 to 65535, kind-only keys, allow: entries that can match (D68), durations and seconds
 // that fit the integer columns of services, listen and metrics.listen on different ports, a signing_key
 // off loopback when A2A services are configured (D166), and no key this build would ignore by failing open
-// (sealed on a direct backend, the remote hooks). Errors quote URLs without their userinfo. It also fills Warnings.
+// (sealed on a direct backend). Errors quote URLs without their userinfo. It also fills Warnings.
 // Defaults must have been applied (Parse and Load do).
 func (c *Config) Validate() error {
 	v := &validator{}
@@ -728,7 +866,7 @@ func (c *Config) Validate() error {
 	c.validateEdge(v)
 	c.validateLimits(v)
 	c.validateBackends(v)
-	c.validateAuth(v)
+	c.validateAuth(v, pub)
 	c.validateMetadata(v)
 	c.validateHooks(v)
 	c.validateTunnel(v)

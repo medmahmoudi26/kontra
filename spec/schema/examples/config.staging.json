@@ -1,0 +1,16 @@
+{
+  "listen": ":8443",
+  "public_url": "https://gateway.kontra.run",
+  "tenancy": "multi",
+  "signing_key": "file:/etc/kontra-signing/kontra.key",
+  "tls": { "acme": { "domains": ["gateway.kontra.run"], "cache_dir": "/var/lib/kontra-gate/acme" } },
+  "edge": { "client_ip": { "from": "proxy_protocol", "trusted": ["10.244.0.0/16"] } },
+  "temporal": { "address": "gate-v4-temporal:7233", "namespace": "kontra" },
+  "postgres": "postgres://kontra@gate-v4-pg/kontra",
+  "auth": { "api_keys": true },
+  "metrics": { "listen": ":9090" },
+  "tunnel": {
+    "anonymous": { "ttl": "2h", "tenants_per_network": 3, "services": 4, "tasks": 4, "calls": 8, "streams": 8, "hiring_streams": 8,
+                   "parts_bytes": "64MiB", "purge_after": "24h", "max_tenants": 200 }
+  }
+}

@@ -38,9 +38,9 @@ func mustList(t *testing.T, entries ...string) AllowList {
 	return l
 }
 
-// allow: lists (spec §2.3, D20, D68): key: globs, org:<tenant> (its keys), oidc:sub:, node:, anonymous
-// (everyone, the caller keeping its own principal), deny by default, and no service for a key without
-// the hire scope.
+// allow: lists (spec §2.3, D20, D68, D301): key: globs, org:<tenant> (its keys), oidc:sub:, oidc:* (every OIDC
+// principal, over oidc or mcp, and no API key, node or anonymous caller), node:, anonymous (everyone, the caller
+// keeping its own principal), deny by default, and no service for a key without the hire scope.
 func TestAllowList(t *testing.T) {
 	acmeKey := keyPrincipal("kk_acme_ab12cd34", "acme", acmeTenant)
 	acmeKey2 := keyPrincipal("kk_acme_Zz99Yy88", "acme", acmeTenant)
@@ -49,9 +49,10 @@ func TestAllowList(t *testing.T) {
 	enrollOnly := keyPrincipal("kk_acme_ab12cd35", "acme", acmeTenant, ScopeEnrollAll)
 	oidc := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|42", BuyerID: buyer1, Via: ViaOIDC}
 	oidcMCP := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|42", BuyerID: buyer1, Via: ViaMCP}
+	oidcOther := Principal{Kind: KindOIDC, ID: "oidc:sub:google-oauth2|7", BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-000000000002"), Via: ViaMCP}
 	node := Principal{Kind: KindNode, ID: "node:k1_abcdefghijklmnopqrstuvwxyz", TenantID: &acmeTenant, TenantSlug: "acme", BuyerID: buyer1, Via: ViaNode}
 	anon := Anonymous(buyer1)
-	all := []Principal{acmeKey, acmeKey2, otherKey, shortKey, enrollOnly, oidc, oidcMCP, node, anon}
+	all := []Principal{acmeKey, acmeKey2, otherKey, shortKey, enrollOnly, oidc, oidcMCP, oidcOther, node, anon}
 	name := func(p Principal) string {
 		return p.ID + "/" + string(p.Via) + "/" + strings.Join(func() []string {
 			var s []string
@@ -78,8 +79,11 @@ func TestAllowList(t *testing.T) {
 		{[]string{"org:nobody"}, nil},
 		{[]string{"oidc:sub:auth0|42"}, []Principal{oidc, oidcMCP}},
 		{[]string{"oidc:sub:auth0|43"}, nil},
+		{[]string{"oidc:*"}, []Principal{oidc, oidcMCP, oidcOther}},
+		{[]string{"oidc:*", "key:kk_acme_*"}, []Principal{oidc, oidcMCP, oidcOther, acmeKey, acmeKey2}},
+		{[]string{"key:*", "oidc:*"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey, oidc, oidcMCP, oidcOther}},
 		{[]string{"node:k1_abcdefghijklmnopqrstuvwxyz"}, []Principal{node}},
-		{[]string{"anonymous"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey, oidc, oidcMCP, node, anon}},
+		{[]string{"anonymous"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey, oidc, oidcMCP, oidcOther, node, anon}},
 		{[]string{"key:kk_a_*", "org:acme"}, []Principal{acmeKey, acmeKey2, shortKey, node}},
 	}
 	for _, tc := range cases {
@@ -106,6 +110,13 @@ func TestAllowList(t *testing.T) {
 	if (AllowList{}).Admits(acmeKey) || (AllowList{}).Admits(anon) {
 		t.Error("the zero AllowList admits")
 	}
+	// oidc:* is a named entry: search's visibility keeps it (spec §12.2), as it keeps key:*, and it marks no service
+	// anonymous.
+	l := mustList(t, "anonymous", "oidc:*")
+	if !l.WithoutAnonymous().Admits(oidcMCP) || l.WithoutAnonymous().Admits(anon) || l.WithoutAnonymous().Admits(acmeKey) ||
+		mustList(t, "oidc:*").AdmitsAnonymous() || l.OnlyAnonymous() {
+		t.Error("oidc:* beside anonymous: WithoutAnonymous, AdmitsAnonymous or OnlyAnonymous is wrong")
+	}
 }
 
 func TestAllowListAnonymousFlags(t *testing.T) {
@@ -128,7 +139,7 @@ func TestAllowListAnonymousFlags(t *testing.T) {
 
 // The allow: grammar is config's: unknown kinds and key: globs that can never match are errors.
 func TestParseAllowListErrors(t *testing.T) {
-	for _, e := range []string{"key:acme-*", "admin", "org:Acme", "user:x", " anonymous", "node:k2_x", "key:abc", "oidc:sub:"} {
+	for _, e := range []string{"key:acme-*", "admin", "org:Acme", "user:x", " anonymous", "node:k2_x", "key:abc", "oidc:sub:", "oidc:sub:*", "oidc:**", "oidc:any"} {
 		if _, err := ParseAllowList([]string{"org:acme", e}); err == nil {
 			t.Errorf("%q parsed", e)
 		}

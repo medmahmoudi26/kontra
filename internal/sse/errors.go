@@ -7,11 +7,13 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/errordetails"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/lifecycle"
 )
 
@@ -205,6 +207,10 @@ func internalError(err error) bool {
 // returned wraps err, so the code, the reason, the details and the 503 of an Update not accepted in time
 // are unchanged; redacted reports whether the text changed, so the caller can log err.
 func Public(err error) (pub error, redacted bool) {
+	if err != nil && RateLimited(err) && err.Error() != msgRateLimited {
+		// However a2a-go wrapped it, the caller reads the edge's words (relay.md §2.2), and the code is -32600.
+		return &a2a.Error{Err: err, Message: msgRateLimited}, false
+	}
 	if err == nil || !internalError(err) {
 		return err, false
 	}
@@ -240,11 +246,28 @@ func public(err error) error {
 // in time (lifecycle.ErrUnavailable): -32603 on JSON-RPC, HTTP 503 on HTTP+JSON (spec §7, §14.1).
 func Unavailable(err error) bool { return errors.Is(err, lifecycle.ErrUnavailable) }
 
+// RateLimited reports whether err is a runtime refusal of an anonymous tenant's limits (anon.ErrRateLimited,
+// spec/tunnel.md §6.2): HTTP 429 with Retry-After on both bindings, -32600 "rate limited" on JSON-RPC, as the
+// edge answers its own rate limits (relay.md §2.2).
+func RateLimited(err error) bool { return errors.Is(err, anon.ErrRateLimited) }
+
+// msgRateLimited is a RateLimited answer's message, the edge's (relay.md §2.2).
+const msgRateLimited = "rate limited"
+
+// RetryAfter is the Retry-After value of a RateLimited answer, in whole seconds.
+var RetryAfter = strconv.Itoa(int(anon.RetryAfter / time.Second))
+
 // HTTPError is the HTTP+JSON answer to err: ToHTTP of Public(err), except that an Update not accepted in
 // time is HTTP 503 (google.rpc UNAVAILABLE, reason INTERNAL_ERROR, so an A2A client still reads -32603),
-// where a2a-go would write 500 (spec §7, §14.1: "-32603 (HTTP 503)"; A2A §3.3.2 allows 500 or 503 for it).
+// where a2a-go would write 500 (spec §7, §14.1: "-32603 (HTTP 503)"; A2A §3.3.2 allows 500 or 503 for it),
+// and a RateLimited error is HTTP 429 (google.rpc RESOURCE_EXHAUSTED, reason INVALID_REQUEST: an A2A client reads
+// -32600), whose Retry-After the caller sets.
 func HTTPError(err error) (status int, body []byte) {
 	err = public(err)
+	if RateLimited(err) {
+		return http.StatusTooManyRequests, restBody(http.StatusTooManyRequests, "RESOURCE_EXHAUSTED", err.Error(),
+			details(err, a2a.ErrorReason(a2a.ErrInvalidRequest), timestamp()))
+	}
 	if !Unavailable(err) {
 		return ToHTTP(err)
 	}
@@ -287,7 +310,16 @@ func JSONRPCErrorBody(id json.RawMessage, e RPCError) []byte {
 // behaviour: the code on JSON-RPC (HTTP 200), the status on HTTP+JSON, as A2A §3.3.2's error table maps
 // them. The spec's explicit JSON-RPC statuses are kept: the unknown-service answer is HTTP 404 with a
 // JSON-RPC body (§2.1), and a refused credential is 401.
+//
+// A RateLimited error is HTTP 429 with Retry-After on both bindings (spec/tunnel.md §6.2: "A2A answers 429 as relay.md
+// §2.2 says"), its body the binding's, as the edge answers on a JSON-RPC route.
 func WriteError(w http.ResponseWriter, b Binding, id json.RawMessage, status int, err error) {
+	if RateLimited(err) {
+		w.Header().Set("Retry-After", RetryAfter)
+		if status == 0 {
+			status = http.StatusTooManyRequests
+		}
+	}
 	var body []byte
 	if b == JSONRPC {
 		body = JSONRPCErrorBody(id, ToJSONRPC(public(err)))

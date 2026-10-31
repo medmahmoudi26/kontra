@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/obs"
@@ -105,6 +106,12 @@ func (r *Registry) revokeKey(s *Session, reason string) {
 }
 
 func (r *Registry) revokeBinding(s *Session, service string) {
+	if s.anonymousEnded() {
+		// An anonymous session's bindings are revoked at its end (anon.End): the session ends with {"t":
+		// "revoked"}, not one {"t": "revoked", "service"} per binding (spec/tunnel.md §6.1).
+		r.goAsync(s.Expire)
+		return
+	}
 	why := fmt.Errorf("%w: the binding of key %s to %s was revoked (§12)", ErrRevoked, s.KeyID, service)
 	if !s.dropService(service, why) {
 		return
@@ -178,14 +185,27 @@ func (r *Registry) Enrolled(b enroll.Binding) {
 	}
 }
 
+// ExpireTenant ends this replica's sessions of an anonymous tenant that ended (anon.ExpiredPayload: its expiry, or a
+// conversion): each is told {"t": "revoked"} and closed (Session.Expire), its key not revoked (spec/tunnel.md §6.1).
+// It does not wait on the network.
+func (r *Registry) ExpireTenant(tenantID uuid.UUID) {
+	for _, s := range r.all() {
+		if s.TenantID == tenantID {
+			s.ended.Store(true) // before any of the tenant's binding revocations is applied (revokeBinding)
+			r.goAsync(s.Expire)
+		}
+	}
+}
+
 // Notify applies one gate-internal NOTIFY kontra_tunnel (pg.Listener.OnChannel): 'session:<id>', sent by
 // the replica whose handshake superseded a session held here, closes it (its row is gone already);
 // 'enrolled:<key_id>/<tenant_id>/<service>' (enroll.EnrolledPayload), sent by the admission that committed
 // the binding, is told to this replica's sessions hosting the service (§5), on every replica, the admitting
 // one included; 'mcp:<tenant_id>/<service>/<replica_id>' (MCPChangedPayload), sent by a replica where a node of
 // the MCP service connected or disconnected, runs the OnMCPChange callbacks here, unless this replica sent it (it
-// ran them when the change happened). Anything else is ignored. It never waits on the database (pg.Listener runs
-// every channel's callbacks on one goroutine).
+// ran them when the change happened); 'expired:<tenant_id>' (anon.ExpiredPayload), sent by the transaction that ended
+// an anonymous tenant, ends this replica's sessions of it (ExpireTenant). Anything else is ignored. It never waits on
+// the database (pg.Listener runs every channel's callbacks on one goroutine).
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on §11 and §5): see Registry; this channel is not tunnel wire
 // protocol.
@@ -205,6 +225,10 @@ func (r *Registry) Notify(payload string) {
 	case strings.HasPrefix(payload, mcpPrefix):
 		if tenantID, service, from, ok := parseMCPChanged(payload); ok && from != r.cfg.ReplicaID {
 			r.runMCP(tenantID, []string{service})
+		}
+	case strings.HasPrefix(payload, "expired:"):
+		if tenantID, ok := anon.ParseExpiredPayload(payload); ok {
+			r.ExpireTenant(tenantID)
 		}
 	default:
 		if b, ok := enroll.ParseEnrolledPayload(payload); ok {

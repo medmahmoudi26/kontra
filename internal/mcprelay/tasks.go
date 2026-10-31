@@ -46,6 +46,7 @@ import (
 //
 // Work packages: M3 WP-06 (legacy, and Create for both eras), M3 WP-07 (modern).
 type Tasks struct {
+	caps      TaskCaps
 	log       *store.Log
 	waker     store.TaskWaker
 	lc        TaskLifecycle
@@ -70,7 +71,18 @@ type TasksConfig struct {
 	Lifecycle TaskLifecycle
 	Hooks     lifecycle.HooksSnapshot // the hook configuration a new task's workflow snapshots (D46)
 	Rules     hooks.KeyRules          // §13.2's rules for an Admission decision's metadata and mcpMeta
-	Logger    *slog.Logger
+	// Caps checks an anonymous tenant's limits where a task is created (spec/tunnel.md §6.2; *anon.Caps): its
+	// concurrent tasks as host and as hirer, and its parts_bytes against the call. Nil checks nothing.
+	Caps   TaskCaps
+	Logger *slog.Logger
+}
+
+// TaskCaps checks the anonymous tenants' limits where a gate-owned task is created (spec/tunnel.md §6.2, D287;
+// *anon.Caps): Message before anything is written (anon.ErrStorageFull), Task in the transaction that creates the
+// row, under the tenant's lock (anon.ErrRateLimited).
+type TaskCaps interface {
+	Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string, n int64) error
+	Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug, principal string) error
 }
 
 // NewTasks checks cfg.
@@ -81,7 +93,7 @@ func NewTasks(cfg TasksConfig) (*Tasks, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Tasks{log: cfg.Log, waker: cfg.Waker, lc: cfg.Lifecycle, hooks: cfg.Hooks, rules: cfg.Rules,
+	return &Tasks{caps: cfg.Caps, log: cfg.Log, waker: cfg.Waker, lc: cfg.Lifecycle, hooks: cfg.Hooks, rules: cfg.Rules,
 		logger: cfg.Logger.With("component", "mcp-tasks"), keepAlive: keepAliveEvery, reread: 5 * time.Second}, nil
 }
 
@@ -126,6 +138,12 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 	if err != nil {
 		return uuid.Nil, err
 	}
+	// An anonymous tenant's parts_bytes (spec/tunnel.md §6.2): a call that would not fit is refused before any row.
+	if t.caps != nil {
+		if err := t.caps.Message(ctx, svc.TenantID, svc.Tenant, int64(len(req.Request))); err != nil {
+			return uuid.Nil, err
+		}
+	}
 	d := req.Decision
 	if err := t.rules.CheckOperatorMaps(d.Metadata, d.MCPMeta); err != nil {
 		t.logger.Warn("an Admission decision's metadata was refused; the task is not created", "service", svc.Name, "error", err)
@@ -165,6 +183,12 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 		return uuid.Nil, err
 	}
 	err = pgx.BeginFunc(ctx, t.log.DB(), func(tx pgx.Tx) error {
+		// An anonymous tenant's concurrent tasks, as host and as hirer (spec/tunnel.md §6.2), under its lock.
+		if t.caps != nil {
+			if err := t.caps.Task(ctx, tx, svc.TenantID, svc.Tenant, req.Principal); err != nil {
+				return err
+			}
+		}
 		if _, err := t.log.CreateTask(ctx, tx, nt); err != nil {
 			return err
 		}
@@ -764,6 +788,8 @@ func (h *Handler) durableCall(rq *request, name string, tool json.RawMessage) {
 	case errors.Is(err, lifecycle.ErrUnavailable):
 		h.log.Warn("mcp: a task's lifecycle did not start in time; the orphan sweep ends it", "service", rq.svc.Ref.Name, "task_id", id, "error", err)
 		writeError(rq.w, http.StatusServiceUnavailable, m.ID, mcpwire.CodeInternal, "the task's lifecycle is unavailable", nil)
+		return
+	case anonRefused(rq.w, m.ID, err):
 		return
 	case err != nil:
 		h.internal(rq, "create the task", err)
