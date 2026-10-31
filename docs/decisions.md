@@ -4516,3 +4516,20 @@ Tested: `TestParseAllowEntry` and `TestAllowOIDCAnyWarnsWithoutAnIssuer` (`inter
 an API key and the anonymous principal), `TestGateMCPOAuth` (`internal/gate`: a token of the in-repository
 authorization server finds and hires an `oidc:*` service on `/mcp` and is served on an `oidc:*` `/mcp/{svc}`; an API
 key is not admitted by the entry).
+
+### D302. §13.3's metric of the oldest pending hook activity is not built in M4 — **decided under the owner's standing instruction, 31 Oct**
+
+[`relay.md`](../spec/relay.md) §13.3 says the gate exports the age of the oldest pending Lifecycle hook activity, so an
+operator can alert on a hook that never completes (its activities are retried forever, a typo in a type name
+included). M5's audit found that the metric does not exist. It is not cheap. The hook activities are scheduled by each
+task's `TaskLifecycle` on the operator's queue, so whether one is pending, and since when, is in Temporal, per
+workflow. The queue's backlog age (Temporal's `DescribeTaskQueue`) counts only activities no worker has picked up: an
+activity a worker polls and fails, which a type name no worker registers is, waits out its retry backoff outside the
+backlog, so the typo case would not show. Describing every open workflow for its pending activities costs one request
+per running task on every scrape. Measuring it needs the workflow to record when each hook call began and ended, a
+change to `TaskLifecycle`'s commands that goes behind `workflow.GetVersion` (§14.4), either a Temporal search
+attribute the operator registers or a gate table, and spec text for the metric's name and labels. Decision: not built
+in M4. It is follow-up work, beside D299's, for a public-repo issue, and §13.3 says the metric is not built yet. Until
+it is, an operator alerts on the hook queue's backlog age and on its own hook worker's activity failures (M5's plan
+alerts on `kontra-settlement`'s backlog age), and the gate's `kontra_gate_operator_patches_refused_total` counts the
+patches it drops.

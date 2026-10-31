@@ -10,9 +10,9 @@ code and its review (D191–D205, D213, D223, D224, D230), decided under the own
 (28 Oct, M4 planning) settles the gate's own `/mcp` in both eras (§12), its resource server and the M4 tests (D268 to
 D276, D282), and was amended the same day after the M4 plan's audit: §10.3's operator-configured endpoints, one
 stream for `elicitation/complete`, the shape of a `hire` result and the anonymous limits (D284, D287 to D289). It was
-amended on 31 Oct after M5's plan audit: `hire` activates the operator's required extensions for the buyer, and an
-`allow:` entry `oidc:*` (D300, D301). Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC
-2119.
+amended on 31 Oct after M5's plan audit: `hire` activates the operator's required extensions for the buyer, an
+`allow:` entry `oidc:*`, and §13.3's metric not yet exported (D300 to D302). Normative. The key words MUST, MUST NOT,
+SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
@@ -1669,8 +1669,8 @@ always write this key), if any, has passed ([`tunnel.md`](tunnel.md) §2.3).
 - **Remote:** `hooks.lifecycle: {task_queue: kontra-settlement}`. The five activities are scheduled by type
   name on that queue; any Temporal SDK can serve them (Cloud's are Python). Retry: unlimited, 1 s doubling to
   5 min: a hook that is down delays settlement and never skips it. The gate exports the age of the oldest
-  pending hook activity as a metric to alert on (a typo in a type name is retried forever, by design). The
-  hook configuration in force when a task started is snapshotted into its workflow input.
+  pending hook activity as a metric to alert on (a typo in a type name is retried forever, by design); this metric is
+  not built yet (D302). The hook configuration in force when a task started is snapshotted into its workflow input.
 - **`kontra.annotate {metadata, mcpMeta}`** (an Update, with the §13.2 rules) may be sent by the operator at any
   time while the workflow runs; **`kontra.close`** ends the hold that `holdOpenSeconds` started after
   `OnReviewClosed`; the workflow then completes as §14.1 says, once no `push_webhook` it started is pending (D78).
