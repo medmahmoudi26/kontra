@@ -31,11 +31,9 @@
 # refuses a handshake without one. The pentest (test/pentest, M3 WP-10) runs this file with compose.pentest.yaml under
 # the project m3pentest; test/vps runs the ACME variant (KONTRA_KIT_TESTS=1).
 
+# The gate's settings, shared by gate-migrate and gate. The image is built by the gate service alone (D313).
 x-gate: &gate
   image: kontra-gate:m4
-  build:
-    context: .
-    args: { VERSION: m4 }
   read_only: true
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
@@ -130,7 +128,9 @@ services:
     restart: "no"
 
   # One-shot: the gate's own schema (kontra-gate migrate, D28), before any replica serves. migrate waits up to a minute
-  # for a database that refuses connections (one still starting) before it gives up.
+  # for a database that refuses connections (one still starting) before it gives up. It runs the image the gate service
+  # builds and builds none itself (D313); compose builds every image before it creates any container. Run alone, it
+  # needs that image first: docker compose build gate && docker compose run --rm gate-migrate.
   gate-migrate:
     <<: *gate
     command: ["migrate", "-f", "/etc/kontra/kontra.yaml", "up"]
@@ -140,6 +140,12 @@ services:
 
   gate:
     <<: *gate
+    # The one service that builds kontra-gate:m4; gate-migrate runs the image it builds (D313). Two services building
+    # one tag race on Docker 29's containerd image store (a fresh Ubuntu 24.04's docker.io, compose 2.40): the second
+    # export fails with image "docker.io/library/kontra-gate:m4": already exists (the M4 VPS gate run, 31 Oct).
+    build:
+      context: .
+      args: { VERSION: m4 }
     command: ["serve", "-f", "/etc/kontra/kontra.yaml"]
     ports:
       - "${KONTRA_LISTEN_ADDR:+${KONTRA_LISTEN_ADDR:-}:}${KONTRA_PORT:-8443}:8443"

@@ -24,10 +24,13 @@ import (
 // the project's network is the team member's node, and SendMessage and the MCP search go from this host with the key.
 //
 // What the stand-in changes, and why (compose.override.yaml in the stack's directory, which compose reads beside the
-// shipped compose.yaml): the kit's gate image instead of a build; Let's Encrypt resolving to 127.0.0.1 and the
-// certificate for the name put in the ACME cache beforehand, signed by the run's CA (TestACMEVariantWritesItsCache
-// shows the cache is written; nothing here may reach Let's Encrypt); edge, a forwarder answering for the name on port 443
-// of the network, which is what the VPS's published port is to the team member; the published ports on loopback. The
+// shipped compose.yaml): the gate's image tag, one of the run's instead of kontra-gate:m4 (which another checkout may
+// hold), which the script's docker compose up --build still builds from the shipped archive, as on the VPS, and must
+// build once (D313: the VPS run failed where gate-migrate built the same tag too, and this host's overlay2 store would
+// retag silently, so the record's builds are counted); Let's Encrypt resolving to 127.0.0.1 and the certificate for
+// the name put in the ACME cache beforehand, signed by the run's CA (TestACMEVariantWritesItsCache shows the cache is
+// written; nothing here may reach Let's Encrypt); edge, a forwarder answering for the name on port 443 of the
+// network, which is what the VPS's published port is to the team member; the published ports on loopback. The
 // rehearsal flags --network, --ca-file and --connect-to say how the team member and this host reach the gate; the port
 // probe and the Let's Encrypt issuer are the VPS's and are not rehearsed, nor are steps 1 to 3 (the stub tests cover
 // them). The whole run is under umask 077.
@@ -35,14 +38,14 @@ func TestTeamGateRehearsal(t *testing.T) {
 	kit.Need(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
-	img := kit.GateImage(t)
+	img := fmt.Sprintf("kontra-gate:kitvps-%d", os.Getpid()) // built by the run's compose; removed after compose down
+	t.Cleanup(func() { _, _ = kit.Run(context.Background(), "", nil, "docker", "image", "rm", img) })
 	port, metrics := kit.FreePort(t), kit.FreePort(t)
 	override := fmt.Sprintf(`# test/vps's stand-in VPS (TestTeamGateRehearsal): never on a real host.
 services:
-  gate-migrate: { image: %[1]s, build: !reset null }
+  gate-migrate: { image: %[1]s }
   gate:
     image: %[1]s
-    build: !reset null
     extra_hosts: ["acme-v02.api.letsencrypt.org:127.0.0.1", "acme-staging-v02.api.letsencrypt.org:127.0.0.1"]
   edge:
     image: %[2]s
@@ -81,11 +84,12 @@ services:
 	sshLog := filepath.Join(shim, "ssh.log")
 	sshStub := fmt.Sprintf(`#!/bin/bash
 # ssh to test/vps's stand-in VPS, which is this host: ssh's options and the destination are dropped, /opt/kontra is the
-# stack's directory, and docker compose there is the stack's project, published on loopback.
+# stack's directory, and docker compose there is the stack's project, published on loopback, building with the docker
+# driver's builder as a VPS's only one (never another project's builder on this host).
 printf 'ssh' >> %[1]q; printf ' %%s' "$@" >> %[1]q; echo >> %[1]q
 while [ $# -gt 0 ]; do case "$1" in -i | -o) shift 2 ;; -*) shift ;; *) break ;; esac; done
 shift
-export COMPOSE_PROJECT_NAME=%[2]s KONTRA_LISTEN_ADDR=127.0.0.1 KONTRA_PORT=%[3]d KONTRA_METRICS_PORT=%[4]d
+export COMPOSE_PROJECT_NAME=%[2]s KONTRA_LISTEN_ADDR=127.0.0.1 KONTRA_PORT=%[3]d KONTRA_METRICS_PORT=%[4]d BUILDX_BUILDER=default
 cmd=$*
 exec bash -c "${cmd//\/opt\/kontra/%[5]s}"
 `, sshLog, s.Project, port, metrics, s.Dir)
@@ -133,6 +137,35 @@ exec bash -c "${cmd//\/opt\/kontra/%[5]s}"
 	} {
 		if !strings.Contains(rec, want) {
 			t.Errorf("the record lacks %q", want)
+		}
+	}
+	// D313: the record names this host's Docker and storage driver, and compose built the gate's image once, from the
+	// shipped archive with VERSION m4; gate-migrate ran that image, as the gate does.
+	if !regexp.MustCompile(`(?m)^  vps \| docker Engine \S+;.*\n  vps \| storage driver \S+ `).MatchString(rec) {
+		t.Errorf("the record lacks the host's docker version and storage driver")
+	}
+	built := regexp.MustCompile(`(?m)^  vps \| #[0-9]+ naming to (\S+)( \S+)? done$`).FindAllStringSubmatch(rec, -1)
+	if len(built) != 1 || built[0][1] != "docker.io/library/"+img {
+		t.Errorf("compose built %q, want %s once", built, img)
+	}
+	if !regexp.MustCompile(`(?m)^  vps \| kontra-gate m4 \(`).MatchString(rec) {
+		t.Errorf("the record lacks kontra-gate version m4")
+	}
+	want, err := kit.Run(ctx, "", nil, "docker", "image", "inspect", "-f", "{{.Id}}", img)
+	if err != nil {
+		t.Fatalf("compose did not build %s: %v", img, err)
+	}
+	for _, svc := range []string{"gate-migrate", "gate"} {
+		id, err := s.Container(ctx, svc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ran, err := kit.Run(ctx, "", nil, "docker", "inspect", "-f", "{{.Image}} {{.State.Status}} {{.State.ExitCode}}", id)
+		if err != nil || !strings.HasPrefix(ran, strings.TrimSpace(want)+" ") {
+			t.Errorf("%s ran %q (%v), want %s's image %s", svc, ran, err, img, want)
+		}
+		if svc == "gate-migrate" && strings.TrimSpace(ran) != strings.TrimSpace(want)+" exited 0" {
+			t.Errorf("gate-migrate: %q, want exited 0", ran)
 		}
 	}
 	// The key's first 8 random characters are its public id (the principal key:<prefix>, which enroll prints on stderr);

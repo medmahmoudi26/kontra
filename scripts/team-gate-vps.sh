@@ -14,7 +14,9 @@
 #      1.1.1.1 resolves it to the droplet (DNS over HTTPS), before anything asks Let's Encrypt;
 #   4. git archive HEAD | ssh … tar -x -C /opt/kontra (refused when /opt/kontra/.env exists: the host is configured
 #      already); kontra.vps.yaml with the name, three random passwords in .env (KONTRA_PORT=443), a new signing key
-#      owned by 65532; docker compose up -d --build --wait (20 min at most);
+#      owned by 65532; the host's docker version, storage driver, compose and buildx recorded; docker compose up -d
+#      --build --wait (20 min at most), the images it built recorded, and on failure its whole output, compose ps -a
+#      and each service's last 40 log lines;
 #   5. from this host: GET /healthz; the certificate's issuer is Let's Encrypt; of 22, 80, 443, 5432, 7233, 8443 and
 #      9090 only 22 and 443 answer; over ssh, an API key and a token for hello (kontra-gate enroll); a team member's
 #      clean machine (a kontra-demo container on this host) runs a2a server --exec 'echo Hello World' and kontra connect
@@ -437,6 +439,10 @@ ssh_opts=(-i "$ssh_key" -o StrictHostKeyChecking=accept-new -o "UserKnownHostsFi
   -o BatchMode=yes -o ServerAliveInterval=15)
 # shellcheck disable=SC2029 # the remote commands are this script's own, expanded here on purpose
 sshx() { ssh "${ssh_opts[@]}" "root@$ip" "$@"; }
+# What step 4 records of the host's Docker, one line each: the server's components, the storage driver, compose, buildx.
+docker_versions='docker version --format "docker {{range .Server.Components}}{{.Name}} {{.Version}}; {{end}}client {{.Client.Version}}"'
+docker_versions+='; docker info --format "storage driver {{.Driver}} {{json .DriverStatus}}"'
+docker_versions+='; docker compose version; docker buildx version'
 step() { echo "== $(date -u +%T) $*"; }
 
 if [ "$mode" = run ]; then
@@ -461,7 +467,6 @@ if [ "$mode" = run ]; then
   ci=$(sshx cloud-init status --wait 2>&1 || true)
   echo "cloud-init: $(tail -1 <<< "$ci")"
   grep -q 'status: done' <<< "$ci" || { echo "team-gate-vps: cloud-init did not finish: $ci"; exit 1; }
-  sshx 'docker compose version && docker buildx version' | sed 's/^/  vps | /'
 
   step "3. DNS: A $name -> $ip"
   body=$(jq -nc --arg n "$name" --arg ip "$ip" --arg c "$comment" '{type: "A", name: $n, content: $ip, ttl: 60, proxied: false, comment: $c}')
@@ -502,9 +507,26 @@ chown 65532:65532 deploy/compose/signing/kontra.key
 chmod 0400 deploy/compose/signing/kontra.key
 echo "configured: deploy/compose/kontra.run.yaml, .env (KONTRA_PORT=443), a new signing key"
 REMOTE
+# The host's Docker as compose meets it (D313): the engine and its components, the storage driver and its status (a
+# fresh Ubuntu 24.04's docker.io 29 uses the containerd image store, overlayfs with driver-type
+# io.containerd.snapshotter.v1, where two builds of one tag fail; the classic overlay2 store retags), compose and buildx.
+{ sshx "$docker_versions" 2>&1 || true; } | sed 's/^/  vps | /'
+# compose's whole output is kept: on success the images it built (the gate's, once) and its last 20 lines are
+# recorded; on failure every line, then the stack as compose left it.
 t0=$SECONDS
-sshx "cd $remote && timeout 1200 docker compose up -d --build --wait" 2>&1 | tail -20 | sed 's/^/  vps | /'
-echo "compose up --build --wait: $((SECONDS - t0)) s"
+up_rc=0
+sshx "cd $remote && timeout 1200 docker compose up -d --build --wait" > "$tmp/compose-up.log" 2>&1 || up_rc=$?
+if [ "$up_rc" != 0 ]; then
+  echo "team-gate-vps: docker compose up -d --build --wait failed (exit $up_rc) after $((SECONDS - t0)) s;" \
+    "its output, all $(wc -l < "$tmp/compose-up.log") lines:"
+  sed 's/^/  vps | /' "$tmp/compose-up.log"
+  echo "the stack as compose left it:"
+  { sshx "cd $remote && docker compose ps -a && docker compose logs --no-color --tail 40" 2>&1 || true; } | sed 's/^/  vps | /'
+  exit 1
+fi
+echo "compose up --build --wait: $((SECONDS - t0)) s; the images it built:"
+{ grep -E '^#[0-9]+ naming to .* done$' "$tmp/compose-up.log" || echo "(none)"; } | sed 's/^/  vps | /'
+tail -20 "$tmp/compose-up.log" | sed 's/^/  vps | /'
 
 step "5. verify from this host"
 # cx: how this host's checks reach the gate (a rehearsal's --connect-to and --ca-file; nothing for the gate run).

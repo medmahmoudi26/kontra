@@ -4659,6 +4659,7 @@ naming the gate's authorization server: refused `invalid_target`, nothing stored
   running its M3 image, whose embedded migrations never apply `0003_m4.sql`. The pentest's default image follows
   (`KONTRA_PENTEST_IMAGE`, `test/pentest`); its project stays `m3pentest` by default, which D266 already lets a run
   beside another checkout's override. The README's upgrade is `git pull && docker compose up -d --build --wait`.
+  Amended by D313: only the `gate` service builds the image, which `gate-migrate` runs.
 - **The gate is published on IPv4 and IPv6.** `kontra.vps.yaml` advises an AAAA record, but compose published on
   `0.0.0.0`, which Docker binds on IPv4 only, so IPv6 clients were refused. The default now names no host address
   (`${KONTRA_LISTEN_ADDR:+${KONTRA_LISTEN_ADDR:-}:}${KONTRA_PORT:-8443}:8443`), which Docker publishes on both families;
@@ -4831,3 +4832,54 @@ the session it asked for. relay.md §11.12, tunnel.md §6.2. Tests: `TestEveryRe
 that answers it as the stock double does, with a 1 MiB JSON body, with a silent event stream and with an endless one:
 `400` with that body each time, and the upstream receives none), `TestGateMCPReviewFixes` (`internal/gate`: on `/mcp`,
 `400` and no session row), `TestClassify` (`internal/mcpwire`: whatever `MCP-Protocol-Version` says).
+
+## From M4's gate runs (31 Oct)
+
+The team gate on a clean VPS (gate run C, WP-09, at `3b890f3`) failed at `docker compose up -d --build --wait` on a
+defect of `compose.yaml`; the gate runs' record, `docs/gate-runs-m4.md`, holds the run. D313 records the fix.
+
+### D313. Only the `gate` service builds the gate's image, and `gate-migrate` runs it — **decided under the owner's standing instruction, 31 Oct** (amends D306; completes D281)
+
+`compose.yaml`'s `x-gate` anchor carried `image: kontra-gate:m4` and `build`, and `gate-migrate` and `gate` both merge
+it, so compose built one tag twice, in parallel. On the droplet the second export failed:
+`#18 ERROR: image "docker.io/library/kontra-gate:m4": already exists`, `target gate: failed to solve`. A fresh Ubuntu
+24.04 now installs `docker.io` 29.1.3 (containerd 2.2.1; compose 2.40.3 and buildx 0.30.1 from Ubuntu's packages, as
+`test/vps/cloud-init.yaml` asks), whose fresh install uses the containerd image store (storage driver `overlayfs`,
+`driver-type io.containerd.snapshotter.v1`); there the second export of a tag the first has just named fails. On the
+classic `overlay2` store (this host: Docker 24.0.5, compose 2.24.6) retagging is idempotent and nothing showed. It is a
+race: the shape at `3b890f3` failed 5 of 15 fresh tries in an `ubuntu:24.04` container with the droplet's packages.
+The kits could not see it: they gave both services the kit's image and reset the build (`build: !reset null`) or came
+up with `--no-build`, and the record kept only compose's last 20 lines, where the error happened to be. The droplet
+lived 5 min 34 s and was torn down and checked; nothing past step 4 ran.
+
+Decision: `build` moves from the anchor to the `gate` service, the one service that builds `kontra-gate:m4`;
+`gate-migrate` keeps the image and runs what `gate` built. Compose builds the images a command needs before it creates
+any container, so the image exists when `gate-migrate` starts (`gate` depends on `gate-migrate`, not the reverse, and
+no `depends_on` could order a build). Before it builds, compose tries to pull `gate-migrate`'s image and, because a
+service builds that image, ignores the failure (compose 2.24.6 prints `gate-migrate Pulling` and `gate-migrate Error`,
+and goes on). Run alone, `gate-migrate` needs the image first: `docker compose build gate && docker compose run --rm
+gate-migrate`, which the README's upgrade now says (before, `run` built it). A second tag for `gate-migrate`, built
+from the same Dockerfile, was the alternative: two builds of one binary, and two images to keep in step.
+
+The VPS run's record says which Docker it met and keeps what compose said. `scripts/team-gate-vps.sh` records, in
+step 4 and so also with `--host`, the server's components (engine, containerd, runc), the storage driver and its
+status, compose and buildx (step 2 recorded compose and buildx only, and only on a droplet). It keeps compose's whole
+output: on success the images compose built (its `naming to … done` lines) and the last 20 lines; on failure every
+line, then `docker compose ps -a` and each service's last 40 log lines. The rehearsal (`TestTeamGateRehearsal`) no
+longer resets the gate's build: the script's `docker compose up --build` builds the gate from the shipped archive, as
+on the VPS, under a tag of the run's (`kontra-gate:kitvps-<pid>`, never `kontra-gate:m4`, which another checkout may
+hold), and the test requires one build of it in the record, `kontra-gate m4`, and `gate-migrate` exited 0 on the image
+the gate runs. This host's `overlay2` store would retag a second build silently, so the builds are counted.
+
+Verified before this change (the gate runs' evidence, 31 Oct): the one-build shape 0 failures in 15 fresh tries on
+Docker 29.1.3 and compose 2.40.3, an upgrade (`up --build` over a running stack) and `build` then `up --no-build`;
+this `compose.yaml` with the whole stack and a real gate build on the same Docker (1 CPU): `up -d --build --wait`
+exit 0 in 366 s, one `naming to`, every service healthy or exited 0, `kontra-gate version` m4, `/healthz` 200, an API
+key and an enrollment token minted. A named volume over the image's 65532-owned `/var/lib/kontra-gate` is 65532's and
+writable on the containerd store too. Tests: `TestComposeTeamGate` (`test/pentest`, in `make check`: no service but
+`gate` declares `build`, and `gate-migrate` runs the gate's image; fails on `7033e0a` with `service gate-migrate builds
+"kontra-gate:m4" too`), `TestComposeConfigResolves` (the same, as `docker compose config` resolves the file with either
+configuration; fails there with `the services that build [gate gate-migrate]`), `TestTeamGateHostMode` and
+`TestTeamGateRecordsComposeFailure` (`test/vps`, against stubs: the versions, the storage driver and the built image in
+the record; on a failure all 31 lines of compose's output and the stack's state, and no step 5; both fail on the
+script as it was), `TestTeamGateRehearsal` (`make test-kits`). The VPS run is to be made again with this fix (D306).

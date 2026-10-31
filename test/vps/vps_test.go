@@ -76,7 +76,8 @@ func TestScriptLints(t *testing.T) { kit.Lint(t, script) }
 //     STUB_DOCTL_DELETE=fail fails droplet deletion;
 //   - STUB_CF_LIST=fail answers every record listing success:false, =after-post those after the run's POST;
 //     STUB_CF_DELETE=fail every record deletion; STUB_CF_POST=lost creates the record and loses the answer (curl 28);
-//   - STUB_SSH_SHIP=fail breaks the ssh that ships the archive (step 4); STUB_DOCKER=down fails docker info.
+//   - STUB_SSH_SHIP=fail breaks the ssh that ships the archive (step 4); STUB_DOCKER=down fails docker info;
+//   - STUB_COMPOSE=fail fails docker compose up on the VPS after 30 lines of output and the VPS run's error.
 //
 // docker cp records the modes of what it copies (stat, relative to the copied directory) in dir/cp-modes.
 func stubs(dir string) map[string]string {
@@ -161,13 +162,23 @@ shift
 case "$*" in
   true) ;;
   "cloud-init status --wait") echo "status: done" ;;
-  "docker compose version && docker buildx version") echo "Docker Compose version v2.24.6" ;;
+  "docker version "*)
+    printf '%s\n' "docker Engine 29.1.3; containerd 2.2.1; runc 1.3.4; docker-init 0.19.0; client 29.1.3" \
+      'storage driver overlayfs [["driver-type","io.containerd.snapshotter.v1"]]' "Docker Compose version 2.40.3" \
+      "github.com/docker/buildx 0.30.1" ;;
   "test -e /opt/kontra/.env") exit 1 ;;
   "mkdir -p /opt/kontra && tar -x -C /opt/kontra")
     cat > /dev/null
     [ "${STUB_SSH_SHIP:-ok}" = ok ] || { echo "client_loop: send disconnect: Broken pipe" >&2; exit 255; } ;;
   "NAME=` + runName + ` DIR=/opt/kontra bash -s") cat > /dev/null; echo "configured (stub)" ;;
-  "cd /opt/kontra && timeout 1200 docker compose up -d --build --wait") echo " Container kontra-gate-1  Healthy" ;;
+  "cd /opt/kontra && timeout 1200 docker compose up -d --build --wait")
+    if [ "${STUB_COMPOSE:-ok}" = fail ]; then
+      for i in $(seq 30); do echo "compose line $i"; done
+      echo '#18 ERROR: image "docker.io/library/kontra-gate:m4": already exists' >&2
+      exit 1
+    fi
+    printf '%s\n' "#17 naming to docker.io/library/kontra-gate:m4 done" " Container kontra-gate-1  Healthy" ;;
+  "cd /opt/kontra && docker compose ps -a && docker compose logs --no-color --tail 40") echo "gate-migrate exited (stub ps -a)" ;;
   "cd /opt/kontra && docker compose exec -T gate kontra-gate enroll -f /etc/kontra/kontra.yaml --api-key m4run") echo "$STUB_KEY" ;;
   "cd /opt/kontra && docker compose exec -T gate kontra-gate enroll -f /etc/kontra/kontra.yaml hello") echo "$STUB_TOKEN" ;;
   "cd /opt/kontra && docker compose ps"*) echo "NAME IMAGE STATUS" ;;
@@ -621,8 +632,9 @@ func TestTeamGateHostMode(t *testing.T) {
 		}
 	}
 	for i, want := range []string{"test -e /opt/kontra/.env", "mkdir -p /opt/kontra && tar -x -C /opt/kontra",
-		"NAME=m4-teamgate.kontra.run DIR=/opt/kontra bash -s", "cd /opt/kontra && timeout 1200 docker compose up -d --build --wait"} {
-		if i >= len(remote) || remote[i] != want {
+		"NAME=m4-teamgate.kontra.run DIR=/opt/kontra bash -s", "docker version --format ",
+		"cd /opt/kontra && timeout 1200 docker compose up -d --build --wait"} {
+		if i >= len(remote) || !(remote[i] == want || strings.HasSuffix(want, " ") && strings.HasPrefix(remote[i], want)) {
 			t.Errorf("remote command %d is not %q: %q", i+1, want, remote)
 		}
 	}
@@ -638,6 +650,49 @@ func TestTeamGateHostMode(t *testing.T) {
 	}
 	if strings.Contains(string(rec), stubKey) || strings.Contains(string(rec), stubToken) || !strings.Contains(string(rec), "PASS") {
 		t.Errorf("the record:\n%s", rec)
+	}
+	// D313: the record says which Docker the stack met (the VPS run's defect showed on the containerd image store only)
+	// and which images compose built.
+	for _, want := range []string{
+		"  vps | docker Engine 29.1.3; containerd 2.2.1;",
+		`  vps | storage driver overlayfs [["driver-type","io.containerd.snapshotter.v1"]]`,
+		"  vps | Docker Compose version 2.40.3",
+		"; the images it built:\n  vps | #17 naming to docker.io/library/kontra-gate:m4 done\n",
+	} {
+		if !strings.Contains(string(rec), want) {
+			t.Errorf("the record lacks %q:\n%s", want, rec)
+		}
+	}
+}
+
+// D313: when docker compose up fails, the record keeps its whole output (the VPS run's kept the last 20 lines, where the
+// error happened to be), then the stack as compose left it, and the run fails without going on to step 5.
+func TestTeamGateRecordsComposeFailure(t *testing.T) {
+	r := newRun(t, "doctl")
+	stdout, stderr, code := r.run([]string{"CLOUDFLARE_API_TOKEN=", "STUB_COMPOSE=fail"}, "--host", "192.0.2.10", "--connect-to", "127.0.0.1:9")
+	if code == 0 || strings.Contains(stdout, "PASS") {
+		t.Fatalf("exit %d\nstdout %s\nstderr %s", code, stdout, stderr)
+	}
+	b, err := os.ReadFile(r.record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := string(b)
+	for _, want := range []string{
+		"  vps | storage driver overlayfs",
+		"team-gate-vps: docker compose up -d --build --wait failed (exit 1) after ",
+		"its output, all 31 lines:\n  vps | compose line 1\n  vps | compose line 2\n",
+		"  vps | compose line 30\n",
+		`  vps | #18 ERROR: image "docker.io/library/kontra-gate:m4": already exists`,
+		"the stack as compose left it:\n  vps | gate-migrate exited (stub ps -a)\n",
+		"torn down; the gate on 192.0.2.10 stays up",
+	} {
+		if !strings.Contains(rec, want) {
+			t.Errorf("the record lacks %q:\n%s", want, rec)
+		}
+	}
+	if i := index(r.calls(), "/healthz"); i >= 0 {
+		t.Errorf("the run went on to step 5 after compose failed: %q", r.calls()[i])
 	}
 }
 

@@ -138,8 +138,10 @@ which says where it goes. Helm: [`charts/kontra`](charts/kontra).
 Upgrading a gate to M4: `git pull && docker compose up -d --build --wait`. The image is `kontra-gate:m4`: without
 `--build` an M3 host has no such image to run, and its `kontra-gate:m3` holds M3's embedded migrations. `kontra-gate
 migrate` (compose runs it in `gate-migrate`) applies `0003_m4.sql`, which holds the `tasks` table's lock for one
-sequential read of it (its header says why); run it before the new replicas start, or when that pause is acceptable. A
-team or account slug may no longer be `anon-` and 16 hex digits.
+sequential read of it (its header says why); run it before the new replicas start, or when that pause is acceptable.
+`gate-migrate` runs the image the `gate` service builds (only `gate` builds it, D313), so to run the migration alone,
+build first: `docker compose build gate && docker compose run --rm gate-migrate`. A team or account slug may no longer
+be `anon-` and 16 hex digits.
 
 PRD §12's pentest list ran against this compose team gate with M3's own surface at `f65760a` (four findings, each
 fixed) and again after the M3 review rounds at `33f06a8` (no finding, D266);
