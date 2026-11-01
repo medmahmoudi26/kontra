@@ -243,6 +243,61 @@ func TestNormalCloseLogsNoError(t *testing.T) {
 	}
 }
 
+// CloseGracefully: what the gate wrote before it reaches a node that writes, its reads behind, while the gate
+// closes (issue #12: {"t": "revoked"} and the close that follows it). The node's writes meet a connection still
+// open, rather than a reset that ends its session before it reads; the close returns once the node has answered.
+func TestCloseGracefullyDeliversTheLastFrames(t *testing.T) {
+	p := tunneltest.NewPair(t)
+	node, gate := p.Sessions(t, nil)
+	gst, err := gate.OpenStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gst.Write([]byte("open\n")); err != nil {
+		t.Fatal(err)
+	}
+	nst, err := node.AcceptStream()
+	if err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(nst)
+	if line, err := br.ReadString('\n'); err != nil || line != "open\n" {
+		t.Fatalf("first line %q, %v", line, err)
+	}
+
+	p.NodeWire.Hold()
+	if _, err := gst.Write([]byte("revoked\n")); err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() { _ = tunnel.CloseGracefully(gate); close(closed) }()
+	eventually(t, 5*time.Second, "the gate's session is shut down", gate.IsClosed)
+	for range 5 { // the node writes: each open is a frame
+		if _, err := node.OpenStream(); err != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	p.NodeWire.Release()
+
+	read := make(chan string, 1)
+	go func() { line, err := br.ReadString('\n'); read <- fmt.Sprintf("%q, %v", line, err) }()
+	select {
+	case got := <-read:
+		if want := fmt.Sprintf("%q, %v", "revoked\n", nil); got != want {
+			t.Fatalf("the node read %s, want %s", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the node read nothing after the gate's close")
+	}
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CloseGracefully has not returned after the node answered")
+	}
+	eventually(t, 5*time.Second, "the node's session closes", node.IsClosed)
+}
+
 // CloseStatusOf reads the handshake code of a close status 4000 + i, and nothing else.
 func TestCloseStatusOf(t *testing.T) {
 	for _, c := range []struct {

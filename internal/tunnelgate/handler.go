@@ -392,9 +392,14 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 	dec := a.dec
 	attrs := []any{obs.KeyTunnelSession, a.session, "key_id", dec.Key.KeyID, "tenant", dec.Key.Tenant, "node", a.hello.Name}
 	log = log.With(attrs...)
-	ctx, cancel := context.WithCancel(context.Background())
+	// The connection's context ends only once the session's close is done (the deferred mux.Close waits for a
+	// close in progress), not when the session closes as ctx does: ending it ends the connection at once, which
+	// would cut a close handshake still delivering the session's last control line (Session.closeTold).
+	connCtx, connCancel := context.WithCancel(context.Background())
+	defer connCancel()
+	ctx, cancel := context.WithCancel(connCtx)
 	defer cancel()
-	mux, err := tunnel.ServerSessionWith(ctx, c, h.muxConfig(h.cfg.Logger.With("remote", remote).With(attrs...)))
+	mux, err := tunnel.ServerSessionWith(connCtx, c, h.muxConfig(h.cfg.Logger.With("remote", remote).With(attrs...)))
 	if err != nil {
 		log.Error("tunnel session did not start", "err", err)
 		_ = c.Close(websocket.StatusInternalError, "")

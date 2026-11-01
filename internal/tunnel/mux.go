@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -77,7 +78,7 @@ func NetConn(ctx context.Context, c *websocket.Conn) net.Conn {
 // the loop fails within writeTimeout and the session closes, as yamux's own stream writes and pings give
 // up after the same time (ConnectionWriteTimeout; M2 review, security-1).
 func netConn(ctx context.Context, c *websocket.Conn, writeTimeout time.Duration) *quietConn {
-	return &quietConn{Conn: websocket.NetConn(ctx, c, websocket.MessageBinary), ctx: ctx, writeTimeout: writeTimeout}
+	return &quietConn{Conn: websocket.NetConn(ctx, c, websocket.MessageBinary), ws: c, ctx: ctx, writeTimeout: writeTimeout}
 }
 
 // quietConn keeps the ends of a session out of yamux's error log, which takes every read error but io.EOF
@@ -88,9 +89,13 @@ func netConn(ctx context.Context, c *websocket.Conn, writeTimeout time.Duration)
 //     is io.EOF, as one closed with StatusNormalClosure is. The session's owner logs its end.
 type quietConn struct {
 	net.Conn
+	ws           *websocket.Conn
 	ctx          context.Context
 	writeTimeout time.Duration
 	closed       atomic.Bool
+
+	handshake atomic.Bool                   // CloseGracefully: Close runs the WebSocket close handshake
+	session   atomic.Pointer[yamux.Session] // the session over it: its key in conns
 }
 
 // Write writes p as one WebSocket message within writeTimeout. websocket.NetConn closes the connection
@@ -118,9 +123,53 @@ func (c *quietConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// Close closes the connection at once (websocket.NetConn's Close ends the read in progress, and closing the
+// WebSocket then closes the TCP connection under it), or with the close handshake after CloseGracefully.
 func (c *quietConn) Close() error {
 	c.closed.Store(true)
-	return c.Conn.Close()
+	if s := c.session.Load(); s != nil {
+		conns.Delete(s)
+	}
+	if !c.handshake.Load() {
+		return c.Conn.Close()
+	}
+	// The close frame goes out behind every frame written before it. The read in progress (yamux's) goes on,
+	// so what the peer still sends is read and dropped (yamux is shut down) and its writes meet an open
+	// connection, until its answer to the close frame ends that read; then the TCP connection closes.
+	err := c.ws.Close(websocket.StatusNormalClosure, "")
+	_ = c.Conn.Close() // websocket.NetConn's timers and contexts: the WebSocket is closed already
+	return err
+}
+
+// conns is the connection under each session ServerSessionWith or ClientSessionWith started, until it closes
+// (CloseGracefully).
+var conns sync.Map // *yamux.Session → *quietConn
+
+func track(s *yamux.Session, c *quietConn) {
+	c.session.Store(s)
+	conns.Store(s, c)
+	if c.closed.Load() { // closed before it was stored: Close found no key, or nothing under it
+		conns.Delete(s)
+	}
+}
+
+// CloseGracefully closes s, a session ServerSession or ClientSession started, as its Close does (no stream
+// opens, every stream ends), except that the WebSocket under it closes with the close handshake: the close
+// frame goes out after every frame written before it, and the connection stays open, what the peer still sends
+// read and dropped, until the peer answers that frame or the WebSocket library's bound passes (5 s; 5 s more
+// while the frame cannot be written). A peer's WebSocket answers it once its reader reaches it, so once its
+// yamux has read every frame written before it.
+//
+// Close instead ends the connection at once, and a peer still writing on it (an answer on a stream this side
+// aborted) meets a reset, which can end the peer's session before it reads the last frames this side wrote:
+// the {"t": "revoked"} line of a revoked key's session was lost so (spec/tunnel.md §12; issue #12). Use it when
+// those frames matter. It returns when the connection is closed. On a session already closing it waits for that
+// close, as Close does, and changes nothing.
+func CloseGracefully(s *yamux.Session) error {
+	if c, ok := conns.Load(s); ok {
+		c.(*quietConn).handshake.Store(true)
+	}
+	return s.Close()
 }
 
 // ServerSession starts the gate's yamux.Server on c (§1, §7) with YamuxConfig(logger).
@@ -143,10 +192,12 @@ func ServerSessionWith(ctx context.Context, c *websocket.Conn, cfg *yamux.Config
 	if err := checkMux(c, cfg); err != nil {
 		return nil, err
 	}
-	s, err := yamux.Server(newPingGuard(netConn(ctx, c, cfg.ConnectionWriteTimeout)), cfg)
+	qc := netConn(ctx, c, cfg.ConnectionWriteTimeout)
+	s, err := yamux.Server(newPingGuard(qc), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: yamux server: %w", err)
 	}
+	track(s, qc)
 	return s, nil
 }
 
@@ -157,10 +208,12 @@ func ClientSessionWith(ctx context.Context, c *websocket.Conn, cfg *yamux.Config
 	if err := checkMux(c, cfg); err != nil {
 		return nil, err
 	}
-	s, err := yamux.Client(netConn(ctx, c, cfg.ConnectionWriteTimeout), cfg)
+	qc := netConn(ctx, c, cfg.ConnectionWriteTimeout)
+	s, err := yamux.Client(qc, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("tunnel: yamux client: %w", err)
 	}
+	track(s, qc)
 	return s, nil
 }
 

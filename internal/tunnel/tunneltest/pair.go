@@ -3,8 +3,9 @@
 // the e2e harness). It is test support only: nothing in a binary imports it.
 //
 // A frozen Wire is a peer that went silent without closing (a dead NAT path, probe tunnel [keepalive]):
-// what it would send is dropped and what it would read stalls. A cut Wire is a killed process: its TCP
-// connection closes.
+// what it would send is dropped and what it would read stalls. A held Wire is a peer whose reading falls
+// behind its writing (a busy process): what arrives waits, and what it writes goes out. A cut Wire is a
+// killed process: its TCP connection closes.
 package tunneltest
 
 import (
@@ -30,6 +31,9 @@ type Wire struct {
 	frozen   atomic.Bool
 	released chan struct{} // closed by Close and Cut: a stalled read returns
 	once     sync.Once
+
+	holdMu sync.Mutex
+	hold   chan struct{} // while held: closed by Release
 }
 
 // NewWire wraps c.
@@ -63,16 +67,61 @@ func (w *Wire) Close() error {
 
 func (w *Wire) release() { w.once.Do(func() { close(w.released) }) }
 
+// Hold makes this side's reads wait until Release, a read already blocked in the socket included: what
+// arrives is kept, in the socket or in that read's hands, and nothing is dropped. Writes go through. It is a
+// side whose reading goroutine falls behind (a busy process): what it writes meanwhile can meet a peer that
+// has closed. Closing or cutting the wire ends a held read with net.ErrClosed: what it held is lost, as
+// what a process had not read is when it closes its socket.
+func (w *Wire) Hold() {
+	w.holdMu.Lock()
+	defer w.holdMu.Unlock()
+	if w.hold == nil {
+		w.hold = make(chan struct{})
+	}
+}
+
+// Release ends Hold: the held reads return what they read.
+func (w *Wire) Release() {
+	w.holdMu.Lock()
+	defer w.holdMu.Unlock()
+	if w.hold != nil {
+		close(w.hold)
+		w.hold = nil
+	}
+}
+
+// waitHeld waits while the wire is held; false when the wire was closed or cut meanwhile.
+func (w *Wire) waitHeld() bool {
+	w.holdMu.Lock()
+	h := w.hold
+	w.holdMu.Unlock()
+	if h == nil {
+		return true
+	}
+	select {
+	case <-h:
+		return true
+	case <-w.released:
+		return false
+	}
+}
+
 // Read reads from the connection; on a frozen wire what arrives is discarded and the read stalls until
-// the wire is closed or cut.
+// the wire is closed or cut; on a held wire the read waits for Release before and after it reads.
 func (w *Wire) Read(p []byte) (int, error) {
 	if w.frozen.Load() {
 		<-w.released
 		return 0, net.ErrClosed
 	}
+	if !w.waitHeld() {
+		return 0, net.ErrClosed
+	}
 	n, err := w.Conn.Read(p)
 	if w.frozen.Load() {
 		<-w.released
+		return 0, net.ErrClosed
+	}
+	if !w.waitHeld() {
 		return 0, net.ErrClosed
 	}
 	return n, err

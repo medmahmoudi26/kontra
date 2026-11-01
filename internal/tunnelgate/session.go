@@ -151,8 +151,8 @@ func (s *Session) anonymousEnded() bool {
 }
 
 // Expire ends an anonymous session at its expiry (spec/tunnel.md §6.1): no new stream, {"t": "revoked"} on its
-// control stream, its pinned MCP sessions closed revoked, then the session closed. Its key is not revoked. Safe to
-// call more than once.
+// control stream, its pinned MCP sessions closed revoked, then the session closed once the node has read the line,
+// within a bound (closeTold). Its key is not revoked. Safe to call more than once.
 func (s *Session) Expire() {
 	why := "its anonymous session expired (§6.1)"
 	s.markRevoked()
@@ -165,7 +165,7 @@ func (s *Session) Expire() {
 	if s.reg != nil && s.hostedMCP() {
 		s.reg.closeMCP(s.ID, "", mcpRevoked)
 	}
-	_ = s.close(why, true)
+	_ = s.closeTold(why, true)
 }
 
 // markRevoked records that the session's key was revoked or its rotation overlap ended: its later refusals wrap
@@ -306,6 +306,25 @@ func (s *Session) close(reason string, log bool) error {
 		return nil
 	}
 	return s.reg.remove(s, reason, first && log)
+}
+
+// closeTold is close for a session just told why it ends ({"t": "revoked"}: a key revocation, §12, or an
+// anonymous session's end, §6.1): it takes no stream from the start, its tunnels row and pinned MCP sessions go
+// at once, and then its connection closes with the WebSocket close handshake (tunnel.CloseGracefully), which
+// keeps it open, what the node still sends dropped, until the node has read every frame written before the close
+// or the handshake's bound passes (5 s once the close frame is written). Closed at once, the connection met a node
+// still writing on it (answers on the streams the revocation aborted) with a reset, and the node's session could
+// end before it read the line (issue #12).
+func (s *Session) closeTold(reason string, log bool) error {
+	first := s.shut(reason)
+	var err error
+	if s.reg != nil {
+		err = s.reg.remove(s, reason, first && log)
+	}
+	if s.mux != nil {
+		_ = tunnel.CloseGracefully(s.mux)
+	}
+	return err
 }
 
 // shut marks the session closed (no new stream) and aborts its streams; it reports whether this call

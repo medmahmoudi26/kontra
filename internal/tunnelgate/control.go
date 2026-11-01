@@ -58,7 +58,8 @@ func parseMCPChanged(payload string) (tenantID uuid.UUID, service, replica strin
 //
 //   - A key: its sessions take no new stream and their streams are aborted at once; then each is told
 //     {"t": "revoked"} and closed (its dispatches fail tunnel_lost), and its open mcp_sessions rows are
-//     closed revoked. A rotated key whose overlap ended (revoked_reason rotated, §12: "revoked_at is set when
+//     closed revoked. The close keeps the connection until the node has read the line, within a bound
+//     (Session.closeTold). A rotated key whose overlap ended (revoked_reason rotated, §12: "revoked_at is set when
 //     the overlap ends") is not an operator's revocation: its session closes without the message, which
 //     would end a node that has moved to its new key.
 //   - A binding: the service leaves the session's served set at once and its streams on the session are
@@ -100,6 +101,10 @@ func (r *Registry) revokeKey(s *Session, reason string) {
 		}
 		if s.hostedMCP() {
 			r.closeMCP(s.ID, "", mcpRevoked)
+		}
+		if tell {
+			_ = s.closeTold(why, false) // the node reads the line before the connection ends
+			return
 		}
 		_ = s.close(why, false)
 	})

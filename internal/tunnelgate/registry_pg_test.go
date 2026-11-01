@@ -783,6 +783,72 @@ func TestKeyRevocation(t *testing.T) {
 	}
 }
 
+// RevokeKey (§12) reaches a node whose reading falls behind its writing (issue #12): the gate writes {"t":
+// "revoked"} and closes the session, and the node writes on it before it reads that line, as a node does whose
+// in-flight streams answer their aborts. A close that cut the connection at once met those writes with a reset,
+// which ended the node's session before it read the line; the close now keeps the connection, reading and
+// discarding, until the node has read everything written before it (the WebSocket close handshake). Meanwhile the
+// session serves nothing: no stream is allowed and the registry holds it no more.
+func TestKeyRevocationReachesAWritingNode(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	a := e.replica("a", replicaOpts{})
+	id := newIdentity(t)
+	n := e.enrollNode(t, a, id, newAgent(), "hello")
+	s := a.held(t, n)
+	wire := a.gate.wires.Last() // the node's end
+	wire.Hold()
+	if err := e.store.RevokeKey(context.Background(), id.KeyID(), enroll.ReasonOperator, "test"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "the gate closes the revoked session", s.Mux().IsClosed)
+	if err := s.Allows("hello", tunnel.KindA2A); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("Allows while the close is in flight: %v", err)
+	}
+	if _, ok := a.reg.Get(n.session); ok {
+		t.Fatal("the registry still holds the revoked session")
+	}
+	// The node writes with its reads held: each open is a frame on the connection.
+	for range 5 {
+		if _, err := n.mux.OpenStream(); err != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	wire.Release()
+	if c := n.nextControl(t, time.Second); c.T != tunnel.CtlRevoked || c.Service != "" {
+		t.Fatalf("control %+v, want {t: revoked}", c)
+	}
+	if !n.closed(time.Second) {
+		t.Fatal("the revoked key's session is open after its control line")
+	}
+}
+
+// A revoked node that never answers the close (a dead path) holds nothing past the close handshake's bound: its
+// session serves nothing and its row is deleted from the revocation on, and its connection ends at the bound (5 s;
+// the test allows twice that on a loaded runner), not with the node.
+func TestKeyRevocationOfASilentNode(t *testing.T) {
+	e := newTunnelEnv(t, "hello")
+	a := e.replica("a", replicaOpts{})
+	id := newIdentity(t)
+	n := e.enrollNode(t, a, id, newAgent(), "hello")
+	s := a.held(t, n)
+	a.gate.wires.Last().Freeze()
+	start := time.Now()
+	if err := e.store.RevokeKey(context.Background(), id.KeyID(), enroll.ReasonOperator, "test"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 5*time.Second, "the gate closes the revoked session", s.Mux().IsClosed)
+	if err := s.Allows("hello", tunnel.KindA2A); !errors.Is(err, ErrRevoked) {
+		t.Fatalf("Allows while the close is in flight: %v", err)
+	}
+	eventually(t, 2*time.Second, "the revoked session's row is deleted", func() bool { return !e.hasRow(t, n.session) })
+	select {
+	case <-a.gate.returned:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the gate holds the silent revoked node's connection %v after the revocation", time.Since(start))
+	}
+}
+
 // RevokeBinding (§12): Allows refuses the service, tunnels.services drops it, an in-flight stream for it is
 // aborted (ErrSessionGone: the exchange reads as a lost session), the node reads {"t":"revoked","service"},
 // the mcp_sessions rows pinned to (session, service) close revoked, and the session's other service is
