@@ -1,0 +1,29 @@
+{
+  "listen": ":8443",
+  "public_url": "https://gateway.example.com",
+  "tenancy": "multi",
+  "tls": { "acme": { "domains": ["gateway.example.com"], "cache_dir": "/var/lib/kontra-gate/acme" } },
+  "signing_key": "file:/etc/kontra-signing/kontra.key",
+  "temporal": { "address": "temporal:7233", "namespace": "kontra" },
+  "postgres": "postgres://kontra_gate@db/gate",
+  "auth": {
+    "api_keys": true,
+    "oidc": {
+      "issuer": "https://api.example.com",
+      "audience": "kontra",
+      "tenant_claim": "https://example.com/claims/tenant",
+      "revocations": { "url": "https://api.example.com/v1/auth/revocations", "poll": "5s", "max_stale": "30s" }
+    },
+    "mcp_oauth": {
+      "issuer": "https://api.example.com",
+      "tenant_claim": "https://example.com/claims/tenant",
+      "revocations": { "url": "https://api.example.com/v1/auth/revocations", "poll": "5s", "max_stale": "30s" }
+    }
+  },
+  "hooks": {
+    "admission": { "url": "https://api.example.com/v1/hooks/admission", "secret_env": "KONTRA_HOOK_SECRET", "operations": ["task", "session"] },
+    "lifecycle": { "task_queue": "operator-lifecycle" }
+  },
+  "operator_metadata_prefixes": ["kontra.escrow."],
+  "metrics": { "listen": ":9090" }
+}

@@ -63,7 +63,7 @@ type Service struct {
 	// D71), nil for a tunnel service. A direct backend is reached from any replica and never hops (§11.2).
 	Direct upstream.Backend
 	Tools  Policy
-	Tasks  string // durable, passthrough or off (§11.5)
+	Tasks  string // durable, required, passthrough or off (§11.5, D322)
 	Sealed bool   // sealed: set (spec/ext-sealed.md §1)
 	// SealedRequired is sealed: true (required): a tools/call without _meta["sh.kontra/sealed"] is refused -32600
 	// before anything is forwarded or a task exists (ext-sealed.md §5 "Gate").

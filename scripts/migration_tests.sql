@@ -254,4 +254,103 @@ do $$ begin
     end if;
 end $$;
 
+-- 0004 (R §13.5, D317): kontra.audit_append links a row as internal/audit does, sha256(prev_hash || row_jcs), under
+-- the chain's lock, and returns the hash; the first row has no prev_hash.
+do $$
+declare h1 bytea; h2 bytea; r record;
+begin
+    h1 := kontra.audit_append(convert_to('{"at":"2026-11-01T00:00:00.000000Z","event":"test.one"}', 'UTF8'));
+    h2 := kontra.audit_append(convert_to('{"at":"2026-11-01T00:00:01+01:00","event":"test.two","n":2}', 'UTF8'));
+    select * into r from audit order by n limit 1;
+    if r.prev_hash is not null or r.hash <> h1 or h1 <> sha256(r.row_jcs) then
+        raise exception 'FAIL: the first appended row is not linked as the chain links it';
+    end if;
+    select * into r from audit order by n desc limit 1;
+    if r.prev_hash <> h1 or r.hash <> h2 or h2 <> sha256(h1 || r.row_jcs) then
+        raise exception 'FAIL: the second appended row is not sha256(prev || row)';
+    end if;
+end $$;
+-- What it refuses: nothing appended for each.
+do $$
+declare bad text; before bigint;
+begin
+    select count(*) into before from audit;
+    foreach bad in array array['', '[1]', '"x"', '{"event":"x"}', '{"at":"2026-11-01T00:00:00Z"}', '{"event":"","at":"2026-11-01T00:00:00Z"}',
+        '{"event":1,"at":"2026-11-01T00:00:00Z"}', '{"event":"x","at":"yesterday"}', '{"event":"x","at":"2026-11-01 00:00:00Z"}', '{"event":"x",',
+        '{"event":"x","at":"dddd-dd-ddTdd:dd:ddZ"}'] loop
+        begin
+            perform kontra.audit_append(convert_to(bad, 'UTF8'));
+            raise exception 'FAIL: audit_append accepted %', bad;
+        exception when invalid_parameter_value then null;
+        end;
+    end loop;
+    begin
+        perform kontra.audit_append(null);
+        raise exception 'FAIL: audit_append accepted null';
+    exception when invalid_parameter_value then null;
+    end;
+    begin
+        perform kontra.audit_append('\xff7b7d'::bytea);
+        raise exception 'FAIL: audit_append accepted bytes that are not UTF-8';
+    exception when invalid_parameter_value then null;
+    end;
+    if (select count(*) from audit) <> before then
+        raise exception 'FAIL: a refused row was appended';
+    end if;
+end $$;
+-- No two rows name the same predecessor, and only the first names none (audit_prev_hash).
+do $$ begin
+    insert into audit (prev_hash, row_jcs, hash) values ((select hash from audit order by n limit 1), 'x', sha256('fork'));
+    raise exception 'FAIL: a second row linked to the first row';
+exception when unique_violation then null; end $$;
+do $$ begin
+    insert into audit (prev_hash, row_jcs, hash) values (null, 'x', sha256('second first'));
+    raise exception 'FAIL: a second row without a predecessor';
+exception when unique_violation then null; end $$;
+-- The function runs as its owner and nobody else may call it unless granted.
+do $$ begin
+    if has_function_privilege('public', 'kontra.audit_append(bytea)', 'execute') then
+        raise exception 'FAIL: PUBLIC may execute kontra.audit_append';
+    end if;
+    if not (select prosecdef from pg_proc where oid = 'kontra.audit_append(bytea)'::regprocedure) then
+        raise exception 'FAIL: kontra.audit_append is not security definer';
+    end if;
+end $$;
+
+-- 0004 (R §2.3, §13.5, D319; Cloud's D-M5-120): one buyer's tasks across services, newest first, are read through
+-- tasks_by_buyer. 20000 tasks on two services, analyzed: an active buyer holds 66 of them, and its newest 50 are an
+-- ordered scan of the index with no sort; a buyer with 20 is found through the index too, not by walking the table.
+insert into services (tenant_id, name, kind, backend, source)
+    values ('01900000-0000-7000-8000-000000000001', 'hello2', 'a2a', '{"tunnel": {}}', 'config');
+insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version, snapshot, status_at)
+    select ('01900000-0000-7000-8001-' || lpad(to_hex(i), 12, '0'))::uuid, '01900000-0000-7000-8000-000000000001',
+           case when i % 2 = 0 then 'hello' else 'hello2' end, 'a2a',
+           ('01900000-0000-7000-8002-' || lpad(to_hex(case when i % 300 = 0 then 4095 else i % 1000 end), 12, '0'))::uuid,
+           'node:k1_x', 'node', 'ctx', 'submitted', 1, '{}', now()
+    from generate_series(1, 20000) i;
+analyze tasks;
+do $$
+declare plan text;
+begin
+    execute 'explain (format json) select id from kontra.tasks where buyer_id = ''01900000-0000-7000-8002-000000000fff''
+             and via in (''api_key'', ''oidc'', ''mcp'', ''node'') order by id desc limit 50' into plan;
+    if plan not like '%"Node Type": "Index Scan"%' or plan not like '%"Index Name": "tasks_by_buyer"%' or plan like '%"Sort"%' then
+        raise exception 'FAIL: an active buyer''s newest tasks are not an ordered scan of tasks_by_buyer: %', plan;
+    end if;
+    execute 'explain (format json) select id from kontra.tasks where buyer_id = ''01900000-0000-7000-8002-000000000007''
+             order by id desc limit 50' into plan;
+    if plan not like '%"Index Name": "tasks_by_buyer"%' or plan like '%"Seq Scan"%' then
+        raise exception 'FAIL: a buyer''s few tasks are not read through tasks_by_buyer: %', plan;
+    end if;
+end $$;
+
+-- 0004 (R §11.5, D322): an MCP service's tasks mode may be required; another value is still refused.
+insert into services (tenant_id, name, kind, backend, source, tasks_mode)
+    values ('01900000-0000-7000-8000-000000000001', 'tools-required', 'mcp', '{"tunnel": {}}', 'config', 'required');
+do $$ begin
+    insert into services (tenant_id, name, kind, backend, source, tasks_mode)
+        values ('01900000-0000-7000-8000-000000000001', 'tools-bogus', 'mcp', '{"tunnel": {}}', 'config', 'always');
+    raise exception 'FAIL: tasks_mode always was accepted';
+exception when check_violation then null; end $$;
+
 select 'migration behaviour: ok';

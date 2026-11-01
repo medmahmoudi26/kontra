@@ -51,8 +51,11 @@ func TestAllowList(t *testing.T) {
 	oidcMCP := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|42", BuyerID: buyer1, Via: ViaMCP}
 	oidcOther := Principal{Kind: KindOIDC, ID: "oidc:sub:google-oauth2|7", BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-000000000002"), Via: ViaMCP}
 	node := Principal{Kind: KindNode, ID: "node:k1_abcdefghijklmnopqrstuvwxyz", TenantID: &acmeTenant, TenantSlug: "acme", BuyerID: buyer1, Via: ViaNode}
+	// D315: an OIDC principal whose issuer's tenant claim names acme is an org:acme member, and stays an OIDC principal.
+	oidcAcme := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|99", TenantID: &acmeTenant, TenantSlug: "acme",
+		BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-000000000003"), Via: ViaOIDC}
 	anon := Anonymous(buyer1)
-	all := []Principal{acmeKey, acmeKey2, otherKey, shortKey, enrollOnly, oidc, oidcMCP, oidcOther, node, anon}
+	all := []Principal{acmeKey, acmeKey2, otherKey, shortKey, enrollOnly, oidc, oidcMCP, oidcOther, oidcAcme, node, anon}
 	name := func(p Principal) string {
 		return p.ID + "/" + string(p.Via) + "/" + strings.Join(func() []string {
 			var s []string
@@ -74,17 +77,18 @@ func TestAllowList(t *testing.T) {
 		{[]string{"key:kk_acme_ab12cd3?"}, []Principal{acmeKey}},
 		{[]string{"key:kk_*_ab12cd34"}, []Principal{acmeKey, otherKey}},
 		{[]string{"key:*"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey}},
-		{[]string{"org:acme"}, []Principal{acmeKey, acmeKey2, node}},
+		{[]string{"org:acme"}, []Principal{acmeKey, acmeKey2, oidcAcme, node}},
 		{[]string{"org:other"}, []Principal{otherKey, shortKey}},
 		{[]string{"org:nobody"}, nil},
 		{[]string{"oidc:sub:auth0|42"}, []Principal{oidc, oidcMCP}},
 		{[]string{"oidc:sub:auth0|43"}, nil},
-		{[]string{"oidc:*"}, []Principal{oidc, oidcMCP, oidcOther}},
-		{[]string{"oidc:*", "key:kk_acme_*"}, []Principal{oidc, oidcMCP, oidcOther, acmeKey, acmeKey2}},
-		{[]string{"key:*", "oidc:*"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey, oidc, oidcMCP, oidcOther}},
+		{[]string{"oidc:*"}, []Principal{oidc, oidcMCP, oidcOther, oidcAcme}},
+		{[]string{"oidc:*", "key:kk_acme_*"}, []Principal{oidc, oidcMCP, oidcOther, oidcAcme, acmeKey, acmeKey2}},
+		{[]string{"key:*", "oidc:*"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey, oidc, oidcMCP, oidcOther, oidcAcme}},
+		{[]string{"oidc:sub:auth0|99"}, []Principal{oidcAcme}},
 		{[]string{"node:k1_abcdefghijklmnopqrstuvwxyz"}, []Principal{node}},
-		{[]string{"anonymous"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey, oidc, oidcMCP, oidcOther, node, anon}},
-		{[]string{"key:kk_a_*", "org:acme"}, []Principal{acmeKey, acmeKey2, shortKey, node}},
+		{[]string{"anonymous"}, []Principal{acmeKey, acmeKey2, otherKey, shortKey, oidc, oidcMCP, oidcOther, oidcAcme, node, anon}},
+		{[]string{"key:kk_a_*", "org:acme"}, []Principal{acmeKey, acmeKey2, shortKey, oidcAcme, node}},
 	}
 	for _, tc := range cases {
 		l := mustList(t, tc.entries...)

@@ -4894,3 +4894,465 @@ script as it was), `TestTeamGateRehearsal` (`make test-kits`). The VPS run was m
 (31 Oct, droplet 614610093: Docker 29.1.3 on the containerd image store, compose 2.40.3) and passed: `up -d --build
 --wait` exit 0 in 232 s with one build, `gate-migrate` and `gate` on the one image, the Let's Encrypt certificate, and
 a hire and an MCP `search` through the gate from another machine ([`gate-runs-m4.md`](gate-runs-m4.md)).
+
+## From M5's gate side (1 Nov)
+
+Kontra Cloud builds M5 against this gate, and its record (kontra-cloud `docs/m5-decisions.md`) names what it needs
+from this repository: decision 7's OIDC principals on the A2A routes with a tenant mapping and a revocation feed
+(public-repo PR M5-G1; its C4 and D-M5-35), and an audit-append contract for the gate's tables it writes (M5-G2; its
+C11, with D-M5-54 as the interim). D314 to D317 settle them. Where Cloud's record proposed something else, the entry
+says so and what Cloud changes. The second build of the gate side (D318 to D323) answers the rest: an observation of
+Cloud's end-to-end run on required extensions (D318), the indexes of its D-M5-120 (D319), the three issues its PRs
+opened against this repository (kontra#5, #6, #7: D320 to D322) and `kontra publish` (M5-G3, its D-M5-62: D323). The
+branch's review (findings AUTH-1, AUDIT-1 and rest-1 to rest-5, all minor) amended D314, D317 and D321 to D323 before
+the merge; each entry says what changed.
+
+### D314. The A2A routes take an issuer's JWTs as OIDC principals — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 7; completes D268, D276)
+
+The owner's decision 7: the gate accepts Cloud's JWTs as OIDC principals, issuer = Cloud's control plane with its JWKS,
+audience `kontra`, revocation checked against `/v1/auth/revocations`. `auth.oidc` (PRD §11, [`relay.md`](../spec/relay.md)
+§2.3) was refused at load with a warning since M1, and D268 and D276 left it to M5 on §12.1's verifier. Decision
+(§2.3, §17; `spec/schema/config.json`):
+
+- **Which bearer.** With `auth.oidc`, a bearer of a JWT's shape (`auth.LooksLikeJWT`, as D296 reads one on the MCP
+  routes) on an A2A route is verified as the issuer's token and never looked up as an API key; any other bearer is an
+  API key. Without it nothing changes: a JWT is looked up as a key and is `401`.
+- **How.** §12.1's verifier (D276, D284, D296): metadata and key set as operator-configured endpoints, the `kid`
+  refetch at most once a minute, ES256, RS256 or EdDSA, `iss`, `exp`, `nbf` with 60 s of skew. `aud` must contain
+  `auth.oidc.audience` (exactly, as one member). The principal is `oidc:sub:<sub>`, `buyer_id` UUIDv5(issuer ‖ sub)
+  (the same buyer as the subject's MCP tokens, which Cloud's D-M5-11 pins), `via = oidc`, and the tenant D315 maps.
+- **Audiences never cross.** A token for an MCP route's canonical URI is `401` on the A2A routes; an
+  `auth.oidc.audience` token is `401` on the MCP routes (`AuthenticateMCP` never asks the A2A verifier). So Cloud's
+  `aud kontra` tokens (its D-M5-39) and its MCP tokens (`aud` = the route) are two credentials. That holds only if
+  the audience names none of the gate's own resources, so the load refuses one that does (review AUTH-1): an absolute
+  URL on `public_url`'s origin whose path is empty, `public_url`'s own, or `{public_url}/mcp` or below it
+  (`config.NamesGateResource`: scheme and host compared case-insensitively, a default port elided, paths decoded and
+  without trailing slashes), with or without `auth.mcp_oauth`, since the issuer may mint MCP tokens for this gate
+  anyway; `oidc.NewA2A` refuses the same values. Otherwise a token minted for one MCP resource (RFC 8707; Cloud's
+  consent page, its D-M5-38) would be a principal on every A2A route. Cloud's `kontra` is unaffected.
+- **One issuer, one verifier.** When `auth.oidc.issuer` equals `auth.mcp_oauth.issuer` (Cloud's case), the replica
+  builds one `oidc.Issuer` for it: one key-set cache, one revocation feed (D316), one tenant claim (D315). Both blocks
+  must then write the same `tenant_claim` and `revocations`, or the load fails: the two settings are the issuer's,
+  true of every token it signs on every route, and a block that left the feed out would be a hole on its routes.
+- **Failures.** A refused token is `401` (`Bearer`, as every A2A `401`); an issuer, feed or tenant the gate could not
+  read is the gate's own failure, answered as a database failure is on these routes (`-32603` on JSON-RPC, `503` on a
+  card), never `401`: a caller cannot tell a refused token from an outage of the operator's, and a client that
+  retried a `401` with a new token would be misled.
+- **Streams.** A token is checked when its request arrives. A stream it opened is not cut when it expires or is
+  revoked, as an API key's is not; the next request is checked.
+
+The `auth.oidc` warning (`Config.unbuilt`) and the `oidc:*` warning on a gate with `auth.oidc` alone go. Why reuse the
+MCP verifier rather than a second one: the checks are §12.1's, which D276 already settled and M4 tested, and Cloud's
+issuer is one population of tokens. What it does not do: no scope or `azp` check (Cloud mints `aud kontra` for one
+purpose), no token introspection (the feed is the revocation channel), no per-service audience.
+
+Tested: `TestAuthenticateA2A` (`internal/auth`: a JWT is the verifier's on A2A only, a key is a key, a refused token
+`401`, a feed stale the gate's own error, a node's request its session's), `TestA2A` and `TestNewIssuerRefuses`
+(`internal/oidc`: three algorithms, `aud` among others, an MCP audience, another audience, expired, a rotated key
+fetched once; `NewA2A` refusing the gate's origin and MCP routes as its audience), `TestOIDCIssuerPolicy`,
+`TestNamesGateResource` and the `TestLoadErrors` rows (`internal/config`: `/mcp`, `/mcp/svc`, the origin with and
+without a slash, a case variant), `TestGateA2AOIDC` (`internal/gate`,
+a whole replica against `oidctest` with its own JWKS and feed: a task via `oidc` with the token's buyer, read back by
+another token of the subject; audiences not crossing; a key rotated at the issuer accepted after one refetch).
+
+### D315. An issuer's tenant claim maps its principals to a tenant by slug — **decided under the owner's standing instruction, 1 Nov** (completes D314; amends D276's "no tenant")
+
+[`relay.md`](../spec/relay.md) §2.3 gave an OIDC principal "none, unless the operator maps it" and §12.1 left the
+mapping to M5; Cloud's D-M5-35 asks for "a tenant claim mapping" without naming one. A principal's tenant is what
+`org:<tenant>` entries admit (a private listing is `[org:<tenant>]` in Cloud's PR-3) and what Admission receives as
+`principal.tenantId`. Decision (§2.3, §12.1, §17):
+
+- **Which claim.** `tenant_claim`, on `auth.oidc` and on `auth.mcp_oauth`, names one top-level claim (a name of 1 to
+  128 characters `[A-Za-z0-9_.:/#~+-]`, so a collision-resistant URI such as `https://kontra.sh/claims/tenant` or a
+  private name; never `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti` or `sid`). Absent: no claim is read and no OIDC
+  principal has a tenant, as before. The gate does not fix the name: a team's IdP chooses its own claims, and the
+  operator writes the name it emits.
+- **Its value.** A string, the slug of a live tenant of this gate of kind `team` or `account` (not deleted, not
+  expired): the slug is what `org:` entries, routes and Cloud's party handles name, and a team's IdP can know it where
+  it cannot know a random UUIDv7. The principal then carries the tenant's id and slug.
+- **A token without the claim** is a principal without a tenant: admitted by `oidc:sub:`, `oidc:*` and `anonymous`,
+  never by `org:`. It is not refused, because a buyer with no tenant of its own (a signed-in person who hires) is the
+  normal case.
+- **A token with a claim the gate cannot honour** is `401`: a value that is not a slug (not a string, `null`, upper
+  case), a slug of no live tenant, or of an anonymous tenant (an anonymous tenant is a session's node key, never a
+  signed-in principal's; tunnel.md §6). The issuer asserted a membership that does not hold, so the token is refused
+  rather than accepted with less: it fails closed, and the operator's bug shows.
+- **Tenancy.** The rule is the same on both. On a multi-tenant gate the claim names one of the operator's tenants. On
+  a team gate the only tenant is `default`, so a team's IdP writes `default` for its members, and `org:default`
+  (which a handshake gives the services it creates, tunnel.md §5) admits them.
+- **Freshness.** `tenant.Resolver` keeps an answer 5 s and never past the tenant's `expires_at`, so a deleted tenant
+  stops mapping within 5 s, the bound an API key's tenant has (§2.3's revocation cache); an unknown slug is kept as
+  long, so one token cannot cost a query per request. A database failure is the gate's own error, not a `401`.
+- **The buyer does not change.** `buyer_id` is UUIDv5(issuer ‖ sub) whatever the tenant (D-M5-11).
+
+What Cloud changes: its `aud kontra` tokens (D-M5-39: `sub` = party, `sid`) and its MCP tokens carry the party's gate
+tenant slug in the claim its configuration names, when the party has a tenant; the two blocks of its gate
+configuration write the same `tenant_claim`.
+
+Tested: `TestIssuerTenantClaim` (`internal/oidc`: mapped, absent, unknown, malformed, a database failure, the setting
+off), `TestResolver` (`internal/tenant`, Postgres: team, account, anonymous, deleted, expired, unknown, the 5 s and
+`expires_at` bounds), `TestAllowList` (`internal/auth`: a mapped principal is an `org:` member and still an OIDC
+principal), `TestGateA2AOIDC` (`org:default` on A2A and on `/mcp/{svc}`), `TestGateA2AOIDCMultiTenant` (`org:acme` on
+a multi-tenant gate; an anonymous tenant's slug, an unknown slug and a case variant `401`).
+
+### D316. An issuer's revocation feed: polled, required of its tokens, failing closed after 30 s — **decided under the owner's standing instruction, 1 Nov** (completes D314; carries out Cloud's C4 and D-M5-35)
+
+A token the gate verifies by itself is good until it expires; decision 7 has Cloud's revocations reach it through
+`GET /v1/auth/revocations`, which at kontra-cloud `c16e182` (`gate/auth/service.py` `recent_revocations`, the
+`Revocations` model) answers `{"window_seconds": 1200, "sessions": [sha256(sid) hex, …]}`: every session revoked in
+the last 20 minutes (at most 200,000), newest first, `Cache-Control: no-store`, public. Its tokens carry `sid` and
+`iat`; access tokens live 15 minutes and MCP tokens 10 (its D-M5-38). Decision (§2.3, §10.3, §12.1, §17):
+
+- **Configuration.** `revocations: {url, poll, max_stale}` on `auth.oidc` and `auth.mcp_oauth` (equal when they name
+  one issuer, D314). `url` is an operator-configured endpoint (§10.3, D284: `https://`, or `http://` on a loopback
+  host; no redirect, no proxy), read with a 10 s timeout and a 32 MiB bound (262,144 entries of 67 bytes fit with
+  room; above Cloud's own 200,000). `poll` defaults to 5 s (1 s to 1 min), §2.3's bound for an API key's revocation;
+  `max_stale` to 30 s (at least twice `poll`, at most 5 min).
+- **The answer.** A JSON object with exact keys (`strictjson`), `window_seconds` an integer from 1 s to 30 days,
+  `sessions` an array of 64-hex-digit digests; other members are ignored. One malformed entry, or any other shape, is
+  a failed read: the gate cannot tell what it would miss. A failed read keeps the last list.
+- **What a token then needs.** A string `sid` of at most 255 bytes, whose sha256 (of its UTF-8 bytes, hex) is not
+  listed; an `iat` at most 60 s ahead; and a lifetime `exp − iat` of at most `window_seconds − 120 s` (1080 s under
+  Cloud's window). Otherwise `401`. The lifetime bound is what makes the list sufficient: a session revoked at R is
+  listed until R + W on the issuer's clock, its tokens were issued at `iat` ≤ R, and the gate accepts one until
+  `exp` + 60 s on its own clock, within 60 s of the issuer's; so with `exp − iat` ≤ W − 120 s the session is listed
+  for as long as any of its tokens is accepted. The gate therefore keeps no revocation of its own, and a replica that
+  restarts knows every revocation that matters from its first read. A token without `sid` or `iat` cannot be checked,
+  so it is refused rather than trusted.
+- **Staleness fails closed.** Before the first read, and once no read has succeeded for `max_stale` (counted from when
+  the last good read began), every token of the issuer is the gate's own failure (D314's: an internal error on the A2A
+  routes, `503` on the MCP routes and cards), never accepted; a revoked token keeps its `401`. API keys, nodes and
+  anonymous callers are unaffected. So a revocation reaches every replica within `max_stale`, normally within `poll`.
+  30 s is the trade: an outage of the operator's control plane longer than that stops its signed-in callers (not its
+  API keys) until it is back, which is the price of never accepting a token that may have been revoked; a longer
+  bound lets a revoked token work longer. The operator can set it from 2·`poll` to 5 min.
+- **Start.** Each replica polls each distinct feed from `Run`, and waits up to 5 s (`FeedWait`) for each one's first
+  read before it serves, so the tokens of its first instants are not refused for want of a read; a feed still unread
+  is logged and polled on.
+- **Watching it.** Gauges `kontra_gate_oidc_revocations_age_seconds` (since the last good read began; `+Inf` before
+  any) and `kontra_gate_oidc_revocations_fresh` (1 while under `max_stale`), labelled by `replica` and `issuer`; a
+  revoked session's token refused is logged at info with the digest's first 4 bytes and the subject.
+
+Conflict with Cloud's proposals: none in the feed's shape. Two requirements follow for Cloud: every token it mints for
+the gate (the `aud kontra` kind and the MCP AS's) carries `sid` and `iat` and lives at most `window_seconds − 120 s`
+(its 15 and 10 minutes do; `REVOCATION_WINDOW`'s comment already intends it), and its gate configuration writes the
+same `revocations` in both blocks. Its `/v1/auth/revocations` stays public, as decision 7 has it: a digest discloses
+nothing without the token.
+
+Tested: `TestParseFeed`, `TestNewFeedRefuses`, `TestIssuerRevocationFeed` (`internal/oidc`: never read, `sid` and `iat`
+required and bounded, the lifetime bound at 1080 s and 1081 s, a revocation refused on A2A and MCP audiences and
+another session not, a failed read keeping its list, stale at 30 s and fresh at 29, a malformed answer, the window
+shrinking), `TestFeedRun`, `TestA2A` (revoked; stale), `TestOIDCIssuerPolicy` and `TestLoadErrors` rows
+(`internal/config`), `TestGateA2AOIDC` (a revoked `sid` `401` within the poll on A2A and `/mcp`, another session
+served; the feed down: past `max_stale` `-32603` on A2A and `503` on `/mcp/fs` while an API key is served, the gauge
+0, then back), `TestOperatorFixtureLoads` (`spec/schema/examples/config.operator.json`).
+
+### D317. `kontra.audit_append(row_jcs bytea)`: an operator's appends join the gate's audit chain — **decided under the owner's standing instruction, 1 Nov** (carries out Cloud's C11; replaces its interim D-M5-54)
+
+Cloud's control plane writes the gate's `services`, `enrollment_tokens` and `api_keys` and revokes keys and bindings
+([`relay.md`](../spec/relay.md) §13.5); each change must be a row of the gate's hash chain (`audit`, PRD §12), which only
+`internal/audit` appended (`pg_advisory_xact_lock(0x6b6f6e7472610100)`, `prev_hash` = the last row's hash by `n`,
+`hash = sha256(prev_hash ‖ row_jcs)`). Cloud's C11 proposes a SQL function; until it exists its D-M5-54 re-implements
+the link in Python with `INSERT` on `audit`. Decision (migration `0004_m5.sql`, §13.5):
+
+- **The function.** `kontra.audit_append(row_jcs bytea) returns bytea`, called in the transaction of the change it
+  records. It takes the same transaction-level lock, reads the head by `n`, computes `sha256(coalesce(prev, '') ‖
+  row_jcs)` over the bytes given, inserts `(at, prev_hash, row_jcs, hash)` and returns the hash. The `at` column is the
+  database's clock under the lock (when the row was appended); the row's own `at` member is the writer's time of its
+  change (the gate's rows write both from one read of that clock; an operator's cannot, since its bytes are hashed as
+  given). Go's appends are unchanged; the two take one lock, so they make one chain, and `audit.Verify` checks it.
+- **What it checks.** `row_jcs` not empty, UTF-8 JSON, an object with a non-empty string `event` and an `at` in RFC
+  3339 form (`22023` otherwise): every row says what happened and when, under the hash. It does not re-canonicalize:
+  the writer sends RFC 8785 bytes and the chain keeps exactly those, as `Verify` reads them. The `at` pattern has no
+  backslash (`[0-9]`, `[.]`; review AUDIT-1): PL/pgSQL lexes a function's literals under the calling session's
+  `standard_conforming_strings` the first time a backend runs it and keeps the result, and with the setting off `\d`
+  read as the letter `d`, refusing every valid row on that connection and accepting `dddd-dd-ddTdd:dd:ddZ`.
+- **Read committed only.** Above read committed the transaction's snapshot can predate the last committed append, so
+  the head it reads under the lock is stale and its row would fork the chain. The function refuses such a transaction
+  (`25000`). And a unique index `audit_prev_hash (prev_hash) nulls not distinct` makes a fork impossible whoever
+  writes (the function, `internal/audit`, or a raw `INSERT` of an interim writer): no two rows name one predecessor,
+  and only the first names none. Building it takes `audit`'s `SHARE` lock for one read of that small table.
+- **Grants.** The function is `SECURITY DEFINER`, owned by the role that runs `kontra-gate migrate` (the owner of
+  `audit`), with `search_path` pinned to `pg_catalog, pg_temp` and every name qualified; `EXECUTE` is revoked from
+  `PUBLIC`. An operator's role needs `USAGE` on schema `kontra` and `EXECUTE` on `kontra.audit_append(bytea)`, and no
+  privilege on `audit` (`SELECT` only to read or verify the chain). So the operator's writer can append only linked
+  rows.
+
+Conflict with Cloud's proposals: C11 names the function and its signature, which this keeps; it says nothing of
+grants, isolation or what a row must hold. Cloud changes: `gate/gatedb` calls `select kontra.audit_append(:row)` in
+place of D-M5-54's lock, head read and `INSERT`; its transactions that append are read committed (SQLAlchemy's
+default); its rows carry `event` and an RFC 3339 `at`; and `ops/sql/gate-grants.sql` (PR-4's correction: "audit
+INSERT") grants `EXECUTE` on the function instead of `INSERT` on `audit`, which it should then revoke. Until Cloud's
+image moves to a gate image with this migration, D-M5-54's writer keeps working: it takes the same lock and links the
+same way, and the unique index refuses any row it linked wrongly.
+
+Tested: `TestSQLAppendJoinsTheChain` (`internal/audit`, Postgres: Go and SQL appends interleaved and then 40 at once
+verify as one chain of 44 rows; each answer is `Hash(prev, row)` of its row; a rolled-back call leaves nothing;
+repeatable read and serializable refused with `25000`; malformed rows `22023`; a role granted `USAGE` and `EXECUTE`
+appends and can neither insert into nor read `audit`; a role without `EXECUTE` cannot call it; a raw insert linking a
+stale head is a unique violation; the operator's row ends the verified chain),
+`TestSQLAppendWithoutStandardConformingStrings` (`internal/audit`: a connection that starts with the setting off appends
+two RFC 3339 rows and refuses an `at` of letters; it fails on the pattern with backslashes), the 0004 blocks of
+`scripts/migration_tests.sql` (`make check-migrations` on Postgres 16 and 17: the links, eleven refused rows, `null` and
+bytes that are not UTF-8, both forks refused, `PUBLIC` without `EXECUTE`, `SECURITY DEFINER`) and
+`scripts/migration_tests_session.sql` (a session of its own, the setting off before its first call), `TestDownThenUp` and
+`TestUpOnEmptyDatabase` (`internal/migrate`: 0004's up and down), `TestMigrateCommand` (`cmd/kontra-gate`),
+`TestEmbeddedMigrations`.
+
+### D318. A served card's required extensions are required of messages, not of a task's own methods — **decided under the owner's standing instruction, 1 Nov** (amends D9; completes D300)
+
+Cloud's `make e2e` at its PR-3 (its D-M5-90) saw the pinned gate refuse every A2A request to a `per_task` service that
+did not activate the escrow entry, `GetTask` included, not only the `SendMessage` [`ext-escrow.md`](../spec/ext-escrow.md)
+§1 names: `a2ahttp.Extensions` ran on every A2A route. The question: per A2A 1.0's extension activation and
+[`relay.md`](../spec/relay.md), should `GetTask`, `CancelTask` and `SubscribeToTask` of a task that exists require it?
+
+What the texts say. A2A 1.0 activates extensions per request (`A2A-Extensions`, §3.2.5) and §3.3.4 has the agent
+return `ExtensionSupportRequiredError` "when a server requests use of an extension marked as `required: true`" and
+the client does not declare it; the extensions topic says a required extension "impacts how requests are structured or
+processed". Neither says which methods; a2a-go v2.7.0's `NewAgentCardEnforcer` checks every method, and the pinned
+TCK (`CORE-CAP-004`) only `SendMessage`. Kontra's own texts scope it: ext-escrow §1 refuses "a `SendMessage` that does
+not activate the URI ... before any task exists", activation being the acknowledgement of the card's quote; relay.md
+§2.4 refuses "before any task row exists".
+
+Decision: a defect, fixed. A message (`SendMessage`, `SendStreamingMessage`, on both bindings: a new task, a
+follow-up, a resend, a review-window message or a dispute) missing a URI the served card marks required is refused
+`-32008`, as before; so is a JSON-RPC method the gate does not know. `GetTask`, `ListTasks`, `CancelTask`,
+`SubscribeToTask`, the four push-config methods and `GetExtendedAgentCard` are not refused for it; the URIs they
+activate are still filtered by the card and echoed. Why:
+
+- **No extension changes those answers.** The gate answers them from its own rows (§5, §8, §9) and never forwards
+  them to the seller, whose own activation of a forwarded cancel is the one stored with the task (§8.1). Refusing them
+  enforces nothing an extension's protocol governs.
+- **The required set is the card's now, the task's terms were fixed at admission.** A buyer whose task was admitted
+  under a free listing loses its task's reads and its cancel the moment the listing is priced (Cloud versions
+  listings, its D-M5-95), and a2a-go's own client activator activates only what the card it resolved declares. A
+  task's owner must always be able to read and stop its task; a cancel of a quoted task is the buyer stopping a
+  payment.
+- **`/mcp` already reads them without it.** A `hire` activates the operator's entries on the buyer's behalf (D300), and
+  its task's `tasks/get`, `tasks/cancel` and a `reply` need nothing more; the same principal reading the same task
+  over A2A was refused.
+
+What it does not change: a message still needs the activation, follow-ups included (a dispute is an escrow message,
+§5), so an extension's protocol still governs every message under the card's current terms. A gate stricter than
+a2a-go's enforcer on messages and more lenient on reads stays conformant: no client that activates is refused.
+
+Conflict with Cloud's record: its D-M5-90 and CLAUDE.md say the gate refuses "a task's reads included". Its clients
+send the header on every request (its e2e and G1 do), so nothing of Cloud's breaks; the sentence should say messages.
+
+Tested: `TestExtensionsRequiredOfMessages` (`internal/a2ahttp`: messages on both bindings and an unknown JSON-RPC method
+refused before the handler; nine task methods on both bindings and `SubscribeToTask` on both served without the
+header, nothing echoed; a declared URI a `GetTask` activates echoed and passed on), `TestExtensions`, and
+`TestGateMCPHireOperatorExtension` (`internal/gate`: the task a `hire` created, read by `GetTask` and `ListTasks` and
+cancelled (`-32002`, completed) over A2A by the same key without `A2A-Extensions`, while a message to it is `-32008`).
+
+### D319. `tasks_by_buyer`, and the derived buyer ids written out — **decided under the owner's standing instruction, 1 Nov** (carries out Cloud's D-M5-120)
+
+Cloud's PR-4 review (its D-M5-120) split `GET /v1/tasks` and `GET /v1/usage` into reads an index serves, and found two
+with none: a buyer's tasks across services (no index of `tasks` starts with `buyer_id`; `tasks_hired` is partial on
+`hired`), and a node principal's tasks and calls (none covers `principal`, and "a node's `buyer_id` is UUIDv5 of a
+gate-internal namespace, relay.md §2.3, which Cloud cannot compute"). It proposed `tasks (buyer_id, id desc)` and
+either the node buyer's namespace written in §2.3 or indexes on `principal`. Decision (migration `0004_m5.sql`,
+[`relay.md`](../spec/relay.md) §2.3, §13.5):
+
+- **`tasks_by_buyer on tasks (buyer_id, id desc)`.** A buyer's newest tasks are an ordered scan of it (task ids are
+  UUIDv7, so `id desc` is newest first). It is built in 0004's transaction, which holds a `SHARE` lock on `tasks` for
+  one scan, as 0003's `tasks_hired` did.
+- **The namespace, not `principal` indexes.** The derivations were fixed since M1 (`ids.Derive`; the namespace is
+  UUIDv5(URL, `https://kontra.sh/ns/v1`) = `a89faf13-…`) and are stored in `buyer_id` forever, so writing them down costs
+  nothing; §2.3 now gives the namespace, the netstring names of the `node`, `oidc` and `anonymous` buyers and one
+  example of each, and a Python one-liner. Cloud computes a node key's buyer and reads its tasks through
+  `tasks_by_buyer` and its calls through `calls_by_buyer`, one query per buyer. Two indexes on `principal` would cost
+  every task and call write an index entry for a read the one index already serves.
+- §13.5 lists the indexes an operator's reads use, and says that a read `OR`ing a party's buyers uses none of them.
+
+Tested: the 0004 block of `scripts/migration_tests.sql` (`make check-migrations`, Postgres 16 and 17: 20,000 tasks
+analysed, an active buyer's newest 50 an ordered `Index Scan` of `tasks_by_buyer` with no sort, a buyer with 20 tasks
+read through it with no sequential scan), `TestDownThenUp` (`internal/migrate`), `TestDerivedBuyersAsRelayWritesThem`
+(`internal/ids`: §2.3's five values), and `scripts/check_specs.py`, which recomputes them with Python's `uuid.uuid5`.
+
+### D320. A receipt's rail may be the operator's own, and its `ref` is defined per event — **decided under the owner's standing instruction, 1 Nov** (carries out kontra#5)
+
+kontra#5 (Cloud's PR-2b): `kontra.escrow.receipts` entries are `{event, rail, ref, at}` with `rail` the enum
+`["stripe"]` and `ref` "the rail's object id", so a development gate's play-money hold (no card network object) has no
+valid rail, and a `disputed` receipt, a message on the task, has no rail object for its `ref`. Its proposal: let
+`rail` be an operator's rail name, at least `ledger`, and define `ref` per event. Decision
+([`ext-escrow.md`](../spec/ext-escrow.md) §1, §3; `ext-escrow.params.json`, `ext-escrow.metadata.json`):
+
+- **A rail is a name** `^[a-z][a-z0-9_-]{0,31}$`, in the card's `rails` and in each receipt: `stripe` (a card payment
+  through Stripe), `ledger` (a hold in the operator's own ledger with no payment-network object), or the operator's
+  own. Both schemas share `params.json#/$defs/rail`.
+- **`ref` by event:** the rail's object id of the money move for `held`, `released`, `refunded`, `resolved` and
+  `chargeback` (`ledger`: the ledger entry); for `disputed`, the dispute message's `messageId`, or the operator's own
+  record of a dispute filed on its page (MCP has no in-protocol dispute, §5). A `disputed` receipt carries the task's
+  rail: the dispute moves no money, and the hold it stops is on that rail.
+
+The proposal as written. The gate is unchanged: it stores and passes these maps (relay.md §13.2) and names no escrow
+key. Cloud's dev gates' receipts now validate; production and staging keep `stripe`.
+
+Tested: `make check-specs` (the fixtures `ext-escrow.metadata.ledger.json`, a `ledger` hold with a `disputed` receipt,
+and `ext-escrow.params.ledger.json`, validate; the existing Stripe fixtures still do).
+
+### D321. `annotations.search.hidden`: a service reachable by its ref and never searched — **decided under the owner's standing instruction, 1 Nov** (carries out kontra#7; amends D301's visibility)
+
+kontra#7 (Cloud's PR-3): `listed` controls search for anonymous principals only; `search` shows every service whose
+`allow:` admits the principal by an entry other than `anonymous`, `key:*` and `oidc:*` included (D301). So Cloud's
+"unlisted" listing, `listed: false` with `allow: [key:*, oidc:*, anonymous]`, appears in the search of every API key and
+signed-in user, and taking `key:*` and `oidc:*` out of `allow:` would strip the card's security fields from a paid
+service. It proposed an annotation such as `search.hidden: true`, or `listed` applied to every principal. Decision
+([`relay.md`](../spec/relay.md) §12.2, §13.4):
+
+- **`annotations.search.hidden: true` leaves the service out of every principal's `search`,** whatever `allow:` and
+  `listed` say. `describe` and `hire` by ref, the cards and the calls stay as `allow:` decides (`describe` answers a
+  service `search` would show the principal were it not hidden): a private-link listing.
+- **Only the JSON boolean `true` hides** (the query is `(annotations -> 'search' -> 'hidden') is distinct from
+  'true'::jsonb`, in SQL, so hidden rows do not count toward a request's 1000 rows read). A team gate refuses at load a
+  `hidden` that is not a boolean (`null` included), so a quoted `"true"` cannot silently hide nothing there; an
+  operator writing rows writes the boolean.
+- **Why the annotation, not `listed` for everyone.** `listed` defaults to false, and every team gate's services are
+  found today by their own keys through `allow:`: applying `listed` to every principal would hide them all, or need
+  a third state. The `search` annotation already holds what search shows and filters on (`description`, `price`,
+  `price_model`), needs no migration and no new column, and Cloud writes it in the same publish.
+
+`spec/schema/config.json` declares `annotations.search.hidden` a boolean, and no longer calls the annotations data the
+gate attaches "without interpreting": it reads `card_extensions`, `tool_meta`, `initialize_meta` and `search`, and
+passes the rest through (review rest-5: a configuration the schema accepted failed at load).
+
+What Cloud changes: an unlisted listing writes `search.hidden: true` beside `listed: false` and `[key:*, oidc:*,
+anonymous]`; its documentation of "unlisted" then holds for signed-in users and keys too.
+
+Tested: `TestSearchHidden` (`internal/gatemcp`, Postgres: an unlisted listing hidden from a signed-in user's, an API
+key's and the anonymous principal's search, described and hireable by ref; `hidden: false` and `"true"` hide nothing;
+a listed hidden service described by ref, not searched), the `TestLoad` and `TestLoadErrors` rows (`internal/config`),
+`make check-specs` and `TestRefusedConfigFixtures` (`examples/invalid/config.search_hidden_string.json`, refused by the
+schema and by the loader for `hidden: "true"` alone, and loading with `true`).
+
+### D322. `tasks: required`: an MCP service whose every call is a gate task — **decided under the owner's standing instruction, 1 Nov** (carries out kontra#6; completes D159, D178)
+
+kontra#6 (Cloud's PR-3, its C42): `hooks.admission.operations` is gate-wide. With `[task, session]`, a plain
+`tools/call` to a `tasks: durable` service is relayed without Admission, and a tool whose `taskSupport` is `optional`
+may be called plainly, so a per-task price is skipped by any client that does not augment its calls; with `call` added,
+every call of every service, free ones included, waits on the hook. Its two proposals: a per-service Admission setting
+for `call`, or a `tasks: required` mode. Decision, the second ([`relay.md`](../spec/relay.md) §11.5, §11.12, §13.1, §17;
+`config.json`; migration `0004_m5.sql`; [`ext-escrow.md`](../spec/ext-escrow.md) §6):
+
+- **`required` is `durable` that refuses a plain call.** The gate owns the service's tasks as for `durable` (§11.5,
+  §11.6; `capabilities.tasks` as the upstream declares, plus `list` and `cancel`). On 2025-11-25, `tools/list` leaves
+  out the tools whose upstream `execution.taskSupport` is absent or `forbidden` and shows `"required"` on every other;
+  a plain `tools/call` is `-32601` (MCP 2025-11-25's answer to a plain call of a tool whose `taskSupport` is
+  `required`), and a call of a tool left out `-32602` `Unknown tool`. On 2026-07-28 (no per-tool support, D159) a
+  `tools/call` that does not declare the tasks extension is `400` `-32021` naming it, as the extension answers a
+  request that needs it (D176), and one to an upstream that does not declare it `-32601`. None of these asks Admission,
+  reaches the upstream or writes a `calls` row. A 2025-06-18 session has no tasks, so it can call nothing there.
+  `describe` shows the legacy list as a 2025-11-25 session sees it.
+- **So every call is a task, which Admission sees as `task`** and may quote (§13.1, §13.2), with no `call` hook for the
+  gate's free services. ext-escrow §6 now says `per_task` on MCP needs `tasks: required` (it said `durable`, which is
+  the hole). A quote on `call` or `session` is still the deny `priced tasks need tasks: durable`; its text is kept.
+- **Why not a per-service operations list.** A plain call has no approval path: Admission could only deny it, so a
+  client would learn the rule from a refusal on every call, the operator would write the same deny twice (the mode and
+  the hook), and the gate would still advertise `optional`. `required` says it in the tool list a client reads before
+  calling, and refuses before any hook.
+- **Storage.** `services.tasks_mode` admits `required` (0004 replaces its check). The configuration's
+  `services.<name>.tasks` takes it. 0004's down refuses (`55006`) while any service is `required`, disabled or not,
+  naming each as `tenant/name`, and changes nothing: a gate before 0004 reads the mode unvalidated, advertises no task
+  support and relays a plain `tools/call` without Admission unless `call` is in the operations, so turning those
+  services `durable` (as the down first did) would open the hole this mode closes, unseen. The operator decides what
+  each becomes, or deletes it, then runs the down again (review rest-2).
+- **Rollout.** The same holds of a replica still on an image before 0004, or one rolled back to it with the database
+  left at 0004. So the order is: every replica runs a gate with 0004; then the operator writes `required` and lets a
+  `per_task` MCP listing's sessions through Admission. Before an image goes back below 0004, the operator first denies
+  those sessions again, or disables or reprices its `required` services.
+
+What Cloud changes: its `ListingPut.tasks` accepts `required`, and a `per_task` MCP listing is published with
+`tasks: required` instead of being refused `per_task_mcp_unavailable` (its C42). Its Admission allows `session` on such
+a listing, with no quote (the session opens nothing priced; each call in it is a task, which it quotes), where it now
+denies every `per_task` listing's `session` ("which MCP does not offer yet"); its deny of `call` stays. It does both
+only once every gate replica runs 0004, and undoes the second before any replica goes back (the rollout above): until
+then that guard is what keeps a replica before 0004 from serving the service's plain calls unsold. Its listing schema
+here ([`schema/listing.json`](../spec/schema/listing.json), D323) already requires it.
+
+Tested: `TestToolViewRequireTasks` (`internal/mcprelay`: the list as `required` shows it, other `execution` members
+kept), `TestRequiredTasks` (Postgres and Temporal, 2025-11-25: the list of two of four tools, `taskSupport` required;
+plain calls `-32601`, left-out tools `-32602`, no Admission, upstream call, task or `calls` row; a task-augmented call
+Admission's `task`, quoted, nothing dispatched), `TestModernRequiredTasks` (2026-07-28: the extension kept on
+`server/discover`; a call not declaring it `400` `-32021` with nothing asked or written; one declaring it a gate task),
+the `TestLoad` row (`internal/config`), the 0004 blocks of `scripts/migration_tests.sql`, `TestDownThenUp` (the down
+refused with a served and a disabled `required` service, naming both, nothing changed; then run) and
+`scripts/check_migrations.sh` (the same refusal on Postgres 16 and 17).
+
+### D323. `kontra publish <listing.yaml>`: a listing file, a person's sign-in for the control plane, and the version it replaces — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 11 and Cloud's D-M5-62; one conflict with the build's brief and one with Cloud's record)
+
+The owner's decision 11 (kontra-cloud#60): the CLI is `connect`, `login`, `seal`, `publish`. Cloud's D-M5-62 makes
+`kontra publish listing.yaml` public-repo PR M5-G3, "the Go subcommand calling Cloud's `PUT /v1/services/{name}`"; its
+D-M5-95 fixes the body (`{kind, visibility, price, tools?, tasks?, sealed, version}`, `price` with the public specs'
+keys, USD), D-M5-63 makes a stale version `409 stale_version`, D-M5-110 puts the route on `CLOUD_ROUTES` as `fresh` and
+D-M5-111 adds `published`. Decision ([`tunnel.md`](../spec/tunnel.md) §6.4; [`schema/listing.json`](../spec/schema/listing.json);
+`internal/publish`):
+
+- **The file.** YAML (or JSON), one document, at most 64 KiB, keys as Cloud's `ListingPut` with `service` for the
+  route's name and no `version`: `service`, `kind` (`a2a`), `visibility` (`public`), `price` (`model` `free`,
+  `per_task`, `per_call` or `per_session`; `amount` a quoted decimal string, cents for `per_task` and micro-USD when
+  metered, above 0; `currency` `USD`; `reviewWindowSeconds` `per_task`'s; `taskTimeoutSeconds`, `idleTimeoutSeconds`
+  up to a week; `tools`, `freePerMonth`, `capPerMonth` `per_call`'s), `tools` and `tasks` (`kind: mcp` only; a priced
+  one never `passthrough`, a `per_task` one `required`, D322), `sealed` (`off`), `published` (`true`). `spec/schema/
+  listing.json` is the contract; `internal/publish` checks the same rules by hand, and both are held to the schema's
+  fixtures (`examples/listing.*.json` accepted, `examples/invalid/listing.*.json` refused, by `check_specs.py` and by
+  `TestSchemaFixtures`). Deployment settings stay the control plane's (Cloud's minimum task price).
+- **No money logic.** The CLI parses, checks shapes and carries: it computes, converts, rounds and compares no amount.
+- **The sign-in is a person's, for that publish.** `kontra publish` discovers the gate's authorization server as
+  `kontra login` does (§6.3 steps 1, 2, with its kept client registration), takes the control plane to be
+  `--control-plane` or that server's issuer (Cloud's D-M5-38: the issuer is the control plane's public URL), runs §6.3
+  step 3's flow with `resource` = the control plane, and sends the token it gets as the bearer of `GET` and `PUT
+  /v1/services/{name}` there only (no redirect followed), never storing or printing it.
+- **The version: a listing is never replaced unseen.** Without `--version`, the CLI reads `GET /v1/services/{name}`
+  (its `listing`: version, price, visibility; the service's `published`; version 0 for none or `404
+  service_not_found`). A service with no listing gets version 0. One that has a listing is refused unless the person
+  says which: the CLI prints the listing's version, price, visibility and whether it is published, names `--version
+  N` to replace it, publishes nothing and exits 1. `--version N` sends the version the person read, with no read;
+  `--replace` sends the version just read and prints what it was. A publish that came in between is `409`, which the
+  CLI reports with the version the listing is at, publishing nothing. `--dry-run` checks the file and prints the
+  request, signing in nowhere. (Review rest-1: the first build sent the version it read itself, which reads Cloud's
+  D-M5-63, "a write to a listing carries the version it read ... never a silent overwrite", as the CLI's read rather
+  than the person's: a file that predated a price set in the console, or a teammate's unpublish, which D-M5-111 says a
+  stale writer cannot undo unseen, replaced it with no warning. A refused publish costs the person a second sign-in;
+  `--replace` is the one-step form for someone who means it.)
+- **Reading the file.** A file whose first character is `{` is JSON (RFC 8259: standard escapes, a surrogate pair
+  included, as Python's `json.dumps` writes a non-BMP tool name; no key twice; UTF-8), and YAML only when it is not
+  JSON (a flow mapping). In YAML an integer is decimal without leading zeros, underscores or a base prefix, and a float
+  has no underscores, or the file is refused naming the line: the YAML decoder reads `0600` as octal 384 and `1_000` as
+  1000, where YAML 1.2's core schema reads 600 and a string, and the CLI must not send a number the person did not
+  write (review rest-4).
+- **What the schema cannot say.** `tools.allow` and `tools.deny` hold at most 64 globs together; JSON Schema bounds
+  each list (64) but not their sum. `examples/invalid/listing.too_many_globs.json` (40 and 40) is the rule's fixture:
+  `check_specs.py` lists it as a rule outside the schema and requires the schema to accept it, and `TestSchemaFixtures`
+  requires the CLI to refuse it for that rule alone (review rest-3).
+
+Conflict with the build's brief: it asked for "the credential `kontra login` stored (or `--api-key`)". That credential
+is a gate API key (`kk_…`, D278, D305), which Cloud's control plane does not take as a bearer (its routes verify its own
+`aud kontra:api` JWTs; its API keys, `kontra_sk_…`, are exchanged for a token of an `api_key` session), and the owner's
+rule is that an API-key or MCP session never satisfies `human` or `fresh`: Cloud's `put_service` is `fresh` and answers
+an API key's session `403 fresh_login_required` ("an API key cannot do this (publish, …)"). A `--api-key` could
+therefore never publish; it is left out, and the sign-in above is what `kontra login`'s flow gives instead. Conflict
+with Cloud's record: its D-M5-110 and `gate/routes.py` say the `fresh` rows "need a person's session, which the CLI has
+too (`kontra login`)", which holds for kontra-sdk's device login but not for this repository's `kontra login`, whose
+token is a gate key. What Cloud changes (PR-6, its authorization server): accept `resource` = its public URL
+(`KONTRA_PUBLIC_URL`) and issue for it an `aud kontra:api` access token of the person's session, made `fresh` by the
+consent (whose approve is already `fresh`, its D-M5-38) and named as such on the consent page ("publish a listing at
+api.kontra.sh"), with no refresh token; D305's rule (a gate key only for the gate's origin) is unchanged. Until PR-6,
+the console's pricing view publishes (its D-M5-62).
+
+Not built: the PRD §13 sketch's `card: sha256:…` pin (Cloud's body has none) and a `--api-key`. A team gate has no
+control plane: `kontra publish` says so for a gate without a sign-in, and its services are its configuration.
+
+Tested: `TestSchemaFixtures` (the 64 globs fixture refused for that rule alone), `TestParseYAML` (`off` a string, an
+unquoted amount, a key twice, two documents, a scalar, unknown keys, `version`, 64 globs together, integral floats),
+`TestParseNumbersAndJSON` (nine integer forms refused naming the line, an underscore in a float, `+600`, `6e2`,
+`600.0` and a quoted `"0600"` read as YAML 1.2 does; JSON with a surrogate pair, `\u00e9` and `\/`, after a byte
+order mark; a JSON key twice, at the top and below; JSON not in UTF-8; a YAML flow mapping), `TestBody` (the exact
+request bytes), `TestParseArgs` (`--replace`, and with `--version` a usage error), `TestDryRun`, and against
+`oidctest` and a fake control plane: `TestPublish` (the token asked for `resource` = the control plane and sent as the
+bearer, version 0; then a publish without a flag refused naming version 1, its price, visibility and state, nothing
+sent; `--replace` sending version 1 and printing what it replaced; one registration, nothing but it in the credentials;
+unpublishing, and the stale file then refused naming the unpublished state), `TestPublishStaleVersion` (`--version` sent with no read, `409` naming the version
+it is at, then the current one published), `TestPublishControlPlaneIsTheIssuer`, `TestPublishRefusals` (`403
+fresh_login_required`, `422` with an escape sequence printed escaped, a redirect not followed, an answer that is not a
+listing), `TestPublishNoSignIn`; `cmd/kontra`'s `TestRun` rows and `TestPublishDryRun`.

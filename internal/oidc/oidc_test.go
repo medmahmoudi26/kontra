@@ -67,6 +67,17 @@ func verifier(t *testing.T, as *oidctest.Server, clk *clock) *Verifier {
 
 func realClock() *clock { return &clock{t: time.Now()} }
 
+// issuer is an Issuer over v with cfg's tenant claim, tenants and feed.
+func issuer(t *testing.T, v *Verifier, cfg IssuerConfig) *Issuer {
+	t.Helper()
+	cfg.Verifier = v
+	iss, err := NewIssuer(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return iss
+}
+
 var mcpAud = CanonicalURI(gateURL, "")
 
 // §12.1, D276: ES256, RS256 and EdDSA tokens from the issuer, for the route's canonical URI, are accepted; the
@@ -102,7 +113,10 @@ func TestVerifyAccepts(t *testing.T) {
 		}
 	}
 
-	p := Principal(as.Issuer(), Claims{Subject: "alice"})
+	p, err := issuer(t, v, IssuerConfig{}).Principal(ctx, as.MustSign(oidctest.Token{Subject: "alice", Audience: []string{mcpAud}}), mcpAud, auth.ViaMCP)
+	if err != nil {
+		t.Fatal(err)
+	}
 	buyer, _ := ids.OIDCBuyer(as.Issuer(), "alice")
 	if p.Kind != auth.KindOIDC || p.ID != "oidc:sub:alice" || p.BuyerID != buyer || p.Via != auth.ViaMCP || p.TenantID != nil ||
 		p.Scopes != nil || !p.MayHire() {
@@ -467,7 +481,7 @@ func TestResourceServer(t *testing.T) {
 	} {
 		as := newAS(t, oidctest.Config{})
 		v := verifier(t, as, realClock())
-		rs, err := NewResourceServer(gateURL, false, v)
+		rs, err := NewResourceServer(gateURL, false, issuer(t, v, IssuerConfig{}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -480,7 +494,7 @@ func TestResourceServer(t *testing.T) {
 	}
 
 	as := newAS(t, oidctest.Config{})
-	rs, _ := NewResourceServer(gateURL, true, verifier(t, as, realClock()))
+	rs, _ := NewResourceServer(gateURL, true, issuer(t, verifier(t, as, realClock()), IssuerConfig{}))
 	ctx := context.Background()
 	gateTok := as.MustSign(oidctest.Token{Subject: "alice", Audience: []string{CanonicalURI(gateURL, "")}})
 	p, err := rs.VerifyMCP(ctx, gateTok, "")
@@ -500,7 +514,7 @@ func TestResourceServer(t *testing.T) {
 		}
 	}
 	as.Close()
-	fresh, _ := NewResourceServer(gateURL, true, verifier(t, as, realClock()))
+	fresh, _ := NewResourceServer(gateURL, true, issuer(t, verifier(t, as, realClock()), IssuerConfig{}))
 	if _, err := fresh.VerifyMCP(ctx, gateTok, ""); err == nil || errors.Is(err, auth.ErrUnauthenticated) {
 		t.Errorf("an issuer down: %v, want the gate's own error", err)
 	}

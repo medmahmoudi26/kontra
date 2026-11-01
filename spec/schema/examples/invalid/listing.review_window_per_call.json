@@ -1,0 +1,1 @@
+{"service": "t", "kind": "mcp", "price": {"model": "per_call", "amount": "0.01", "reviewWindowSeconds": 60}}

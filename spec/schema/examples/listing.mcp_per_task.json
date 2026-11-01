@@ -1,0 +1,1 @@
+{"service": "research", "kind": "mcp", "price": {"model": "per_task", "amount": "5.00", "reviewWindowSeconds": 3600, "taskTimeoutSeconds": 1800}, "tasks": "required", "sealed": "optional"}

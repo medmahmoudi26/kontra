@@ -45,7 +45,13 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"login", "--gate", "http://gate.example"}, 2, "", "kontra login: usage"}, // https:// except on localhost
 		{[]string{"login", "--bogus"}, 2, "", "usage: kontra login"},
 		{[]string{"login", "extra"}, 2, "", "unexpected argument"},
-		{[]string{"publish"}, 1, "", "kontra publish: not until M5"},
+		{[]string{"publish"}, 2, "", "kontra publish: usage: name the listing file"}, // spec/tunnel.md §6.4 (D323)
+		{[]string{"publish", "-h"}, 0, "--control-plane URL", ""},
+		{[]string{"publish", "--version", "x", "l.yaml"}, 2, "", "usage: kontra publish"},
+		{[]string{"publish", "--replace", "--version", "2", "l.yaml"}, 2, "", "--version and --replace"},
+		{[]string{"publish", "-h"}, 0, "--replace", ""},
+		{[]string{"publish", "--dry-run", "/nonexistent/listing.yaml"}, 1, "", "kontra publish: the listing file: open"},
+		{[]string{"--help"}, 0, "kontra publish sends a listing file", ""},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},
 		{[]string{"connect", "-h"}, 0, "--listen ADDR", ""},
 		{[]string{"connect", "-h"}, 0, "mcp:NAME=stdio:CMD", ""},
@@ -365,5 +371,28 @@ func TestConnectExitsWhenTheAnonymousSessionExpires(t *testing.T) {
 	case <-adm.asked:
 		t.Error("kontra connect redialed after the end")
 	default:
+	}
+}
+
+// kontra publish --dry-run (spec/tunnel.md §6.4, D323): a listing file checked and its request printed, nothing sent;
+// an invalid one exits 1 naming each problem.
+func TestPublishDryRun(t *testing.T) {
+	dir := t.TempDir()
+	good, bad := filepath.Join(dir, "listing.yaml"), filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(good, []byte("service: hello\nprice:\n  model: per_task\n  amount: \"1.00\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bad, []byte("service: Hello\nprice: { model: per_call, amount: \"1\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), []string{"publish", good, "--dry-run"}, &stdout, &stderr); code != 0 ||
+		!strings.Contains(stdout.String(), "PUT /v1/services/hello") || !strings.Contains(stdout.String(), "nothing was sent") {
+		t.Fatalf("a dry run: %d %s %s", code, stdout.String(), stderr.String())
+	}
+	stdout.Reset()
+	if code := run(context.Background(), []string{"publish", "--dry-run", bad}, &stdout, &stderr); code != 1 ||
+		!strings.Contains(stderr.String(), "service: \"Hello\"") || !strings.Contains(stderr.String(), "kind: mcp") {
+		t.Fatalf("an invalid listing: %d %s", code, stderr.String())
 	}
 }

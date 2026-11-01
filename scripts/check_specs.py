@@ -46,6 +46,28 @@ for p in sorted((SCHEMAS / "examples").glob("*.json")):
     for err in v.iter_errors(json.loads(p.read_text())):
         problems.append(f"{p.relative_to(ROOT)}: {err.json_path}: {err.message}")
 
+# 2b. Refused fixtures: examples/invalid/<schema>.<variant>.json must not validate against <schema>.json (the CLI's own
+#     checks are held to the same files: internal/publish's tests, D323; the gate's loader to config.*, D321). A rule
+#     JSON Schema cannot state is checked outside it: its fixture is listed here with the rule, and must validate, so
+#     that it tests that rule alone (the CLI and the control plane refuse it).
+BEYOND_SCHEMA = {
+    "listing.too_many_globs.json": "tools.allow and tools.deny hold at most 64 globs together",
+}
+for p in sorted((SCHEMAS / "examples" / "invalid").glob("*.json")):
+    base = p.name.split(".")[0]
+    schema = schemas.get(f"{base}.json")
+    if schema is None:
+        problems.append(f"{p.relative_to(ROOT)}: no schema for refused fixture")
+        continue
+    valid = Draft202012Validator(schema, registry=registry).is_valid(json.loads(p.read_text()))
+    if p.name in BEYOND_SCHEMA and not valid:
+        problems.append(f"{p.relative_to(ROOT)}: the schema refuses it, but it tests a rule outside the schema "
+                        f"({BEYOND_SCHEMA[p.name]})")
+    elif p.name not in BEYOND_SCHEMA and valid:
+        problems.append(f"{p.relative_to(ROOT)}: validates, but is a refused fixture")
+for name in sorted(set(BEYOND_SCHEMA) - {p.name for p in (SCHEMAS / "examples" / "invalid").glob("*.json")}):
+    problems.append(f"spec/schema/examples/invalid/{name}: listed as a rule outside the schema, but missing")
+
 # 3. Relative links in markdown point at files that exist.
 for md in sorted(list((ROOT / "spec").glob("*.md")) + list((ROOT / "docs").glob("*.md")) + [ROOT / "README.md"]):
     text = re.sub(r"```.*?```", "", md.read_text(), flags=re.S)
@@ -67,6 +89,28 @@ for f in list((ROOT / "spec").glob("*.md")) + list((ROOT / "migrations").glob("*
     cited |= set(re.findall(r"\bD(\d+)\b", f.read_text()))
 for n in sorted(cited - entries, key=int):
     problems.append(f"D{n} is cited but has no entry in docs/decisions.md")
+
+# 5. relay.md §2.3's derived buyer ids (D319) are what Python's uuid.uuid5 computes from the names it writes: an
+#    operator computes them in its own language.
+import uuid  # noqa: E402
+
+relay = (ROOT / "spec" / "relay.md").read_text()
+NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://kontra.sh/ns/v1")
+
+
+def derive(kind, *parts):
+    return uuid.uuid5(NS, "".join(f"{len(p.encode())}:{p}," for p in [kind, *parts]))
+
+
+for what, value in [
+    ("the namespace", NS),
+    ("the node buyer", derive("node", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa")),
+    ("the oidc buyer", derive("oidc", "https://api.kontra.sh", "alice")),
+    ("the team gate's anonymous buyer", derive("anonymous")),
+    ("a tenant's anonymous buyer", derive("anonymous", "01900000-0000-7000-8000-000000000001")),
+]:
+    if f"`{value}`" not in relay:
+        problems.append(f"spec/relay.md §2.3: {what} is {value}, which it does not write")
 
 for line in problems:
     print(line)

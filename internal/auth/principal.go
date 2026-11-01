@@ -6,8 +6,9 @@
 // (spec/tunnel.md §9): they carry no credential of their own and take the session's principal, the handshake's
 // API key re-validated on every request or node:<key_id> (HireSource). M4 makes the MCP routes an OAuth resource
 // server when auth.mcp_oauth is set (spec §12.1; AuthenticateMCP, internal/oidc): a JWT for the route's canonical URI
-// is oidc:sub:<sub> with via mcp there. OIDC JWTs on the A2A routes are M5's: there a bearer token that is not an API
-// key of this gate is 401.
+// is oidc:sub:<sub> with via mcp there. M5 adds the A2A routes' OIDC principals when auth.oidc is set
+// (AuthenticateA2A, D314): a JWT whose aud contains auth.oidc.audience is oidc:sub:<sub> with via oidc, and, on either
+// kind of route, the tenant its issuer's tenant claim names (D315) and the revocations its issuer's feed lists (D316).
 //
 // Revocation is checked on every request against a per-replica RevocationCache, refreshed by NOTIFY
 // kontra_revoke and re-read from Postgres at least every 5 s; APIKeys keeps verified keys in memory for a
@@ -83,7 +84,7 @@ func ParseScope(s string) (Scope, error) {
 type Principal struct {
 	Kind       Kind
 	ID         string     // the full principal id, e.g. "key:kk_acme_ab12cd34"
-	TenantID   *uuid.UUID // the key's tenant; nil for anonymous and unmapped OIDC subjects
+	TenantID   *uuid.UUID // the key's tenant, or an OIDC token's tenant claim's (D315); nil for anonymous and unmapped OIDC subjects
 	TenantSlug string     // that tenant's slug, which org:<tenant> entries name; "" without a tenant
 	BuyerID    uuid.UUID  // stable; several keys may share one
 	Via        Via

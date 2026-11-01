@@ -7,9 +7,9 @@
 //	kontra seal --open <part.json>
 //	(spec/ext-sealed.md §5.1; internal/sealing)
 //	kontra login [--gate URL] [--no-browser] (spec/tunnel.md §6.3; internal/login; M4 WP-06)
+//	kontra publish [--gate URL] [--control-plane URL] [--version N | --replace] [--dry-run] [--no-browser] <listing.yaml>
+//	(spec/tunnel.md §6.4, spec/schema/listing.json; internal/publish; M5-G3, D323)
 //	kontra version
-//
-// publish comes with Cloud's listings (PRD §14 M5).
 package main
 
 import (
@@ -26,6 +26,7 @@ import (
 	"kontra.sh/kontra/internal/login"
 	"kontra.sh/kontra/internal/node"
 	"kontra.sh/kontra/internal/obs"
+	"kontra.sh/kontra/internal/publish"
 	"kontra.sh/kontra/internal/sealing"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/version"
@@ -42,6 +43,7 @@ const usage = `usage:
               [--media-type <type>] [file | -]
   kontra seal --open <part.json>
   kontra login [--gate <url>] [--no-browser]
+  kontra publish [--gate <url>] [--control-plane <url>] [--version <n> | --replace] [--dry-run] [--no-browser] <listing.yaml>
   kontra version
 
 kontra connect hosts the services on this machine at a gate, and lets local clients hire the gate's services,
@@ -99,13 +101,13 @@ the card answered 404 without it, never on the gate's key set.
 kontra login gets an API key for a gate (default https://gateway.kontra.sh) from the gate's sign-in and keeps it in
 ~/.kontra/credentials for that gate only; kontra connect then hires as it, and an anonymous session's next handshake
 with it becomes the account's (spec/tunnel.md §6.3). --no-browser prints the sign-in URL instead of opening it.
-`
 
-// later is when each subcommand that is not built yet comes (PRD §14, note 2 §4). There is no console
-// subcommand: the owner dropped the local console (D164).
-var later = map[string]string{
-	"publish": "M5", // listings (PRD §14 M5)
-}
+kontra publish sends a listing file (spec/schema/listing.json: kind, visibility, price free, per_task, per_call or
+per_session in USD, MCP policy, sealing) to the gate operator's control plane, after a sign-in in the browser for that
+publish only: a person publishes, never an API key (spec/tunnel.md §6.4). It never replaces a listing unseen: name
+the version you read (--version N) or --replace. --dry-run checks the file and prints the request; kontra publish -h
+has the flags.
+`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -169,14 +171,30 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "publish":
+		// tunnel.md §6.4 (D323): a listing sent to the operator's control plane, signed in for that publish only.
+		if err := publish.Command(ctx, args[1:], stdout, stderr); err != nil {
+			var problems publish.Problems
+			if errors.As(err, &problems) {
+				// One line per problem, each escaped for the terminal (a file's text is quoted in them).
+				fmt.Fprintln(stderr, "kontra publish: the listing is not valid (spec/schema/listing.json):")
+				for _, p := range problems {
+					fmt.Fprintln(stderr, "  "+tunnel.Printable(p))
+				}
+				return 1
+			}
+			fmt.Fprintln(stderr, "kontra publish:", tunnel.Printable(err.Error()))
+			if errors.Is(err, publish.ErrUsage) {
+				return 2
+			}
+			return 1
+		}
+		return 0
 	case "-h", "--help", "help":
 		fmt.Fprint(stdout, usage)
 		return 0
 	}
-	if m, ok := later[args[0]]; ok {
-		fmt.Fprintf(stderr, "kontra %s: not until %s (PRD §14)\n", args[0], m)
-		return 1
-	}
+	// There is no console subcommand: the owner dropped the local console (D164).
 	fmt.Fprint(stderr, usage)
 	return 2
 }

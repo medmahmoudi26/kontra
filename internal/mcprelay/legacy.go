@@ -180,10 +180,10 @@ func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, 
 		}); err != nil {
 			return nil, err
 		}
-	case rq.svc.Tasks == config.TasksDurable:
-		// §11.5: a durable service's tasks are the gate's: as the upstream declares them, plus list and cancel,
-		// which the gate serves itself (tasks/list, tasks/cancel, §11.6). An upstream that declares no tasks gets
-		// none advertised.
+	case config.GateOwnsTasks(rq.svc.Tasks):
+		// §11.5: a durable (or required) service's tasks are the gate's: as the upstream declares them, plus list and
+		// cancel, which the gate serves itself (tasks/list, tasks/cancel, §11.6). An upstream that declares no tasks
+		// gets none advertised.
 		if res, err = rewriteCapabilities(res, func(caps json.RawMessage) (json.RawMessage, error) {
 			tasks, ok := mcpwire.Member(caps, "tasks")
 			if !ok || firstByte(tasks) != '{' {
@@ -260,15 +260,15 @@ func rewriteCapabilities(result json.RawMessage, fn func(json.RawMessage) (json.
 }
 
 // tasksAdvertised reports whether the session is shown the upstream's tasks (§11.5): passthrough as the upstream
-// declares; durable once gate-owned tasks are served (Deps.Tasks, M3 WP-06); never for off or a 2025-06-18
-// session.
+// declares; durable and required once gate-owned tasks are served (Deps.Tasks, M3 WP-06); never for off or a
+// 2025-06-18 session.
 func (h *Handler) tasksAdvertised(svc *Service, version string) bool {
 	switch {
 	case version == mcpwire.V20250618:
 		return false
 	case svc.Tasks == config.TasksPassthrough:
 		return true
-	case svc.Tasks == config.TasksDurable:
+	case config.GateOwnsTasks(svc.Tasks):
 		return h.deps.Tasks != nil
 	}
 	return false
@@ -359,7 +359,7 @@ func (h *Handler) pinned(rq *request) {
 		return
 	}
 
-	if m := rq.msg; m != nil && strings.HasPrefix(m.Method, "tasks/") && rq.svc.Tasks == config.TasksDurable &&
+	if m := rq.msg; m != nil && strings.HasPrefix(m.Method, "tasks/") && config.GateOwnsTasks(rq.svc.Tasks) &&
 		h.tasksAdvertised(rq.svc, sess.ProtocolVersion) {
 		// §11.6: a durable service's tasks are the gate's, served from Postgres on any replica and never forwarded,
 		// so they need no exchange on the session's tunnel: a task outlives the tunnel its dispatch used.
@@ -599,9 +599,11 @@ func (h *Handler) toolsKey(rq *request) ToolsKey {
 	return ToolsKey{TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name}
 }
 
-// view is how this session sees the service's tools (§11.3, §11.5, §13.4).
+// view is how this session sees the service's tools (§11.3, §11.5, §13.4; D322).
 func (h *Handler) view(rq *request) ToolView {
-	return ToolView{Policy: rq.svc.Tools, Meta: rq.svc.ToolMeta, DropExecution: !h.tasksAdvertised(rq.svc, rq.sess.ProtocolVersion)}
+	advertised := h.tasksAdvertised(rq.svc, rq.sess.ProtocolVersion)
+	return ToolView{Policy: rq.svc.Tools, Meta: rq.svc.ToolMeta, DropExecution: !advertised,
+		RequireTasks: advertised && rq.svc.Tasks == config.TasksRequired}
 }
 
 // toolsList answers tools/list from the cache (§11.3): every upstream page drained through the client's own
@@ -778,7 +780,8 @@ func (h *Handler) readAnswer(resp *http.Response, id json.RawMessage, tunnelled 
 }
 
 // toolsCall serves a tools/call (§11.3–§11.5): the tool resolved against the cached list (an unknown or denied tool
-// is -32602 "Unknown tool: <name>" before anything is forwarded or metered); a task-augmented call by the service's
+// is -32602 "Unknown tool: <name>" before anything is forwarded or metered); on a tasks: required service a plain call
+// is -32601 and a tool the upstream cannot run as a task unknown (D322); a task-augmented call by the service's
 // tasks: mode; Admission (call, or task for a passthrough task); then the call forwarded on the pinned session with
 // its meter, one calls row when the response completes.
 func (h *Handler) toolsCall(rq *request, t target) {
@@ -805,6 +808,20 @@ func (h *Handler) toolsCall(rq *request, t target) {
 		return
 	}
 	_, task := mcpwire.Member(m.Params, "task")
+	if rq.svc.Tasks == config.TasksRequired {
+		// §11.5 (D322): every call of a required service is a gate task, which Admission sees as a task. A tool the
+		// upstream cannot run as one is not on its list; a plain call is -32601, as MCP 2025-11-25 answers a plain call
+		// of a tool whose taskSupport is required. Neither reaches Admission, the upstream or the meter.
+		if h.tasksAdvertised(rq.svc, rq.sess.ProtocolVersion) && !taskSupported(tool) {
+			writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeInvalidParams, "Unknown tool: "+name, nil)
+			return
+		}
+		if !task {
+			writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "this service runs every tools/call as a task "+
+				"(tasks: required): call the tool with params.task, in MCP 2025-11-25 or later", nil)
+			return
+		}
+	}
 	op := hooks.OpCall
 	if task {
 		if !h.tasksAdvertised(rq.svc, rq.sess.ProtocolVersion) {
@@ -812,7 +829,7 @@ func (h *Handler) toolsCall(rq *request, t target) {
 			writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "tasks are not supported on this service", nil)
 			return
 		}
-		if rq.svc.Tasks == config.TasksDurable {
+		if config.GateOwnsTasks(rq.svc.Tasks) {
 			h.durableCall(rq, name, tool)
 			return
 		}

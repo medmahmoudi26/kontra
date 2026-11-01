@@ -32,6 +32,11 @@ and since M4:
   failures (`make tck`, and the `tck` workflow);
 - comes up on a fresh VPS from `compose.yaml` with built-in ACME ([below](#a-team-gate-on-your-own-vps)).
 
+For Cloud's M5 it takes an issuer's JWTs as principals on the A2A routes, with a tenant claim and a revocation feed
+(`auth.oidc`), lets an operator append to its audit chain (`kontra.audit_append`), serves MCP services whose every call
+is a task (`tasks: required`) and services hidden from search, and `kontra publish` sends a listing to the operator's
+control plane ([below](#the-cli); D314 to D323 in [`docs/decisions.md`](docs/decisions.md)).
+
 The demo below is written for the staging gate, `gateway.kontra.run`: the production gate, `gateway.kontra.sh`, opens
 no anonymous sessions until Cloud's M5 (D268 and D280 in [`docs/decisions.md`](docs/decisions.md)). The staging gate
 has been up since 31 Oct: M4's gate runs deployed it and ran this block on a clean laptop against it
@@ -267,14 +272,59 @@ A denied tool is missing from `tools/list`, and a call to it is answered `Unknow
 exist; `allow:` narrows the rest (absent, every tool; empty, none). The gate meters each call by tool name, bytes,
 duration and the result's top-level `isError`, and never reads arguments or content, which may be sealed.
 
+## The CLI
+
+One binary, four commands (`kontra <command> -h` has every flag):
+
+| Command | What it does | Spec |
+|---|---|---|
+| `kontra connect` | Hosts the agents and MCP servers on this machine at a gate (`--serve`), and lets local clients hire the gate's services on `127.0.0.1:7777`, through one outbound connection | [`spec/tunnel.md`](spec/tunnel.md) |
+| `kontra login` | Gets an API key for a gate from its operator's sign-in, kept in `~/.kontra/credentials` for that gate only | [`spec/tunnel.md`](spec/tunnel.md) §6.3 |
+| `kontra seal` | Seals a file for a sealed service without a node, and opens a sealed answer | [`spec/ext-sealed.md`](spec/ext-sealed.md) §5.1 |
+| `kontra publish` | Sends a listing, how one of your services is sold, to the gate operator's control plane (Kontra Cloud) | [`spec/tunnel.md`](spec/tunnel.md) §6.4 |
+
+**Publishing a listing (M5).** A listing file says how one of your services is sold: its kind, visibility, MCP
+policy, sealing and price, one of four in USD: `free`; `per_task`, a quote held in escrow and released after a review
+window ([`spec/ext-escrow.md`](spec/ext-escrow.md)); `per_call` or `per_session`, metered and invoiced monthly
+([`spec/schema/listing.json`](spec/schema/listing.json) has every key and bound):
+
+```yaml
+# hello.listing.yaml: the agent `kontra connect --serve a2a:hello=…` hosts, sold per task
+service: hello
+kind: a2a
+visibility: public            # public | unlisted (reachable by URL, never searched) | private
+price:
+  model: per_task             # free | per_task | per_call | per_session
+  amount: "1.00"              # USD, quoted: at most 2 decimals per task, 6 when metered
+  reviewWindowSeconds: 86400  # the buyer may dispute for a day after completion
+  taskTimeoutSeconds: 600
+```
+
+```sh
+kontra publish --dry-run hello.listing.yaml   # checks the file, prints the request, sends nothing
+kontra publish hello.listing.yaml
+#  kontra publish: signing in at https://api.kontra.sh (sign-in by https://api.kontra.sh) in your browser; …
+#  kontra publish: hello is published at version 1: per_task 1.00 USD, public, on https://api.kontra.sh.
+```
+
+An MCP service is `kind: mcp`, with `per_call` (per-tool amounts under `price.tools`, `freePerMonth`, `capPerMonth`)
+or `per_session` (`idleTimeoutSeconds`), its own `tools: {allow, deny}` and `tasks`; a `per_task` MCP service sets
+`tasks: required`, so every call is a task its quote covers. `published: false` unpublishes the service and keeps the
+listing. Each publish is a new version of the listing; tasks keep the quote they were admitted with. `kontra publish`
+signs you in in the browser for that publish only, as `kontra login` does, and keeps nothing but the client
+registration: an API key never publishes. It never replaces a listing unseen: for a service that already has one it
+prints that listing's version, price and state and publishes nothing, until you name the version you read
+(`--version N`) or ask for whatever is current (`--replace`); it stops if another publish came in between. The CLI only carries the listing; the control plane decides
+what it accepts, and the gate holds no price. A team gate has no control plane: its services are its configuration.
+
 ## Layout
 
 ```
-cmd/kontra/        the CLI: connect, login, seal, version (publish comes with Cloud's listings, M5)
+cmd/kontra/        the CLI: connect, login, seal, publish, version
 cmd/kontra-gate/   the gate: serve, migrate, enroll, health, version
 internal/          relay, tunnel, gatemcp (/mcp), anon, store (Postgres), lifecycle (Temporal), sealing, …
 spec/              tunnel.md, relay.md, ext-escrow.md, ext-sealed.md, ext-input-schema.md, schema/
-migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql (the gate's Postgres schema, embedded in kontra-gate)
+migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql (the gate's Postgres schema, embedded in kontra-gate)
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)
 compose.dev.yaml   Temporal + Postgres for working on the gate itself

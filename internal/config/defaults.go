@@ -34,6 +34,13 @@ const (
 	MaxAdmissionWait      = 30 * time.Second // hooks.MaxAdmissionTimeout: the MCP relay's bound on a shared session decision
 	DefaultTasksMode      = TasksDurable
 
+	// An issuer's revocation feed (auth.oidc.revocations, auth.mcp_oauth.revocations; spec §2.3, D316).
+	DefaultRevocationsPoll     = 5 * time.Second
+	MinRevocationsPoll         = time.Second
+	MaxRevocationsPoll         = time.Minute
+	DefaultRevocationsMaxStale = 30 * time.Second
+	MaxRevocationsMaxStale     = 5 * time.Minute
+
 	// DefaultMaxSessionsPerPrincipal is services.<name>.max_sessions_per_principal's default (spec §11.2, D213, D231:
 	// half the stdio bridge's default --max-sessions, so that one principal keeping its sessions in use leaves another
 	// room on a default bridge), and MaxSessionsPerPrincipal its bound (services.max_sessions_per_principal CHECK in
@@ -116,6 +123,17 @@ func (c *Config) applyDerivedDefaults() {
 			if d, err := os.UserCacheDir(); err == nil {
 				a.CacheDir = filepath.Join(d, "kontra-gate", "acme")
 			}
+		}
+	}
+	for _, r := range []*Revocations{c.Auth.oidcRevocations(), c.Auth.mcpRevocations()} {
+		if r == nil {
+			continue
+		}
+		if r.Poll == 0 {
+			r.Poll = Duration(DefaultRevocationsPoll)
+		}
+		if r.MaxStale == 0 {
+			r.MaxStale = Duration(DefaultRevocationsMaxStale)
 		}
 	}
 	if h := c.Hooks.Admission; h != nil {

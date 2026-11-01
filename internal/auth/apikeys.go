@@ -722,10 +722,12 @@ func (k *APIKeys) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 
 // Authenticator turns a request's credential into a principal: an API key, or none (the anonymous
 // principal, admitted only by a service whose allow: list says so). On the MCP routes, with a resource server, also a
-// JWT of the MCP authorization server (AuthenticateMCP, mcp_oauth.go; M4 WP-06).
+// JWT of the MCP authorization server (AuthenticateMCP, mcp_oauth.go; M4 WP-06); on the A2A routes, with auth.oidc, a
+// JWT of the configured issuer (AuthenticateA2A, oidc_a2a.go; M5, D314).
 type Authenticator struct {
 	keys *APIKeys
 	mcp  MCPResourceServer // nil without auth.mcp_oauth
+	a2a  A2AVerifier       // nil without auth.oidc
 }
 
 // NewAuthenticator returns the edge's authenticator. keys nil (auth.api_keys: false) refuses every bearer
@@ -734,11 +736,12 @@ func NewAuthenticator(keys *APIKeys) *Authenticator {
 	return &Authenticator{keys: keys}
 }
 
-// Authenticate reads Authorization. No credential returns the anonymous principal with the given buyer
-// and authenticated=false, so the route can decide (only an allow: list with `anonymous` admits it). A bad
-// credential (not exactly one `Bearer <token>`, an unknown, revoked or expired key, or a token that is
-// not an API key, such as an OIDC JWT, which M1 does not accept) is ErrUnauthenticated even on an
-// anonymous service. Any other error is the gate's own.
+// Authenticate reads Authorization as an API key. No credential returns the anonymous principal with the given
+// buyer and authenticated=false, so the route can decide (only an allow: list with `anonymous` admits it). A bad
+// credential (not exactly one `Bearer <token>`, an unknown, revoked or expired key, or a token that is not an API
+// key, such as a JWT on a route whose issuer is not configured) is ErrUnauthenticated even on an anonymous service.
+// Any other error is the gate's own. The routes call it through AuthenticateA2A and AuthenticateMCP, which verify a
+// JWT of their configured issuer first.
 //
 // A request a node opened on its tunnel session (HireSourceFrom) takes the session's principal and nothing
 // else: Authorization is not read (spec/tunnel.md §9: a local client never sends a credential to the node, and

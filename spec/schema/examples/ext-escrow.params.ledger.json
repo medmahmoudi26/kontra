@@ -1,0 +1,1 @@
+{"quote": {"amount": "15.00", "currency": "USD"}, "reviewWindowSeconds": 600, "taskTimeoutSeconds": 600, "rails": ["ledger"], "terms": "https://operator.example.com/terms/escrow/v1"}

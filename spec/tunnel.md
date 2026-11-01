@@ -9,7 +9,8 @@ D277, D278), and was amended the same day after the M4 plan's audit: the hello's
 an anonymous tenant may present, and the anonymous limits counted per tenant and gate-wide (§4, §6, §12; D285 to
 D287). It was amended on 31 Oct after M4's review: what the `calls` limit counts, an anonymous key not rotated, the
 sweeps of a gate that stopped opening anonymous sessions, what anonymous tenants can keep stored (§6, §12; D304), and
-the resource an authorization server issues a key for (§6.3; D305). Normative. RFC 2119 key words.
+the resource an authorization server issues a key for (§6.3; D305). Revision 7 (1 Nov, M5) adds `kontra publish`
+(§6.4; D323), decided under the owner's standing instruction. Normative. RFC 2119 key words.
 
 The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
 node, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the node sends
@@ -449,6 +450,42 @@ existing account service is bound, not created again, and one that is disabled o
 tenant token or the operator creates a service, §5), and nothing moves; a service's other nodes are told of the new
 key; a hello declaring no service converts the key hire-only when the API key may hire (§9). A team tenant's key
 converts into the team as an account's does; a gate that stopped opening anonymous sessions still converts.
+
+### 6.4 `kontra publish` (D323)
+
+`kontra publish [--gate URL] [--control-plane URL] [--version N | --replace] [--dry-run] [--no-browser] <listing.yaml>` sends a
+listing, how one of the person's services is sold, to the gate operator's control plane. Its file is YAML (or JSON),
+one document, at most 64 KiB, as [`schema/listing.json`](schema/listing.json) describes it: `service` (the name at the
+gate, under the person's tenant), `kind` (`a2a` or `mcp`), `visibility` (`public`, `unlisted`, `private`), `price`
+(`free`, `per_task`, `per_call` or `per_session`, in USD, with ext-escrow.md's and price.json's keys), an MCP service's
+`tools` and `tasks`, `sealed` and `published`. The CLI carries the listing: it computes, converts and compares no
+amount, and the gate holds no price ([`relay.md`](relay.md) §13.5).
+
+1. It checks the file against the schema, and stops at a file it refuses, naming each problem. `--dry-run` stops
+   there too, printing the request it would send.
+2. It reads the gate's RFC 9728 document and its authorization server's metadata as §6.3 steps 1 and 2 do, with the
+   client registration `kontra login` keeps for that gate (registered once, as there). The control plane is
+   `--control-plane`, else the authorization server's issuer (Cloud's control plane is both); `https://`, or
+   `http://` on a loopback host.
+3. It signs the person in by §6.3 step 3's flow with `resource` = the control plane's URL (RFC 8707; scheme and host
+   in lower case, the default port elided, no trailing `/`), and sends the access token it gets as `Authorization:
+   Bearer` to the control plane only, following no redirect; it never stores or prints it. A publish is a person's change: an API key never publishes (kontra-cloud's `fresh` rule), so there is
+   no `--api-key`, and a token is asked for each publish, which the person's consent confirms.
+4. Unless `--version` names one, it reads the service's listing, `GET {control plane}/v1/services/{service}`
+   (`listing`, its `version`, `price` and `visibility`, and the service's `published`; version 0 when the control
+   plane has no listing of it: `404` `service_not_found`). A listing is never replaced unseen: when the service has
+   one (version above 0) and neither `--version` nor `--replace` was given, the CLI prints its version, price,
+   visibility and whether it is published, names the `--version` to replace it with, sends nothing and exits 1; the
+   file may predate a price set in the console or a teammate's unpublish, which the version the CLI just read cannot
+   tell. With `--replace` it replaces the version it read, printing what that version was.
+5. It sends `PUT {control plane}/v1/services/{service}` with `{kind, visibility, price, tools?, tasks?, sealed,
+   published, version}` (Cloud's `ListingPut`): the version `--version` names, the one read under `--replace`, or 0.
+   A listing changed since that version is the control plane's `409` `stale_version`: nothing is published, and the
+   CLI names the version the listing is at. Any other refusal is printed as the control plane wrote it (`code` and
+   `message`, escaped), and exits 1.
+
+The operator's authorization server issues, for `resource` = its control plane, an access token of the person's
+session, confirmed by the consent (D323); a gate API key only for the gate's origin (§6.3 step 4, D305).
 
 ## 7. After `welcome`
 

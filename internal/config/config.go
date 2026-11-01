@@ -156,15 +156,55 @@ type Auth struct {
 	Anonymous *Anonymous `yaml:"anonymous"`
 }
 
-// OIDC is the operator's IdP for A2A routes (spec §2.3). Not built in M1.
+// OIDC is the operator's issuer for the A2A routes (spec §2.3): a bearer JWT whose aud contains Audience is the
+// principal oidc:sub:<sub> with via oidc. Built in M5 (D314). TenantClaim and Revocations are the issuer's (D315,
+// D316): when auth.mcp_oauth names the same issuer they must be equal there, since they hold for every token it signs.
 type OIDC struct {
-	Issuer   string `yaml:"issuer"`
-	Audience string `yaml:"audience"`
+	Issuer      string       `yaml:"issuer"`
+	Audience    string       `yaml:"audience"`
+	TenantClaim string       `yaml:"tenant_claim"` // the claim naming the principal's tenant by slug; "" maps none
+	Revocations *Revocations `yaml:"revocations"`  // nil: no revocation feed, a token is good until it expires
 }
 
-// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). Built in M4 (D276).
+// MCPOAuth is the MCP authorization server the gate is a resource server for (spec §12.1). Built in M4 (D276); its
+// tenant claim and revocation feed since M5 (D315, D316), as auth.oidc's.
 type MCPOAuth struct {
-	Issuer string `yaml:"issuer"`
+	Issuer      string       `yaml:"issuer"`
+	TenantClaim string       `yaml:"tenant_claim"`
+	Revocations *Revocations `yaml:"revocations"`
+}
+
+// Revocations is an issuer's revocation feed (spec §2.3, D316): an operator-configured endpoint (§10.3) answering
+// {"window_seconds": n, "sessions": [sha256(sid), hex, ...]}, the sessions revoked in the last n seconds (Cloud's GET
+// /v1/auth/revocations). The gate reads it every Poll and refuses a token whose sid is listed; once no read has
+// succeeded for MaxStale, every token of the issuer is the gate's own failure (fail closed) until one does.
+type Revocations struct {
+	URL      string   `yaml:"url"`       // https://, or http:// on a loopback host (§10.3, D284)
+	Poll     Duration `yaml:"poll"`      // default 5s; 1s to 1m
+	MaxStale Duration `yaml:"max_stale"` // default 30s; at least twice poll, at most 5m
+}
+
+// oidcRevocations and mcpRevocations are the two blocks' feeds, nil when the block or its feed is absent.
+func (a *Auth) oidcRevocations() *Revocations {
+	if a.OIDC == nil {
+		return nil
+	}
+	return a.OIDC.Revocations
+}
+
+func (a *Auth) mcpRevocations() *Revocations {
+	if a.MCPOAuth == nil {
+		return nil
+	}
+	return a.MCPOAuth.Revocations
+}
+
+// Equal reports whether r and o configure the same feed (both absent included).
+func (r *Revocations) Equal(o *Revocations) bool {
+	if r == nil || o == nil {
+		return r == o
+	}
+	return *r == *o
 }
 
 // Anonymous is reserved for gate-wide anonymous settings; per service, anonymous is an allow: entry.
@@ -375,7 +415,7 @@ type Service struct {
 	Backend     Backend    `yaml:"backend"`
 	Allow       []string   `yaml:"allow"` // deny by default (spec §2.3); grammar in ParseAllowEntry
 	Tools       *Tools     `yaml:"tools"` // mcp only (§11.3)
-	Tasks       string     `yaml:"tasks"` // mcp only: durable (default) | passthrough | off (§11.5)
+	Tasks       string     `yaml:"tasks"` // mcp only: durable (default) | required | passthrough | off (§11.5, D322)
 	Sealed      Sealed     `yaml:"sealed"`
 	SellerKeys  JSON       `yaml:"seller_keys"` // inline JWKS {"keys": […]} or {"url": "https://…"} (§3); M3
 	SessionIdle Seconds    `yaml:"session_idle_s"`
@@ -404,12 +444,17 @@ const (
 	KindMCP = "mcp"
 )
 
-// MCP task modes (spec §11.5).
+// MCP task modes (spec §11.5). required is durable that refuses a plain tools/call: every call is a gate task (D322).
 const (
 	TasksDurable     = "durable"
+	TasksRequired    = "required"
 	TasksPassthrough = "passthrough"
 	TasksOff         = "off"
 )
+
+// GateOwnsTasks reports whether mode has the gate own an MCP service's task-augmented calls (§11.5): durable and
+// required.
+func GateOwnsTasks(mode string) bool { return mode == TasksDurable || mode == TasksRequired }
 
 // Backend is exactly one of tunnel, a2a {url}, mcp {url} (spec §1, §6.1).
 type Backend struct {

@@ -98,14 +98,24 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["issuer", "audience"],
-          "properties": { "issuer": { "$ref": "#/$defs/httpsURL" }, "audience": { "type": "string", "minLength": 1 } }
+          "description": "The issuer whose JWTs are principals on the A2A routes (spec §2.3; built in M5, D314): a token whose aud contains audience is oidc:sub:<sub> with via oidc. Verified as auth.mcp_oauth's tokens are (spec §12.1, D276), on one verifier when both name the same issuer. When both name it, their tenant_claim and revocations must be equal (D315, D316).",
+          "properties": {
+            "issuer": { "$ref": "#/$defs/httpsURL" },
+            "audience": { "type": "string", "minLength": 1, "description": "The aud the A2A routes' tokens must contain (Cloud: kontra). Never one of the gate's own resources: the gate refuses at load an absolute URL on public_url's origin whose path is empty, public_url's own, or {public_url}/mcp or below it, the MCP routes' audiences (spec §2.3, D314: audiences never cross)." },
+            "tenant_claim": { "$ref": "#/$defs/tenantClaim" },
+            "revocations": { "$ref": "#/$defs/revocations" }
+          }
         },
         "mcp_oauth": {
           "type": "object",
           "additionalProperties": false,
           "required": ["issuer"],
-          "description": "The authorization server /mcp and /mcp/{svc} are a resource server for (spec §12.1; built in M4, D276); its metadata and key set are fetched as operator-configured endpoints (spec §10.3, D284). It needs a public_url without a path (D296).",
-          "properties": { "issuer": { "$ref": "#/$defs/httpsURL" } }
+          "description": "The authorization server /mcp and /mcp/{svc} are a resource server for (spec §12.1; built in M4, D276); its metadata and key set are fetched as operator-configured endpoints (spec §10.3, D284). It needs a public_url without a path (D296). tenant_claim and revocations as auth.oidc's (M5, D315, D316).",
+          "properties": {
+            "issuer": { "$ref": "#/$defs/httpsURL" },
+            "tenant_claim": { "$ref": "#/$defs/tenantClaim" },
+            "revocations": { "$ref": "#/$defs/revocations" }
+          }
         },
         "anonymous": { "type": "object", "additionalProperties": false, "description": "Reserved; per service, anonymous is an allow: entry." }
       }
@@ -217,6 +227,23 @@
     },
     "hostPort": { "type": "string", "pattern": "^(\\[[0-9A-Fa-f:.]+\\]|[^:\\[\\]]*):[0-9]{1,5}$" },
     "httpsURL": { "type": "string", "pattern": "^https://[^/?#@]+" },
+    "tenantClaim": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:/#~+-]{1,128}$",
+      "not": { "enum": ["iss", "sub", "aud", "exp", "nbf", "iat", "jti", "sid"] },
+      "description": "The claim of the issuer's tokens naming the principal's tenant by its slug (spec §2.3, D315). Absent from a token: the principal has no tenant. Present: a string naming a live tenant of kind team or account of this gate (on a team gate, default), or the token is refused. Absent from the config: no token maps to a tenant."
+    },
+    "revocations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url"],
+      "description": "The issuer's revocation feed (spec §2.3, D316), an operator-configured endpoint (spec §10.3): GET answers {window_seconds, sessions: [sha256(sid) hex]}. With it, a token needs sid and iat and a lifetime (exp - iat) of at most window_seconds - 120 s; one whose sid is listed is refused; once no read has succeeded for max_stale, every token of the issuer is refused as the gate's own failure until one does.",
+      "properties": {
+        "url": { "type": "string", "pattern": "^https?://" },
+        "poll": { "$ref": "#/$defs/duration", "default": "5s", "description": "From 1s to 1m." },
+        "max_stale": { "$ref": "#/$defs/duration", "default": "30s", "description": "At least twice poll, at most 5m." }
+      }
+    },
     "urlBackend": {
       "type": "object",
       "additionalProperties": false,
@@ -265,7 +292,7 @@
             "deny": { "type": "array", "items": { "type": "string", "pattern": "^[^?\\[\\]\\\\]+$" } }
           }
         },
-        "tasks": { "enum": ["durable", "passthrough", "off"], "description": "durable (the default): the gate owns task-augmented calls (spec §11.5); on 2026-07-28 every tools/call that declares the tasks extension, on a service whose upstream declares it, becomes a gate task whose request and result are kept until the task's retention ends, as an A2A task's are (§11.12, D178). passthrough: the upstream owns them. off: plain calls only, nothing kept." },
+        "tasks": { "enum": ["durable", "required", "passthrough", "off"], "description": "durable (the default): the gate owns task-augmented calls (spec §11.5); on 2026-07-28 every tools/call that declares the tasks extension, on a service whose upstream declares it, becomes a gate task whose request and result are kept until the task's retention ends, as an A2A task's are (§11.12, D178). required: durable, and every tools/call must be a task: a plain call is refused (-32601 on 2025-11-25, -32021 on 2026-07-28), tools/list shows execution.taskSupport required and leaves out the tools the upstream cannot run as tasks, so Admission sees every call as a task (D322). passthrough: the upstream owns them. off: plain calls only, nothing kept." },
         "sealed": { "$ref": "#/$defs/sealed" },
         "seller_keys": {
           "oneOf": [
@@ -286,7 +313,17 @@
           }
         },
         "listed": { "type": "boolean", "default": false },
-        "annotations": { "type": "object", "default": {}, "description": "Operator data the gate attaches without interpreting (spec §13.4)." }
+        "annotations": {
+          "type": "object",
+          "default": {},
+          "description": "Operator data the gate attaches to what it serves (spec §13.4): it reads card_extensions, tool_meta, initialize_meta and search, and passes the rest through. search.hidden: true leaves the service out of every principal's search (spec §12.2, D321); the gate refuses at load a hidden that is not a boolean, null included.",
+          "properties": {
+            "search": {
+              "type": "object",
+              "properties": { "hidden": { "type": "boolean" } }
+            }
+          }
+        }
       },
       "allOf": [
         {

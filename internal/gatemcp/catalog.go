@@ -263,8 +263,9 @@ const SearchExamine = 1000
 
 // Search answers search for p (D271): the services visible to p whose ref, name or description contains query
 // (case-insensitively), of kind, whose price_model annotation equals price ("free": none); ordered by ref (byte
-// order), PageSize a page, with an opaque keyset cursor; anonymous tenants never appear. One request reads at most
-// SearchExamine rows: past them the page ends early, its nextCursor at the last row read.
+// order), PageSize a page, with an opaque keyset cursor; anonymous tenants and services hidden from search (D321)
+// never appear. One request reads at most SearchExamine rows: past them the page ends early, its nextCursor at the
+// last row read.
 func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs) (SearchResult, error) {
 	after := ""
 	if args.Cursor != "" {
@@ -287,7 +288,7 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 	examined := 0
 	for {
 		limit := min(c.batch, c.examine-examined)
-		rows, err := c.db.Query(ctx, `select `+serviceColumns+`, `+refExpr+serviceFrom+scope+`
+		rows, err := c.db.Query(ctx, `select `+serviceColumns+`, `+refExpr+serviceFrom+scope+searchable+`
 			and ($1::text is null or s.kind = $1) and (`+refExpr+`) collate "C" > $2::text collate "C"
 			order by (`+refExpr+`) collate "C" limit $3`, kind, after, limit)
 		if err != nil {
@@ -335,6 +336,11 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 		}
 	}
 }
+
+// searchable leaves out the services the operator hides from search, annotations.search.hidden true (§12.2, D321):
+// reachable by ref (describe and hire, as allow: decides), never listed, for every principal. Any other value of the
+// member, a string included, hides nothing; a team gate's configuration refuses one that is not a boolean.
+const searchable = ` and (s.annotations -> 'search' -> 'hidden') is distinct from 'true'::jsonb`
 
 // scanTail scans a row whose last column is extra, after serviceColumns.
 type scanTail struct {
@@ -449,8 +455,12 @@ func (c *Catalog) cachedTools(ctx context.Context, s *service, p auth.Principal)
 	rctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
 	// A nil Pager reads only what is cached: a cold cache is an error, and a drain in flight is waited for briefly.
+	// The legacy list as a 2025-11-25 session of the service sees it (tasks: required, D322); the modern one has no
+	// execution.taskSupport.
 	v := mcprelay.ToolView{Policy: svc.Tools, Meta: svc.ToolMeta}
-	if list, err := c.tools.List(rctx, key, mcpwire.EraLegacy, v, nil); err == nil {
+	lv := v
+	lv.RequireTasks = svc.Tasks == config.TasksRequired
+	if list, err := c.tools.List(rctx, key, mcpwire.EraLegacy, lv, nil); err == nil {
 		return list, true
 	}
 	if list, _, err := c.tools.ListModern(rctx, key, v, nil); err == nil {

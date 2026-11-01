@@ -199,3 +199,37 @@ func TestNodeBuyer(t *testing.T) {
 		t.Error("NodeBuyer accepted no namespace")
 	}
 }
+
+// relay.md §2.3's table of derived buyers (D319) is what an operator computes the ids from: each example it writes is
+// the id the gate stores. scripts/check_specs.py recomputes the same values with Python's uuid.uuid5.
+func TestDerivedBuyersAsRelayWritesThem(t *testing.T) {
+	node, err := NodeBuyer(Namespace, "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oidc, err := OIDCBuyer("https://api.kontra.sh", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	team, _ := AnonymousBuyer(uuid.Nil)
+	multi, _ := AnonymousBuyer(uuid.MustParse("01900000-0000-7000-8000-000000000001"))
+	for name, tc := range map[string]struct {
+		got  uuid.UUID
+		want string
+	}{
+		"namespace":                    {Namespace, "a89faf13-3f2e-5f6d-8f26-999810d1be71"},
+		"node":                         {node, "70c9ed92-910e-5b48-b506-040034a1d192"},
+		"oidc":                         {oidc, "cd0b4bc7-5da9-50b2-aecd-b390e706e09a"},
+		"anonymous, team gate":         {team, "86ac12bd-54bd-5c48-95fc-5fca3c9a43db"},
+		"anonymous, multi-tenant gate": {multi, "ff015874-8db2-5a37-8ea7-f3e3516c1461"},
+	} {
+		if tc.got.String() != tc.want {
+			t.Errorf("%s = %s, want relay.md §2.3's %s", name, tc.got, tc.want)
+		}
+	}
+	// The names as relay.md writes them, netstrings of the kind and its parts.
+	if netstrings("node", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa") != "4:node,29:k1_aaaaaaaaaaaaaaaaaaaaaaaaaa," ||
+		netstrings("anonymous") != "9:anonymous," {
+		t.Errorf("netstrings: %q %q", netstrings("node", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa"), netstrings("anonymous"))
+	}
+}

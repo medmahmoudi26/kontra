@@ -370,3 +370,52 @@ func TestIDs(t *testing.T) {
 		t.Errorf("MintID: %q %v", id, err)
 	}
 }
+
+// tasks: required shown to a 2025-11-25 session (§11.5, D322): the tools the upstream cannot run as tasks (taskSupport
+// absent, forbidden, or a case variant of the key) are left out, every other shows taskSupport "required" with its
+// other execution members kept and tool_meta applied; Tool still finds a left-out tool (the relay answers it unknown).
+func TestToolViewRequireTasks(t *testing.T) {
+	c := NewToolsCache()
+	key := ToolsKey{Service: "priced"}
+	list := `{"tools":[` +
+		`{"name":"research","execution":{"taskSupport":"optional","x":1}},` +
+		`{"name":"forced","execution":{"taskSupport":"required"}},` +
+		`{"name":"never","execution":{"taskSupport":"forbidden"}},` +
+		`{"name":"plain"},` +
+		`{"name":"variant","execution":{"TaskSupport":"optional"}}]}`
+	pager := func(context.Context, string) (json.RawMessage, error) { return json.RawMessage(list), nil }
+	v := ToolView{Meta: map[string]map[string]json.RawMessage{"*": {"sh.kontra/price": json.RawMessage(`"0.01 USD"`)}}, RequireTasks: true}
+	got, err := c.List(context.Background(), key, mcpwire.EraLegacy, v, pager)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, raw := range got {
+		var tool struct {
+			Name      string            `json:"name"`
+			Meta      map[string]string `json:"_meta"`
+			Execution map[string]any    `json:"execution"`
+		}
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, tool.Name)
+		if tool.Execution["taskSupport"] != "required" || tool.Meta["sh.kontra/price"] != "0.01 USD" {
+			t.Errorf("%s under required: %s", tool.Name, raw)
+		}
+		if tool.Name == "research" && tool.Execution["x"] != float64(1) {
+			t.Errorf("research lost its other execution members: %s", raw)
+		}
+	}
+	if strings.Join(names, ",") != "research,forced" {
+		t.Errorf("listed %v, want research and forced", names)
+	}
+	// Durable shows the list as the upstream wrote it.
+	all, err := c.List(context.Background(), key, mcpwire.EraLegacy, ToolView{}, pager)
+	if err != nil || len(all) != 5 || !bytes.Contains(all[0], []byte(`"optional"`)) {
+		t.Errorf("durable: %d tools %v, first %s", len(all), err, all[0])
+	}
+	if _, ok, _ := c.Tool(context.Background(), key, mcpwire.EraLegacy, Policy{}, "never", pager); !ok {
+		t.Error("the cache lost a tool the view left out")
+	}
+}

@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kontra.sh/schema/listing/v1.json",
+  "title": "A listing file: what `kontra publish <listing.yaml>` sends to the operator's control plane (D323)",
+  "description": "How one of the publisher's services is sold, as Kontra Cloud's PUT /v1/services/{name} takes it (kontra-cloud D-M5-95, D-M5-110): the service's kind, visibility, MCP policy, sealing and price, in USD. The file is YAML (or JSON); the price keys are ext-escrow.md's and price.json's. The CLI checks the file against this schema and sends it; the control plane decides what it accepts, and the gate holds no price.",
+  "type": "object",
+  "required": ["service", "price"],
+  "additionalProperties": false,
+  "properties": {
+    "service": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+      "description": "The service's name at the gate, under the publisher's tenant: 1 to 63 of [a-z0-9-], not starting or ending with '-'."
+    },
+    "kind": { "enum": ["a2a", "mcp"], "default": "a2a" },
+    "visibility": {
+      "enum": ["public", "unlisted", "private"],
+      "default": "public",
+      "description": "public: listed and searched; unlisted: reachable by its URL, never searched (relay.md §12.2, D321); private: the publisher's own tenant only."
+    },
+    "price": { "$ref": "#/$defs/price" },
+    "tools": { "$ref": "#/$defs/toolsPolicy" },
+    "tasks": {
+      "enum": ["durable", "required", "passthrough", "off"],
+      "description": "An MCP service's tasks mode (relay.md §11.5): a priced one is never passthrough, and per_task needs required (D322)."
+    },
+    "sealed": { "enum": ["off", "optional", "required"], "default": "off" },
+    "published": {
+      "type": "boolean",
+      "default": true,
+      "description": "false unpublishes the service (the gate answers it as unknown) and keeps the listing as a new version."
+    }
+  },
+  "allOf": [
+    {
+      "description": "per_call and per_session price an MCP service's calls and sessions.",
+      "if": { "required": ["price"], "properties": { "price": { "required": ["model"], "properties": { "model": { "enum": ["per_call", "per_session"] } } } } },
+      "then": { "required": ["kind"], "properties": { "kind": { "const": "mcp" } } }
+    },
+    {
+      "description": "tools and tasks are an MCP service's.",
+      "if": { "not": { "required": ["kind"], "properties": { "kind": { "const": "mcp" } } } },
+      "then": { "not": { "anyOf": [ { "required": ["tools"] }, { "required": ["tasks"] } ] } }
+    },
+    {
+      "description": "A priced MCP service's calls are observed: never passthrough (relay.md §11.5).",
+      "if": {
+        "required": ["kind", "price"],
+        "properties": { "kind": { "const": "mcp" }, "price": { "required": ["model"], "properties": { "model": { "not": { "const": "free" } } } } }
+      },
+      "then": { "properties": { "tasks": { "not": { "const": "passthrough" } } } }
+    },
+    {
+      "description": "per_task on MCP: every call a task, which Admission quotes (ext-escrow.md §6, D322).",
+      "if": {
+        "required": ["kind", "price"],
+        "properties": { "kind": { "const": "mcp" }, "price": { "required": ["model"], "properties": { "model": { "const": "per_task" } } } }
+      },
+      "then": { "required": ["tasks"], "properties": { "tasks": { "const": "required" } } }
+    }
+  ],
+  "$defs": {
+    "cents": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,2})?$",
+      "not": { "pattern": "^0(\\.0{1,2})?$" },
+      "description": "USD above 0 with at most 2 decimals: a task is charged in cents."
+    },
+    "micros": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,8})(\\.[0-9]{1,6})?$",
+      "not": { "pattern": "^0(\\.0{1,6})?$" },
+      "description": "USD above 0 with at most 6 decimals: metered amounts are micro-USD."
+    },
+    "toolName": { "type": "string", "pattern": "^[^\\u0000-\\u001f\\u007f]{1,128}$" },
+    "price": {
+      "type": "object",
+      "required": ["model"],
+      "additionalProperties": false,
+      "properties": {
+        "model": { "enum": ["free", "per_task", "per_call", "per_session"] },
+        "amount": { "type": "string", "maxLength": 24 },
+        "currency": { "const": "USD", "default": "USD" },
+        "reviewWindowSeconds": { "type": "integer", "minimum": 0, "maximum": 604800 },
+        "taskTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 604800, "default": 3600 },
+        "idleTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 604800 },
+        "tools": {
+          "type": "object",
+          "maxProperties": 100,
+          "propertyNames": { "$ref": "#/$defs/toolName", "not": { "const": "*" } },
+          "additionalProperties": { "$ref": "#/$defs/micros" }
+        },
+        "freePerMonth": { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+        "capPerMonth": { "$ref": "#/$defs/micros" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "model": { "const": "free" } } },
+          "then": { "properties": { "amount": { "enum": ["0", "0.0", "0.00"] } } }
+        },
+        {
+          "if": { "properties": { "model": { "const": "per_task" } } },
+          "then": { "required": ["amount"], "properties": { "amount": { "$ref": "#/$defs/cents" } } }
+        },
+        {
+          "if": { "properties": { "model": { "enum": ["per_call", "per_session"] } } },
+          "then": { "required": ["amount"], "properties": { "amount": { "$ref": "#/$defs/micros" } } }
+        },
+        {
+          "if": { "properties": { "model": { "not": { "const": "per_task" } } } },
+          "then": { "properties": { "reviewWindowSeconds": { "const": 0 } } }
+        },
+        {
+          "if": { "properties": { "model": { "not": { "const": "per_call" } } } },
+          "then": { "not": { "anyOf": [ { "required": ["tools"] }, { "required": ["freePerMonth"] }, { "required": ["capPerMonth"] } ] } }
+        }
+      ]
+    },
+    "toolsPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "relay.md §11.3: an absent allow allows every tool, an empty one none; deny wins. At most 64 globs in allow and deny together: a bound on the sum this schema cannot state (it bounds each list at 64), which kontra publish and the control plane check (examples/invalid/listing.too_many_globs.json, which the schema accepts and they refuse).",
+      "properties": {
+        "allow": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/toolName" } },
+        "deny": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/toolName" } }
+      }
+    }
+  }
+}

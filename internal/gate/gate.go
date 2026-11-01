@@ -42,6 +42,7 @@ import (
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/migrate"
+	"kontra.sh/kontra/internal/oidc"
 	"kontra.sh/kontra/internal/peer"
 	"kontra.sh/kontra/internal/pg"
 	"kontra.sh/kontra/internal/push"
@@ -190,6 +191,9 @@ type Replica struct {
 	nodeKeys *enroll.Revocations
 	enroll   *enroll.Store
 	tunnels  *tunnelgate.Registry
+
+	// The OIDC issuers' revocation feeds (spec §2.3, D316), polled by Run; empty without one (oauth.go).
+	feeds []*oidc.Feed
 
 	// Card signing (spec §3, D166): the key set, nil on a gate off loopback without signing_key (which serves no
 	// a2a service). The claim-check bucket (spec §10.4, D167), nil without blobs:, and the egress renderer.
@@ -522,8 +526,9 @@ func (r *Replica) assemble() error {
 
 	writer := sse.NewWriterWithOptions(r.storeLog, r.listener, sse.Options{Logger: log, Render: r.render})
 	routes := edge.NewRouter()
-	// The MCP OAuth resource server (spec §12.1; M4 WP-06), before the MCP routes it guards serve anything.
-	if err := r.assembleMCPOAuth(routes, authn); err != nil {
+	// The OIDC issuers (spec §2.3, §12.1): the MCP OAuth resource server (M4 WP-06) and the A2A routes' OIDC principals
+	// (M5, D314), with their tenant claims and revocation feeds, before the routes they guard serve anything.
+	if err := r.assembleOIDC(routes, authn); err != nil {
 		return err
 	}
 	a2aRoutes := a2ahttp.New(a2ahttp.Deps{
@@ -830,6 +835,7 @@ func (r *Replica) Run(ctx context.Context) error {
 	if r.opts.hup {
 		goLoop("sighup", r.hupLoop)
 	}
+	r.runFeeds(ctx, goLoop)
 
 	wctx, cancel := context.WithTimeout(ctx, r.opts.cardWait)
 	if missing := r.services.WaitCards(wctx); len(missing) > 0 {
@@ -1191,6 +1197,7 @@ func (r *Replica) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 	gauge("kontra_gate_services", "Enabled services in the registry.", r.services.Count())
 	gauge("kontra_gate_tunnel_sessions", "Tunnel sessions this replica holds.", r.tunnels.Count())
 	writePatchRefusals(w, r.id, &r.refusals)
+	writeFeeds(w, r.id, r.feeds)
 }
 
 // writePatchRefusals writes kontra_gate_operator_patches_refused_total, the operator patches this replica's
