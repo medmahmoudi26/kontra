@@ -4901,9 +4901,9 @@ Kontra Cloud builds M5 against this gate, and its record (kontra-cloud `docs/m5-
 from this repository: decision 7's OIDC principals on the A2A routes with a tenant mapping and a revocation feed
 (public-repo PR M5-G1; its C4 and D-M5-35), and an audit-append contract for the gate's tables it writes (M5-G2; its
 C11, with D-M5-54 as the interim). D314 to D317 settle them. Where Cloud's record proposed something else, the entry
-says so and what Cloud changes. The second build of the gate side (D318 to D322) answers the rest: an observation of
-Cloud's end-to-end run on required extensions (D318), the indexes of its D-M5-120 (D319) and the three issues its PRs
-opened against this repository (kontra#5, #6, #7: D320 to D322).
+says so and what Cloud changes. The second build of the gate side (D318 to D323) answers the rest: an observation of
+Cloud's end-to-end run on required extensions (D318), the indexes of its D-M5-120 (D319), the three issues its PRs
+opened against this repository (kontra#5, #6, #7: D320 to D322) and `kontra publish` (M5-G3, its D-M5-62: D323).
 
 ### D314. The A2A routes take an issuer's JWTs as OIDC principals — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 7; completes D268, D276)
 
@@ -5234,7 +5234,8 @@ for `call`, or a `tasks: required` mode. Decision, the second ([`relay.md`](../s
 
 What Cloud changes: its `ListingPut.tasks` accepts `required`, and a `per_task` MCP listing is published with
 `tasks: required` instead of being refused `per_task_mcp_unavailable` (its C42); its Admission's guard on a `per_task`
-listing's `session` may stay.
+listing's `session` may stay. Its listing schema here ([`schema/listing.json`](../spec/schema/listing.json), D323)
+already requires it.
 
 Tested: `TestToolViewRequireTasks` (`internal/mcprelay`: the list as `required` shows it, other `execution` members
 kept), `TestRequiredTasks` (Postgres and Temporal, 2025-11-25: the list of two of four tools, `taskSupport` required;
@@ -5242,3 +5243,59 @@ plain calls `-32601`, left-out tools `-32602`, no Admission, upstream call, task
 Admission's `task`, quoted, nothing dispatched), `TestModernRequiredTasks` (2026-07-28: the extension kept on
 `server/discover`; a call not declaring it `400` `-32021` with nothing asked or written; one declaring it a gate task),
 the `TestLoad` row (`internal/config`), the 0004 blocks of `scripts/migration_tests.sql` and `TestDownThenUp`.
+
+### D323. `kontra publish <listing.yaml>`: a listing file, a person's sign-in for the control plane, and the version it replaces — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 11 and Cloud's D-M5-62; one conflict with the build's brief and one with Cloud's record)
+
+The owner's decision 11 (kontra-cloud#60): the CLI is `connect`, `login`, `seal`, `publish`. Cloud's D-M5-62 makes
+`kontra publish listing.yaml` public-repo PR M5-G3, "the Go subcommand calling Cloud's `PUT /v1/services/{name}`"; its
+D-M5-95 fixes the body (`{kind, visibility, price, tools?, tasks?, sealed, version}`, `price` with the public specs'
+keys, USD), D-M5-63 makes a stale version `409 stale_version`, D-M5-110 puts the route on `CLOUD_ROUTES` as `fresh` and
+D-M5-111 adds `published`. Decision ([`tunnel.md`](../spec/tunnel.md) §6.4; [`schema/listing.json`](../spec/schema/listing.json);
+`internal/publish`):
+
+- **The file.** YAML (or JSON), one document, at most 64 KiB, keys as Cloud's `ListingPut` with `service` for the
+  route's name and no `version`: `service`, `kind` (`a2a`), `visibility` (`public`), `price` (`model` `free`,
+  `per_task`, `per_call` or `per_session`; `amount` a quoted decimal string, cents for `per_task` and micro-USD when
+  metered, above 0; `currency` `USD`; `reviewWindowSeconds` `per_task`'s; `taskTimeoutSeconds`, `idleTimeoutSeconds`
+  up to a week; `tools`, `freePerMonth`, `capPerMonth` `per_call`'s), `tools` and `tasks` (`kind: mcp` only; a priced
+  one never `passthrough`, a `per_task` one `required`, D322), `sealed` (`off`), `published` (`true`). `spec/schema/
+  listing.json` is the contract; `internal/publish` checks the same rules by hand, and both are held to the schema's
+  fixtures (`examples/listing.*.json` accepted, `examples/invalid/listing.*.json` refused, by `check_specs.py` and by
+  `TestSchemaFixtures`). Deployment settings stay the control plane's (Cloud's minimum task price).
+- **No money logic.** The CLI parses, checks shapes and carries: it computes, converts, rounds and compares no amount.
+- **The sign-in is a person's, for that publish.** `kontra publish` discovers the gate's authorization server as
+  `kontra login` does (§6.3 steps 1, 2, with its kept client registration), takes the control plane to be
+  `--control-plane` or that server's issuer (Cloud's D-M5-38: the issuer is the control plane's public URL), runs §6.3
+  step 3's flow with `resource` = the control plane, and sends the token it gets as the bearer of `GET` and `PUT
+  /v1/services/{name}` there only (no redirect followed), never storing or printing it.
+- **The version.** Without `--version`, the CLI reads `GET /v1/services/{name}` (`listing.version`, 0 for none or `404
+  service_not_found`) and sends that: the file is the listing the person declares, and a publish that came in
+  between is `409`, which the CLI reports with the version the listing is at, publishing nothing. `--version N` sends
+  the version the person read, for a strict replace. `--dry-run` checks the file and prints the request, signing in
+  nowhere.
+
+Conflict with the build's brief: it asked for "the credential `kontra login` stored (or `--api-key`)". That credential
+is a gate API key (`kk_…`, D278, D305), which Cloud's control plane does not take as a bearer (its routes verify its own
+`aud kontra:api` JWTs; its API keys, `kontra_sk_…`, are exchanged for a token of an `api_key` session), and the owner's
+rule is that an API-key or MCP session never satisfies `human` or `fresh`: Cloud's `put_service` is `fresh` and answers
+an API key's session `403 fresh_login_required` ("an API key cannot do this (publish, …)"). A `--api-key` could
+therefore never publish; it is left out, and the sign-in above is what `kontra login`'s flow gives instead. Conflict
+with Cloud's record: its D-M5-110 and `gate/routes.py` say the `fresh` rows "need a person's session, which the CLI has
+too (`kontra login`)", which holds for kontra-sdk's device login but not for this repository's `kontra login`, whose
+token is a gate key. What Cloud changes (PR-6, its authorization server): accept `resource` = its public URL
+(`KONTRA_PUBLIC_URL`) and issue for it an `aud kontra:api` access token of the person's session, made `fresh` by the
+consent (whose approve is already `fresh`, its D-M5-38) and named as such on the consent page ("publish a listing at
+api.kontra.sh"), with no refresh token; D305's rule (a gate key only for the gate's origin) is unchanged. Until PR-6,
+the console's pricing view publishes (its D-M5-62).
+
+Not built: the PRD §13 sketch's `card: sha256:…` pin (Cloud's body has none) and a `--api-key`. A team gate has no
+control plane: `kontra publish` says so for a gate without a sign-in, and its services are its configuration.
+
+Tested: `TestSchemaFixtures`, `TestParseYAML` (`off` a string, an unquoted amount, a key twice, two documents, a
+scalar, unknown keys, `version`, 64 globs together, integral floats), `TestBody` (the exact request bytes),
+`TestParseArgs`, `TestDryRun`, and against `oidctest` and a fake control plane: `TestPublish` (the token asked for
+`resource` = the control plane and sent as the bearer, version 0 then the version read, one registration, nothing but it
+in the credentials, unpublishing), `TestPublishStaleVersion` (`--version` sent with no read, `409` naming the version
+it is at, then the current one published), `TestPublishControlPlaneIsTheIssuer`, `TestPublishRefusals` (`403
+fresh_login_required`, `422` with an escape sequence printed escaped, a redirect not followed, an answer that is not a
+listing), `TestPublishNoSignIn`; `cmd/kontra`'s `TestRun` rows and `TestPublishDryRun`.

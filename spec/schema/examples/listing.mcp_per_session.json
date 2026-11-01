@@ -1,0 +1,1 @@
+{"service": "notebook", "kind": "mcp", "price": {"model": "per_session", "amount": "0.50", "idleTimeoutSeconds": 900}}

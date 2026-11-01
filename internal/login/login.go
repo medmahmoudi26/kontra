@@ -24,8 +24,9 @@
 //  4. The access token must be an API key of the gate (kk_…, accessToken: this revision's rule, M5's to revise);
 //     anything else is refused and not stored.
 //
-// Neither the code nor the verifier is ever printed or logged; nothing the authorization server writes reaches the
-// terminal but through tunnel.Printable. The authorization server is the operator's (Cloud's control plane, M5); the
+// Steps 2 and 3 are Authenticate, which kontra publish runs too, for the control plane's resource (spec/tunnel.md §6.4,
+// D323). Neither the code nor the verifier is ever printed or logged; nothing the authorization server writes reaches
+// the terminal but through tunnel.Printable. The authorization server is the operator's (Cloud's control plane, M5); the
 // tests use an in-repository one (internal/oidc/oidctest).
 //
 // Work package: M4 WP-06.
@@ -110,6 +111,9 @@ type Options struct {
 	Out io.Writer
 	// Wait bounds the loopback listener (Wait when zero; tests shorten it).
 	Wait time.Duration
+	// Name is the command signing in, in what the sign-in prints ("kontra login" when ""; kontra publish signs in for
+	// its control plane through Authenticate, D323).
+	Name string
 }
 
 // ParseArgs parses the arguments after `login`; getenv reads HOME for ~/.kontra. A refusal wraps ErrUsage; -h is
@@ -168,25 +172,61 @@ func Run(ctx context.Context, o Options) error {
 	if o.Out == nil {
 		o.Out = io.Discard
 	}
+	s, err := Discover(ctx, o.Client, o.Gate.String())
+	if err != nil {
+		return err
+	}
+	token, err := Authenticate(ctx, s, s.Origin, o)
+	if err != nil {
+		return err
+	}
+	if err := accessToken(token); err != nil {
+		return err
+	}
 	creds, err := node.LoadCredentials(o.CredentialsPath)
 	if err != nil {
 		return err
 	}
-	s, err := Discover(ctx, o.Client, o.Gate.String())
-	if err != nil {
+	if _, err := creds.Update(s.Origin, func(c *node.Credential) { c.APIKey = token }); err != nil {
 		return err
+	}
+	fmt.Fprintf(o.Out, "kontra login: signed in at %s; the API key is kept in %s for that gate only.\n"+
+		"Restart kontra connect: its next handshake hires as the account, and an anonymous session's services move to the "+
+		"account at new URLs (spec/tunnel.md §6.3).\n", s.Origin, creds.Path())
+	return nil
+}
+
+// Authenticate is §6.3 steps 2 and 3 at the authorization server discovery found (s), for resource (RFC 8707): the
+// client registration kept with s.Origin's credential for s.Issuer, else a new one, kept; then the authorization code
+// flow; a registration the authorization server no longer knows is forgotten. It returns the access token, which it
+// neither checks nor stores: kontra login keeps an API key of the gate (resource = s.Origin), kontra publish uses a
+// control-plane token once (resource = the control plane, D323). o's Client, Out and CredentialsPath are set.
+func Authenticate(ctx context.Context, s *Server, resource string, o Options) (string, error) {
+	if o.Client == nil {
+		o.Client = NewClient(nil)
+	}
+	if o.Out == nil {
+		o.Out = io.Discard
+	}
+	name := o.Name
+	if name == "" {
+		name = defaultName
+	}
+	creds, err := node.LoadCredentials(o.CredentialsPath)
+	if err != nil {
+		return "", err
 	}
 	clientID, reused := "", false
 	if oc := creds.For(s.Origin).OAuthClient; oc != nil && oc.Issuer == s.Issuer && oc.ClientID != "" {
 		clientID, reused = oc.ClientID, true
 	} else {
 		if clientID, err = Register(ctx, o.Client, s); err != nil {
-			return err
+			return "", err
 		}
 		if _, err := creds.Update(s.Origin, func(c *node.Credential) {
 			c.OAuthClient = &node.OAuthClient{Issuer: s.Issuer, ClientID: clientID}
 		}); err != nil {
-			return err
+			return "", err
 		}
 	}
 	open := o.Open
@@ -196,7 +236,8 @@ func Run(ctx context.Context, o Options) error {
 	case open == nil:
 		open = openBrowser
 	}
-	token, err := Authorize(ctx, o.Client, s, clientID, AuthorizeOptions{Open: open, Out: o.Out, Wait: o.Wait})
+	token, err := Authorize(ctx, o.Client, s, clientID, AuthorizeOptions{Open: open, Out: o.Out, Wait: o.Wait,
+		Resource: resource, Name: name})
 	forget := func() bool {
 		forgot := false
 		_, uerr := creds.Update(s.Origin, func(c *node.Credential) {
@@ -217,24 +258,18 @@ func Run(ctx context.Context, o Options) error {
 		// instead of failing the same way for ever. A login that simply was not finished costs one registration more.
 		if forget() {
 			err = fmt.Errorf("%w. It reused this computer's registration at %s, which the authorization server may have "+
-				"forgotten (its sign-in page then says it does not know the client): kontra login dropped it, and the next one "+
-				"registers again", err, clip(s.Issuer))
+				"forgotten (its sign-in page then says it does not know the client): %s dropped it, and the next one "+
+				"registers again", err, clip(s.Issuer), name)
 		}
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := accessToken(token); err != nil {
-		return err
-	}
-	if _, err := creds.Update(s.Origin, func(c *node.Credential) { c.APIKey = token }); err != nil {
-		return err
-	}
-	fmt.Fprintf(o.Out, "kontra login: signed in at %s; the API key is kept in %s for that gate only.\n"+
-		"Restart kontra connect: its next handshake hires as the account, and an anonymous session's services move to the "+
-		"account at new URLs (spec/tunnel.md §6.3).\n", s.Origin, creds.Path())
-	return nil
+	return token, nil
 }
+
+// defaultName is the command a sign-in prints when Options.Name is empty.
+const defaultName = "kontra login"
 
 // apiKeyRE is an API key as kontra login accepts one: kk_ (spec/relay.md §2.3, D37), then letters, digits and _, at
 // most auth.MaxBearer characters in all (what the gate looks up).
@@ -459,6 +494,11 @@ type AuthorizeOptions struct {
 	Open func(string) error // opens the URL in a browser; nil prints it to Out
 	Out  io.Writer
 	Wait time.Duration // the listener's bound (Wait when zero)
+	// Resource is the RFC 8707 resource asked for, in the authorization and the token request ("": s.Origin, the
+	// gate's, for its API key).
+	Resource string
+	// Name is the command signing in, in what the listener answers and Out shows ("kontra login" when "").
+	Name string
 }
 
 // errInvalidClient is a token endpoint that no longer knows the client.
@@ -479,6 +519,13 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	if o.Out == nil {
 		o.Out = io.Discard
 	}
+	if o.Resource == "" {
+		o.Resource = s.Origin
+	}
+	name := o.Name
+	if name == "" {
+		name = defaultName
+	}
 	verifier, state := random(32), random(16)
 	sum := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
@@ -496,7 +543,7 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	q := au.Query()
 	for k, v := range map[string]string{
 		"response_type": "code", "client_id": clientID, "redirect_uri": redirect, "code_challenge": challenge,
-		"code_challenge_method": "S256", "state": state, "resource": s.Origin,
+		"code_challenge_method": "S256", "state": state, "resource": o.Resource,
 	} {
 		q.Set(k, v)
 	}
@@ -519,28 +566,28 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if subtle.ConstantTimeCompare([]byte(v.Get("state")), []byte(state)) != 1 {
-			http.Error(w, "kontra login: this answer is not for the sign-in kontra login started (state); it stops.", http.StatusBadRequest)
-			deliver(outcome{err: errors.New("the sign-in's answer carried another state than kontra login sent: refused")})
+			http.Error(w, name+": this answer is not for the sign-in "+name+" started (state); it stops.", http.StatusBadRequest)
+			deliver(outcome{err: errors.New("the sign-in's answer carried another state than " + name + " sent: refused")})
 			return
 		}
 		if e := v.Get("error"); e != "" {
-			http.Error(w, "kontra login: the sign-in was refused.", http.StatusBadRequest)
+			http.Error(w, name+": the sign-in was refused.", http.StatusBadRequest)
 			deliver(outcome{err: fmt.Errorf("the authorization server refused the sign-in: %s", printable(e, v.Get("error_description")))})
 			return
 		}
 		// RFC 9207: an iss must be the issuer; and it must be there when the metadata says it is sent.
 		if iss, ok := v["iss"]; (ok && (len(iss) != 1 || iss[0] != s.Issuer)) || (!ok && s.ISSRequired) {
-			http.Error(w, "kontra login: this answer is from another authorization server; it stops.", http.StatusBadRequest)
+			http.Error(w, name+": this answer is from another authorization server; it stops.", http.StatusBadRequest)
 			deliver(outcome{err: errors.New("the sign-in's answer names another authorization server (iss, RFC 9207): refused")})
 			return
 		}
 		code := v.Get("code")
 		if code == "" {
-			http.Error(w, "kontra login: the answer carries no code.", http.StatusBadRequest)
+			http.Error(w, name+": the answer carries no code.", http.StatusBadRequest)
 			deliver(outcome{err: errors.New("the sign-in's answer carried no code")})
 			return
 		}
-		_, _ = io.WriteString(w, "kontra login: signed in. You may close this tab.\n")
+		_, _ = io.WriteString(w, name+": signed in. You may close this tab.\n")
 		deliver(outcome{code: code})
 	})
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
@@ -558,15 +605,16 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	defer stop()
 
 	shown := tunnel.Printable(au.String())
-	// Both origins: the gate's, whose key this is, and the authorization server's, whose page asks for consent (D305).
-	where := s.Origin + " (sign-in by " + issuerOrigin(s.Issuer) + ")"
+	// Both origins: the resource's (the gate, whose key this is; or the control plane), and the authorization server's,
+	// whose page asks for consent (D305).
+	where := issuerOrigin(o.Resource) + " (sign-in by " + issuerOrigin(s.Issuer) + ")"
 	if o.Open == nil {
-		fmt.Fprintf(o.Out, "kontra login: open this URL in a browser on this machine to sign in at %s:\n\n  %s\n\n", where, shown)
+		fmt.Fprintf(o.Out, "%s: open this URL in a browser on this machine to sign in at %s:\n\n  %s\n\n", name, where, shown)
 	} else {
-		fmt.Fprintf(o.Out, "kontra login: signing in at %s in your browser; if it does not open, open this URL on this machine:\n\n  %s\n\n",
-			where, shown)
+		fmt.Fprintf(o.Out, "%s: signing in at %s in your browser; if it does not open, open this URL on this machine:\n\n  %s\n\n",
+			name, where, shown)
 		if err := o.Open(au.String()); err != nil {
-			fmt.Fprintf(o.Out, "kontra login: the browser could not be opened (%v): open the URL above\n", err)
+			fmt.Fprintf(o.Out, "%s: the browser could not be opened (%v): open the URL above\n", name, err)
 		}
 	}
 	timer := time.NewTimer(o.Wait)
@@ -575,7 +623,7 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	select {
 	case res = <-got:
 	case <-timer.C:
-		return "", fmt.Errorf("%w within %s: run kontra login again", errNoAnswer, o.Wait)
+		return "", fmt.Errorf("%w within %s: run %s again", errNoAnswer, o.Wait, name)
 	case <-ctx.Done():
 		return "", fmt.Errorf("%w: %w", errNoAnswer, ctx.Err())
 	}
@@ -584,7 +632,7 @@ func Authorize(ctx context.Context, client *http.Client, s *Server, clientID str
 	if res.err != nil {
 		return "", res.err
 	}
-	return redeem(ctx, client, s, clientID, res.code, verifier, redirect)
+	return redeem(ctx, client, s, clientID, res.code, verifier, redirect, o.Resource, name)
 }
 
 // issuerOrigin is the printable origin of an issuer URL, the URL itself when it has none.
@@ -598,10 +646,10 @@ func issuerOrigin(issuer string) string {
 
 // redeem is the token request (RFC 6749 §4.1.3, RFC 7636 §4.5, RFC 8707): it follows no redirect, and nothing it
 // says names the code or the verifier.
-func redeem(ctx context.Context, client *http.Client, s *Server, clientID, code, verifier, redirect string) (string, error) {
+func redeem(ctx context.Context, client *http.Client, s *Server, clientID, code, verifier, redirect, resource, name string) (string, error) {
 	form := url.Values{
 		"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirect}, "client_id": {clientID},
-		"code_verifier": {verifier}, "resource": {s.Origin},
+		"code_verifier": {verifier}, "resource": {resource},
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.TokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -622,7 +670,7 @@ func redeem(ctx context.Context, client *http.Client, s *Server, clientID, code,
 	if status != http.StatusOK {
 		e := scrub(oauthError(b, status))
 		if strings.HasPrefix(e, "invalid_client") {
-			return "", fmt.Errorf("%w (%s): run kontra login again", errInvalidClient, e)
+			return "", fmt.Errorf("%w (%s): run %s again", errInvalidClient, e, name)
 		}
 		return "", fmt.Errorf("the authorization server refused the token request: %s", e)
 	}

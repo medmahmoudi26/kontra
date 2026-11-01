@@ -1,0 +1,1 @@
+{"service": "search-tools", "kind": "mcp", "visibility": "unlisted", "price": {"model": "per_call", "amount": "0.002", "currency": "USD", "tools": {"deep-search": "0.01"}, "freePerMonth": 100, "capPerMonth": "10.00"}, "tools": {"deny": ["admin-*"]}, "tasks": "durable"}

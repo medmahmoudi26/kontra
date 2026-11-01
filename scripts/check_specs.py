@@ -46,6 +46,17 @@ for p in sorted((SCHEMAS / "examples").glob("*.json")):
     for err in v.iter_errors(json.loads(p.read_text())):
         problems.append(f"{p.relative_to(ROOT)}: {err.json_path}: {err.message}")
 
+# 2b. Refused fixtures: examples/invalid/<schema>.<variant>.json must not validate against <schema>.json (the CLI's own
+#     checks are held to the same files: internal/publish's tests, D323).
+for p in sorted((SCHEMAS / "examples" / "invalid").glob("*.json")):
+    base = p.name.split(".")[0]
+    schema = schemas.get(f"{base}.json")
+    if schema is None:
+        problems.append(f"{p.relative_to(ROOT)}: no schema for refused fixture")
+        continue
+    if Draft202012Validator(schema, registry=registry).is_valid(json.loads(p.read_text())):
+        problems.append(f"{p.relative_to(ROOT)}: validates, but is a refused fixture")
+
 # 3. Relative links in markdown point at files that exist.
 for md in sorted(list((ROOT / "spec").glob("*.md")) + list((ROOT / "docs").glob("*.md")) + [ROOT / "README.md"]):
     text = re.sub(r"```.*?```", "", md.read_text(), flags=re.S)
