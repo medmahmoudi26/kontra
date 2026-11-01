@@ -29,10 +29,11 @@ import (
 //     quoted task); no session is ever sent an
 //     elicitation/create (the gate sends no URL-mode request and reads no client result as approval);
 //   - a session without elicitation.url gets working with the URL in the text (plain) or statusMessage
-//     (task-augmented) and _meta sh.kontra/approve-url, never -32042;
+//     (task-augmented) and _meta sh.kontra/approve-url, never -32042; the plain answer's structuredContent has the
+//     same URL as url and quote.approveUrl (D324);
 //   - after kontra.approval {accepted: true}, of S1's two GET streams (one on each replica) exactly one receives
 //     notifications/elicitation/complete {elicitationId}, once and with no event id, S2's stream none, and S1's retried
-//     hire answers the completed result;
+//     hire answers the completed result, its structuredContent the answer's text and the thread URL;
 //   - a declined quote's retry is isError with sh.kontra/canceled declined (task-augmented: cancelled); an expired
 //     one's is sh.kontra/canceled quote_expired;
 //   - a team gate's own approve URL (https://gate.team.example/approve/<taskId>) reaches the -32042 and the working
@@ -155,6 +156,11 @@ func TestGateMCPHireQuote(t *testing.T) {
 	if pr.IsError || pr.TaskID() != taskID || !strings.Contains(pr.Text(), el.URL) || pr.Meta["sh.kontra/approve-url"] != el.URL {
 		t.Errorf("a quoted hire to a session without URL elicitation: %+v", pr)
 	}
+	// D324: the same URL, and the quote's terms, in structuredContent, which may be all a client shows.
+	if sc := pr.Structured; sc == nil || sc.URL != el.URL || sc.Quote == nil || sc.Quote.ApproveURL != el.URL || sc.Quote.ExpiresAt == "" ||
+		sc.Text != pr.Text() {
+		t.Errorf("a quoted hire's structuredContent: %s, want url and quote.approveUrl %s", pr.StructuredRaw, el.URL)
+	}
 	ctr := Tool(t, keep(p.ToolTask("hire", args)))
 	if ctr.Task == nil || ctr.Task.TaskID != taskID || ctr.Task.Status != "working" || ctr.Task.StatusMessage != el.URL ||
 		ctr.Meta["sh.kontra/approve-url"] != el.URL {
@@ -186,8 +192,9 @@ func TestGateMCPHireQuote(t *testing.T) {
 	}
 	answers = append(answers, got...)
 	rr := Tool(t, keep(s1.Tool("hire", args)))
-	if rr.IsError || rr.TaskID() != taskID || rr.State() != "TASK_STATE_COMPLETED" || rr.Text() != "Hello World" {
-		t.Fatalf("S1's retry after the approval: %+v", rr)
+	if rr.IsError || rr.TaskID() != taskID || rr.State() != "TASK_STATE_COMPLETED" || rr.Text() != "Hello World" ||
+		rr.Structured.Text != "Hello World" || rr.Structured.URL != el.URL {
+		t.Fatalf("S1's retry after the approval: %+v (%s)", rr, rr.StructuredRaw)
 	}
 	if n := seller.Messages(); n != 1 {
 		t.Errorf("the seller received %d messages after the approval, want 1", n)

@@ -150,6 +150,19 @@ func TestToolsListSchemas(t *testing.T) {
 			if !bytes.Equal(gotJCS, wantJCS) {
 				t.Errorf("%s's inputSchema\n%s\nwant mcp-tools.json's\n%s", name, gotJCS, wantJCS)
 			}
+			// hire and reply declare hireResult as their outputSchema (D324); search and describe declare none.
+			out, has := tool["outputSchema"]
+			if wantOut := name == ToolHire || name == ToolReply; has != wantOut {
+				t.Errorf("%s: outputSchema present %v, want %v", name, has, wantOut)
+			}
+			if has {
+				want, _ := json.Marshal(inlineRefs(t, file.Defs["hireResult"], file.Defs))
+				wantJCS, _ := jcs.Transform(want)
+				gotJCS, err := jcs.Transform(out)
+				if err != nil || !bytes.Equal(gotJCS, wantJCS) {
+					t.Errorf("%s's outputSchema\n%s\nwant mcp-tools.json's hireResult\n%s", name, gotJCS, wantJCS)
+				}
+			}
 			var ann map[string]json.RawMessage
 			_ = json.Unmarshal(tool["annotations"], &ann)
 			if ann["readOnlyHint"] == nil || ann["destructiveHint"] == nil {
@@ -209,11 +222,12 @@ func renderOf(t *testing.T, task *a2a.Task, state store.State) rendered {
 	return r
 }
 
-// Render (§12.2, D289): text parts as text; data parts as text (their JSON) and in structuredContent.data, message
-// first, then each artifact's, in order; file parts as resource blocks (raw bytes embedded with their media type, a
-// URL as a resource_link); structuredContent {taskId, state, data?} with the A2A state, data absent without data
-// parts; failed, rejected and canceled are isError with sh.kontra/failure or sh.kontra/canceled in _meta and their
-// status message as text.
+// Render (§12.2, D289, D324): text parts as text; data parts as text (their JSON) and in structuredContent.data,
+// message first, then each artifact's, in order; file parts as resource blocks (raw bytes embedded with their media
+// type, a URL as a resource_link) and in structuredContent.files; structuredContent {taskId, state, url?, text?, data?,
+// files?} with the A2A state, data absent without data parts, text the text blocks', url the task's thread; failed,
+// rejected and canceled are isError with sh.kontra/failure or sh.kontra/canceled in _meta and their status message
+// as text.
 func TestRender(t *testing.T) {
 	file := a2a.NewRawPart([]byte("tck"))
 	file.MediaType, file.Filename = "text/plain", "output.txt"
@@ -245,24 +259,30 @@ func TestRender(t *testing.T) {
 	if l := r.Content[5]; l.URI != "https://example.com/output.txt" || l.Name != "output.txt" || l.MIMEType != "text/plain" {
 		t.Errorf("the URL part: %+v", l)
 	}
-	var sc struct {
-		TaskID string `json:"taskId"`
-		State  string `json:"state"`
-		Data   []any  `json:"data"`
-	}
+	var sc HireResult
 	scb, _ := json.Marshal(r.StructuredContent)
 	if err := json.Unmarshal(scb, &sc); err != nil {
 		t.Fatal(err)
 	}
-	if len(r.StructuredContent) != 3 || sc.TaskID != string(task.ID) || sc.State != "TASK_STATE_COMPLETED" ||
-		!reflect.DeepEqual(sc.Data, []any{map[string]any{"from": "message"}, map[string]any{"n": 1.0}, []any{"x"}}) {
+	// D324: the text beside data, and the file parts' links; no url, the task having none.
+	if len(r.StructuredContent) != 5 || sc.TaskID != string(task.ID) || sc.State != "TASK_STATE_COMPLETED" || sc.URL != "" ||
+		sc.Text != "here\nartifact text" ||
+		!reflect.DeepEqual(sc.Data, []any{map[string]any{"from": "message"}, map[string]any{"n": 1.0}, []any{"x"}}) ||
+		!reflect.DeepEqual(sc.Files, []FileRef{{URI: "kontra:task/019a0000-0000-7000-8000-000000000001/output.txt", Name: "output.txt", MediaType: "text/plain"},
+			{URI: "https://example.com/output.txt", Name: "output.txt", MediaType: "text/plain"}}) {
 		t.Errorf("structuredContent %s", scb)
 	}
 
-	// No data parts: no data member.
+	// No data parts: no data member; the answer's text in structuredContent too (D324).
 	r = renderOf(t, taskWith(a2a.TaskStateCompleted, agentText("Hello World"), nil), store.StateCompleted)
-	if _, ok := r.StructuredContent["data"]; ok || len(r.StructuredContent) != 2 || r.Content[0].Text != "Hello World" {
+	if _, ok := r.StructuredContent["data"]; ok || len(r.StructuredContent) != 3 || r.Content[0].Text != "Hello World" ||
+		string(r.StructuredContent["text"]) != `"Hello World"` {
 		t.Errorf("a text-only result: %+v", r)
+	}
+	// A task that went through a quote keeps its thread URL: structuredContent.url (D324).
+	r = renderOf(t, taskWith(a2a.TaskStateCompleted, agentText("Hello World"), map[string]any{lifecycle.MetaApproveURL: "https://app.kontra.sh/#/t/1"}), store.StateCompleted)
+	if string(r.StructuredContent["url"]) != `"https://app.kontra.sh/#/t/1"` || r.Meta != nil {
+		t.Errorf("a quoted task's result: %+v", r)
 	}
 
 	for _, tc := range []struct {
@@ -289,10 +309,11 @@ func TestRender(t *testing.T) {
 		if tc.key != "" && r.Meta[tc.key] != tc.value {
 			t.Errorf("%s: _meta %v, want %s = %s", tc.state, r.Meta, tc.key, tc.value)
 		}
-		var st string
+		var st, text string
 		_ = json.Unmarshal(r.StructuredContent["state"], &st)
-		if st != string(tc.a2a) {
-			t.Errorf("%s: structured state %s", tc.state, st)
+		_ = json.Unmarshal(r.StructuredContent["text"], &text)
+		if st != string(tc.a2a) || text != tc.text {
+			t.Errorf("%s: structured state %s, text %q", tc.state, st, text)
 		}
 	}
 }

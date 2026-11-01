@@ -197,13 +197,26 @@ func (h *Handler) quoted(rq *request, row *store.TaskRow, svc store.ServiceRef, 
 	writeResult(rq.w, rq.sid, rq.msg.ID, quotedResult(row))
 }
 
-// quotedResult is the plain answer for a quoted task (§12.3): the URL and the task id as text, {taskId, state} and
-// the URL in _meta (D21).
+// quotedResult is the plain answer for a quoted task (§12.3): the URL, the task id and the quote's expiry as text;
+// structuredContent with the same text, the URL as url and the quote's terms (D324: a client may show nothing but
+// structuredContent); the URL in _meta (D21). The URL is the one the URL elicitation carries.
 func quotedResult(row *store.TaskRow) json.RawMessage {
 	u := approveURL(row.Snapshot)
+	expires := ""
+	if row.QuoteExpiresAt != nil {
+		expires = row.QuoteExpiresAt.UTC().Format(time.RFC3339)
+	}
 	text := "This task needs a person to approve its quote before it runs: open " + u + " to review and approve it (task " +
-		row.ID.String() + "). Then call hire again with the same arguments to get its result."
-	return textResult(text, PlainState{TaskID: row.ID.String(), State: string(row.State.A2A())}, map[string]any{MetaApproveURL: u})
+		row.ID.String()
+	if expires != "" {
+		text += "; the quote expires at " + expires
+	}
+	text += "). Then call hire again with the same arguments to get its result."
+	res := HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text}
+	if res.URL != "" && expires != "" {
+		res.Quote = &QuoteTerms{ApproveURL: res.URL, ExpiresAt: expires}
+	}
+	return textResult(text, res, map[string]any{MetaApproveURL: u})
 }
 
 // writeCreateTask answers a task-augmented hire with its CreateTaskResult (§11.5 step 2, §12.3).
@@ -283,8 +296,9 @@ func extensionsText(who, tool string, uris []string, a2aURL string) string {
 // refused answers an error the Hirer returned (the A2A route's own refusals): an anonymous tenant's cap is 429 with
 // -32600 "rate limited" and Retry-After (as the MCP relay answers it, spec/tunnel.md §6.2); "admission unavailable"
 // and a lifecycle that did not accept the request in time are 503 with -32603 (§13.1, §7); any other A2A refusal
-// (Admission's refusal with its code and message, "anonymous storage limit", a part or a follow-up refused) is that
-// JSON-RPC error; anything else is the gate's own failure (what names the request in the log).
+// (Admission's refusal with its code and message, an operator's code as it is (D325), "anonymous storage limit", a
+// part or a follow-up refused) is that JSON-RPC error; anything else is the gate's own failure (what names the request
+// in the log).
 func (h *Handler) refused(rq *request, what string, err error) {
 	id := rq.msg.ID
 	code, msg := relay.CodeOf(err)
@@ -393,7 +407,8 @@ func turnOver(row *store.TaskRow, asked, after int64) bool {
 	return after == 0 || asked > after
 }
 
-// plainAnswer is the CallToolResult of a plain hire or reply for the task as row has it (§12.2).
+// plainAnswer is the CallToolResult of a plain hire or reply for the task as row has it (§12.2): its text in content
+// and, with taskId, state and the task's thread URL, in structuredContent (D324).
 func (h *Handler) plainAnswer(ctx context.Context, row *store.TaskRow, p auth.Principal) json.RawMessage {
 	switch {
 	case row.State.Terminal():
@@ -412,13 +427,13 @@ func (h *Handler) plainAnswer(ctx context.Context, row *store.TaskRow, p auth.Pr
 		return quotedResult(row)
 	case row.State == store.StateInputRequired:
 		_, text, _ := Question(row.Snapshot, Reader{Principal: p, Era: mcpwire.EraLegacy})
-		return textResult(text, PlainState{TaskID: row.ID.String(), State: string(row.State.A2A())},
+		return textResult(text, HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text},
 			map[string]any{MetaInputRequired: true})
 	}
 	follow := strings.TrimRight(h.deps.PublicURL, "/") + "/agents/" + h.serviceRef(row)
 	text := "The task " + row.ID.String() + " is still " + string(row.State) + ". Follow it with GetTask at " + follow +
 		" (the same credential), or call reply when it asks a question."
-	return textResult(text, PlainState{TaskID: row.ID.String(), State: string(row.State.A2A())}, nil)
+	return textResult(text, HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text}, nil)
 }
 
 // serviceRef is the ref of a task's service on this gate (the tenant's slug is not on the row: a single-tenant gate

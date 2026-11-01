@@ -5356,3 +5356,92 @@ unpublishing, and the stale file then refused naming the unpublished state), `Te
 it is at, then the current one published), `TestPublishControlPlaneIsTheIssuer`, `TestPublishRefusals` (`403
 fresh_login_required`, `422` with an escape sequence printed escaped, a redirect not followed, an answer that is not a
 listing), `TestPublishNoSignIn`; `cmd/kontra`'s `TestRun` rows and `TestPublishDryRun`.
+
+## From M5's gate G3 (1 Nov)
+
+M5's gate G3 ("from Claude as a stock MCP client, `hire` returns the thread URL, Accept holds, Decline leaves no Stripe
+object") ran stock Claude Code 2.1.281 against staging and recorded two findings against this repository, the first as
+the conflict C59. Both are **decided under the owner's standing instruction, 1 Nov**.
+
+### D324. The hire result carries in `structuredContent` what a person needs: the thread URL, the quote, the answer — **decided under the owner's standing instruction, 1 Nov** (resolves C59; amends D289, completes D21)
+
+C59: [`relay.md`](../spec/relay.md) §12.2 and §12.3 made a plain `hire`'s `structuredContent` `{taskId, state, data?}`
+(D289), and put a quoted task's approve URL, the task's thread (D188), only in the text and `_meta` (D21). Claude Code
+2.1.281, speaking 2026-07-28 with the gate, calls `hire` without the tasks extension and shows its model and its user
+only a tool result's `structuredContent` when it has one. G3 saw it on staging: a free `hire` whose agent answered "hi
+from G3" showed Claude `{taskId, state: TASK_STATE_COMPLETED}` and nothing else, and against a copy replaying the
+gate's quoted answer, Claude in `-p` and interactive mode alike said no URL was returned. With the URL in
+`structuredContent`, or with a text-only result, Claude quoted the exact URL. A `-32042` URL elicitation shows a
+proper dialog with the URL in interactive Claude Code, but `-p` cancels it at once, and 2026-07-28 removed it (D24,
+D269): the gate's milestone, "`hire` returns the thread URL" from a stock client, cannot rest on it. Decision (§12.2,
+§12.3; [`schema/mcp-tools.json`](../spec/schema/mcp-tools.json) `$defs/hireResult`):
+
+- **One result shape, `HireResult`, for every `CallToolResult` `hire` and `reply` answer** (plain, both eras), for
+  `tasks/result` of a `hire` task and for the `result` of a modern `tasks/get`, so task-augmented hires end in it too:
+  `taskId` and `state` always; `url`, the task's approve URL exactly as the URL elicitation carries it, whenever the
+  task has one (it keeps `kontra.approve.url` after it leaves `quoted`, so the answer after Accept has it too);
+  `quote` `{approveUrl, expiresAt}` while `quoted`, hooks.json's `QuoteTerms`, whose expiry the text now states as well;
+  `text`, the text of the content's text blocks other than data parts' JSON (the agent's answer, its question with the
+  reply-tool hint, or the gate's quoted, still-running or failure text); `data` as D289 had it; `files`, each file
+  part's `{uri, name?, mediaType?}`, so a presigned link reaches a model that sees nothing else.
+- **`text` joins what the content shows, bounded as it is.** Each message's and artifact's text parts are joined as
+  `statusMessage` joins a message's (a streamed answer's chunks are parts of one artifact), and the message and the
+  artifacts one per line. No new bound: each inline part is at most 256 KiB, a larger one being a file (§10.4), and the
+  task's bytes are bounded by `limits.task_bytes` (§6.6), as the content's are.
+- **The content stays.** MCP says a tool that returns structured content SHOULD also return it as text, for clients
+  that read only content. The gate's content already is that text, readable rather than a JSON dump: the answer's
+  text, data parts as JSON and files as resources, and a quoted task's URL, id and expiry. A JSON copy of
+  `structuredContent` beside it would show content-only clients every answer twice, so none is added.
+- **`hire` and `reply` declare it as their `outputSchema`, strict** (`additionalProperties: false`, the A2A states as
+  an enum, `url` and `approveUrl` `^https://`), in both eras' `tools/list`. A stock client validates
+  `structuredContent` against it and fails the call when it does not match (the TypeScript SDK 1.x even for an
+  `isError` result), so every shape is held to it: the Go shapes against a validator of the schema's keywords and
+  against the fixtures `spec/schema/examples/mcp-tools.hireResult.*.json`, which `make check-specs` validates with a
+  full 2020-12 validator, and the stock TypeScript SDK's own validator in the e2e test. The schema uses only keywords
+  draft-07 and 2020-12 read alike and names no `$schema`, since a client's validator may default to either.
+- **What is not built.** A task Admission allowed without a quote has no `url`: the gate never builds the operator's
+  URL (D188), and Admission's `allow` names none. An operator that wants every hire to answer its thread would need
+  `allow` to carry one, a hooks.json change of its own. `-32042` for a modern client that declares `elicitation.url`
+  (G3's optional suggestion) is not added: 2026-07-28 removed it, and the structured result is what reaches `-p`.
+
+Tested: `TestHireResultShapes` and `TestHireResultSchema` (`internal/gatemcp`: quoted, completed with data and files,
+completed without a thread, failed, rejected, declined, input-required and still working; each validated against the
+`outputSchema` and equal to its fixture; the validator refusing an extra member, a missing state, an unknown state, a
+non-UUID id, an `http` URL, a quote without its expiry, an empty `data`), `TestToolsListSchemas` and
+`TestModernToolsList` (the `outputSchema` is `hireResult`, on `hire` and `reply` only, the same in both eras),
+`TestRender`; `TestGateMCPHireStructured` (`internal/gate`, a whole replica read through `structuredContent` alone: a
+modern client declaring URL and form elicitation without the tasks extension, as Claude Code does, gets the quoted
+task's thread as `url` and `quote.approveUrl`, byte-equal to the URL a legacy session's `-32042` carries; after the
+approval the retried `hire` is the answer "Hello World" with the URL; a free hire's text, data and files with no
+`url`; a question and `reply`'s answer); e2e `gate_mcp_stock_client` (`@modelcontextprotocol/client` 2.4.0 on Node 24
+in 2026-07-28 and `@modelcontextprotocol/sdk` 1.32.2 in 2025-11-25, unmodified: every call accepted by the client's own
+validator, which accepts each fixture and refuses bad shapes), and the `gate_mcp_hire` and `gate_mcp_hire_quote` rows.
+
+### D325. An operator's refusal code reaches the caller: as it is on `/mcp`, in the error's details on A2A — **decided under the owner's standing instruction, 1 Nov** (carries out Cloud's D-M5-10 on the public routes)
+
+G3's second finding: the A2A route mapped an Admission refusal code it did not know to `a2a.ErrUnauthorized`
+(`interceptors.go`), so Cloud's `-32060` `seller_not_payable` to `-32063` `listing_unavailable` (its D-M5-10) reached
+`/mcp` as `-32603`, the code of the gate's own failure, and A2A as `UNAUTHORIZED`: only the message survived, and a
+client could not tell a seller who cannot be paid from a missing card or a cap. `/mcp/{svc}` already answered every
+code as it is; `relay.md` §13.1 said nothing of codes. Decision (§13.1; `hooks.json`'s `refusal.code` describes it):
+
+- **The operator's range is `-32099` to `-32050`**, the upper half of JSON-RPC's implementation-defined server errors
+  (`-32099` to `-32000`), which A2A (`-32001` to `-32009`; a2a-go's `-32000`) and MCP (`-32000` to `-32042` so far:
+  `-32001`, `-32002`, `-32020` to `-32022`, `-32042`) do not use. Cloud's codes lie in it.
+- **`/mcp` answers such a code as it is**, with the refusal's message, in both eras (`relay.CodeOf` reads it from the
+  refusal), as `/mcp/{svc}` does.
+- **The A2A routes answer `PERMISSION_DENIED`** (JSON-RPC `-31403`, HTTP+JSON `403`), the nearest A2A error: the
+  operator decided the caller may not do this now, which is not a malformed request, a missing task or the gate's own
+  failure (`-32000` would be HTTP `500`, which clients retry). The code is kept in the error's details as a
+  `google.protobuf.Struct` `{"code": <code>}` before the `ErrorInfo`, which a2a-go's client reads into `Details` and
+  which both bindings write (the gate's own copy of the mapping, `internal/sse`, is held to a2a-go's by
+  `TestErrorMappingDrift`). The gate interprets no operator code: the range is all it reads.
+- **Everything else is unchanged.** A2A's own codes are their errors; any other code (`-32042` included, so an
+  operator cannot make a client look for an elicitation that is not there) is `PERMISSION_DENIED` with the message
+  alone on A2A and `-32603` on `/mcp`.
+
+Tested: `TestDeniedCodes` (`internal/relay`: `-32060` to `-32063` and the range's ends are `PERMISSION_DENIED` with the
+code in the JSON-RPC data and the HTTP+JSON details, and `CodeOf` gives the code; `-32049`, `-32100`, `-32042` and `403`
+are not; A2A codes stay their errors; a deny without a refusal or a message), `TestAdmissionRefusals` (a `-32061` deny
+through the interceptors), and `TestGateMCPHireStructured` (a whole replica: `-32060` on `/mcp` in both eras, `-31403`
+with the code in JSON-RPC's data, `403` `PERMISSION_DENIED` with it in HTTP+JSON's details, no task).

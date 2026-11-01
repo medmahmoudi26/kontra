@@ -64,8 +64,8 @@ The gate serves its own MCP endpoint, `https://gateway.kontra.sh/mcp`, as a firs
 server: `search`, `describe`, `hire` (task-augmented), `reply`, plus MCP Tasks. An MCP client's
 session is the agent's and can never approve money. `hire` creates the task in a pre-hold state
 `quoted`, posts the quote card into the task's thread, and answers with a URL-mode elicitation
-(MCP 2025-11-25; the URL in the tool result text for older clients) whose URL is the thread itself,
-`app.kontra.sh/#/t/<taskId>` (D188). The person accepts the quote there; the hold follows. Decline or quote
+(MCP 2025-11-25; for other clients the URL in the tool result's text and `structuredContent`, D324)
+whose URL is the thread itself, `app.kontra.sh/#/t/<taskId>` (D188). The person accepts the quote there; the hold follows. Decline or quote
 expiry cancels with nothing held. Thread SSE and the client's `tasks/get` / `tasks/result` read the
 same `task_events`, so the task can be followed and answered from either side. A2A-native buyer
 agents get the same thread URL in `input-required` metadata (`kontra.approve.url`).

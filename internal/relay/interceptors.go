@@ -388,21 +388,45 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 			return ctx, nil, admissionUnavailable()
 		}
 	case hooks.Deny:
-		code, msg := a2a.ErrUnauthorized, "admission denied"
-		if d.Refusal != nil {
-			if e, ok := errorForCode[d.Refusal.Code]; ok {
-				code = e
-			}
-			if d.Refusal.Message != "" {
-				msg = d.Refusal.Message
-			}
-		}
-		return ctx, nil, a2a.NewError(code, msg)
+		return ctx, nil, denied(d.Refusal)
 	default:
 		return ctx, nil, admissionUnavailable()
 	}
 	return hooks.WithAdmitted(ctx, hooks.Admitted{TaskID: string(taskID), Decision: d}), nil, nil
 }
+
+// denied is the error of an Admission deny (spec §13.1, D325): a refusal code that names an A2A error is that error;
+// one of the operator's codes (hooks.OperatorCode) is PERMISSION_DENIED (a2a.ErrUnauthorized, the nearest A2A error:
+// the caller may not do this, as the operator decided) carrying the code, which the A2A bindings write in the error's
+// data ({"code": <code>}) and /mcp answers as it is (CodeOf); any other is PERMISSION_DENIED. The message is the
+// refusal's, "admission denied" when it has none.
+func denied(r *hooks.Refusal) error {
+	sentinel, msg := a2a.ErrUnauthorized, "admission denied"
+	if r == nil {
+		return a2a.NewError(sentinel, msg)
+	}
+	if r.Message != "" {
+		msg = r.Message
+	}
+	if e, ok := errorForCode[r.Code]; ok {
+		return a2a.NewError(e, msg)
+	}
+	if hooks.OperatorCode(r.Code) {
+		return a2a.NewError(&OperatorRefusalError{Code: r.Code}, msg).WithDetails(map[string]any{"code": r.Code})
+	}
+	return a2a.NewError(sentinel, msg)
+}
+
+// OperatorRefusalError is an Admission deny whose code is the operator's (hooks.OperatorCode; spec §13.1, D325). It
+// is a2a.ErrUnauthorized to every A2A binding (it unwraps to it) and its code to /mcp (CodeOf).
+type OperatorRefusalError struct {
+	Code int
+}
+
+func (e *OperatorRefusalError) Error() string { return a2a.ErrUnauthorized.Error() }
+
+// Unwrap makes the refusal PERMISSION_DENIED wherever an A2A binding maps it.
+func (e *OperatorRefusalError) Unwrap() error { return a2a.ErrUnauthorized }
 
 // admissionUnavailable is Admission failing closed (spec §13.1): -32603 "admission unavailable", which the HTTP+JSON
 // binding answers 503 (the error carries lifecycle.ErrUnavailable for sse.HTTPError, as an Update not accepted in

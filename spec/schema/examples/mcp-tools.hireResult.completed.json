@@ -1,0 +1,23 @@
+{
+  "taskId": "019a0000-0000-7000-8000-000000000001",
+  "state": "TASK_STATE_COMPLETED",
+  "url": "https://app.kontra.sh/#/t/019a0000-0000-7000-8000-000000000001",
+  "text": "the service ended the task: completed\nHello World",
+  "data": [
+    {
+      "n": 1
+    }
+  ],
+  "files": [
+    {
+      "uri": "kontra:task/019a0000-0000-7000-8000-000000000001/output.txt",
+      "name": "output.txt",
+      "mediaType": "text/plain"
+    },
+    {
+      "uri": "https://example.com/output.txt",
+      "name": "output.txt",
+      "mediaType": "text/plain"
+    }
+  ]
+}

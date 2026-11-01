@@ -21,12 +21,13 @@ import (
 // (examples/sellers/tck, a stock seller that completes at once) and the in-test seller (the TCK seller's artifact
 // kinds, a slow exec, a failing exec). Asserted, clause by clause:
 //
-//   - a plain hire that ends within the wait answers the rendered outcome and structuredContent exactly {taskId, state}
-//     (no data without data parts), the task being an ordinary A2A task marked hired;
+//   - a plain hire that ends within the wait answers the rendered outcome and structuredContent exactly {taskId, state,
+//     text} (no data without data parts; the text the content's, D324), the task being an ordinary A2A task marked
+//     hired;
 //   - a plain hire still running after the 25 s wait answers {taskId, state: working} with the A2A URL that follows it;
 //   - a task-augmented hire answers CreateTaskResult; tasks/result (on B) renders text parts as text, data parts as JSON
 //     text and in structuredContent.data, a raw file part as an embedded resource and a URL part as a resource_link;
-//     structuredContent is {taskId, state, data};
+//     structuredContent is {taskId, state, text, data, files};
 //   - a failed upstream is a CallToolResult with isError and _meta sh.kontra/failure, never a JSON-RPC error;
 //   - tasks/list lists only this buyer's hire tasks, newest first: not the buyer's ordinary A2A task (SendMessage with
 //     the same API key), whose tasks/get is -32602 as an unknown task's; another buyer's tasks/list is empty and its
@@ -86,14 +87,16 @@ func TestGateMCPHire(t *testing.T) {
 	s := OpenGateSession(t, ctx, a, h.APIKey, `{}`)
 	sb := s.On(b)
 
-	// A plain hire that completes at once, on the TCK seller: rendered text, structuredContent {taskId, state}.
+	// A plain hire that completes at once, on the TCK seller: rendered text, structuredContent {taskId, state, text}, the
+	// text the content's (D324).
 	r := Tool(t, s.Tool("hire", `{"service":"tck","message":"tck-complete-task hi"}`))
 	if r.IsError || r.State() != "TASK_STATE_COMPLETED" || r.TaskID() == "" || !strings.HasPrefix(r.Text(), "Unhandled messageId prefix: ") {
 		t.Fatalf("a plain fast hire: %+v", r)
 	}
 	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(r.StructuredRaw, &keys); err != nil || len(keys) != 2 || keys["taskId"] == nil || keys["state"] == nil {
-		t.Errorf("structuredContent of a hire without data parts: %s, want exactly {taskId, state}", r.StructuredRaw)
+	if err := json.Unmarshal(r.StructuredRaw, &keys); err != nil || len(keys) != 3 || keys["taskId"] == nil || keys["state"] == nil ||
+		r.Structured.Text != r.Text() {
+		t.Errorf("structuredContent of a hire without data parts: %s, want exactly {taskId, state, text}", r.StructuredRaw)
 	}
 	fast := r.TaskID()
 	if !scalar[bool](t, h, `select hired and protocol = 'a2a' and first_request is not null from kontra.tasks where id::text = $1`, fast) {

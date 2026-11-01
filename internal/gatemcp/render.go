@@ -62,11 +62,12 @@ func textResult(text string, structured any, meta map[string]any) json.RawMessag
 	return b
 }
 
-// Render is an ended hire task's outcome as MCP content (§12.2, D289): text parts as text, data parts as text (the
-// value's JSON) and in structuredContent.data, file parts as resource blocks (raw bytes embedded, a URL as a
-// resource_link), from the final status message and then each artifact; structuredContent {taskId, state, data?}
-// with the A2A state. A CallToolResult whatever the state: isError for failed, rejected and canceled, with the final
-// status message as text (the failure's reason text when it has none) and sh.kontra/failure (§11.8's reason; a
+// Render is an ended hire task's outcome as MCP content (§12.2, D289, D324): text parts as text, data parts as text
+// (the value's JSON) and in structuredContent.data, file parts as resource blocks (raw bytes embedded, a URL as a
+// resource_link) and in structuredContent.files, from the final status message and then each artifact;
+// structuredContent a HireResult with the A2A state, the task's thread URL when it has one, and the text of the
+// content's text blocks. A CallToolResult whatever the state: isError for failed, rejected and canceled, with the
+// final status message as text (the failure's reason text when it has none) and sh.kontra/failure (§11.8's reason; a
 // rejected task's is "rejected") or sh.kontra/canceled in _meta. Kontra-blob parts must have been rendered as
 // presigned URLs before (blob.Renderer.Task).
 func Render(task *a2a.Task, state store.State) (json.RawMessage, error) {
@@ -78,9 +79,12 @@ func render(task *a2a.Task, state store.State) callToolResult {
 	var (
 		blocks []content
 		data   []any
+		files  []FileRef
+		texts  []string // the text of each message and artifact: its text parts, joined as statusText joins them
 		n      int
 	)
 	add := func(parts a2a.ContentParts) {
+		var text strings.Builder
 		for _, p := range parts {
 			if p == nil {
 				continue
@@ -89,6 +93,7 @@ func render(task *a2a.Task, state store.State) callToolResult {
 			switch v := p.Content.(type) {
 			case a2a.Text:
 				blocks = append(blocks, content{Type: "text", Text: string(v)})
+				text.WriteString(string(v))
 			case a2a.Data:
 				js, err := json.Marshal(v.Value)
 				if err != nil {
@@ -97,15 +102,21 @@ func render(task *a2a.Task, state store.State) callToolResult {
 				blocks = append(blocks, content{Type: "text", Text: string(js)})
 				data = append(data, v.Value)
 			case a2a.Raw:
+				uri := partURI(task, p, n)
 				blocks = append(blocks, content{Type: "resource", Resource: &resource{
-					URI: partURI(task, p, n), MIMEType: p.MediaType, Blob: base64.StdEncoding.EncodeToString(v)}})
+					URI: uri, MIMEType: p.MediaType, Blob: base64.StdEncoding.EncodeToString(v)}})
+				files = append(files, FileRef{URI: uri, Name: p.Filename, MediaType: p.MediaType})
 			case a2a.URL:
 				name := p.Filename
 				if name == "" {
 					name = string(v)
 				}
 				blocks = append(blocks, content{Type: "resource_link", URI: string(v), Name: name, MIMEType: p.MediaType})
+				files = append(files, FileRef{URI: string(v), Name: p.Filename, MediaType: p.MediaType})
 			}
+		}
+		if text.Len() > 0 {
+			texts = append(texts, text.String())
 		}
 	}
 	var meta map[string]any
@@ -122,19 +133,19 @@ func render(task *a2a.Task, state store.State) callToolResult {
 		}
 	}
 	isError := false
+	gate := "" // what the gate says of an ended task whose status message has no text
 	switch state {
 	case store.StateFailed, store.StateRejected:
 		isError = true
 		meta = map[string]any{MetaFailure: failureOf(state, md)}
 		if statusText(task) == "" {
-			text := rejectedText
+			gate = rejectedText
 			if state == store.StateFailed {
-				text = store.ReasonText(store.FailureReason(failureOf(state, md)))
-				if text == "" {
-					text = "the task failed"
+				gate = store.ReasonText(store.FailureReason(failureOf(state, md)))
+				if gate == "" {
+					gate = "the task failed"
 				}
 			}
-			blocks = append([]content{{Type: "text", Text: text}}, blocks...)
 		}
 	case store.StateCanceled:
 		isError = true
@@ -144,18 +155,23 @@ func render(task *a2a.Task, state store.State) callToolResult {
 		}
 		meta = map[string]any{MetaCanceled: why}
 		if statusText(task) == "" {
-			blocks = append([]content{{Type: "text", Text: canceledText(why)}}, blocks...)
+			gate = canceledText(why)
 		}
 	}
-	if len(blocks) == 0 {
-		blocks = []content{{Type: "text", Text: "the task " + string(state)}}
+	if gate == "" && len(blocks) == 0 {
+		gate = "the task " + string(state)
+	}
+	if gate != "" {
+		blocks = append([]content{{Type: "text", Text: gate}}, blocks...)
+		texts = append([]string{gate}, texts...)
 	}
 	id := ""
 	if task != nil {
 		id = string(task.ID)
 	}
 	return callToolResult{Content: blocks, IsError: isError, Meta: meta,
-		StructuredContent: PlainState{TaskID: id, State: string(state.A2A()), Data: data}}
+		StructuredContent: HireResult{TaskID: id, State: string(state.A2A()), URL: threadURL(task),
+			Text: strings.Join(texts, "\n"), Data: data, Files: files}}
 }
 
 // FailureRejected is sh.kontra/failure of a hire task the agent rejected (A2A rejected, MCP "failed"): §12.2 gives
@@ -262,6 +278,16 @@ func approveURL(task *a2a.Task) string {
 	}
 	u, _ := task.Metadata[lifecycle.MetaApproveURL].(string)
 	return u
+}
+
+// threadURL is a HireResult's url: the task's approve URL, its thread on the operator's page (§12.3 step 3, D188),
+// which a task keeps after it leaves quoted; "" for a task that was never quoted (the gate never builds the
+// operator's URL) and for one that is not https:// (hooks.CheckQuote admits no other, and the outputSchema says so).
+func threadURL(task *a2a.Task) string {
+	if u := approveURL(task); strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return ""
 }
 
 // mcpTime is an MCP timestamp: ISO 8601 in UTC, to the millisecond.
