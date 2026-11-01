@@ -16,7 +16,7 @@ than all of them: [`tunnel.md`](../spec/tunnel.md), [`relay.md`](../spec/relay.m
 [`ext-escrow.md`](../spec/ext-escrow.md), [`ext-sealed.md`](../spec/ext-sealed.md),
 [`ext-input-schema.md`](../spec/ext-input-schema.md), and the schema, one file per milestone
 ([`0001_init.sql`](../migrations/0001_init.sql), [`0002_m3.sql`](../migrations/0002_m3.sql),
-[`0003_m4.sql`](../migrations/0003_m4.sql)). Where a spec differs from a document, the
+[`0003_m4.sql`](../migrations/0003_m4.sql), [`0004_m5.sql`](../migrations/0004_m5.sql)). Where a spec differs from a document, the
 spec wins once the owner has signed it, and the difference is a numbered entry in
 [`decisions.md`](decisions.md) with its reason and evidence. Each milestone's decisions are under its own heading
 there (M4's, D268 onward under the M4 headings, were numbered after M3's review had merged).

@@ -8,7 +8,7 @@ import (
 )
 
 // The embedded set is exactly the files in this directory, numbered from 0001 with no gap (one per milestone that
-// changes the schema: 0001 M1, 0002 M3, 0003 M4), and each is a goose single-file migration.
+// changes the schema: 0001 M1, 0002 M3, 0003 M4, 0004 M5), and each is a goose single-file migration.
 func TestEmbeddedMigrations(t *testing.T) {
 	names, err := fs.Glob(FS, "*.sql")
 	if err != nil {
@@ -17,7 +17,7 @@ func TestEmbeddedMigrations(t *testing.T) {
 	if len(names) == 0 || names[0] != "0001_init.sql" {
 		t.Fatalf("embedded migrations = %v, want 0001_init.sql first", names)
 	}
-	want := []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql"}
+	want := []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql"}
 	if len(names) != len(want) {
 		t.Fatalf("embedded migrations = %v, want %v", names, want)
 	}

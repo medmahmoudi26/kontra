@@ -3,7 +3,9 @@ package audit
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"sync"
@@ -11,6 +13,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/pgtest"
 )
@@ -153,5 +158,202 @@ func TestAppendChain(t *testing.T) {
 	}
 	if _, err := Append(ctx, tx, "x", Fields{"f": 1.5}); err == nil {
 		t.Error("a float appended")
+	}
+}
+
+// sqlAppend appends rowJCS through kontra.audit_append (migration 0004, D317) in a transaction of its own (opts: its
+// isolation), committing it when commit is set, and returns the hash the function answered.
+func sqlAppend(ctx context.Context, pool *pgxpool.Pool, rowJCS []byte, commit bool, opts pgx.TxOptions) ([]byte, error) {
+	tx, err := pool.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var h []byte
+	if err := tx.QueryRow(ctx, `select kontra.audit_append($1)`, rowJCS).Scan(&h); err != nil {
+		return nil, err
+	}
+	if commit {
+		return h, tx.Commit(ctx)
+	}
+	return h, nil
+}
+
+// operatorRow is an operator's row as it would write one: RFC 8785 bytes with event and at.
+func operatorRow(t *testing.T, i int) []byte {
+	t.Helper()
+	b, err := Canonical(Fields{"event": "service.published", "at": time.Now(), "tenant": "acme", "service": "hi", "i": i})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// M5-G2 (D317): kontra.audit_append and the Go appends make one chain. Interleaved, then concurrent, appends of both
+// writers verify as one chain (audit.Verify); the function's answer is the row's hash, sha256(prev || row) as Hash
+// computes it; a rolled-back call leaves nothing; a transaction above read committed is refused; an operator's role
+// granted only USAGE on kontra and EXECUTE on the function appends through it and can neither insert into nor read
+// kontra.audit, and a role without the grant cannot call it; a raw insert that links a stale head is refused
+// (audit_prev_hash), so no writer forks the chain.
+func TestSQLAppendJoinsTheChain(t *testing.T) {
+	pool := pgtest.New(t)
+	ctx := context.Background()
+	goAppend := func(i int) error {
+		return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			_, err := Append(ctx, tx, "test.event", Fields{"i": i})
+			return err
+		})
+	}
+	if err := goAppend(0); err != nil {
+		t.Fatal(err)
+	}
+	answers := map[string][]byte{} // hash → row_jcs, from the function's answers
+	var mu sync.Mutex
+	sql := func(i int, commit bool) {
+		row := operatorRow(t, i)
+		h, err := sqlAppend(ctx, pool, row, commit, pgx.TxOptions{})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if commit {
+			mu.Lock()
+			answers[string(h)] = row
+			mu.Unlock()
+		}
+	}
+	sql(1, true)
+	if err := goAppend(2); err != nil {
+		t.Fatal(err)
+	}
+	sql(-1, false) // rolled back
+	sql(3, true)
+	var wg sync.WaitGroup
+	for i := 4; i < 44; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				if err := goAppend(i); err != nil {
+					t.Error(err)
+				}
+				return
+			}
+			sql(i, true)
+		}()
+	}
+	wg.Wait()
+	rows, err := Verify(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 44 || len(answers) != 22 {
+		t.Fatalf("%d rows (want 44), %d answered by the function (want 22)", len(rows), len(answers))
+	}
+	for i, r := range rows {
+		row, bySQL := answers[string(r.Hash)]
+		if !bySQL {
+			continue
+		}
+		if !bytes.Equal(row, r.RowJCS) {
+			t.Errorf("row n %d: the function's hash names another row", r.N)
+		}
+		var prev []byte
+		if i > 0 {
+			prev = rows[i-1].Hash
+		}
+		if h := Hash(prev, row); !bytes.Equal(h[:], r.Hash) {
+			t.Errorf("row n %d: the function's hash is not Hash(prev, row)", r.N)
+		}
+		delete(answers, string(r.Hash))
+	}
+	if len(answers) != 0 {
+		t.Errorf("%d answers name no row", len(answers))
+	}
+
+	// Above read committed: refused, nothing appended.
+	for _, iso := range []pgx.TxIsoLevel{pgx.RepeatableRead, pgx.Serializable} {
+		var pe *pgconn.PgError
+		if _, err := sqlAppend(ctx, pool, operatorRow(t, 99), true, pgx.TxOptions{IsoLevel: iso}); !errors.As(err, &pe) || pe.Code != "25000" {
+			t.Errorf("%s: %v, want SQLSTATE 25000", iso, err)
+		}
+	}
+	// Not a row: refused.
+	for _, bad := range []string{`{"event":"x"}`, `[]`, `{"at":"2026-11-01T00:00:00Z","event":""}`} {
+		var pe *pgconn.PgError
+		if _, err := sqlAppend(ctx, pool, []byte(bad), true, pgx.TxOptions{}); !errors.As(err, &pe) || pe.Code != "22023" {
+			t.Errorf("%s: %v, want SQLSTATE 22023", bad, err)
+		}
+	}
+	if rows, err := Verify(ctx, pool); err != nil || len(rows) != 44 {
+		t.Fatalf("after the refusals: %d rows, %v", len(rows), err)
+	}
+
+	// The grants of migration 0004's header: an operator's role appends through the function only.
+	var r [6]byte
+	_, _ = rand.Read(r[:])
+	op, other := pgx.Identifier{"kontra_test_op_" + hex.EncodeToString(r[:])}.Sanitize(), pgx.Identifier{"kontra_test_no_" + hex.EncodeToString(r[:])}.Sanitize()
+	for _, role := range []string{op, other} {
+		if _, err := pool.Exec(ctx, "create role "+role+" nologin"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			c := context.Background()
+			_, _ = pool.Exec(c, "drop owned by "+role)
+			_, _ = pool.Exec(c, "drop role if exists "+role)
+		})
+		if _, err := pool.Exec(ctx, "grant usage on schema kontra to "+role); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pool.Exec(ctx, "grant execute on function kontra.audit_append(bytea) to "+op); err != nil {
+		t.Fatal(err)
+	}
+	asRole := func(role string, fn func(tx pgx.Tx) error) error {
+		return pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, "set local role "+role); err != nil {
+				return err
+			}
+			return fn(tx)
+		})
+	}
+	denied := func(err error) bool {
+		var pe *pgconn.PgError
+		return errors.As(err, &pe) && pe.Code == "42501"
+	}
+	var opHash []byte
+	if err := asRole(op, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `select kontra.audit_append($1)`, operatorRow(t, 100)).Scan(&opHash)
+	}); err != nil || len(opHash) != 32 {
+		t.Fatalf("the operator's role through the function: %x %v", opHash, err)
+	}
+	if err := asRole(op, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `insert into kontra.audit (prev_hash, row_jcs, hash) values ($1, 'x', sha256('raw'))`, opHash)
+		return err
+	}); !denied(err) {
+		t.Errorf("the operator's role inserting into kontra.audit: %v, want permission denied", err)
+	}
+	if err := asRole(op, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `select count(*) from kontra.audit`)
+		return err
+	}); !denied(err) {
+		t.Errorf("the operator's role reading kontra.audit without a select grant: %v, want permission denied", err)
+	}
+	if err := asRole(other, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `select kontra.audit_append($1)`, operatorRow(t, 101))
+		return err
+	}); !denied(err) {
+		t.Errorf("a role without the execute grant: %v, want permission denied", err)
+	}
+
+	// A raw insert linked to a stale head is a unique violation, not a fork; the chain still verifies with the
+	// operator's row last.
+	var pe *pgconn.PgError
+	if _, err := pool.Exec(ctx, `insert into kontra.audit (prev_hash, row_jcs, hash) values ($1, 'x', sha256('fork'))`, rows[10].Hash); !errors.As(err, &pe) || pe.Code != "23505" {
+		t.Errorf("a raw insert linked to a stale head: %v, want a unique violation", err)
+	}
+	rows, err = Verify(ctx, pool)
+	if err != nil || len(rows) != 45 || !bytes.Equal(rows[44].Hash, opHash) {
+		t.Fatalf("the chain after every writer: %d rows, %v", len(rows), err)
 	}
 }

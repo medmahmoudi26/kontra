@@ -11,6 +11,11 @@
 // v4.1.
 //
 // A row never carries a secret: callers pass ids, prefixes and names, never a key, a token or a hash.
+//
+// An operator that writes the gate's tables (Cloud's control plane: services, enrollment tokens, API keys and their
+// revocations, spec/relay.md §13.5) appends its rows through the SQL function kontra.audit_append(row_jcs bytea)
+// (migrations/0004_m5.sql, D317), which takes LockID, links the row exactly as Append does and returns its hash; the
+// unique index audit_prev_hash refuses a second row naming the same predecessor, so neither writer can fork the chain.
 package audit
 
 import (
@@ -31,7 +36,8 @@ import (
 
 // LockID is the advisory lock that serializes appends: "kontra" in ASCII, then 0x0100. The gate's other
 // key is migrate.LockID (…0001); Kontra Cloud, which may share the database, uses …0003, …0005 and …0006
-// for its own workers, so the gate's keys stay outside the low range.
+// for its own workers, so the gate's keys stay outside the low range. kontra.audit_append takes the same lock
+// (migration 0004), so the gate's appends and an operator's make one chain.
 const LockID int64 = 0x6b6f6e7472610100
 
 // Events the gate appends. Each names its subject and what happened to it.

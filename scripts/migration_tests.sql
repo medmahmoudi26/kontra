@@ -254,4 +254,66 @@ do $$ begin
     end if;
 end $$;
 
+-- 0004 (R §13.5, D317): kontra.audit_append links a row as internal/audit does, sha256(prev_hash || row_jcs), under
+-- the chain's lock, and returns the hash; the first row has no prev_hash.
+do $$
+declare h1 bytea; h2 bytea; r record;
+begin
+    h1 := kontra.audit_append(convert_to('{"at":"2026-11-01T00:00:00.000000Z","event":"test.one"}', 'UTF8'));
+    h2 := kontra.audit_append(convert_to('{"at":"2026-11-01T00:00:01+01:00","event":"test.two","n":2}', 'UTF8'));
+    select * into r from audit order by n limit 1;
+    if r.prev_hash is not null or r.hash <> h1 or h1 <> sha256(r.row_jcs) then
+        raise exception 'FAIL: the first appended row is not linked as the chain links it';
+    end if;
+    select * into r from audit order by n desc limit 1;
+    if r.prev_hash <> h1 or r.hash <> h2 or h2 <> sha256(h1 || r.row_jcs) then
+        raise exception 'FAIL: the second appended row is not sha256(prev || row)';
+    end if;
+end $$;
+-- What it refuses: nothing appended for each.
+do $$
+declare bad text; before bigint;
+begin
+    select count(*) into before from audit;
+    foreach bad in array array['', '[1]', '"x"', '{"event":"x"}', '{"at":"2026-11-01T00:00:00Z"}', '{"event":"","at":"2026-11-01T00:00:00Z"}',
+        '{"event":1,"at":"2026-11-01T00:00:00Z"}', '{"event":"x","at":"yesterday"}', '{"event":"x","at":"2026-11-01 00:00:00Z"}', '{"event":"x",'] loop
+        begin
+            perform kontra.audit_append(convert_to(bad, 'UTF8'));
+            raise exception 'FAIL: audit_append accepted %', bad;
+        exception when invalid_parameter_value then null;
+        end;
+    end loop;
+    begin
+        perform kontra.audit_append(null);
+        raise exception 'FAIL: audit_append accepted null';
+    exception when invalid_parameter_value then null;
+    end;
+    begin
+        perform kontra.audit_append('\xff7b7d'::bytea);
+        raise exception 'FAIL: audit_append accepted bytes that are not UTF-8';
+    exception when invalid_parameter_value then null;
+    end;
+    if (select count(*) from audit) <> before then
+        raise exception 'FAIL: a refused row was appended';
+    end if;
+end $$;
+-- No two rows name the same predecessor, and only the first names none (audit_prev_hash).
+do $$ begin
+    insert into audit (prev_hash, row_jcs, hash) values ((select hash from audit order by n limit 1), 'x', sha256('fork'));
+    raise exception 'FAIL: a second row linked to the first row';
+exception when unique_violation then null; end $$;
+do $$ begin
+    insert into audit (prev_hash, row_jcs, hash) values (null, 'x', sha256('second first'));
+    raise exception 'FAIL: a second row without a predecessor';
+exception when unique_violation then null; end $$;
+-- The function runs as its owner and nobody else may call it unless granted.
+do $$ begin
+    if has_function_privilege('public', 'kontra.audit_append(bytea)', 'execute') then
+        raise exception 'FAIL: PUBLIC may execute kontra.audit_append';
+    end if;
+    if not (select prosecdef from pg_proc where oid = 'kontra.audit_append(bytea)'::regprocedure) then
+        raise exception 'FAIL: kontra.audit_append is not security definer';
+    end if;
+end $$;
+
 select 'migration behaviour: ok';

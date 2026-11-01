@@ -14,7 +14,8 @@ amended on 31 Oct after M5's plan audit: `hire` activates the operator's require
 `allow:` entry `oidc:*`, and §13.3's metric not yet exported (D300 to D302), and again after M4's review: what `/mcp`
 serves, its sessions in use, its `tasks/result` streams and its rendering of bucketed parts (§10.4, §12; D303).
 Revision 9 (1 Nov, M5) builds the OIDC principals of the A2A routes, an issuer's tenant claim and its revocation feed
-(§2.3, §10.3, §12.1, §17; D314 to D316), decided under the owner's standing instruction.
+(§2.3, §10.3, §12.1, §17; D314 to D316), and an operator's appends to the audit chain (§13.5; D317), decided under the
+owner's standing instruction.
 Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
@@ -1789,7 +1790,14 @@ tables, not a gate route.
 In Cloud the services, enrollments and keys are written by the control plane into the gate's `services`,
 `enrollment_tokens` and `api_keys` tables (as sha256, with prefix, `buyer_id` and scopes). A change to
 `services` is followed by `NOTIFY kontra_services, '<tenant>/<name>'`, which every replica applies without
-restart. Team gates load `services:` from `kontra.yaml` at start and on SIGHUP. A multi-tenant gate with a
+restart. Each such change, and each revocation the operator writes, is also a row of the gate's `audit` chain (PRD
+§12), appended in the transaction of the change with `select kontra.audit_append(<row>)` (migration 0004, D317): the
+row's RFC 8785 (JCS) bytes, a JSON object with a string `event` and an RFC 3339 `at`, linked under the chain's
+advisory lock exactly as the gate links its own (`hash = sha256(prev_hash ‖ row)`), the hash returned. The function
+refuses a transaction above read committed, and no two rows may name the same predecessor, so no writer forks the
+chain. It runs as its owner (the role that migrates the gate), so the operator's role needs only `USAGE` on schema
+`kontra` and `EXECUTE` on the function, never a write on `audit` itself. Team gates load `services:` from
+`kontra.yaml` at start and on SIGHUP. A multi-tenant gate with a
 `services:` block refuses to start, and a `services:` entry naming a row the operator wrote is refused (D116). A
 service removed or disabled answers as an unknown service at once, and its tasks in flight fail
 `service_unavailable` at their next dispatch or `forward_cancel` (D117).

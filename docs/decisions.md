@@ -4899,7 +4899,8 @@ a hire and an MCP `search` through the gate from another machine ([`gate-runs-m4
 
 Kontra Cloud builds M5 against this gate, and its record (kontra-cloud `docs/m5-decisions.md`) names what it needs
 from this repository: decision 7's OIDC principals on the A2A routes with a tenant mapping and a revocation feed
-(public-repo PR M5-G1; its C4 and D-M5-35). D314 to D316 settle them. Where Cloud's record proposed something else, the entry
+(public-repo PR M5-G1; its C4 and D-M5-35), and an audit-append contract for the gate's tables it writes (M5-G2; its
+C11, with D-M5-54 as the interim). D314 to D317 settle them. Where Cloud's record proposed something else, the entry
 says so and what Cloud changes.
 
 ### D314. The A2A routes take an issuer's JWTs as OIDC principals — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 7; completes D268, D276)
@@ -5034,3 +5035,48 @@ shrinking), `TestFeedRun`, `TestA2A` (revoked; stale), `TestOIDCIssuerPolicy` an
 served; the feed down: past `max_stale` `-32603` on A2A and `503` on `/mcp/fs` while an API key is served, the gauge
 0, then back), `TestOperatorFixtureLoads` (`spec/schema/examples/config.operator.json`).
 
+### D317. `kontra.audit_append(row_jcs bytea)`: an operator's appends join the gate's audit chain — **decided under the owner's standing instruction, 1 Nov** (carries out Cloud's C11; replaces its interim D-M5-54)
+
+Cloud's control plane writes the gate's `services`, `enrollment_tokens` and `api_keys` and revokes keys and bindings
+([`relay.md`](../spec/relay.md) §13.5); each change must be a row of the gate's hash chain (`audit`, PRD §12), which only
+`internal/audit` appended (`pg_advisory_xact_lock(0x6b6f6e7472610100)`, `prev_hash` = the last row's hash by `n`,
+`hash = sha256(prev_hash ‖ row_jcs)`). Cloud's C11 proposes a SQL function; until it exists its D-M5-54 re-implements
+the link in Python with `INSERT` on `audit`. Decision (migration `0004_m5.sql`, §13.5):
+
+- **The function.** `kontra.audit_append(row_jcs bytea) returns bytea`, called in the transaction of the change it
+  records. It takes the same transaction-level lock, reads the head by `n`, computes `sha256(coalesce(prev, '') ‖
+  row_jcs)` over the bytes given, inserts `(at, prev_hash, row_jcs, hash)` and returns the hash. The `at` column is the
+  database's clock under the lock (when the row was appended); the row's own `at` member is the writer's time of its
+  change (the gate's rows write both from one read of that clock; an operator's cannot, since its bytes are hashed as
+  given). Go's appends are unchanged; the two take one lock, so they make one chain, and `audit.Verify` checks it.
+- **What it checks.** `row_jcs` not empty, UTF-8 JSON, an object with a non-empty string `event` and an `at` in RFC
+  3339 form (`22023` otherwise): every row says what happened and when, under the hash. It does not re-canonicalize:
+  the writer sends RFC 8785 bytes and the chain keeps exactly those, as `Verify` reads them.
+- **Read committed only.** Above read committed the transaction's snapshot can predate the last committed append, so
+  the head it reads under the lock is stale and its row would fork the chain. The function refuses such a transaction
+  (`25000`). And a unique index `audit_prev_hash (prev_hash) nulls not distinct` makes a fork impossible whoever
+  writes (the function, `internal/audit`, or a raw `INSERT` of an interim writer): no two rows name one predecessor,
+  and only the first names none. Building it takes `audit`'s `SHARE` lock for one read of that small table.
+- **Grants.** The function is `SECURITY DEFINER`, owned by the role that runs `kontra-gate migrate` (the owner of
+  `audit`), with `search_path` pinned to `pg_catalog, pg_temp` and every name qualified; `EXECUTE` is revoked from
+  `PUBLIC`. An operator's role needs `USAGE` on schema `kontra` and `EXECUTE` on `kontra.audit_append(bytea)`, and no
+  privilege on `audit` (`SELECT` only to read or verify the chain). So the operator's writer can append only linked
+  rows.
+
+Conflict with Cloud's proposals: C11 names the function and its signature, which this keeps; it says nothing of
+grants, isolation or what a row must hold. Cloud changes: `gate/gatedb` calls `select kontra.audit_append(:row)` in
+place of D-M5-54's lock, head read and `INSERT`; its transactions that append are read committed (SQLAlchemy's
+default); its rows carry `event` and an RFC 3339 `at`; and `ops/sql/gate-grants.sql` (PR-4's correction: "audit
+INSERT") grants `EXECUTE` on the function instead of `INSERT` on `audit`, which it should then revoke. Until Cloud's
+image moves to a gate image with this migration, D-M5-54's writer keeps working: it takes the same lock and links the
+same way, and the unique index refuses any row it linked wrongly.
+
+Tested: `TestSQLAppendJoinsTheChain` (`internal/audit`, Postgres: Go and SQL appends interleaved and then 40 at once
+verify as one chain of 44 rows; each answer is `Hash(prev, row)` of its row; a rolled-back call leaves nothing;
+repeatable read and serializable refused with `25000`; malformed rows `22023`; a role granted `USAGE` and `EXECUTE`
+appends and can neither insert into nor read `audit`; a role without `EXECUTE` cannot call it; a raw insert linking a
+stale head is a unique violation; the operator's row ends the verified chain), the 0004 blocks of
+`scripts/migration_tests.sql` (`make check-migrations` on Postgres 16 and 17: the links, ten refused rows, `null` and
+bytes that are not UTF-8, both forks refused, `PUBLIC` without `EXECUTE`, `SECURITY DEFINER`), `TestDownThenUp` and
+`TestUpOnEmptyDatabase` (`internal/migrate`: 0004's up and down), `TestMigrateCommand` (`cmd/kontra-gate`),
+`TestEmbeddedMigrations`.
