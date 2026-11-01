@@ -374,13 +374,23 @@ func (e *tunnelEnv) rowServices(t *testing.T, session uuid.UUID) []string {
 }
 
 // held is the registry's session of a node.
+// held is the session n opened on r, once r holds it. Registry.Add marks a session registered after its tunnels row
+// commits, so the row (what enrollNode and connectNode wait for) can be visible a moment before Get returns the session:
+// held waits for that moment, at most 5 s (a CI flake of TestKeyRevocation read Get in between).
 func (r *replica) held(t *testing.T, n *testNode) *Session {
 	t.Helper()
-	s, ok := r.reg.Get(n.session)
-	if !ok {
-		t.Fatalf("replica %s does not hold session %s", r.id, n.session)
+	var s *Session
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var ok bool
+		if s, ok = r.reg.Get(n.session); ok {
+			return s
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("replica %s does not hold session %s", r.id, n.session)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	return s
 }
 
 // exchangeClient sends HTTP requests on fresh streams of s for service.

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"kontra.sh/kontra/internal/enroll"
+	"kontra.sh/kontra/internal/nodekey"
+	"kontra.sh/kontra/internal/tunnel"
 )
 
 // anonymousDecision admits req as an anonymous session ending at end, at a multi-tenant URL.
@@ -255,5 +257,30 @@ func TestAnonymousEndEstimate(t *testing.T) {
 				t.Errorf("a revoked now is the end: %v, want %v (left %s)", got, c.revoked, time.Duration(s.anonLeft.Load()))
 			}
 		})
+	}
+}
+
+// writes counts the writes it is given.
+type writes struct{ n []string }
+
+func (w *writes) Write(p []byte) (int, error) { w.n = append(w.n, string(p)); return len(p), nil }
+
+// The welcome is one write of the node's output: a reader that sees "connected to" sees every line of it, the
+// anonymous session's end included (a CI flake of TestRealAdmissionOpensAnAnonymousSession read the output between the
+// service lines and the last one).
+func TestWelcomeIsOneWrite(t *testing.T) {
+	id, _, err := nodekey.LoadOrCreate(t.TempDir()+"/identity.key", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var w writes
+	n := &Node{out: &w, origin: "https://gate.example", cfg: Config{Public: []string{"site"}}}
+	n.printWelcome(&tunnel.Welcome{Tenant: "anon-0123456789abcdef", Session: "s-1",
+		Services:  []tunnel.WelcomeService{{Kind: "a2a", Name: "site", URL: "https://gate.example/agents/anon-0123456789abcdef/site"}, {Kind: "mcp", Name: "fs", URL: "https://gate.example/mcp/anon-0123456789abcdef/fs"}},
+		Anonymous: &tunnel.AnonymousInfo{ExpiresAt: time.Now().Add(time.Hour)}}, id)
+	if len(w.n) != 1 || !strings.HasPrefix(w.n[0], "kontra connect: connected to https://gate.example as "+id.KeyID()) ||
+		!strings.Contains(w.n[0], "/site  (public: anyone may call it)\n") || !strings.Contains(w.n[0], "  mcp fs  ") ||
+		!strings.HasSuffix(w.n[0], "(kontra login keeps the services)\n") {
+		t.Fatalf("%d writes: %q", len(w.n), w.n)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -738,25 +739,28 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 // printWelcome writes the welcome's services and their gate URLs (the CLI's stdout). The gate's text was
 // checked by tunnel.ParseOutcome (a tenant and service names, http(s) URLs in printable ASCII), and prints
 // through tunnel.Printable besides, so that nothing a gate writes reaches the terminal as an escape sequence
-// (M2 review, security-5).
+// (M2 review, security-5). The welcome is one write: a reader of the output (a terminal shared with the node's other
+// sessions, or a test waiting for "connected to") never sees part of it.
 func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 	p := tunnel.Printable
-	fmt.Fprintf(n.out, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
+	var b strings.Builder
+	fmt.Fprintf(&b, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
 	if len(w.Services) == 0 {
-		fmt.Fprintln(n.out, "  no service is served on this session")
+		fmt.Fprintln(&b, "  no service is served on this session")
 	}
 	for _, s := range w.Services {
 		note := ""
 		if w.Anonymous != nil && slices.Contains(n.cfg.Public, s.Name) {
 			note = "  (public: anyone may call it)"
 		}
-		fmt.Fprintf(n.out, "  %s %s  %s%s\n", p(s.Kind), p(s.Name), p(s.URL), note)
+		fmt.Fprintf(&b, "  %s %s  %s%s\n", p(s.Kind), p(s.Name), p(s.URL), note)
 	}
 	if a := w.Anonymous; a != nil {
 		// §6.1: an anonymous session's URLs end with it.
-		fmt.Fprintf(n.out, "  anonymous session: it ends at %s (in %s); its URLs then answer 404 (kontra login keeps the services)\n",
+		fmt.Fprintf(&b, "  anonymous session: it ends at %s (in %s); its URLs then answer 404 (kontra login keeps the services)\n",
 			a.ExpiresAt.UTC().Format(time.RFC3339), time.Until(a.ExpiresAt).Round(time.Second))
 	}
+	_, _ = io.WriteString(n.out, b.String())
 }
 
 // retire keeps a session serving what the gate sends on it until the gate closes it, but never redials it.
