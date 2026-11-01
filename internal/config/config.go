@@ -415,7 +415,7 @@ type Service struct {
 	Backend     Backend    `yaml:"backend"`
 	Allow       []string   `yaml:"allow"` // deny by default (spec §2.3); grammar in ParseAllowEntry
 	Tools       *Tools     `yaml:"tools"` // mcp only (§11.3)
-	Tasks       string     `yaml:"tasks"` // mcp only: durable (default) | passthrough | off (§11.5)
+	Tasks       string     `yaml:"tasks"` // mcp only: durable (default) | required | passthrough | off (§11.5, D322)
 	Sealed      Sealed     `yaml:"sealed"`
 	SellerKeys  JSON       `yaml:"seller_keys"` // inline JWKS {"keys": […]} or {"url": "https://…"} (§3); M3
 	SessionIdle Seconds    `yaml:"session_idle_s"`
@@ -444,12 +444,17 @@ const (
 	KindMCP = "mcp"
 )
 
-// MCP task modes (spec §11.5).
+// MCP task modes (spec §11.5). required is durable that refuses a plain tools/call: every call is a gate task (D322).
 const (
 	TasksDurable     = "durable"
+	TasksRequired    = "required"
 	TasksPassthrough = "passthrough"
 	TasksOff         = "off"
 )
+
+// GateOwnsTasks reports whether mode has the gate own an MCP service's task-augmented calls (§11.5): durable and
+// required.
+func GateOwnsTasks(mode string) bool { return mode == TasksDurable || mode == TasksRequired }
 
 // Backend is exactly one of tunnel, a2a {url}, mcp {url} (spec §1, §6.1).
 type Backend struct {

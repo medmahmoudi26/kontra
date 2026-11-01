@@ -105,12 +105,16 @@ type ToolsKey struct {
 type Pager func(ctx context.Context, cursor string) (json.RawMessage, error)
 
 // ToolView is how a cached list is shown to one client: the service's policy, the operator's tool_meta annotation
-// ("<tool name>" | "*" → sh.kontra/ keys, spec §13.4), and whether every tool's execution is removed (tasks: off,
-// a 2025-06-18 session, §11.5).
+// ("<tool name>" | "*" → sh.kontra/ keys, spec §13.4), whether every tool's execution is removed (tasks: off,
+// a 2025-06-18 session, §11.5), and whether every call must be a task (RequireTasks).
 type ToolView struct {
 	Policy        Policy
 	Meta          map[string]map[string]json.RawMessage
 	DropExecution bool
+	// RequireTasks is tasks: required shown to a 2025-11-25 session (§11.5, D322): a tool the upstream cannot run as a
+	// task (execution.taskSupport absent or forbidden) is left out, as a denied one is, and every other tool shows
+	// execution.taskSupport "required", so a client calls it as a task (a plain call is -32601).
+	RequireTasks bool
 }
 
 // ToolsCache is each service's drained tools/list, per era (spec/relay.md §11.3, §11.12): every upstream page
@@ -209,7 +213,7 @@ func (t *tools) show(v ToolView) ([]json.RawMessage, error) {
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
+		if !ok || (v.RequireTasks && !taskSupported(raw)) {
 			continue
 		}
 		shown, err := present(raw, t.names[i], v)
@@ -420,7 +424,8 @@ func toolName(tool json.RawMessage) (string, bool) {
 }
 
 // present is one cached tool as v shows it: tool_meta's "*" keys and then the tool's own written into its _meta,
-// each replacing a same-named key (§13.4), and execution removed when v says so.
+// each replacing a same-named key (§13.4), execution removed when v says so, and execution.taskSupport "required"
+// under RequireTasks (the caller left out the tools the upstream cannot run as tasks).
 func present(tool json.RawMessage, name string, v ToolView) (json.RawMessage, error) {
 	out := []byte(tool)
 	var err error
@@ -436,8 +441,17 @@ func present(tool json.RawMessage, name string, v ToolView) (json.RawMessage, er
 			return nil, err
 		}
 	}
-	if v.DropExecution {
+	switch {
+	case v.DropExecution:
 		if out, err = mcpwire.DeleteMember(out, "execution"); err != nil {
+			return nil, err
+		}
+	case v.RequireTasks:
+		exec, _ := mcpwire.Member(out, "execution")
+		if exec, err = mcpwire.SetMember(exec, "taskSupport", json.RawMessage(`"required"`)); err != nil {
+			return nil, err
+		}
+		if out, err = mcpwire.SetMember(out, "execution", exec); err != nil {
 			return nil, err
 		}
 	}

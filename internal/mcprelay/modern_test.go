@@ -1571,3 +1571,35 @@ func TestModernMRTRCancel(t *testing.T) {
 		t.Fatalf("the upstream got %d tasks/cancel and %d calls", up.Count("tasks/cancel"), up.Calls("ask"))
 	}
 }
+
+// tasks: required on 2026-07-28 (§11.12, D322): the service keeps the tasks extension on server/discover; a tools/call
+// that does not declare it is 400 with -32021 naming it, asking no Admission, reaching no upstream and writing no calls
+// row; one that declares it is a gate task, as on a durable service.
+func TestModernRequiredTasks(t *testing.T) {
+	e := newTaskEnv(t)
+	up, url := modernTaskDouble(t)
+	e.service("research", url, func(s *Service) { s.Tasks = config.TasksRequired })
+	if _, err := e.pool.Exec(context.Background(), `update kontra.services set tasks_mode = 'required' where name = 'research'`); err != nil {
+		t.Fatal(err)
+	}
+	adm := &fakeAdmission{}
+	ra := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpTask, hooks.OpCall}})
+	key, _ := e.apiKey("buyer")
+	m := newModern(t, key, ra.url+"/mcp/research", true)
+	d := result(t, m.req(1, "server/discover", nil))
+	if ext := d["capabilities"].(map[string]any)["extensions"].(map[string]any); ext["io.modelcontextprotocol/tasks"] == nil {
+		t.Fatalf("a required service keeps the tasks extension: %v", d)
+	}
+	plain := newModern(t, key, ra.url+"/mcp/research", false)
+	rep := plain.req(2, "tools/call", map[string]any{"name": "quick", "arguments": map[string]any{}})
+	if code, data := rpcError(t, rep); rep.status != http.StatusBadRequest || code != -32021 || data["requiredCapabilities"] == nil {
+		t.Fatalf("a modern call without the tasks extension: %d %s", rep.status, rep.body)
+	}
+	if adm.n() != 0 || e.count(`select count(*) from kontra.calls`) != 0 || len(up.ModernTasks()) != 0 {
+		t.Fatalf("the refused call: Admission asked %d times, %d calls rows", adm.n(), e.count(`select count(*) from kontra.calls`))
+	}
+	taskID := createdModern(t, m.req(3, "tools/call", map[string]any{"name": "research", "arguments": map[string]any{"topic": "python"}}))
+	if n := e.count(`select count(*) from kontra.tasks where id = $1 and protocol = 'mcp'`, taskID); n != 1 || adm.n() != 1 {
+		t.Fatalf("the declared call: %d tasks, Admission asked %d times", n, adm.n())
+	}
+}

@@ -292,7 +292,7 @@
             "deny": { "type": "array", "items": { "type": "string", "pattern": "^[^?\\[\\]\\\\]+$" } }
           }
         },
-        "tasks": { "enum": ["durable", "passthrough", "off"], "description": "durable (the default): the gate owns task-augmented calls (spec §11.5); on 2026-07-28 every tools/call that declares the tasks extension, on a service whose upstream declares it, becomes a gate task whose request and result are kept until the task's retention ends, as an A2A task's are (§11.12, D178). passthrough: the upstream owns them. off: plain calls only, nothing kept." },
+        "tasks": { "enum": ["durable", "required", "passthrough", "off"], "description": "durable (the default): the gate owns task-augmented calls (spec §11.5); on 2026-07-28 every tools/call that declares the tasks extension, on a service whose upstream declares it, becomes a gate task whose request and result are kept until the task's retention ends, as an A2A task's are (§11.12, D178). required: durable, and every tools/call must be a task: a plain call is refused (-32601 on 2025-11-25, -32021 on 2026-07-28), tools/list shows execution.taskSupport required and leaves out the tools the upstream cannot run as tasks, so Admission sees every call as a task (D322). passthrough: the upstream owns them. off: plain calls only, nothing kept." },
         "sealed": { "$ref": "#/$defs/sealed" },
         "seller_keys": {
           "oneOf": [

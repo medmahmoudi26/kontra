@@ -471,7 +471,7 @@ func (h *Handler) discoverResult(rq *request) func(m *mcpwire.Message, raw []byt
 		if ans, _ := mcpwire.ClassifyDiscover(http.StatusOK, &mcpwire.Message{Result: res}); ans == mcpwire.AnswerModern {
 			h.deps.Tools.LearnModern(h.toolsKey(rq), res)
 		}
-		out, err := rewriteDiscover(res, rq.svc.Tasks == config.TasksDurable && h.deps.Tasks != nil, rq.svc.InitializeMeta)
+		out, err := rewriteDiscover(res, config.GateOwnsTasks(rq.svc.Tasks) && h.deps.Tasks != nil, rq.svc.InitializeMeta)
 		if err != nil {
 			return fail(err)
 		}
@@ -685,8 +685,9 @@ func (h *Handler) modernToolsFailed(rq *request, err error) {
 
 // modernToolsCall serves a modern tools/call (§11.3, §11.4, §11.12): the tool resolved against the modern cached
 // list (unknown or denied: -32602 before anything is forwarded or metered); a gate-owned task when the request
-// declares the tasks extension on a durable service whose upstream declared it in its cached server/discover (D159);
-// otherwise a plain call, Admission call, forwarded with its meter, one calls row naming the virtual session.
+// declares the tasks extension on a durable or required service whose upstream declared it in its cached
+// server/discover (D159); on a required service any other call is refused (D322); otherwise a plain call, Admission
+// call, forwarded with its meter, one calls row naming the virtual session.
 func (h *Handler) modernToolsCall(rq *request) {
 	m := rq.msg
 	name, _ := stringMember(m.Params, "name")
@@ -701,6 +702,18 @@ func (h *Handler) modernToolsCall(rq *request) {
 	}
 	if h.ownsModernTask(rq) {
 		h.modernTaskCall(rq, name)
+		return
+	}
+	if rq.svc.Tasks == config.TasksRequired {
+		// D322: every call of a required service is a gate task. A request that does not declare the tasks extension is
+		// 400 with -32021 naming it, as the extension answers a request that needs it (D176); an upstream that does not
+		// declare it in this revision runs no task, so the service takes no call in it.
+		if !mcpwire.DeclaresTasks(m.Params) {
+			writeRefusal(rq.w, mcpwire.MissingTasks(m.ID))
+			return
+		}
+		writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "this service runs every tools/call as a task "+
+			"(tasks: required), which its server does not offer in MCP 2026-07-28", nil)
 		return
 	}
 	if ref := h.admit(rq, hooks.OpCall, name); ref != nil {
@@ -721,10 +734,10 @@ func (h *Handler) modernToolsCall(rq *request) {
 	h.modernForward(rq, meter, nil)
 }
 
-// ownsModernTask is D159's rule: a tools/call that declares the tasks extension, on a durable service that serves
-// gate-owned tasks, whose upstream declared the extension in its cached server/discover.
+// ownsModernTask is D159's rule: a tools/call that declares the tasks extension, on a durable (or required, D322)
+// service that serves gate-owned tasks, whose upstream declared the extension in its cached server/discover.
 func (h *Handler) ownsModernTask(rq *request) bool {
-	if rq.svc.Tasks != config.TasksDurable || h.deps.Tasks == nil || !mcpwire.DeclaresTasks(rq.msg.Params) {
+	if !config.GateOwnsTasks(rq.svc.Tasks) || h.deps.Tasks == nil || !mcpwire.DeclaresTasks(rq.msg.Params) {
 		return false
 	}
 	caps, ok := h.deps.Tools.Capabilities(h.toolsKey(rq))
@@ -786,7 +799,7 @@ func (h *Handler) modernTaskRequest(rq *request) {
 		writeRefusal(rq.w, mcpwire.MissingTasks(m.ID))
 		return
 	}
-	if rq.svc.Tasks != config.TasksDurable || h.deps.Tasks == nil {
+	if !config.GateOwnsTasks(rq.svc.Tasks) || h.deps.Tasks == nil {
 		writeError(rq.w, http.StatusNotFound, m.ID, mcpwire.CodeMethodNotFound, "Method not found", nil)
 		return
 	}

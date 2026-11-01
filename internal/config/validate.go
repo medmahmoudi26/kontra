@@ -629,9 +629,9 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 	}
 	if s.Kind == KindMCP {
 		switch s.Tasks {
-		case TasksDurable, TasksPassthrough, TasksOff:
+		case TasksDurable, TasksRequired, TasksPassthrough, TasksOff:
 		default:
-			v.add("%s.tasks %q: want durable, passthrough or off", at, s.Tasks)
+			v.add("%s.tasks %q: want durable, required, passthrough or off", at, s.Tasks)
 		}
 	}
 	if s.Tools != nil {
@@ -667,6 +667,8 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 	}
 	if !s.Annotations.IsZero() && (len(s.Annotations) == 0 || s.Annotations[0] != '{') {
 		v.add("%s.annotations: want a mapping", at)
+	} else if !s.Annotations.IsZero() && !searchHiddenIsBool(s.Annotations) {
+		v.add("%s.annotations.search.hidden: want true or false (spec §12.2, D321)", at)
 	}
 	// services stores these as integer seconds (timeout_s, retention_s, session_idle_s in 0001).
 	if s.SessionIdle <= 0 {
@@ -867,4 +869,21 @@ func (c *Config) unbuilt() []string {
 		}
 	}
 	return w
+}
+
+// searchHiddenIsBool reports whether annotations.search.hidden, when present, is a boolean: the one member of the
+// search annotation the gate reads as a switch (§12.2, D321), which would otherwise hide nothing.
+func searchHiddenIsBool(annotations JSON) bool {
+	var a struct {
+		Search map[string]json.RawMessage `json:"search"`
+	}
+	if json.Unmarshal(annotations, &a) != nil {
+		return true // another check names a malformed annotation
+	}
+	h, ok := a.Search["hidden"]
+	if !ok {
+		return true
+	}
+	var b bool
+	return json.Unmarshal(h, &b) == nil && string(h) != "null"
 }

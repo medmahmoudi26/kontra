@@ -316,4 +316,40 @@ do $$ begin
     end if;
 end $$;
 
+-- 0004 (R §2.3, §13.5, D319; Cloud's D-M5-120): one buyer's tasks across services, newest first, are read through
+-- tasks_by_buyer. 20000 tasks on two services, analyzed: an active buyer holds 66 of them, and its newest 50 are an
+-- ordered scan of the index with no sort; a buyer with 20 is found through the index too, not by walking the table.
+insert into services (tenant_id, name, kind, backend, source)
+    values ('01900000-0000-7000-8000-000000000001', 'hello2', 'a2a', '{"tunnel": {}}', 'config');
+insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version, snapshot, status_at)
+    select ('01900000-0000-7000-8001-' || lpad(to_hex(i), 12, '0'))::uuid, '01900000-0000-7000-8000-000000000001',
+           case when i % 2 = 0 then 'hello' else 'hello2' end, 'a2a',
+           ('01900000-0000-7000-8002-' || lpad(to_hex(case when i % 300 = 0 then 4095 else i % 1000 end), 12, '0'))::uuid,
+           'node:k1_x', 'node', 'ctx', 'submitted', 1, '{}', now()
+    from generate_series(1, 20000) i;
+analyze tasks;
+do $$
+declare plan text;
+begin
+    execute 'explain (format json) select id from kontra.tasks where buyer_id = ''01900000-0000-7000-8002-000000000fff''
+             and via in (''api_key'', ''oidc'', ''mcp'', ''node'') order by id desc limit 50' into plan;
+    if plan not like '%"Node Type": "Index Scan"%' or plan not like '%"Index Name": "tasks_by_buyer"%' or plan like '%"Sort"%' then
+        raise exception 'FAIL: an active buyer''s newest tasks are not an ordered scan of tasks_by_buyer: %', plan;
+    end if;
+    execute 'explain (format json) select id from kontra.tasks where buyer_id = ''01900000-0000-7000-8002-000000000007''
+             order by id desc limit 50' into plan;
+    if plan not like '%"Index Name": "tasks_by_buyer"%' or plan like '%"Seq Scan"%' then
+        raise exception 'FAIL: a buyer''s few tasks are not read through tasks_by_buyer: %', plan;
+    end if;
+end $$;
+
+-- 0004 (R §11.5, D322): an MCP service's tasks mode may be required; another value is still refused.
+insert into services (tenant_id, name, kind, backend, source, tasks_mode)
+    values ('01900000-0000-7000-8000-000000000001', 'tools-required', 'mcp', '{"tunnel": {}}', 'config', 'required');
+do $$ begin
+    insert into services (tenant_id, name, kind, backend, source, tasks_mode)
+        values ('01900000-0000-7000-8000-000000000001', 'tools-bogus', 'mcp', '{"tunnel": {}}', 'config', 'always');
+    raise exception 'FAIL: tasks_mode always was accepted';
+exception when check_violation then null; end $$;
+
 select 'migration behaviour: ok';

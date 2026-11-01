@@ -367,3 +367,52 @@ func TestSearchBoundsTheRowsOneRequestReads(t *testing.T) {
 		t.Fatalf("search pages %v\nwant %s", pages, want)
 	}
 }
+
+// annotations.search.hidden (§12.2, D321; issue #7): Cloud's unlisted listing, [key:*, oidc:*, anonymous] with listed
+// false, is left out of every principal's search once hidden, an API key's and a signed-in user's included, while
+// describe and hire by ref still answer as allow: decides; a listed service hidden is left out too, and a hidden
+// member that is not the boolean true (false, the string "true") hides nothing.
+func TestSearchHidden(t *testing.T) {
+	e := newCatalogEnv(t)
+	ctx := context.Background()
+	unlisted := []string{"key:*", "oidc:*", "anonymous"}
+	e.service(e.acme, "link", "a2a", directA2A, unlisted, false, `{"search": {"hidden": true}}`, "", false)
+	e.service(e.acme, "shown", "a2a", directA2A, unlisted, false, `{"search": {"hidden": false}}`, "", false)
+	e.service(e.acme, "loose", "a2a", directA2A, unlisted, false, `{"search": {"hidden": "true"}}`, "", false)
+	e.service(e.acme, "listedhidden", "a2a", directA2A, []string{"anonymous"}, true, `{"search": {"hidden": true, "price_model": "per_task"}}`, "", false)
+	c := NewCatalog(CatalogConfig{DB: e.pool, Multi: true, PublicURL: "https://gate.example"})
+	user := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaOIDC}
+	key := keyPrincipal(e.team, tenant.TeamSlug, "kk_default_ab12cd34")
+	for _, tc := range []struct {
+		who      string
+		p        auth.Principal
+		search   string
+		describe bool
+	}{
+		{"a signed-in user", user, "[acme/loose acme/shown]", true},
+		{"an API key", key, "[acme/loose acme/shown]", true},
+		{"the anonymous principal", auth.Anonymous(uuid.Must(uuid.NewV7())), "[]", false},
+	} {
+		r, err := c.Search(ctx, tc.p, SearchArgs{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := []string{}
+		for _, s := range r.Services {
+			got = append(got, s.Ref)
+		}
+		if fmt.Sprint(got) != tc.search {
+			t.Errorf("search as %s: %v, want %s", tc.who, got, tc.search)
+		}
+		if _, err := c.Describe(ctx, tc.p, Ref{Tenant: "acme", Name: "link"}); (err == nil) != tc.describe {
+			t.Errorf("describe acme/link as %s: %v, want described %v", tc.who, err, tc.describe)
+		}
+		if s, err := c.Hireable(ctx, tc.p, Ref{Tenant: "acme", Name: "link"}); err != nil || s == nil {
+			t.Errorf("hire acme/link as %s: %v %v", tc.who, s, err)
+		}
+	}
+	// The listed one hidden: described by ref as a listed service is, never searched.
+	if _, err := c.Describe(ctx, auth.Anonymous(uuid.Must(uuid.NewV7())), Ref{Tenant: "acme", Name: "listedhidden"}); err != nil {
+		t.Errorf("describe a listed hidden service: %v", err)
+	}
+}

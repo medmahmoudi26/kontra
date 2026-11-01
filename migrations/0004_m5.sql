@@ -1,5 +1,9 @@
 -- Kontra gate schema, revision 0004 (M5).
 --
+-- Three changes: an operator's appends to the audit chain (D317), the index of a buyer's tasks (D319) and the MCP task
+-- mode required (D322), the last two below the function. Every M5 schema change is in this one file, frozen when M5
+-- merges.
+--
 -- An operator's appends to the gate's audit chain (PRD §12; R §13.5; D317). Cloud's control plane writes the gate's
 -- services, enrollment_tokens and api_keys rows and revokes keys and bindings, and each such change must be a row of
 -- the chain internal/audit keeps (migrations/0001_init.sql audit). kontra.audit_append(row_jcs) appends one, in the
@@ -75,7 +79,25 @@ $$;
 -- +goose StatementEnd
 revoke all on function audit_append(bytea) from public;
 
+-- R §2.3, §13.5 (D319; Cloud's D-M5-120): a buyer's tasks across services, newest first. tasks_by_caller and
+-- tasks_by_context lead with (tenant_id, service), and tasks_hired is partial on hired, so a read of one buyer's tasks
+-- (an operator's: a party's API keys', its OIDC subject's and, by the node buyers R §2.3 writes, its nodes') walked the
+-- table. Building it takes a SHARE lock on tasks for one scan (goose runs the file in one transaction, where CREATE
+-- INDEX CONCURRENTLY cannot run): the task writes of replicas still serving wait for it, as for 0003's tasks_hired.
+create index tasks_by_buyer on tasks (buyer_id, id desc);
+
+-- R §11.5 (D322; issue #6): tasks: required, durable that refuses a plain tools/call, so every call of the service is a
+-- gate task Admission sees. Adding the check reads services once.
+alter table services drop constraint services_tasks_mode_check;
+alter table services add constraint services_tasks_mode_check
+    check (tasks_mode in ('durable', 'required', 'passthrough', 'off'));
+
 -- +goose Down
 set local search_path to kontra;
+-- A required service becomes durable, the mode required refines: it still owns its tasks, and takes plain calls again.
+update services set tasks_mode = 'durable' where tasks_mode = 'required';
+alter table services drop constraint services_tasks_mode_check;
+alter table services add constraint services_tasks_mode_check check (tasks_mode in ('durable', 'passthrough', 'off'));
+drop index tasks_by_buyer;
 drop function audit_append(bytea);
 drop index audit_prev_hash;

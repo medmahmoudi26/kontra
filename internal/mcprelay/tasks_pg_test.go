@@ -33,6 +33,7 @@ import (
 
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
@@ -1633,5 +1634,74 @@ func TestDurableTaskSealedAnswerRefusedByTheNode(t *testing.T) {
 	}
 	if n := e.count(`select count(*) from kontra.attempts where task_id = $1`, taskID); n != 1 {
 		t.Fatalf("%d attempts: a sealed rejection is never retried", n)
+	}
+}
+
+// tasks: required on 2025-11-25 (§11.5, D322; issue #6): the session is shown the gate's tasks; tools/list leaves out
+// the tools the upstream cannot run as tasks and shows taskSupport required on the others; a plain tools/call is
+// -32601 and a left-out tool -32602, neither asking Admission (whose operations are task and call), reaching the
+// upstream or writing a calls row; a task-augmented call is a gate task, Admission asked once with operation task,
+// and a quote creates it quoted with nothing dispatched.
+func TestRequiredTasks(t *testing.T) {
+	e := newTaskEnv(t)
+	up := mcptest.New()
+	up.Tools = []json.RawMessage{toolWith("research", "optional"), toolWith("forced", "required"), toolWith("never", "forbidden"),
+		toolWith("plain", "")}
+	up.TaskRun = researchRun
+	srv := httptest.NewServer(up)
+	t.Cleanup(srv.Close)
+	e.service("research", srv.URL, func(s *Service) { s.Tasks = config.TasksRequired })
+	if _, err := e.pool.Exec(context.Background(), `update kontra.services set tasks_mode = 'required' where name = 'research'`); err != nil {
+		t.Fatal(err)
+	}
+	adm := &fakeAdmission{}
+	r := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpTask, hooks.OpCall}})
+	key, _ := e.apiKey("buyer")
+	c := newTaskClient(t, key, r.url+"/mcp/research")
+
+	lr := c.post(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	res, _ := lr.msg(t)["result"].(map[string]any)
+	tools, _ := res["tools"].([]any)
+	var listed []string
+	for _, x := range tools {
+		tool := x.(map[string]any)
+		listed = append(listed, tool["name"].(string))
+		if exec, _ := tool["execution"].(map[string]any); exec["taskSupport"] != "required" {
+			t.Errorf("%s is listed with execution %v, want taskSupport required", tool["name"], tool["execution"])
+		}
+	}
+	if strings.Join(listed, ",") != "research,forced" {
+		t.Fatalf("tools/list of a required service: %v (%s)", listed, lr.body)
+	}
+	for _, c2 := range []struct {
+		tool string
+		code int
+	}{{"research", -32601}, {"forced", -32601}, {"never", -32602}, {"plain", -32602}} {
+		if got := c.call(c.url, 3, c2.tool, "hi").errCode(t); got != c2.code {
+			t.Errorf("a plain call of %s: %d, want %d", c2.tool, got, c2.code)
+		}
+	}
+	if got := c.taskCall(4, "never", map[string]any{}).errCode(t); got != -32602 {
+		t.Errorf("a task-augmented call of a tool left out: %d, want -32602", got)
+	}
+	if adm.n() != 0 || up.Count("tools/call") != 0 || e.count(`select count(*) from kontra.calls`) != 0 ||
+		e.count(`select count(*) from kontra.tasks`) != 0 {
+		t.Fatalf("the refused calls: Admission asked %d times, %d upstream calls, %d calls rows", adm.n(), up.Count("tools/call"),
+			e.count(`select count(*) from kontra.calls`))
+	}
+	// A task: Admission's task, then quoted with nothing dispatched.
+	adm.set(hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ApproveURL: "https://pay.example/t/2",
+		ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}, nil)
+	taskID := created(t, c.taskCall(5, "research", map[string]any{}))
+	adm.mu.Lock()
+	asked := append([]hooks.AdmitRequest(nil), adm.asked...)
+	adm.mu.Unlock()
+	if len(asked) != 1 || asked[0].Operation != hooks.OpTask || asked[0].Tool != "research" {
+		t.Fatalf("Admission was asked %+v, want once for a task of research", asked)
+	}
+	var st string
+	_ = e.pool.QueryRow(context.Background(), `select state from kontra.tasks where id = $1`, taskID).Scan(&st)
+	if st != "quoted" || up.Count("tools/call") != 0 {
+		t.Fatalf("the quoted task is %s with %d upstream calls", st, up.Count("tools/call"))
 	}
 }

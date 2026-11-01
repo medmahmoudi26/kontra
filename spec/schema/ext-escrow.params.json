@@ -9,10 +9,15 @@
     "quote": { "$ref": "#/$defs/money" },
     "reviewWindowSeconds": { "type": "integer", "minimum": 0, "maximum": 604800 },
     "taskTimeoutSeconds": { "type": "integer", "minimum": 1 },
-    "rails": { "type": "array", "items": { "type": "string", "enum": ["stripe"] }, "minItems": 1, "uniqueItems": true },
+    "rails": { "type": "array", "items": { "$ref": "#/$defs/rail" }, "minItems": 1, "uniqueItems": true },
     "terms": { "type": "string", "format": "uri", "pattern": "^https://" }
   },
   "$defs": {
+    "rail": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+      "description": "A rail's name (ext-escrow.md §1, §3; D320): stripe (a card payment through Stripe), ledger (a hold kept in the operator's own ledger, with no payment-network object: a development or test gate's play balance), or an operator's own rail."
+    },
     "money": {
       "type": "object",
       "required": ["amount", "currency"],

@@ -1,11 +1,12 @@
 # Escrow extension `https://kontra.sh/ext/escrow/v1`
 
-Status: **draft** (M0, revision 2). Public specification; implemented only by Kontra Cloud. The open-source
-gate contains no escrow code and names no escrow key: it passes the card entry through from the operator's
-annotations, enforces `required: true` like any extension (a `hire` of its own `/mcp` activates the entry for the
-buyer, as it does every required entry of the operator's, [`relay.md`](relay.md) §12.2), stores the task metadata the
-operator's hooks write, renders the operator's `mcpMeta` verbatim, and offers review-window messages to the operator's
-`OnReviewMessage` hook ([`relay.md`](relay.md) §2.5, §7, §13).
+Status: **draft** (M0, revision 3, 1 Nov: a task's methods need no activation, D318; rails other than `stripe` and the
+`ref` of each receipt, D320; `per_task` on MCP needs `tasks: required`, D322). Public specification; implemented only
+by Kontra Cloud. The open-source gate contains no escrow code and names no escrow key: it passes the card entry
+through from the operator's annotations, enforces `required: true` like any extension (a `hire` of its own `/mcp`
+activates the entry for the buyer, as it does every required entry of the operator's, [`relay.md`](relay.md) §12.2),
+stores the task metadata the operator's hooks write, renders the operator's `mcpMeta` verbatim, and offers
+review-window messages to the operator's `OnReviewMessage` hook ([`relay.md`](relay.md) §2.5, §7, §13).
 
 Escrow is the price shape `per_task` (README, "Pricing"): a fixed quote held once a person accepts it, released
 to the seller after a review window, refunded on dispute or failure. The two metered shapes,
@@ -37,13 +38,14 @@ In the served card's `capabilities.extensions`:
 | `quote.currency` | string | ISO 4217 alphabetic code |
 | `reviewWindowSeconds` | integer | 0 ≤ n ≤ 604800 (7 days, PRD §18) |
 | `taskTimeoutSeconds` | integer | 1 ≤ n; the gate's `task.timeout` for this service |
-| `rails` | array of strings | v4: `["stripe"]`. The slot reserves room for other rails (PRD §17). |
+| `rails` | array of strings | The rails a hold may be made on, each a rail's name (§3): `stripe`, `ledger`, or an operator's own (`^[a-z][a-z0-9_-]{0,31}$`). Cloud's production and staging gates write `["stripe"]` (PRD §17). |
 | `terms` | URL | The terms the buyer consents to |
 
 JSON Schema: [`schema/ext-escrow.params.json`](schema/ext-escrow.params.json).
 
-`required: true`: a `SendMessage` that does not activate the URI is refused with
-`ExtensionSupportRequiredError` before any task exists. Activating the URI acknowledges the quote shown in
+`required: true`: a `SendMessage` (or `SendStreamingMessage`) that does not activate the URI is refused with
+`ExtensionSupportRequiredError` before any task exists; a task's reads, cancel and subscription need no activation
+([`relay.md`](relay.md) §2.4, D318). Activating the URI acknowledges the quote shown in
 the card the caller fetched (PRD §5). It is not, by itself, approval to pay: **an API key or an MCP session
 never approves a quote** (README, 25 Oct, "§12 adds"), so a task from such a principal is always `quoted`
 until a person accepts it on the operator's page (D38).
@@ -86,9 +88,21 @@ the gate removes ([`relay.md`](relay.md) §2.5). The operator's gate config sets
 | `kontra.escrow.quote` | The quote object at admission, so the task stays self-describing after a price change |
 | `kontra.escrow.holdId` | Opaque hold reference |
 | `kontra.escrow.reviewEndsAt` | RFC 3339 UTC; set when the task completes |
-| `kontra.escrow.receipts` | Append-only array of `{event, rail, ref, at}`: `event` ∈ `held`, `released`, `refunded`, `disputed`, `resolved`, `chargeback`; `ref` the rail's object id; `at` RFC 3339 UTC. Appended by `metadata` events; the final status message is never rewritten. |
+| `kontra.escrow.receipts` | Append-only array of `{event, rail, ref, at}`: `event` ∈ `held`, `released`, `refunded`, `disputed`, `resolved`, `chargeback`; `rail` the rail the hold is on (below); `ref` as below; `at` RFC 3339 UTC. Appended by `metadata` events; the final status message is never rewritten. |
 | `kontra.approve.url` | While `quoted`: the page where the person accepts the quote |
 | `kontra.keyRetainUntil` | RFC 3339 UTC; set when the task completes to `reviewEndsAt`, so a hiring node keeps the job's key while a dispute may still need the output ([`relay.md`](relay.md) §13.3, [`tunnel.md`](tunnel.md) §2.3). Not under the escrow prefix: the gate admits it for every operator. |
+
+**Rails and refs (D320).** A receipt's `rail` is the rail of the task's hold, a name matching `^[a-z][a-z0-9_-]{0,31}$`:
+`stripe`, a card payment through Stripe; `ledger`, a hold kept in the operator's own ledger with no payment-network
+object (a development or test gate's play balance); or an operator's own rail, named in its card's `rails`. A
+receipt's `ref` depends on its `event`:
+
+| `event` | `ref` |
+|---|---|
+| `held`, `released`, `refunded`, `resolved`, `chargeback` | The rail's object id of that money move (Stripe: the payment intent, transfer, refund or dispute; `ledger`: the operator's ledger entry) |
+| `disputed` | The dispute message's `messageId` (§5), or, for a dispute filed on the operator's page (MCP, §5), the operator's own record of it |
+
+A `disputed` receipt carries the task's rail: the dispute moves no money, and the hold it stops is on that rail.
 
 JSON Schema: [`schema/ext-escrow.metadata.json`](schema/ext-escrow.metadata.json) (the operator's keys).
 
@@ -142,8 +156,10 @@ can show it before calling:
   ```
   One billable session is one `mcp_sessions` row, from `created_at` to `closed_at`; `idleTimeoutSeconds` must
   equal the service's `session_idle_s`, which closes it ([`relay.md`](relay.md) §11.2).
-- **`per_task` on MCP:** requires the service's `tasks: durable` (a priced passthrough call is refused,
-  [`relay.md`](relay.md) §13.1). The operator renders its escrow state on `CreateTaskResult`, `tasks/get` and
+- **`per_task` on MCP:** requires the service's `tasks: required` ([`relay.md`](relay.md) §11.5, D322): every call
+  is then a gate task, which Admission quotes. Under `durable` a client that does not augment a call reaches the
+  service with no quote, unless the gate-wide `hooks.admission.operations` lists `call`; a priced passthrough call is
+  refused ([`relay.md`](relay.md) §13.1). The operator renders its escrow state on `CreateTaskResult`, `tasks/get` and
   `tasks/result` through `mcpMeta` as `_meta["sh.kontra/escrow"] = {status, quote, holdId, reviewEndsAt,
   receipts}` (the fields of §3 without the `kontra.escrow.` prefix); the gate never builds it.
 

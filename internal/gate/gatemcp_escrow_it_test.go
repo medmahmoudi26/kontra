@@ -16,7 +16,8 @@ import (
 // https://app.kontra.sh/#/t/<task>, the pre-minted id the task then has; the A2A route still refuses a SendMessage
 // that does not activate the entry (§2.4); nothing reaches the seller while the task is quoted, and once a person
 // approves it the seller receives the message with no A2A-Extensions (the gate activated the entry, the buyer did
-// not). A service whose seller's own card requires an extension, and a required-sealed one, are still isError with no
+// not); the buyer's key then reads, lists and cancels the task over A2A without activating the entry, and only a
+// message to it is refused (D318). A service whose seller's own card requires an extension, and a required-sealed one, are still isError with no
 // task and no Admission (D294, D272).
 func TestGateMCPHireOperatorExtension(t *testing.T) {
 	e := newGateEnv(t)
@@ -145,6 +146,36 @@ hooks:
 	_, ans = s.call("hire", `{"service":"paid","message":"hi"}`)
 	if rr := ans.tool(t); rr.IsError || rr.text() != "Hello World" || rr.Structured.TaskID != taskID {
 		t.Errorf("the retry after the approval: %s", ans.raw)
+	}
+
+	// The hired task over A2A, by the same key and without A2A-Extensions (§2.4, D318): its reads and its cancel are
+	// served (a completed task is not cancelable, -32002), and only a message to it is refused -32008.
+	rpcA2A := func(method, params string) string {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/paid", strings.NewReader(
+			`{"jsonrpc":"2.0","id":7,"method":"`+method+`","params":`+params+`}`))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("A2A-Version", "1.0")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	if b := rpcA2A("GetTask", `{"id":"`+taskID+`"}`); !strings.Contains(b, `"id":"`+taskID+`"`) || !strings.Contains(b, "TASK_STATE_COMPLETED") {
+		t.Errorf("A2A GetTask of the hired task without A2A-Extensions: %s", b)
+	}
+	if b := rpcA2A("ListTasks", `{}`); !strings.Contains(b, taskID) || strings.Contains(b, "-32008") {
+		t.Errorf("A2A ListTasks without A2A-Extensions: %s", b)
+	}
+	if b := rpcA2A("CancelTask", `{"id":"`+taskID+`"}`); !strings.Contains(b, `"code":-32002`) {
+		t.Errorf("A2A CancelTask of the completed task without A2A-Extensions: %s, want -32002", b)
+	}
+	if b := rpcA2A("SendMessage", `{"message":{"messageId":"m-after","role":"ROLE_USER","taskId":"`+taskID+`","parts":[{"text":"more"}]}}`); !strings.Contains(b, `"code":-32008`) {
+		t.Errorf("an A2A message to the hired task without A2A-Extensions: %s, want -32008", b)
 	}
 
 	// What a hire cannot carry: the seller's own required extension, and sealing. isError, no task, no Admission.

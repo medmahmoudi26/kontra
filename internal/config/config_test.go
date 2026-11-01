@@ -390,6 +390,8 @@ func TestLoadErrors(t *testing.T) {
 		{"tools on a2a", svc("    kind: a2a\n    backend: { tunnel: {} }\n    tools: { allow: [x] }\n"), "tools: mcp services only"},
 		{"tasks on a2a", svc("    kind: a2a\n    backend: { tunnel: {} }\n    tasks: durable\n"), "tasks: mcp services only"},
 		{"bad tasks mode", svc("    kind: mcp\n    backend: { tunnel: {} }\n    tasks: sometimes\n"), `tasks "sometimes"`},
+		{"search.hidden not a boolean (D321)", svc("    kind: a2a\n    backend: { tunnel: {} }\n    annotations: { search: { hidden: \"yes\" } }\n"), "annotations.search.hidden"},
+		{"search.hidden null (D321)", svc("    kind: a2a\n    backend: { tunnel: {} }\n    annotations: { search: { hidden: null } }\n"), "annotations.search.hidden"},
 		{"http backend without allow_private (D67)", svc("    kind: a2a\n    backend: { a2a: { url: http://10.0.0.5:9000 } }\n"), "http:// is refused unless allow_private: true (D67)"},
 		{"backend with credentials", svc("    kind: a2a\n    backend: { a2a: { url: https://u:p@x.example.com } }\n"), "credentials do not belong"},
 		{"backend with query", svc("    kind: a2a\n    backend: { a2a: { url: \"https://x.example.com/?a=1\" } }\n"), "no query or fragment"},
@@ -746,6 +748,22 @@ postgres: "postgres://k@db/k?pool_max_conns=7&pool_max_conn_lifetime=1h"
 			}
 			if len(c.Warnings) != 0 {
 				t.Errorf("MCP services are built since M3 WP-04; warnings = %q", c.Warnings)
+			}
+		}},
+		{"a service hidden from search (D321)", minimal + `
+  link:
+    kind: a2a
+    backend: { tunnel: {} }
+    annotations: { search: { hidden: true, price_model: per_task } }
+`, nil},
+		{"mcp service whose every call is a task (D322)", minimal + `
+  priced:
+    kind: mcp
+    backend: { tunnel: {} }
+    tasks: required
+`, func(t *testing.T, c *Config) {
+			if c.Services["priced"].Tasks != TasksRequired || !GateOwnsTasks(c.Services["priced"].Tasks) || GateOwnsTasks(TasksPassthrough) {
+				t.Errorf("tasks = %q", c.Services["priced"].Tasks)
 			}
 		}},
 		{"peer hop (M3 WP-04)", minimal + `

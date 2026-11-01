@@ -4901,7 +4901,9 @@ Kontra Cloud builds M5 against this gate, and its record (kontra-cloud `docs/m5-
 from this repository: decision 7's OIDC principals on the A2A routes with a tenant mapping and a revocation feed
 (public-repo PR M5-G1; its C4 and D-M5-35), and an audit-append contract for the gate's tables it writes (M5-G2; its
 C11, with D-M5-54 as the interim). D314 to D317 settle them. Where Cloud's record proposed something else, the entry
-says so and what Cloud changes.
+says so and what Cloud changes. The second build of the gate side (D318 to D322) answers the rest: an observation of
+Cloud's end-to-end run on required extensions (D318), the indexes of its D-M5-120 (D319) and the three issues its PRs
+opened against this repository (kontra#5, #6, #7: D320 to D322).
 
 ### D314. The A2A routes take an issuer's JWTs as OIDC principals — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 7; completes D268, D276)
 
@@ -5080,3 +5082,163 @@ stale head is a unique violation; the operator's row ends the verified chain), t
 bytes that are not UTF-8, both forks refused, `PUBLIC` without `EXECUTE`, `SECURITY DEFINER`), `TestDownThenUp` and
 `TestUpOnEmptyDatabase` (`internal/migrate`: 0004's up and down), `TestMigrateCommand` (`cmd/kontra-gate`),
 `TestEmbeddedMigrations`.
+
+### D318. A served card's required extensions are required of messages, not of a task's own methods — **decided under the owner's standing instruction, 1 Nov** (amends D9; completes D300)
+
+Cloud's `make e2e` at its PR-3 (its D-M5-90) saw the pinned gate refuse every A2A request to a `per_task` service that
+did not activate the escrow entry, `GetTask` included, not only the `SendMessage` [`ext-escrow.md`](../spec/ext-escrow.md)
+§1 names: `a2ahttp.Extensions` ran on every A2A route. The question: per A2A 1.0's extension activation and
+[`relay.md`](../spec/relay.md), should `GetTask`, `CancelTask` and `SubscribeToTask` of a task that exists require it?
+
+What the texts say. A2A 1.0 activates extensions per request (`A2A-Extensions`, §3.2.5) and §3.3.4 has the agent
+return `ExtensionSupportRequiredError` "when a server requests use of an extension marked as `required: true`" and
+the client does not declare it; the extensions topic says a required extension "impacts how requests are structured or
+processed". Neither says which methods; a2a-go v2.7.0's `NewAgentCardEnforcer` checks every method, and the pinned
+TCK (`CORE-CAP-004`) only `SendMessage`. Kontra's own texts scope it: ext-escrow §1 refuses "a `SendMessage` that does
+not activate the URI ... before any task exists", activation being the acknowledgement of the card's quote; relay.md
+§2.4 refuses "before any task row exists".
+
+Decision: a defect, fixed. A message (`SendMessage`, `SendStreamingMessage`, on both bindings: a new task, a
+follow-up, a resend, a review-window message or a dispute) missing a URI the served card marks required is refused
+`-32008`, as before; so is a JSON-RPC method the gate does not know. `GetTask`, `ListTasks`, `CancelTask`,
+`SubscribeToTask`, the four push-config methods and `GetExtendedAgentCard` are not refused for it; the URIs they
+activate are still filtered by the card and echoed. Why:
+
+- **No extension changes those answers.** The gate answers them from its own rows (§5, §8, §9) and never forwards
+  them to the seller, whose own activation of a forwarded cancel is the one stored with the task (§8.1). Refusing them
+  enforces nothing an extension's protocol governs.
+- **The required set is the card's now, the task's terms were fixed at admission.** A buyer whose task was admitted
+  under a free listing loses its task's reads and its cancel the moment the listing is priced (Cloud versions
+  listings, its D-M5-95), and a2a-go's own client activator activates only what the card it resolved declares. A
+  task's owner must always be able to read and stop its task; a cancel of a quoted task is the buyer stopping a
+  payment.
+- **`/mcp` already reads them without it.** A `hire` activates the operator's entries on the buyer's behalf (D300), and
+  its task's `tasks/get`, `tasks/cancel` and a `reply` need nothing more; the same principal reading the same task
+  over A2A was refused.
+
+What it does not change: a message still needs the activation, follow-ups included (a dispute is an escrow message,
+§5), so an extension's protocol still governs every message under the card's current terms. A gate stricter than
+a2a-go's enforcer on messages and more lenient on reads stays conformant: no client that activates is refused.
+
+Conflict with Cloud's record: its D-M5-90 and CLAUDE.md say the gate refuses "a task's reads included". Its clients
+send the header on every request (its e2e and G1 do), so nothing of Cloud's breaks; the sentence should say messages.
+
+Tested: `TestExtensionsRequiredOfMessages` (`internal/a2ahttp`: messages on both bindings and an unknown JSON-RPC method
+refused before the handler; nine task methods on both bindings and `SubscribeToTask` on both served without the
+header, nothing echoed; a declared URI a `GetTask` activates echoed and passed on), `TestExtensions`, and
+`TestGateMCPHireOperatorExtension` (`internal/gate`: the task a `hire` created, read by `GetTask` and `ListTasks` and
+cancelled (`-32002`, completed) over A2A by the same key without `A2A-Extensions`, while a message to it is `-32008`).
+
+### D319. `tasks_by_buyer`, and the derived buyer ids written out — **decided under the owner's standing instruction, 1 Nov** (carries out Cloud's D-M5-120)
+
+Cloud's PR-4 review (its D-M5-120) split `GET /v1/tasks` and `GET /v1/usage` into reads an index serves, and found two
+with none: a buyer's tasks across services (no index of `tasks` starts with `buyer_id`; `tasks_hired` is partial on
+`hired`), and a node principal's tasks and calls (none covers `principal`, and "a node's `buyer_id` is UUIDv5 of a
+gate-internal namespace, relay.md §2.3, which Cloud cannot compute"). It proposed `tasks (buyer_id, id desc)` and
+either the node buyer's namespace written in §2.3 or indexes on `principal`. Decision (migration `0004_m5.sql`,
+[`relay.md`](../spec/relay.md) §2.3, §13.5):
+
+- **`tasks_by_buyer on tasks (buyer_id, id desc)`.** A buyer's newest tasks are an ordered scan of it (task ids are
+  UUIDv7, so `id desc` is newest first). It is built in 0004's transaction, which holds a `SHARE` lock on `tasks` for
+  one scan, as 0003's `tasks_hired` did.
+- **The namespace, not `principal` indexes.** The derivations were fixed since M1 (`ids.Derive`; the namespace is
+  UUIDv5(URL, `https://kontra.sh/ns/v1`) = `a89faf13-…`) and are stored in `buyer_id` forever, so writing them down costs
+  nothing; §2.3 now gives the namespace, the netstring names of the `node`, `oidc` and `anonymous` buyers and one
+  example of each, and a Python one-liner. Cloud computes a node key's buyer and reads its tasks through
+  `tasks_by_buyer` and its calls through `calls_by_buyer`, one query per buyer. Two indexes on `principal` would cost
+  every task and call write an index entry for a read the one index already serves.
+- §13.5 lists the indexes an operator's reads use, and says that a read `OR`ing a party's buyers uses none of them.
+
+Tested: the 0004 block of `scripts/migration_tests.sql` (`make check-migrations`, Postgres 16 and 17: 20,000 tasks
+analysed, an active buyer's newest 50 an ordered `Index Scan` of `tasks_by_buyer` with no sort, a buyer with 20 tasks
+read through it with no sequential scan), `TestDownThenUp` (`internal/migrate`), `TestDerivedBuyersAsRelayWritesThem`
+(`internal/ids`: §2.3's five values), and `scripts/check_specs.py`, which recomputes them with Python's `uuid.uuid5`.
+
+### D320. A receipt's rail may be the operator's own, and its `ref` is defined per event — **decided under the owner's standing instruction, 1 Nov** (carries out kontra#5)
+
+kontra#5 (Cloud's PR-2b): `kontra.escrow.receipts` entries are `{event, rail, ref, at}` with `rail` the enum
+`["stripe"]` and `ref` "the rail's object id", so a development gate's play-money hold (no card network object) has no
+valid rail, and a `disputed` receipt, a message on the task, has no rail object for its `ref`. Its proposal: let
+`rail` be an operator's rail name, at least `ledger`, and define `ref` per event. Decision
+([`ext-escrow.md`](../spec/ext-escrow.md) §1, §3; `ext-escrow.params.json`, `ext-escrow.metadata.json`):
+
+- **A rail is a name** `^[a-z][a-z0-9_-]{0,31}$`, in the card's `rails` and in each receipt: `stripe` (a card payment
+  through Stripe), `ledger` (a hold in the operator's own ledger with no payment-network object), or the operator's
+  own. Both schemas share `params.json#/$defs/rail`.
+- **`ref` by event:** the rail's object id of the money move for `held`, `released`, `refunded`, `resolved` and
+  `chargeback` (`ledger`: the ledger entry); for `disputed`, the dispute message's `messageId`, or the operator's own
+  record of a dispute filed on its page (MCP has no in-protocol dispute, §5). A `disputed` receipt carries the task's
+  rail: the dispute moves no money, and the hold it stops is on that rail.
+
+The proposal as written. The gate is unchanged: it stores and passes these maps (relay.md §13.2) and names no escrow
+key. Cloud's dev gates' receipts now validate; production and staging keep `stripe`.
+
+Tested: `make check-specs` (the fixtures `ext-escrow.metadata.ledger.json`, a `ledger` hold with a `disputed` receipt,
+and `ext-escrow.params.ledger.json`, validate; the existing Stripe fixtures still do).
+
+### D321. `annotations.search.hidden`: a service reachable by its ref and never searched — **decided under the owner's standing instruction, 1 Nov** (carries out kontra#7; amends D301's visibility)
+
+kontra#7 (Cloud's PR-3): `listed` controls search for anonymous principals only; `search` shows every service whose
+`allow:` admits the principal by an entry other than `anonymous`, `key:*` and `oidc:*` included (D301). So Cloud's
+"unlisted" listing, `listed: false` with `allow: [key:*, oidc:*, anonymous]`, appears in the search of every API key and
+signed-in user, and taking `key:*` and `oidc:*` out of `allow:` would strip the card's security fields from a paid
+service. It proposed an annotation such as `search.hidden: true`, or `listed` applied to every principal. Decision
+([`relay.md`](../spec/relay.md) §12.2, §13.4):
+
+- **`annotations.search.hidden: true` leaves the service out of every principal's `search`,** whatever `allow:` and
+  `listed` say. `describe` and `hire` by ref, the cards and the calls stay as `allow:` decides (`describe` answers a
+  service `search` would show the principal were it not hidden): a private-link listing.
+- **Only the JSON boolean `true` hides** (the query is `(annotations -> 'search' -> 'hidden') is distinct from
+  'true'::jsonb`, in SQL, so hidden rows do not count toward a request's 1000 rows read). A team gate refuses at load a
+  `hidden` that is not a boolean (`null` included), so a quoted `"true"` cannot silently hide nothing there; an
+  operator writing rows writes the boolean.
+- **Why the annotation, not `listed` for everyone.** `listed` defaults to false, and every team gate's services are
+  found today by their own keys through `allow:`: applying `listed` to every principal would hide them all, or need
+  a third state. The `search` annotation already holds what search shows and filters on (`description`, `price`,
+  `price_model`), needs no migration and no new column, and Cloud writes it in the same publish.
+
+What Cloud changes: an unlisted listing writes `search.hidden: true` beside `listed: false` and `[key:*, oidc:*,
+anonymous]`; its documentation of "unlisted" then holds for signed-in users and keys too.
+
+Tested: `TestSearchHidden` (`internal/gatemcp`, Postgres: an unlisted listing hidden from a signed-in user's, an API
+key's and the anonymous principal's search, described and hireable by ref; `hidden: false` and `"true"` hide nothing;
+a listed hidden service described by ref, not searched), the `TestLoad` and `TestLoadErrors` rows (`internal/config`).
+
+### D322. `tasks: required`: an MCP service whose every call is a gate task — **decided under the owner's standing instruction, 1 Nov** (carries out kontra#6; completes D159, D178)
+
+kontra#6 (Cloud's PR-3, its C42): `hooks.admission.operations` is gate-wide. With `[task, session]`, a plain
+`tools/call` to a `tasks: durable` service is relayed without Admission, and a tool whose `taskSupport` is `optional`
+may be called plainly, so a per-task price is skipped by any client that does not augment its calls; with `call` added,
+every call of every service, free ones included, waits on the hook. Its two proposals: a per-service Admission setting
+for `call`, or a `tasks: required` mode. Decision, the second ([`relay.md`](../spec/relay.md) §11.5, §11.12, §13.1, §17;
+`config.json`; migration `0004_m5.sql`; [`ext-escrow.md`](../spec/ext-escrow.md) §6):
+
+- **`required` is `durable` that refuses a plain call.** The gate owns the service's tasks as for `durable` (§11.5,
+  §11.6; `capabilities.tasks` as the upstream declares, plus `list` and `cancel`). On 2025-11-25, `tools/list` leaves
+  out the tools whose upstream `execution.taskSupport` is absent or `forbidden` and shows `"required"` on every other;
+  a plain `tools/call` is `-32601` (MCP 2025-11-25's answer to a plain call of a tool whose `taskSupport` is
+  `required`), and a call of a tool left out `-32602` `Unknown tool`. On 2026-07-28 (no per-tool support, D159) a
+  `tools/call` that does not declare the tasks extension is `400` `-32021` naming it, as the extension answers a
+  request that needs it (D176), and one to an upstream that does not declare it `-32601`. None of these asks Admission,
+  reaches the upstream or writes a `calls` row. A 2025-06-18 session has no tasks, so it can call nothing there.
+  `describe` shows the legacy list as a 2025-11-25 session sees it.
+- **So every call is a task, which Admission sees as `task`** and may quote (§13.1, §13.2), with no `call` hook for the
+  gate's free services. ext-escrow §6 now says `per_task` on MCP needs `tasks: required` (it said `durable`, which is
+  the hole). A quote on `call` or `session` is still the deny `priced tasks need tasks: durable`; its text is kept.
+- **Why not a per-service operations list.** A plain call has no approval path: Admission could only deny it, so a
+  client would learn the rule from a refusal on every call, the operator would write the same deny twice (the mode and
+  the hook), and the gate would still advertise `optional`. `required` says it in the tool list a client reads before
+  calling, and refuses before any hook.
+- **Storage.** `services.tasks_mode` admits `required` (0004 replaces its check; its down turns a `required` service
+  `durable`, the mode it refines, before restoring the check). The configuration's `services.<name>.tasks` takes it.
+
+What Cloud changes: its `ListingPut.tasks` accepts `required`, and a `per_task` MCP listing is published with
+`tasks: required` instead of being refused `per_task_mcp_unavailable` (its C42); its Admission's guard on a `per_task`
+listing's `session` may stay.
+
+Tested: `TestToolViewRequireTasks` (`internal/mcprelay`: the list as `required` shows it, other `execution` members
+kept), `TestRequiredTasks` (Postgres and Temporal, 2025-11-25: the list of two of four tools, `taskSupport` required;
+plain calls `-32601`, left-out tools `-32602`, no Admission, upstream call, task or `calls` row; a task-augmented call
+Admission's `task`, quoted, nothing dispatched), `TestModernRequiredTasks` (2026-07-28: the extension kept on
+`server/discover`; a call not declaring it `400` `-32021` with nothing asked or written; one declaring it a gate task),
+the `TestLoad` row (`internal/config`), the 0004 blocks of `scripts/migration_tests.sql` and `TestDownThenUp`.

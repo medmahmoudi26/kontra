@@ -227,6 +227,9 @@ type route struct {
 	tenant, name string
 	prefix       string // the service path, {svc}
 	taskID       string // routeRESTSubscribe
+	// message: POST {svc}/message:send or {svc}/message:stream, the HTTP+JSON routes that carry a message, on which a
+	// served card's required extensions are required (§2.4, D318). JSON-RPC routes decide by the method.
+	message bool
 }
 
 func (rt route) binding() sse.Binding {
@@ -278,9 +281,9 @@ func parseRoute(r *http.Request, multi bool) (route, bool) {
 	case rest == ".well-known/seller-jwks.json" && get:
 		rt.kind = routeSellerJWKS
 	case rest == "message:send" && post:
-		rt.kind = routeREST
+		rt.kind, rt.message = routeREST, true
 	case rest == "message:stream" && post:
-		rt.kind = routeRESTStream
+		rt.kind, rt.message = routeRESTStream, true
 	case (rest == "tasks" || rest == "extendedAgentCard") && r.Method == http.MethodGet:
 		rt.kind = routeREST
 	case strings.HasPrefix(rest, "tasks/"):
@@ -516,13 +519,25 @@ func (s *Server) serveJSONRPC(w http.ResponseWriter, r *http.Request, rt route, 
 		r = r.WithContext(context.WithValue(r.Context(), noteKey{}, n))
 		boundWrites(t.jsonrpc, ResponseWriteTimeout).ServeHTTP(&rpcWriter{ResponseWriter: w, note: n, id: id}, r)
 	})
-	s.a2a(svc, next).ServeHTTP(w, r)
+	// A body that does not parse, or names a method the gate does not know, is held to the required extensions as a
+	// message is: only the methods of an existing task and the extended card are not (§2.4, D318).
+	s.a2a(svc, !parsed || !taskMethods[req.Method], next).ServeHTTP(w, r)
+}
+
+// taskMethods are the JSON-RPC methods that act on a task that exists (read, list, cancel, subscribe, push configs)
+// or read the extended card: a served card's required extensions are not required of them (§2.4, D318). Every other
+// method, SendMessage and SendStreamingMessage first, is.
+var taskMethods = map[string]bool{
+	"GetTask": true, "ListTasks": true, "CancelTask": true, "SubscribeToTask": true,
+	"CreateTaskPushNotificationConfig": true, "GetTaskPushNotificationConfig": true,
+	"ListTaskPushNotificationConfigs": true, "DeleteTaskPushNotificationConfig": true,
+	"GetExtendedAgentCard": true,
 }
 
 // a2a is the middleware every A2A request (not a card) passes: A2A-Version, then A2A-Extensions against
-// the service's served card.
-func (s *Server) a2a(svc *Service, next http.Handler) http.Handler {
-	return Versions(Extensions(s.declared(svc), next))
+// the service's served card, its required URIs refused when missing from a message (message, D318).
+func (s *Server) a2a(svc *Service, message bool, next http.Handler) http.Handler {
+	return Versions(extensions(s.declared(svc), message, next))
 }
 
 func (s *Server) jsonrpcStream(w http.ResponseWriter, r *http.Request, rt route, svc *Service, p auth.Principal, req rpcRequest) {
@@ -618,7 +633,7 @@ func (s *Server) serveREST(w http.ResponseWriter, r *http.Request, rt route, svc
 			boundWrites(http.StripPrefix(rt.prefix, t.rest), ResponseWriteTimeout).ServeHTTP(&restWriter{ResponseWriter: w, note: n}, r)
 		})
 	}
-	s.a2a(svc, next).ServeHTTP(w, r)
+	s.a2a(svc, rt.message, next).ServeHTTP(w, r)
 }
 
 // decodeStrict is a2a-go's utils.DecodeJSON: one JSON value and nothing after it.
@@ -834,7 +849,17 @@ func isV10(v string) bool {
 // requested ones the card declares, in the order the request named them. The work is linear in the header
 // and the card's required list: at most MaxRequestedExtensions distinct URIs of at most MaxExtensionURI
 // bytes are considered, each looked up in the card's set.
+//
+// Extensions holds every request to the required URIs; the gate's routes hold only messages to them (D318).
 func Extensions(declared func(r *http.Request) *ExtensionSet, next http.Handler) http.Handler {
+	return extensions(declared, true, next)
+}
+
+// extensions is Extensions, refusing a missing required URI only when required is true: a message (SendMessage,
+// SendStreamingMessage), which a required extension's protocol governs. A request on a task that exists, which no
+// extension of the card changes (the gate answers it from its own rows, §5, §8, §9), is served with the URIs it
+// activated and echoed, whatever the card now requires (spec §2.4, D318).
+func extensions(declared func(r *http.Request) *ExtensionSet, required bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requested := splitExtensions(r.Header.Values(a2a.SvcParamExtensions), r.Header.Values("X-"+a2a.SvcParamExtensions))
 		var set *ExtensionSet
@@ -852,7 +877,7 @@ func Extensions(declared func(r *http.Request) *ExtensionSet, next http.Handler)
 		var missing []string
 		n := 0
 		for _, u := range set.Required() {
-			if !active[u] {
+			if required && !active[u] {
 				n++
 				if len(missing) < maxMissingNamed {
 					missing = append(missing, u)

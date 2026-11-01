@@ -48,15 +48,13 @@
             ]
           },
           "rail": {
-            "type": "string",
-            "enum": [
-              "stripe"
-            ]
+            "$ref": "https://kontra.sh/schema/ext/escrow/v1/params.json#/$defs/rail"
           },
           "ref": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 256
+            "maxLength": 256,
+            "description": "Per event (ext-escrow.md §3, D320): for held, released, refunded, resolved and chargeback the rail's object id of that money move (ledger: the operator's ledger entry); for disputed the dispute message's messageId, or the operator's own dispute record id for a dispute filed on its page."
           },
           "at": {
             "type": "string",

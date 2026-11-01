@@ -68,6 +68,28 @@ for f in list((ROOT / "spec").glob("*.md")) + list((ROOT / "migrations").glob("*
 for n in sorted(cited - entries, key=int):
     problems.append(f"D{n} is cited but has no entry in docs/decisions.md")
 
+# 5. relay.md §2.3's derived buyer ids (D319) are what Python's uuid.uuid5 computes from the names it writes: an
+#    operator computes them in its own language.
+import uuid  # noqa: E402
+
+relay = (ROOT / "spec" / "relay.md").read_text()
+NS = uuid.uuid5(uuid.NAMESPACE_URL, "https://kontra.sh/ns/v1")
+
+
+def derive(kind, *parts):
+    return uuid.uuid5(NS, "".join(f"{len(p.encode())}:{p}," for p in [kind, *parts]))
+
+
+for what, value in [
+    ("the namespace", NS),
+    ("the node buyer", derive("node", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa")),
+    ("the oidc buyer", derive("oidc", "https://api.kontra.sh", "alice")),
+    ("the team gate's anonymous buyer", derive("anonymous")),
+    ("a tenant's anonymous buyer", derive("anonymous", "01900000-0000-7000-8000-000000000001")),
+]:
+    if f"`{value}`" not in relay:
+        problems.append(f"spec/relay.md §2.3: {what} is {value}, which it does not write")
+
 for line in problems:
     print(line)
 sys.exit(1 if problems else 0)

@@ -15,7 +15,10 @@ amended on 31 Oct after M5's plan audit: `hire` activates the operator's require
 serves, its sessions in use, its `tasks/result` streams and its rendering of bucketed parts (§10.4, §12; D303).
 Revision 9 (1 Nov, M5) builds the OIDC principals of the A2A routes, an issuer's tenant claim and its revocation feed
 (§2.3, §10.3, §12.1, §17; D314 to D316), and an operator's appends to the audit chain (§13.5; D317), decided under the
-owner's standing instruction.
+owner's standing instruction. It was amended the same day: a served card's required extensions are required of
+messages, not of a task's own methods (§2.4; D318); the derived buyer ids written out and the indexes an operator's
+reads use (§2.3, §13.5; D319); a search-hidden service (§12.2, §13.4; D321); and MCP `tasks: required` (§11.5,
+§11.12, §13.1; D322).
 Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
@@ -149,6 +152,22 @@ entry admits every principal, authenticated or not, and an authenticated caller 
 `via`. A service the gate creates during a handshake gets `allow: [org:<its tenant>]` ([`tunnel.md`](tunnel.md)
 §5–§6), so its owner's own nodes can call it.
 
+**Derived buyer ids (D319).** The table's UUIDv5 ids (RFC 9562 §5.5) are in the gate's namespace `N` = UUIDv5(the URL
+namespace `6ba7b811-9dad-11d1-80b4-00c04fd430c8`, `"https://kontra.sh/ns/v1"`) = `a89faf13-3f2e-5f6d-8f26-999810d1be71`,
+of a name that writes a kind and its parts as netstrings, each `<its length in bytes, decimal>:<its UTF-8 bytes>,`:
+
+| Buyer | Name | Example |
+|---|---|---|
+| a node hiring without an API key, `node:<key_id>` | `4:node,29:<key_id>,` | `k1_aaaaaaaaaaaaaaaaaaaaaaaaaa` → `70c9ed92-910e-5b48-b506-040034a1d192` |
+| `oidc:sub:<sub>` (`via` `oidc` or `mcp`) | `4:oidc,<n>:<issuer>,<n>:<sub>,`, the issuer exactly as configured | `https://api.kontra.sh`, `alice` → `cd0b4bc7-5da9-50b2-aecd-b390e706e09a` |
+| `anonymous`, team gate | `9:anonymous,` | `86ac12bd-54bd-5c48-95fc-5fca3c9a43db` |
+| `anonymous`, multi-tenant gate | `9:anonymous,36:<service tenant id>,` | `01900000-0000-7000-8000-000000000001` → `ff015874-8db2-5a37-8ea7-f3e3516c1461` |
+
+They are stored in `tasks.buyer_id`, `calls.buyer_id` and `mcp_sessions.buyer_id`, so they never change. An operator
+computes them to read a buyer's rows through `tasks_by_buyer` (`tasks (buyer_id, id desc)`) and `calls_by_buyer`
+(§13.5): the tasks and calls of a party's nodes are those of its node keys' buyers (Python: `uuid.uuid5(N,
+"".join(f"{len(p.encode())}:{p}," for p in [kind, *parts]))`).
+
 **OIDC principals on the A2A routes (D314).** With `auth.oidc` (`issuer`, `audience`), a bearer of a JWT's shape on an
 A2A route (three base64url segments separated by dots, at most 16 KiB, as §12.1 reads one) is verified as a token of
 that issuer and is never looked up as an API key; any other bearer is an API key. Verification is §12.1's (the issuer's
@@ -227,9 +246,13 @@ Applied by HTTP middleware in front of a2a-go's transports, and by the gate's ow
   serves 1.0 only downstream (PRD §18).
 - **`A2A-Extensions`.** Accepted as one comma-separated header, several headers, or both; split, trimmed
   and deduplicated. `X-A2A-Extensions` (0.3) is accepted as an alias. URIs the served card does not
-  declare are ignored. A request missing a URI the card marks `required: true` is refused with
-  `ExtensionSupportRequiredError` (`-32008`) before any task row exists. The response carries the
-  activated URIs in one comma-separated `A2A-Extensions` header.
+  declare are ignored. A message (`SendMessage`, `SendStreamingMessage`; on JSON-RPC also a method the gate does not
+  know) missing a URI the card marks `required: true` is refused with `ExtensionSupportRequiredError` (`-32008`)
+  before any task row exists. The methods of a task that exists (`GetTask`, `ListTasks`, `CancelTask`,
+  `SubscribeToTask`, the push configs) and `GetExtendedAgentCard` are not refused for it (D318): the gate answers them
+  from its own rows, which no extension of the card changes, and a task's owner can always read and cancel it,
+  whatever the card has required since the task was admitted. The response carries the activated URIs in one
+  comma-separated `A2A-Extensions` header, on every method.
 - **Strict decoding of JSON-RPC (D172).** The gate reads a JSON-RPC body itself (the method that routes a stream,
   `params.tenant`, the `id`) before a2a-go decodes it again, so the two must never see different members. The body
   is decoded with exact, case-sensitive keys first. A request in which a key repeats, or two keys are equal under
@@ -903,7 +926,7 @@ The gate serves each `kind: mcp` service as a Streamable HTTP MCP endpoint, prot
 | Shape | What the gate adds | Durability |
 |---|---|---|
 | Plain requests (`initialize`, `tools/list`, `tools/call`, `resources/*`, `prompts/*`, notifications, responses) | Auth, `allow:`, per-tool policy, limits, metering, session affinity | None: there is no task to make durable. A pinned session dies with its tunnel. |
-| Task-augmented `tools/call` (`params.task`), when the service's `tasks:` mode is `durable` | All of the above, plus the gate owns the task: `TaskLifecycle`, event log, `tasks/*` from Postgres | As for A2A (§5–§10) |
+| Task-augmented `tools/call` (`params.task`), when the service's `tasks:` mode is `durable` or `required` (where every call is one, D322) | All of the above, plus the gate owns the task: `TaskLifecycle`, event log, `tasks/*` from Postgres | As for A2A (§5–§10) |
 
 The relay works on raw JSON, decoded with exact keys (§11.1). It never decodes and re-encodes a message
 through a typed SDK, because go-sdk v1.8.0 drops `Tool.execution` and rejects `tasks/*` (D19). Unknown fields
@@ -1095,9 +1118,17 @@ The service's `tasks:` key decides (note 1 §6 operator config):
 | `durable` (default) | `capabilities.tasks` as the upstream declares it; the gate adds `list` and `cancel` | the gate owns the task (below) |
 | `passthrough` | as the upstream declares it | forwarded on the pinned session; the upstream owns the task; the gate relays `tasks/*` on that session like any plain request. The `calls` row is written when the `CreateTaskResult` returns, with `task_id NULL` and `is_error NULL`: the outcome is not observed, so an operator never bills `per_call` on such rows, and a priced task needs `durable` (§13.1) |
 | `off` | `capabilities.tasks` removed; every tool's `execution` removed | `-32601` |
+| `required` | as `durable`; `tools/list` leaves out the tools whose upstream `execution.taskSupport` is absent or `forbidden`, and shows `execution.taskSupport: "required"` on every other | as `durable`; a plain `tools/call` is `-32601` (MCP's answer to a plain call of a tool whose `taskSupport` is `required`), and one of a tool left out is `-32602` `Unknown tool`, neither asking Admission, reaching the upstream or writing a `calls` row |
 
 The gate never advertises tasks the upstream does not support, and never runs the task shape over a plain
 upstream call (note 1 §8 and README "Open", default kept).
+
+**`required` (D322).** `durable` lets a client choose: a tool whose upstream `taskSupport` is `optional` is called
+plainly by any client that does not augment the call, and Admission sees a plain call only when the gate-wide
+`hooks.admission.operations` lists `call`, which puts every call of every service, free ones included, behind the
+hook. `required` makes every call of one service a gate task, which Admission sees as `task` and may quote (§13.1,
+§13.2): what an operator that prices an MCP service per task sets ([`ext-escrow.md`](ext-escrow.md) §6). A
+`2025-06-18` session, which has no tasks, can call nothing on it.
 
 **`durable`:**
 
@@ -1314,7 +1345,9 @@ bridge's answer to the probe (rule 3's body, [`tunnel.md`](tunnel.md) §10).
 
 **Gate-owned tasks (D159).** The extension has no per-request opt-in and no `execution.taskSupport`: the server
 decides. For `tasks: durable` the gate decides as follows; `passthrough` and `off` give modern clients plain calls
-only (D161).
+only (D161). For `tasks: required` it decides the same, and a `tools/call` that is not a gate-owned task by rule 1 is
+refused: `400` with `-32021` naming the extension when the request does not declare it, else (an upstream that does
+not declare it) `-32601`; nothing reaches Admission or the upstream (D322).
 
 1. A `tools/call` whose request declares the extension, on a `durable` service whose upstream declared it in its
    cached `server/discover`, becomes a gate-owned task. Any other is a plain call (§11.4).
@@ -1468,8 +1501,8 @@ JSON Schema 2020-12 objects, published in `spec/schema/mcp-tools.json`.
 
 | Tool | Input | Result |
 |---|---|---|
-| `search` | `{query?: string, kind?: "a2a"\|"mcp", price?: string, cursor?: string}` | `structuredContent: {services: [{ref, kind, name, description, available, price?}], nextCursor?}`, plus the same as a text block. `available` = at least one connected session or a direct backend. `price` is the operator's annotation, verbatim. Only services whose `allow:` admits the principal by an entry other than `anonymous` (`key:*` and `oidc:*` included, D301), plus services the operator marks `listed`; services of an anonymous tenant never appear. |
-| `describe` | `{service: string}` | Only for a service `search` would return to the principal, else the unknown-service error. The served card (A2A) or the cached, filtered, annotated `tools/list` (MCP; never an upstream call per request), `sealed`, `available`, and the URLs to call it directly (`{public_url}/agents/…` or `/mcp/…`). |
+| `search` | `{query?: string, kind?: "a2a"\|"mcp", price?: string, cursor?: string}` | `structuredContent: {services: [{ref, kind, name, description, available, price?}], nextCursor?}`, plus the same as a text block. `available` = at least one connected session or a direct backend. `price` is the operator's annotation, verbatim. Only services whose `allow:` admits the principal by an entry other than `anonymous` (`key:*` and `oidc:*` included, D301), plus services the operator marks `listed`; services of an anonymous tenant never appear, nor services the operator hides from search (`annotations.search.hidden: true`, D321), for any principal. |
+| `describe` | `{service: string}` | Only for a service `search` would return to the principal were it not hidden (D321), else the unknown-service error. The served card (A2A) or the cached, filtered, annotated `tools/list` (MCP; never an upstream call per request), `sealed`, `available`, and the URLs to call it directly (`{public_url}/agents/…` or `/mcp/…`). |
 | `hire` | `{service: string, message: string \| {parts: Part[]}, contextId?: string}` | Task-augmented (`execution.taskSupport: "optional"`): a `CreateTaskResult`. Plain: a `CallToolResult` whose `structuredContent` is `{taskId, state, data?}` (below; a quoted task's approve URL in its text and `_meta`, §12.3). Only `kind: a2a` services: MCP services are called directly at `/mcp/{svc}`. |
 | `reply` | `{taskId: string, message: string \| {parts: Part[]}}` | Sends a follow-up to a task in `input-required` (§7). Answers the task's new state. |
 | (MCP Tasks) | `tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel` | §11.6, for tasks created by `hire`. `tasks/result` returns the task's final message and artifacts as MCP content: text parts as `text`, data parts as `text` (JSON) and in `structuredContent.data`, file parts as `resource` blocks. For `hire` tasks this replaces §11.8: every terminal state answers a `CallToolResult`, never a JSON-RPC error; one that ended `failed`, `rejected` or `canceled` has `isError: true`, the final status message as text, and `sh.kontra/failure` or `sh.kontra/canceled` in its `_meta` (and in `tasks/get`'s) as in §11.8; a `rejected` task's `sh.kontra/failure` is `rejected` (D293). |
@@ -1687,8 +1720,9 @@ Rules:
   and `Z`) in the future (D284). `operations` says which of `task`, `session` (MCP `initialize`) and `call`
   (plain MCP `tools/call`) consult the hook; an operation it does not list is answered as the built-in answers it.
 - **A `quote` is valid only for operation `task` on a gate-owned task** (an A2A task, or an MCP task with
-  `tasks: durable`). For `call`, `session`, or a passthrough task-augmented call it is treated as a deny,
-  `-32603` `priced tasks need tasks: durable`.
+  `tasks: durable` or `required`). For `call`, `session`, or a passthrough task-augmented call it is treated as a deny,
+  `-32603` `priced tasks need tasks: durable`. An MCP service priced per task sets `tasks: required`, so that no plain
+  call escapes the hook (§11.5, D322).
 - **Admission decides; it never moves money.** Nothing makes the hook atomic with the task's creation: the
   gate can stop between the answer and the task row. Money moves only where a workflow exists, on approval
   (§13.2) or in the Lifecycle hooks (§13.3). An operator that records anything under the pre-minted `taskId`
@@ -1767,7 +1801,7 @@ Operator data the gate attaches without interpreting:
 | `services.annotations` | `card_extensions` | Appended to the served card's `capabilities.extensions` (§3), e.g. Cloud's `https://kontra.sh/ext/escrow/v1` entry with its `params`. A `required: true` entry is enforced like any other (§2.4); a `hire` of `/mcp` activates it for the buyer (§12.2, D300). |
 | | `tool_meta` | `{"<tool name>" \| "*": {<sh.kontra/… keys>}}`, applied to `tools/list` entries' `_meta` (§11.3), e.g. `sh.kontra/price`. |
 | | `initialize_meta` | `{<sh.kontra/… keys>}`, applied to the `initialize` result's `_meta` (§11.2), e.g. a `per_session` price. |
-| | `search` | The `price` and `price_model` strings `search` returns and filters on, verbatim (§12.2). |
+| | `search` | The `price` and `price_model` strings `search` returns and filters on, verbatim, and its `description` (§12.2). `hidden: true` leaves the service out of every principal's `search`, whatever `allow:` and `listed` say, while `describe`, `hire`, its cards and its calls stay as they decide: a service reachable by its ref and never listed (D321). Only the boolean `true` hides; a team gate refuses any other value than a boolean at load. |
 | `services` | `listed` | Whether `search` shows the service to principals outside its tenant, and whether its cards are public (§2.1). |
 | gate config | `caller_metadata` | `kontra.` keys callers may write (§2.5), e.g. Cloud's `kontra.escrow.dispute`. |
 | gate config | `operator_metadata_prefixes` | The metadata prefixes Admission, Updates and patches may write, besides `kontra.keyRetainUntil` (§13.2). |
@@ -1786,6 +1820,13 @@ are scoped to the caller's own `buyer_id` (PRD §12). The **owner of a service**
 own API may show a tenant the tasks and calls of the services it owns (who called, when, state, metadata;
 never content), which is what "served by my nodes" needs (D39). That is the operator's read of the gate's
 tables, not a gate route.
+
+The indexes an operator's reads use (D319): a service's tasks newest first, `tasks_by_service` (`tenant_id, service,
+status_at desc, id desc`); a buyer's tasks across services newest first, `tasks_by_buyer` (`buyer_id, id desc`); a
+service's calls, `calls_by_service` (`tenant_id, service, at`); a buyer's calls, `calls_by_buyer` (`buyer_id, at`). A
+party's buyers are its API keys' `buyer_id`, the OIDC buyer of its subject and the node buyers of its node keys, each
+computed as §2.3 writes it; a read that `OR`s them in one query uses none of these indexes, so it is one query per
+buyer, each with a `LIMIT`.
 
 In Cloud the services, enrollments and keys are written by the control plane into the gate's `services`,
 `enrollment_tokens` and `api_keys` tables (as sha256, with prefix, `buyer_id` and scopes). A change to
@@ -2010,7 +2051,7 @@ met, are D297.
 |---|---|---|
 | `services.<name>.kind` | — (required) | §1 |
 | `services.<name>.tools.allow`, `.deny` | allow all | §11.3 |
-| `services.<name>.tasks` | `durable` | §11.5 |
+| `services.<name>.tasks` | `durable`; or `required`, `passthrough`, `off` (D322) | §11.5 |
 | `services.<name>.sealed` | `false`; `true` or `{required: bool}` (`required` defaults to `true`); tunnel backends only (D91) | [`ext-sealed.md`](ext-sealed.md) §1 |
 | `services.<name>.seller_keys` | none (seller signatures not verified) | §3 |
 | `services.<name>.session_idle_s` | `3600` | §11.2 |

@@ -144,7 +144,8 @@ func TestStatus(t *testing.T) {
 	}
 }
 
-// Down then up is clean: the first down removes 0004's function and index (Check then fails at version 3), the second
+// Down then up is clean: the first down removes 0004's function, its indexes and the tasks mode required (Check then
+// fails at version 3), the second
 // 0003's columns, indexes and checks (version 2), the third 0002's relations and column (version 1), the fourth every
 // relation of 0001 (the version table stays; Check fails at version 0), and up again builds the same schema.
 func TestDownThenUp(t *testing.T) {
@@ -165,8 +166,15 @@ func TestDownThenUp(t *testing.T) {
 		t.Fatalf("first Down = %v", res)
 	}
 	if scalar[bool](t, c, "select to_regprocedure('kontra.audit_append(bytea)') is not null") ||
-		scalar[bool](t, c, "select to_regclass('kontra.audit_prev_hash') is not null") {
-		t.Error("audit_append or audit_prev_hash survives 0004's down")
+		scalar[bool](t, c, "select to_regclass('kontra.audit_prev_hash') is not null") ||
+		scalar[bool](t, c, "select to_regclass('kontra.tasks_by_buyer') is not null") {
+		t.Error("audit_append, audit_prev_hash or tasks_by_buyer survives 0004's down")
+	}
+	if !strings.Contains(scalar[string](t, c, `select pg_get_constraintdef(oid) from pg_constraint
+		where conname = 'services_tasks_mode_check' and conrelid = 'kontra.services'::regclass`), "'off'") ||
+		strings.Contains(scalar[string](t, c, `select pg_get_constraintdef(oid) from pg_constraint
+		where conname = 'services_tasks_mode_check' and conrelid = 'kontra.services'::regclass`), "required") {
+		t.Error("0004's down did not restore services_tasks_mode_check without required")
 	}
 	if !scalar[bool](t, c, "select to_regclass('kontra.tasks_hired') is not null") {
 		t.Error("the first down undid more than 0004")

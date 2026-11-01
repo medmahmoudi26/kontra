@@ -704,6 +704,81 @@ func TestExtensions(t *testing.T) {
 	}
 }
 
+// A served card's required extension is required of a message only (spec §2.4, D318): SendMessage and
+// SendStreamingMessage on both bindings, and a JSON-RPC method the gate does not know, are -32008 without it before
+// the handler; the methods of a task that exists (GetTask, ListTasks, CancelTask, SubscribeToTask, the push configs)
+// and the extended card reach the handler without it, and still echo the URIs they activate.
+func TestExtensionsRequiredOfMessages(t *testing.T) {
+	f := newFixture(t, false)
+	tid := "0192f0b4-0000-7000-8000-000000000001"
+	refused := func(what string, w *httptest.ResponseRecorder, rpcBinding bool) {
+		t.Helper()
+		if rpcBinding {
+			if r := decodeRPC(t, w); r.Error == nil || r.Error.Code != -32008 {
+				t.Errorf("%s without the required extension: %d %s, want -32008", what, w.Code, w.Body)
+			}
+			return
+		}
+		if w.Code != 400 || !strings.Contains(w.Body.String(), "EXTENSION_SUPPORT_REQUIRED") {
+			t.Errorf("%s without the required extension: %d %s, want 400 EXTENSION_SUPPORT_REQUIRED", what, w.Code, w.Body)
+		}
+	}
+	_, n0 := f.h.last()
+	refused("REST message:send", f.do(req{"POST", "/agents/strict/message:send", msg, v1("alice")}), false)
+	refused("REST message:stream", f.do(req{"POST", "/agents/strict/message:stream", msg, v1("alice")}), false)
+	refused("JSON-RPC SendMessage", f.do(req{"POST", "/agents/strict", rpc("SendMessage", msg, 1), v1("alice")}), true)
+	refused("JSON-RPC SendStreamingMessage", f.do(req{"POST", "/agents/strict", rpc("SendStreamingMessage", msg, 2), v1("alice")}), true)
+	refused("an unknown JSON-RPC method", f.do(req{"POST", "/agents/strict", rpc("SendMessages", msg, 3), v1("alice")}), true)
+	if _, n := f.h.last(); n != n0 {
+		t.Fatal("a message missing a required extension reached the handler")
+	}
+	if m, _, _ := f.st.take(); m != "" {
+		t.Fatal("a message missing a required extension reached the SSE writer")
+	}
+
+	// A task's methods: served, the handler sees no extension, nothing is echoed.
+	for _, c := range []struct {
+		name string
+		r    req
+		want string
+	}{
+		{"JSON-RPC GetTask", req{"POST", "/agents/strict", rpc("GetTask", `{"id":"`+tid+`"}`, 4), v1("alice")}, "GetTask"},
+		{"JSON-RPC ListTasks", req{"POST", "/agents/strict", rpc("ListTasks", `{}`, 5), v1("alice")}, "ListTasks"},
+		{"JSON-RPC CancelTask", req{"POST", "/agents/strict", rpc("CancelTask", `{"id":"`+tid+`"}`, 6), v1("alice")}, "CancelTask"},
+		{"JSON-RPC GetTaskPushNotificationConfig", req{"POST", "/agents/strict",
+			rpc("GetTaskPushNotificationConfig", `{"taskId":"`+tid+`","id":"p"}`, 7), v1("alice")}, "GetTaskPushConfig"},
+		{"JSON-RPC ListTaskPushNotificationConfigs", req{"POST", "/agents/strict",
+			rpc("ListTaskPushNotificationConfigs", `{"taskId":"`+tid+`"}`, 8), v1("alice")}, "ListTaskPushConfigs"},
+		{"REST GET task", req{"GET", "/agents/strict/tasks/" + tid, "", v1("alice")}, "GetTask"},
+		{"REST list", req{"GET", "/agents/strict/tasks", "", v1("alice")}, "ListTasks"},
+		{"REST cancel", req{"POST", "/agents/strict/tasks/" + tid + ":cancel", "", v1("alice")}, "CancelTask"},
+		{"REST push configs", req{"GET", "/agents/strict/tasks/" + tid + "/pushNotificationConfigs", "", v1("alice")}, "ListTaskPushConfigs"},
+	} {
+		_, before := f.h.last()
+		w := f.do(c.r)
+		got, n := f.h.last()
+		if n != before+1 || got.method != c.want || len(got.extensions) != 0 || strings.Contains(w.Body.String(), "-32008") ||
+			strings.Contains(w.Body.String(), "EXTENSION_SUPPORT_REQUIRED") || len(w.Header().Values("A2A-Extensions")) != 0 {
+			t.Errorf("%s without the required extension: %d %s; the handler saw %+v (%d calls, want %d)", c.name, w.Code, w.Body, got, n, before+1)
+		}
+	}
+	// SubscribeToTask on both bindings reaches the gate's SSE writer.
+	for _, r := range []req{
+		{"POST", "/agents/strict", rpc("SubscribeToTask", `{"id":"`+tid+`"}`, 9), v1("alice")},
+		{"GET", "/agents/strict/tasks/" + tid + ":subscribe", "", v1("alice")},
+	} {
+		w := f.do(r)
+		if m, _, _ := f.st.take(); m != "Subscribe" || w.Code != 200 {
+			t.Errorf("%s %s without the required extension: %d %s, the SSE writer saw %q", r.method, r.path, w.Code, w.Body, m)
+		}
+	}
+	// A task's method that activates a declared URI still has it echoed and passed on.
+	w := f.do(req{"POST", "/agents/strict", rpc("GetTask", `{"id":"`+tid+`"}`, 10), v1("alice", "A2A-Extensions", extOptional+", https://undeclared.example/z")})
+	if got, _ := f.h.last(); w.Header().Get("A2A-Extensions") != extOptional || fmt.Sprint(got.extensions) != "["+extOptional+"]" {
+		t.Errorf("GetTask activating %s: echoed %v, a2a-go saw %v", extOptional, w.Header().Values("A2A-Extensions"), got.extensions)
+	}
+}
+
 // An Update not accepted in time: -32603 on both bindings, HTTP 503 on HTTP+JSON (spec §7, §14.1); any
 // other internal error keeps a2a-go's 500.
 func TestUnavailableUpdate(t *testing.T) {
