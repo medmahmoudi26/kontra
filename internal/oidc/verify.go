@@ -49,7 +49,7 @@ const (
 
 // Config configures a Verifier.
 type Config struct {
-	Issuer string // auth.mcp_oauth.issuer, compared byte for byte with the metadata's issuer and every token's iss
+	Issuer string // auth.oidc.issuer or auth.mcp_oauth.issuer, compared byte for byte with the metadata's issuer and every token's iss
 	// Client fetches the metadata and the key set: §10.3's operator-configured endpoint client (D284). Nil is
 	// ssrf.NewOperatorClient with the system roots.
 	Client *http.Client
@@ -178,7 +178,7 @@ func (v *Verifier) claims(payload []byte, audience string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	var c Claims
+	c := Claims{members: m}
 	if err := str(m, "iss", &c.Issuer, true); err != nil {
 		return Claims{}, err
 	}
@@ -346,7 +346,7 @@ func (v *Verifier) current(ctx context.Context, refetch bool) (*keySet, error) {
 			fresh := v.keys != nil && at.Sub(v.fetchedAt) < KeySetTTL
 			set := v.keys
 			v.mu.Unlock()
-			v.log.Warn("the MCP authorization server's metadata or key set could not be read", "issuer", v.cfg.Issuer, "error", err)
+			v.log.Warn("the OIDC issuer's metadata or key set could not be read", "issuer", v.cfg.Issuer, "error", err)
 			if fresh {
 				return set, nil // a refetch that failed keeps the set it was to refresh
 			}

@@ -36,10 +36,11 @@ func ParseAllowList(entries []string) (AllowList, error) {
 // (spec §2.3). Entries match:
 //
 //   - key:<glob>: an API key principal whose prefix the glob matches (* any run, ? one character);
-//   - org:<tenant>: any principal whose tenant has that slug (its API keys, and from M2 its nodes' keys);
+//   - org:<tenant>: any principal whose tenant has that slug (its API keys, from M2 its nodes' keys, and from M5 the
+//     OIDC principals whose issuer's tenant claim names it, D315);
 //   - oidc:sub:<subject>: that OIDC subject, arriving over oidc or mcp;
 //   - oidc:*: every OIDC principal, whatever its subject: a principal of kind oidc exists only for a JWT the
-//     configured issuer signed (auth.mcp_oauth on the MCP routes; auth.oidc on the A2A routes from M5), so this is
+//     configured issuer signed (auth.mcp_oauth on the MCP routes; auth.oidc on the A2A routes, M5), so this is
 //     every principal that issuer authenticated, and never an API key, a node or the anonymous principal (D301);
 //   - node:<key_id>: that node key hiring without an API key (M2);
 //   - anonymous: everyone, authenticated or not.

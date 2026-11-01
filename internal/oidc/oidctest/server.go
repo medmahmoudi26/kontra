@@ -10,7 +10,9 @@
 //     (a loopback redirect matches on any port, RFC 8252 §7.3), and answers with code, state and iss (RFC 9207);
 //   - a token endpoint that verifies the code_verifier against the challenge and issues Config.MintKey's access token
 //     (a kk_ API key minted on a gate's database: DBMinter), or a JWT when MintKey is nil (the variant kontra login
-//     must refuse).
+//     must refuse);
+//   - a revocation feed as Kontra Cloud serves it (PathRevocations; Revoke, FeedDown, SetFeedWindow), for the gate's
+//     OIDC principals (M5, D316).
 //
 // Every request is recorded (Registrations, Authorizations, TokenRequests, Fetches) so that tests can assert what a
 // client sent. Follow plays the browser: it requests an authorization URL and delivers the redirect to the CLI's
@@ -79,7 +81,13 @@ const (
 	PathAuthorize = "/authorize"
 	PathToken     = "/token"
 	PathRegister  = "/register"
+	// PathRevocations is the revocation feed (spec/relay.md §2.3, D316), as Kontra Cloud serves GET
+	// /v1/auth/revocations: {"window_seconds": n, "sessions": [sha256(sid) hex, newest first]}.
+	PathRevocations = "/v1/auth/revocations"
 )
+
+// FeedWindow is the feed's default window_seconds, Cloud's (20 minutes).
+const FeedWindow = 1200
 
 // Config configures a Server.
 type Config struct {
@@ -118,6 +126,12 @@ type Server struct {
 	tokens   []TokenRequest
 	fetches  map[string]int
 	lastCode string
+
+	// The revocation feed: the revoked sessions' digests (newest last), its window_seconds, and an outage.
+	revoked    []string
+	feedWindow int
+	feedStatus int // non-zero: the feed answers this status with no body
+	feedBody   []byte
 }
 
 // key is one signing key.
@@ -155,7 +169,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Discovery == "" {
 		cfg.Discovery = DiscoveryOAuth
 	}
-	s := &Server{cfg: cfg, clients: map[string]Registration{}, grants: map[string]*grant{}, fetches: map[string]int{}}
+	s := &Server{cfg: cfg, clients: map[string]Registration{}, grants: map[string]*grant{}, fetches: map[string]int{},
+		feedWindow: FeedWindow}
 	for _, alg := range []string{AlgES256, AlgRS256, AlgEdDSA} {
 		if _, err := s.Rotate(alg); err != nil {
 			return nil, err
@@ -241,6 +256,8 @@ type Token struct {
 	Audience []string
 	Issuer   string    // the server's when empty
 	Expiry   time.Time // an hour from now when zero
+	// Session is written as sid when not empty (the session a revocation feed names, D316).
+	Session string
 	// NotBefore is written as nbf when not zero.
 	NotBefore time.Time
 	// Unpublished signs with a fresh key of Alg that the JWKS does not list.
@@ -277,6 +294,9 @@ func (s *Server) Sign(t Token) (string, error) {
 	}
 	if !t.NotBefore.IsZero() {
 		claims["nbf"] = t.NotBefore.Unix()
+	}
+	if t.Session != "" {
+		claims["sid"] = t.Session
 	}
 	for k, v := range t.Claims {
 		claims[k] = v
@@ -433,8 +453,69 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.authorize(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == PathToken:
 		s.token(w, r)
+	case r.Method == http.MethodGet && r.URL.Path == PathRevocations:
+		s.revocations(w)
 	default:
 		http.NotFound(w, r)
+	}
+}
+
+// RevocationsURL is the revocation feed's URL.
+func (s *Server) RevocationsURL() string { return s.srv.URL + PathRevocations }
+
+// Revoke lists the session sid on the revocation feed, as sha256 of its bytes in hex.
+func (s *Server) Revoke(sid string) {
+	d := sha256.Sum256([]byte(sid))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revoked = append(s.revoked, fmt.Sprintf("%x", d))
+}
+
+// Unrevoke takes every session off the feed (its window passed).
+func (s *Server) Unrevoke() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revoked = nil
+}
+
+// SetFeedWindow sets the feed's window_seconds.
+func (s *Server) SetFeedWindow(seconds int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.feedWindow = seconds
+}
+
+// FeedDown makes the feed answer status with no body (an outage); 0 brings it back.
+func (s *Server) FeedDown(status int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.feedStatus = status
+}
+
+// SetFeedBody makes the feed answer body as is (a malformed feed); nil serves the feed again.
+func (s *Server) SetFeedBody(body []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.feedBody = body
+}
+
+func (s *Server) revocations(w http.ResponseWriter) {
+	s.mu.Lock()
+	status, body, window := s.feedStatus, s.feedBody, s.feedWindow
+	sessions := make([]string, 0, len(s.revoked))
+	for i := len(s.revoked) - 1; i >= 0; i-- {
+		sessions = append(sessions, s.revoked[i])
+	}
+	s.mu.Unlock()
+	w.Header().Set("Cache-Control", "no-store")
+	switch {
+	case status != 0:
+		w.WriteHeader(status)
+	case body != nil:
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"window_seconds": window, "sessions": sessions})
 	}
 }
 

@@ -79,9 +79,10 @@ type HandlerSource interface {
 	For(ctx context.Context, svc store.ServiceRef) (*relay.ServiceHandler, error)
 }
 
-// Authenticator turns a request's credential into a principal; *auth.Authenticator implements it.
+// Authenticator turns a request's credential into a principal: an API key, a request a node opened, or with auth.oidc
+// a JWT of the configured issuer (spec §2.3, D314); *auth.Authenticator implements it.
 type Authenticator interface {
-	Authenticate(r *http.Request, anonymousBuyer uuid.UUID) (auth.Principal, bool, error)
+	AuthenticateA2A(r *http.Request, anonymousBuyer uuid.UUID) (auth.Principal, bool, error)
 }
 
 // Streams is the gate's SSE writer; *sse.Writer implements it.
@@ -344,8 +345,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx = withRoute(ctx, routeInfo{binding: rt.binding(), id: id})
 	r = r.WithContext(ctx)
 
-	// The credential first: a bad one is 401 whether or not the path names a service (D50).
-	p, authenticated, err := s.deps.Auth.Authenticate(r, uuid.Nil)
+	// The credential first: a bad one is 401 whether or not the path names a service (D50). An OIDC issuer, feed or
+	// tenant the gate could not read is its own failure, never a 401 (D314).
+	p, authenticated, err := s.deps.Auth.AuthenticateA2A(r, uuid.Nil)
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated):
 		unauthenticated(w, rt, id)
@@ -942,7 +944,8 @@ func unknownService(w http.ResponseWriter, rt route, id json.RawMessage) {
 	}
 }
 
-// unauthenticated is a bad credential (not exactly one Bearer token, an unknown, revoked or expired key):
+// unauthenticated is a bad credential (not exactly one Bearer token, an unknown, revoked or expired key, a JWT the
+// configured issuer did not sign for auth.oidc.audience or whose session it revoked):
 // 401 on every route, a JSON-RPC or google.rpc.Status body on the A2A routes, empty on cards.
 func unauthenticated(w http.ResponseWriter, rt route, id json.RawMessage) {
 	w.Header().Set("WWW-Authenticate", `Bearer`)

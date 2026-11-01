@@ -497,6 +497,35 @@ func TestLoadErrors(t *testing.T) {
 		{"remote lifecycle hook without a queue", head + "hooks: { lifecycle: {} }\n", "hooks.lifecycle.task_queue: required"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
+		// D315: a tenant claim is a claim name, never one the gate reads for itself.
+		{"tenant claim sub", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, tenant_claim: sub } }\n",
+			`auth.oidc.tenant_claim "sub": a registered claim`},
+		{"tenant claim sid", head + "auth: { mcp_oauth: { issuer: https://login.example.com, tenant_claim: sid } }\n",
+			`auth.mcp_oauth.tenant_claim "sid": a registered claim`},
+		{"tenant claim with a space", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, tenant_claim: \"my tenant\" } }\n",
+			"auth.oidc.tenant_claim \"my tenant\": want a claim name"},
+		// D316: the revocation feed is an operator-configured endpoint, read often enough and failing closed in time.
+		{"revocations without url", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, revocations: { poll: 5s } } }\n",
+			"auth.oidc.revocations.url"},
+		{"revocations over http", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, revocations: { url: http://cp.example.com/v1/auth/revocations } } }\n",
+			"https:// unless the host is loopback"},
+		{"revocations poll under a second", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, revocations: { url: https://cp.example.com/r, poll: 500ms } } }\n",
+			"auth.oidc.revocations.poll 500ms: from 1s to 1m"},
+		{"revocations max_stale under twice poll", head + "auth: { mcp_oauth: { issuer: https://login.example.com, revocations: { url: https://cp.example.com/r, poll: 10s, max_stale: 15s } } }\n",
+			"auth.mcp_oauth.revocations.max_stale 15s: at least twice poll (20s)"},
+		{"revocations max_stale over 5m", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, revocations: { url: https://cp.example.com/r, max_stale: 6m } } }\n",
+			"at most 5m"},
+		{"revocations zero poll", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, revocations: { url: https://cp.example.com/r, poll: 0s } } }\n",
+			"must be positive"},
+		{"revocations unknown key", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, revocations: { url: https://cp.example.com/r, secret: x } } }\n",
+			"field secret not found"},
+		// D315, D316: one issuer named by both blocks has one tenant claim and one feed.
+		{"one issuer, two tenant claims", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, tenant_claim: tenant }, " +
+			"mcp_oauth: { issuer: https://login.example.com } }\n", "write the same in both"},
+		{"one issuer, a feed on one block", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra }, " +
+			"mcp_oauth: { issuer: https://login.example.com, revocations: { url: https://login.example.com/r } } }\n", "write the same feed in both"},
+		{"one issuer, two feeds", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, revocations: { url: https://login.example.com/r } }, " +
+			"mcp_oauth: { issuer: https://login.example.com, revocations: { url: https://login.example.com/r, max_stale: 1m } } }\n", "write the same feed in both"},
 		// D296 (the M4 WP-06 review): the RFC 9728 documents of a public_url with a path are not where RFC 9728 §3.1
 		// and kontra login look for them.
 		{"mcp_oauth with a public_url path", "postgres: postgres://k@db/k\npublic_url: http://localhost:8080/kontra\n" +
@@ -518,6 +547,57 @@ func TestLoadErrors(t *testing.T) {
 				t.Errorf("error %q\nwant it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// auth.oidc (D314) and the issuer blocks' tenant claim and revocation feed (D315, D316) load with their defaults; the
+// feed may be http:// on a loopback host only; one issuer named by both blocks loads when they agree, and two issuers
+// keep their own.
+func TestOIDCIssuerPolicy(t *testing.T) {
+	c := parse(t, minimal+`auth:
+  api_keys: true
+  oidc:
+    issuer: https://cp.example.com
+    audience: kontra
+    tenant_claim: https://kontra.sh/claims/tenant
+    revocations: { url: "https://cp.example.com/v1/auth/revocations" }
+  mcp_oauth:
+    issuer: https://cp.example.com
+    tenant_claim: https://kontra.sh/claims/tenant
+    revocations: { url: "https://cp.example.com/v1/auth/revocations" }
+`)
+	o, m := c.Auth.OIDC, c.Auth.MCPOAuth
+	want := Revocations{URL: "https://cp.example.com/v1/auth/revocations", Poll: Duration(5 * time.Second), MaxStale: Duration(30 * time.Second)}
+	if o.TenantClaim != "https://kontra.sh/claims/tenant" || o.Revocations == nil || *o.Revocations != want ||
+		m.Revocations == nil || *m.Revocations != want || len(c.Warnings) != 0 {
+		t.Errorf("auth = %+v %+v %+v, warnings %q", o, o.Revocations, m.Revocations, c.Warnings)
+	}
+	c = parse(t, minimal+`auth:
+  oidc: { issuer: https://cp.example.com, audience: kontra, revocations: { url: "http://127.0.0.1:9000/r", poll: 1s, max_stale: 2s } }
+  mcp_oauth: { issuer: https://idp.example.com, tenant_claim: org }
+`)
+	if r := c.Auth.OIDC.Revocations; r == nil || r.Poll.D() != time.Second || r.MaxStale.D() != 2*time.Second || c.Auth.OIDC.TenantClaim != "" ||
+		c.Auth.MCPOAuth.Revocations != nil || c.Auth.MCPOAuth.TenantClaim != "org" {
+		t.Errorf("two issuers: %+v %+v", c.Auth.OIDC, c.Auth.MCPOAuth)
+	}
+	parse(t, minimal+"auth: { oidc: { issuer: https://cp.example.com, audience: kontra, revocations: { url: \"https://cp.example.com/r\", poll: 1m, max_stale: 5m } } }\n")
+	if !(*Revocations)(nil).Equal(nil) || (&want).Equal(nil) || !(&want).Equal(&Revocations{URL: want.URL, Poll: want.Poll, MaxStale: want.MaxStale}) {
+		t.Error("Revocations.Equal")
+	}
+}
+
+// spec/schema/examples/config.operator.json, a hosted operator's gate (M5): its OIDC issuer on both route kinds with one
+// tenant claim and one revocation feed, its remote hooks; it loads with no warning.
+func TestOperatorFixtureLoads(t *testing.T) {
+	t.Setenv("KONTRA_HOOK_SECRET", "s")
+	c, err := Load("../../spec/schema/examples/config.operator.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, m := c.Auth.OIDC, c.Auth.MCPOAuth
+	if o == nil || m == nil || o.Issuer != m.Issuer || o.Audience != "kontra" || o.TenantClaim != m.TenantClaim || o.Revocations == nil ||
+		!o.Revocations.Equal(m.Revocations) || o.Revocations.MaxStale.D() != 30*time.Second || len(c.Warnings) != 0 {
+		t.Errorf("the operator fixture: %+v %+v, warnings %q", o, m, c.Warnings)
 	}
 }
 
@@ -779,6 +859,11 @@ func TestAllowOIDCAnyWarnsWithoutAnIssuer(t *testing.T) {
 	if len(c.Warnings) != 0 || !slices.Equal(c.Services["hello"].Allow, []string{"oidc:*", "key:kk_acme_*"}) {
 		t.Errorf("with auth.mcp_oauth: warnings %q, allow %q", c.Warnings, c.Services["hello"].Allow)
 	}
+	// auth.oidc's principals are built since M5 (D314): an issuer on the A2A routes alone is enough.
+	c = parse(t, "auth: { oidc: { issuer: https://login.example.com, audience: kontra } }\n"+minimal+svc)
+	if len(c.Warnings) != 0 {
+		t.Errorf("with auth.oidc: warnings %q, want none", c.Warnings)
+	}
 	if err := parseErr(t, minimal+"    allow: [\"oidc:sub:*\"]\n"); err == nil || !strings.Contains(err.Error(), "write oidc:*") {
 		t.Errorf("oidc:sub:*: %v, want an error naming oidc:*", err)
 	}
@@ -835,8 +920,9 @@ tenancy: multi
 tunnel: { anonymous: true }
 peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 `)
-	// tunnel.anonymous (M4 WP-03) and auth.mcp_oauth (M4 WP-06) are built: they load with no warning.
-	want := []string{"auth.oidc", "services.files.seller_keys"}
+	// tunnel.anonymous (M4 WP-03), auth.mcp_oauth (M4 WP-06) and auth.oidc (M5, D314) are built: they load with no
+	// warning.
+	want := []string{"services.files.seller_keys"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
@@ -849,8 +935,8 @@ peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 		if strings.Contains(w, "services.remote") || strings.Contains(w, "tunnel backends") {
 			t.Errorf("a served tunnel service is warned about: %q", w)
 		}
-		if strings.Contains(w, "tunnel.anonymous") || strings.Contains(w, "mcp_oauth") {
-			t.Errorf("tunnel.anonymous and auth.mcp_oauth are built, but warned about: %q", w)
+		if strings.Contains(w, "tunnel.anonymous") || strings.Contains(w, "mcp_oauth") || strings.Contains(w, "auth.oidc") {
+			t.Errorf("tunnel.anonymous, auth.mcp_oauth and auth.oidc are built, but warned about: %q", w)
 		}
 	}
 	// The plain tunnel service loads with no warning at all.

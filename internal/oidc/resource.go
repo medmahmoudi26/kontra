@@ -17,35 +17,36 @@ import (
 type ResourceServer struct {
 	publicURL string
 	multi     bool
-	verifier  *Verifier
+	issuer    *Issuer
 }
 
 var _ auth.MCPResourceServer = (*ResourceServer)(nil)
 
 // NewResourceServer is the resource server of a gate at publicURL (tenancy multi: /mcp/{tenant}/{name}) for the
-// verifier's issuer.
-func NewResourceServer(publicURL string, multi bool, v *Verifier) (*ResourceServer, error) {
-	if v == nil || publicURL == "" {
-		return nil, errors.New("oidc: a resource server needs the public URL and a verifier")
+// issuer (auth.mcp_oauth.issuer, with its tenant claim and revocation feed).
+func NewResourceServer(publicURL string, multi bool, iss *Issuer) (*ResourceServer, error) {
+	if iss == nil || publicURL == "" {
+		return nil, errors.New("oidc: a resource server needs the public URL and an issuer")
 	}
-	return &ResourceServer{publicURL: publicURL, multi: multi, verifier: v}, nil
+	return &ResourceServer{publicURL: publicURL, multi: multi, issuer: iss}, nil
 }
 
 // VerifyMCP verifies a bearer JWT for the MCP route svc ("" for /mcp): its audience must contain the route's
 // canonical URI (RFC 8707), so a token for /mcp is refused on every /mcp/{svc} and the other way round. A token that
-// is not valid there is auth.ErrUnauthenticated; an issuer the gate cannot read is the gate's own error (503).
+// is not valid there (its revocation feed and tenant claim included) is auth.ErrUnauthenticated; an issuer, feed or
+// tenant the gate cannot read is the gate's own error (503).
 func (rs *ResourceServer) VerifyMCP(ctx context.Context, token, svc string) (auth.Principal, error) {
 	if !rs.wellFormed(svc) {
 		return auth.Principal{}, auth.ErrUnauthenticated
 	}
-	c, err := rs.verifier.Verify(ctx, token, CanonicalURI(rs.publicURL, svc))
+	p, err := rs.issuer.Principal(ctx, token, CanonicalURI(rs.publicURL, svc), auth.ViaMCP)
 	switch {
 	case errors.Is(err, ErrInvalidToken):
 		return auth.Principal{}, auth.ErrUnauthenticated
 	case err != nil:
 		return auth.Principal{}, err
 	}
-	return Principal(rs.verifier.Issuer(), c), nil
+	return p, nil
 }
 
 // Challenge is the WWW-Authenticate value of a 401 on the MCP route svc ("" for /mcp): Bearer with the route's RFC
@@ -153,5 +154,5 @@ func MetadataHandler(publicURL, issuer string, multi bool) http.Handler {
 
 // Handler is MetadataHandler for this resource server.
 func (rs *ResourceServer) Handler() http.Handler {
-	return MetadataHandler(rs.publicURL, rs.verifier.Issuer(), rs.multi)
+	return MetadataHandler(rs.publicURL, rs.issuer.Issuer(), rs.multi)
 }

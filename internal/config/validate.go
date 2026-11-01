@@ -398,11 +398,13 @@ func (c *Config) validateAuth(v *validator, pub *url.URL) {
 		if o.Audience == "" {
 			v.add("auth.oidc.audience: required")
 		}
+		validateIssuerPolicy(v, "auth.oidc", o.TenantClaim, o.Revocations)
 	}
 	if m := c.Auth.MCPOAuth; m != nil {
 		if err := checkHTTPSURL(m.Issuer, false); err != nil {
 			v.add("auth.mcp_oauth.issuer: %v", err)
 		}
+		validateIssuerPolicy(v, "auth.mcp_oauth", m.TenantClaim, m.Revocations)
 		// D296: the resource server's RFC 9728 documents are at {public_url}/.well-known/oauth-protected-resource/mcp…,
 		// which is where RFC 9728 §3.1 puts them (the well-known path inserted after the host) only for a public_url
 		// without a path; kontra login reads them there, at the gate's origin (spec/tunnel.md §6.3).
@@ -410,6 +412,53 @@ func (c *Config) validateAuth(v *validator, pub *url.URL) {
 			v.add("public_url %q: auth.mcp_oauth needs a public_url without a path (its RFC 9728 documents are at the "+
 				"origin's /.well-known/oauth-protected-resource/mcp, RFC 9728 §3.1; spec §12.1, D296)", redactURL(c.PublicURL))
 		}
+	}
+	// D315, D316: one issuer's tokens are one population. Its tenant claim and its revocation feed hold for every
+	// token it signs, on the A2A routes and the MCP routes alike, so two blocks naming it must say the same.
+	if o, m := c.Auth.OIDC, c.Auth.MCPOAuth; o != nil && m != nil && o.Issuer == m.Issuer {
+		if o.TenantClaim != m.TenantClaim {
+			v.add("auth.oidc.tenant_claim %q and auth.mcp_oauth.tenant_claim %q: both blocks name the issuer %q, whose "+
+				"tenant claim is one for all its tokens; write the same in both (spec §2.3, D315)",
+				o.TenantClaim, m.TenantClaim, redactURL(o.Issuer))
+		}
+		if !o.Revocations.Equal(m.Revocations) {
+			v.add("auth.oidc.revocations and auth.mcp_oauth.revocations: both blocks name the issuer %q, whose revocation "+
+				"feed holds for all its tokens; write the same feed in both, or none (spec §2.3, D316)", redactURL(o.Issuer))
+		}
+	}
+}
+
+// tenantClaimRE is the shape of a tenant_claim: a JWT claim name (RFC 7519 §4), printable ASCII without white space,
+// quotes or backslashes, as a collision-resistant URI or a private name is written.
+var tenantClaimRE = regexp.MustCompile(`^[A-Za-z0-9_.:/#~+-]{1,128}$`)
+
+// registeredClaims are the claims the gate reads for themselves (RFC 7519 §4.1, sid of OpenID Connect): none of them
+// names a tenant.
+var registeredClaims = []string{"iss", "sub", "aud", "exp", "nbf", "iat", "jti", "sid"}
+
+// validateIssuerPolicy checks an issuer block's tenant_claim and revocations (spec §2.3, D315, D316).
+func validateIssuerPolicy(v *validator, at, claim string, r *Revocations) {
+	if claim != "" {
+		switch {
+		case !tenantClaimRE.MatchString(claim):
+			v.add("%s.tenant_claim %q: want a claim name of 1 to 128 characters [A-Za-z0-9_.:/#~+-]", at, claim)
+		case slices.Contains(registeredClaims, claim):
+			v.add("%s.tenant_claim %q: a registered claim the gate reads for itself; name the issuer's tenant claim", at, claim)
+		}
+	}
+	if r == nil {
+		return
+	}
+	if err := checkHTTPSURL(r.URL, true); err != nil {
+		v.add("%s.revocations.url: %v (https:// unless the host is loopback, spec §10.3)", at, err)
+	}
+	poll, stale := r.Poll.D(), r.MaxStale.D()
+	if poll < MinRevocationsPoll || poll > MaxRevocationsPoll {
+		v.add("%s.revocations.poll %s: from %s to %s", at, r.Poll, Duration(MinRevocationsPoll), Duration(MaxRevocationsPoll))
+	}
+	if stale < 2*poll || stale > MaxRevocationsMaxStale {
+		v.add("%s.revocations.max_stale %s: at least twice poll (%s) and at most %s (spec §2.3, D316)", at, r.MaxStale,
+			Duration(2*poll), Duration(MaxRevocationsMaxStale))
 	}
 }
 
@@ -558,10 +607,10 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 			v.add("%s.allow: %v", at, err)
 		}
 	}
-	if slices.Contains(s.Allow, string(AllowOIDCAny)) && c.Auth.MCPOAuth == nil {
-		// Fails closed: no principal of kind oidc exists without an issuer (auth.oidc's are not built yet).
+	if slices.Contains(s.Allow, string(AllowOIDCAny)) && c.Auth.MCPOAuth == nil && c.Auth.OIDC == nil {
+		// Fails closed: no principal of kind oidc exists without an issuer.
 		c.Warnings = append(c.Warnings, fmt.Sprintf("%s.allow: oidc:* admits nobody on this gate: no OIDC issuer is "+
-			"configured (auth.mcp_oauth, spec §12.1; D301)", at))
+			"configured (auth.oidc or auth.mcp_oauth, spec §2.3, §12.1; D301)", at))
 	}
 
 	if s.Kind == KindA2A {
@@ -807,13 +856,10 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
 // served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
 // M3 WP-04; sealed: on tunnel services since M3 WP-08; tunnel.anonymous since M4 WP-03; auth.mcp_oauth since M4 WP-06
-// (D276).
+// (D276); auth.oidc, tenant claims and revocation feeds since M5 (D314 to D316).
 func (c *Config) unbuilt() []string {
 	var w []string
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
-	if c.Auth.OIDC != nil {
-		note("auth.oidc: OIDC callers are not built in this release; their bearer tokens are refused (401)")
-	}
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]
 		if !s.SellerKeys.IsZero() && s.Kind == KindMCP {

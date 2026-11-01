@@ -13,6 +13,8 @@ stream for `elicitation/complete`, the shape of a `hire` result and the anonymou
 amended on 31 Oct after M5's plan audit: `hire` activates the operator's required extensions for the buyer, an
 `allow:` entry `oidc:*`, and §13.3's metric not yet exported (D300 to D302), and again after M4's review: what `/mcp`
 serves, its sessions in use, its `tasks/result` streams and its rendering of bucketed parts (§10.4, §12; D303).
+Revision 9 (1 Nov, M5) builds the OIDC principals of the A2A routes, an issuer's tenant claim and its revocation feed
+(§2.3, §10.3, §12.1, §17; D314 to D316), decided under the owner's standing instruction.
 Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
@@ -132,7 +134,7 @@ Behind a proxy, `remote` is the proxy's one address, and `rps_per_ip` would thro
 | Credential | Principal | Tenant | `buyer_id` | `via` |
 |---|---|---|---|---|
 | `Authorization: Bearer <api key>` (stored as sha256, PRD §12) | `key:<prefix>`, the prefix unique per gate (whoever mints a key mints again on a collision) | the key's | the key's `buyer_id` (several keys may share one) | `api_key` |
-| `Authorization: Bearer <JWT>` from the configured OIDC issuer (A2A routes; audience `auth.oidc.audience`) | `oidc:sub:<sub>` | none, unless the operator maps it | UUIDv5(issuer ‖ sub) | `oidc` |
+| `Authorization: Bearer <JWT>` from the configured OIDC issuer (A2A routes; audience `auth.oidc.audience`) | `oidc:sub:<sub>` | the tenant its issuer's `tenant_claim` names, else none | UUIDv5(issuer ‖ sub) | `oidc` |
 | `Authorization: Bearer <JWT>` on `/mcp` or `/mcp/{svc}` from the configured MCP authorization server, audience = that route's canonical URI (§12.1) | `oidc:sub:<sub>` | as above | as above | `mcp` |
 | A request on a stream the node opened ([`tunnel.md`](tunnel.md) §9) | the API key from the handshake's `auth` when present, else `node:<key_id>` | the key's | the API key's, else UUIDv5(gate namespace ‖ key_id) | `api_key`, else `node` |
 | Nothing, on a service whose `allow:` contains `anonymous` | `anonymous` | none | team gate: one fixed `buyer_id` for all anonymous callers; multi-tenant gate: UUIDv5(service tenant ‖ "anonymous") | `anonymous` |
@@ -145,6 +147,46 @@ OIDC issuer or MCP authorization server stands for (the two rows above), and nev
 entry admits every principal, authenticated or not, and an authenticated caller keeps its own principal, `buyer_id` and
 `via`. A service the gate creates during a handshake gets `allow: [org:<its tenant>]` ([`tunnel.md`](tunnel.md)
 §5–§6), so its owner's own nodes can call it.
+
+**OIDC principals on the A2A routes (D314).** With `auth.oidc` (`issuer`, `audience`), a bearer of a JWT's shape on an
+A2A route (three base64url segments separated by dots, at most 16 KiB, as §12.1 reads one) is verified as a token of
+that issuer and is never looked up as an API key; any other bearer is an API key. Verification is §12.1's (the issuer's
+metadata and key set as §10.3's operator-configured endpoints, the `kid` refetch, the algorithms, `iss`, `exp` and `nbf`
+with 60 s of skew), except that `aud` must contain `auth.oidc.audience` (`kontra` in Cloud) rather than a route's
+canonical URI. A token valid there is the principal `oidc:sub:<sub>` with `via = oidc`; any other is `401`. An issuer,
+revocation feed or tenant the gate cannot read when a token needs it is the gate's own failure, answered as a database
+failure is (an internal error, `-32603` on JSON-RPC; `503` on a card), never `401`. Audiences never cross: a token for
+an MCP route's canonical URI is `401` on the A2A routes, and an `auth.oidc.audience` token is `401` on the MCP routes.
+When `auth.oidc` and `auth.mcp_oauth` name the same issuer, one verifier (one key-set cache) serves both, and the
+issuer's `tenant_claim` and `revocations` must be written the same in both blocks, or the gate refuses to start: they
+hold for every token the issuer signs, on both kinds of route. A token is checked when its request arrives; a stream it
+opened is not cut when the token expires or is revoked, as an API key's is not.
+
+**Tenant claim (D315).** `tenant_claim` names a claim of the issuer's tokens whose value is the slug of the principal's
+tenant. A token without that claim is a principal without a tenant: `oidc:sub:`, `oidc:*` and `anonymous` entries
+admit it, `org:` entries never do. A token with it is accepted only if the value is a string naming a live tenant of
+this gate of kind `team` or `account` (not deleted, not expired); the principal then has that tenant, which
+`org:<slug>` admits and the hooks receive as `principal.tenantId`. A value that is not a slug, names no such tenant or
+names an anonymous tenant, is `401`. On a team gate the only such tenant is `default`, so a team's IdP writes `default`
+for its members. A replica keeps a tenant's answer at most 5 s, never past its `expires_at`, so a deleted tenant stops
+mapping within 5 s. The `buyer_id` stays UUIDv5(issuer ‖ sub) whatever the tenant. Without `tenant_claim` no claim is
+read and no OIDC principal has a tenant.
+
+**Revocation feed (D316).** `revocations` (`url`, `poll` default `5s`, `max_stale` default `30s`) is an issuer's list of
+the sessions it revoked: a `GET` of `url` (an operator-configured endpoint, §10.3) answers `{"window_seconds": W,
+"sessions": [<sha256 of a session id, 64 hex digits>, …]}`, every session revoked in the last W seconds (Cloud's
+`GET /v1/auth/revocations`). Other members are ignored; an answer of another shape, with more than 262,144 entries, or
+over 32 MiB, is a failed read. Each replica reads it every `poll`. With a feed, a token of the issuer must carry `sid`
+(a string of at most 255 bytes) and `iat` (at most 60 s ahead), and is `401` when sha256 of its `sid`'s bytes is
+listed, or when its lifetime `exp − iat` exceeds W − 120 s. A revoked session stays listed for W after its
+revocation, and the lifetime bound keeps it listed for as long as the gate would accept one of its tokens (60 s of
+skew on each clock), so the gate keeps no revocation of its own: a replica that restarts knows every one that matters
+from its first read. A failed read keeps the last list. Once no read has succeeded for `max_stale`, and before the
+first, every token of the issuer is the gate's own failure (an internal error on the A2A routes, `503` on the MCP
+routes and on cards), never accepted: the feed fails closed, and a revocation reaches every replica within
+`max_stale`, normally within `poll`. A replica waits up to 5 s for each feed's first read before it serves. Its gauges
+`kontra_gate_oidc_revocations_age_seconds` and `kontra_gate_oidc_revocations_fresh`, by `issuer`, say how old its list
+is; an operator alerts on `fresh` 0. API keys are not on the feed: their revocations are the cache below.
 
 **Anonymous callers share a buyer.** All of them on a team gate, and all of one tenant's on a
 multi-tenant gate, are one `buyer_id`. So for the `anonymous` principal `ListTasks` and MCP `tasks/list`
@@ -807,18 +849,19 @@ backend; for push, `push.allow_private` in the gate config, meant for tests): it
 also permits `http://` (D67), and never relaxes the redirect or proxy rule. a2a-go's push sender lacks several of
 these rules, so the gate uses its own dialer (D17).
 
-**Operator-configured endpoints (D284).** Three destinations are the operator's own infrastructure, written in
+**Operator-configured endpoints (D284).** These destinations are the operator's own infrastructure, written in
 `kontra.yaml` and never derived from a request, a card or a part: the Admission hook (`hooks.admission.url`, §13.1),
-the MCP authorization server (`auth.mcp_oauth.issuer`, its RFC 8414 or OpenID metadata and the `jwks_uri` that
-metadata names, §12.1) and the bucket (the endpoint of `blobs:`, §10.4). A team's control plane, IdP or object store
-is often on a private network, so these skip the address check; the rest of this section still applies to them:
+the OIDC issuers (`auth.oidc.issuer` and `auth.mcp_oauth.issuer`, their RFC 8414 or OpenID metadata and the `jwks_uri`
+that metadata names, §2.3, §12.1), their revocation feeds (`revocations.url`, §2.3, D316) and the bucket (the endpoint
+of `blobs:`, §10.4). A team's control plane, IdP or object store is often on a private network, so these skip the
+address check; the rest of this section still applies to them:
 
 - `https://` only, except `http://` on a loopback host (`localhost`, `127.0.0.0/8`, `::1`), which is then connected
   to a loopback address only; the bucket's endpoint is dialed with the scheme the operator wrote (D192);
 - redirects are never followed (a `3xx` is a failure) and the environment's proxy is always ignored;
-- the answers of the Admission hook and of the issuer are bounded (a decision at 64 KiB, the metadata and the key set
-  at 256 KiB each; a longer one is a failure), and each of their requests has a timeout (5 s;
-  `hooks.admission.timeout`, at most 30 s, for Admission). The bucket's requests carry parts (§10.4), which no such
+- the answers of the Admission hook and of the issuers are bounded (a decision at 64 KiB, the metadata and the key set
+  at 256 KiB each, a revocation feed at 32 MiB; a longer one is a failure), and each of their requests has a timeout
+  (5 s; `hooks.admission.timeout`, at most 30 s, for Admission; 10 s for a revocation feed). The bucket's requests carry parts (§10.4), which no such
   bound fits: they keep their S3 client's own dial, TLS-handshake and response-header timeouts and end with the
   context of the request or activity that makes them;
 - no private-address check: what they reach is the operator's choice.
@@ -1405,9 +1448,11 @@ principal: a request without a credential is `401` (§12.1); through a node, the
   from a request, so a team's IdP on a private network is reached, over `https://` with no redirect followed and
   bounded bodies. `iss` must equal the issuer, `exp` must not have passed and `nbf`, when present, must have, within 60 s of
   skew; `alg` is ES256, RS256 or EdDSA, never `none` or an HMAC. `scope` is not checked. The principal is
-  `oidc:sub:<sub>` with `buyer_id` UUIDv5(issuer ‖ sub) and no tenant: mapping a subject to a tenant comes with the
-  OIDC principals of the A2A routes (M5). A header with `crit`, a key set's RSA key under 2048 bits and keys that are
-  not signing keys are refused or skipped (RFC 7515 §4.1.11, RFC 7518 §3.3).
+  `oidc:sub:<sub>` with `buyer_id` UUIDv5(issuer ‖ sub) and the tenant `auth.mcp_oauth.tenant_claim` names, else none;
+  with `auth.mcp_oauth.revocations` the issuer's revocation feed applies, and a revoked session's token is `401` with
+  `error="invalid_token"` (§2.3, D315, D316). A stale feed or a tenant the gate cannot read is, like an unreadable
+  issuer, `503` with `-32603`. A header with `crit`, a key set's RSA key under 2048 bits and keys that are not signing
+  keys are refused or skipped (RFC 7515 §4.1.11, RFC 7518 §3.3).
 - A principal that arrived through `/mcp` with OAuth has `via = mcp`. The gate passes `via` to the hooks. An
   MCP session, like an API key, can never approve anything that moves money: that is the hooks' invariant
   (Cloud), and the gate gives them what they need to keep it.
@@ -1977,7 +2022,10 @@ met, are D297.
 | `peer.listen` | none: only this replica's tunnel sessions serve MCP requests; a gate of more than one replica SHOULD set it | §11.2 (D163, D179) |
 | `peer.advertise` | the `peer.listen` address, or, when it names no host, the address of the interface that holds the default route | §11.2 |
 | `peer.secret_env` | — (required with `peer.listen`): the environment variable holding the shared secret, at least 32 bytes | §11.2 |
+| `auth.oidc.issuer`, `.audience` | off | §2.3 (D314): the A2A routes' OIDC principals, verified as §12.1's tokens for `audience`; dialed as §10.3's operator-configured endpoints |
 | `auth.mcp_oauth.issuer` | off | §12.1 (audiences are derived per route); dialed as §10.3's operator-configured endpoints |
+| `auth.oidc.tenant_claim`, `auth.mcp_oauth.tenant_claim` | none: no token maps to a tenant; equal in both blocks when they name one issuer | §2.3 (D315) |
+| `auth.oidc.revocations`, `auth.mcp_oauth.revocations` (`url`, `poll`, `max_stale`) | none: a token is good until it expires; `poll` `5s` (1s to 1m), `max_stale` `30s` (twice `poll` to 5m); equal in both blocks when they name one issuer | §2.3 (D316), §10.3 |
 | `hooks.admission.url`, `.secret_env`, `.timeout`, `.operations` | built in (`timeout` `5s`, `operations` `[task]`) | §13.1, §10.3 |
 | `hooks.lifecycle.task_queue` | built in | §13.3 |
 | `drain_timeout` | `10m` | §14.3 |

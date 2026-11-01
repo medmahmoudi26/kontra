@@ -15,23 +15,34 @@
 //     configuration), fetched as one of §10.3's operator-configured endpoints (D284: https://, no redirect, no
 //     proxy, no address check, bodies at most 256 KiB, 5 s), cached 10 minutes; an unknown kid refetches it at most
 //     once a minute. scope is not checked.
-//   - The principal is oidc:sub:<sub>, buyer UUIDv5(issuer ‖ sub), no tenant, via mcp (spec §2.3).
+//   - The principal is oidc:sub:<sub>, buyer UUIDv5(issuer ‖ sub), via mcp (spec §2.3), with the tenant its tenant
+//     claim names (Issuer, below).
+//
+// With auth.oidc (M5, D314) a bearer JWT on the A2A routes is verified by the same Verifier, for the configured
+// audience (kontra in Cloud) instead of a canonical URI: the principal is oidc:sub:<sub> with via oidc (A2A). One
+// Issuer per distinct issuer holds its Verifier and two policies of its own, applied to every token it signs on every
+// route:
+//
+//   - tenant_claim (D315): the claim naming the principal's tenant by slug. Absent from a token, the principal has
+//     no tenant; present, it must name a live tenant of kind team or account (Tenants), or the token is refused.
+//   - revocations (D316): the issuer's revocation feed (Feed), polled; a token then needs a sid that the feed does
+//     not list and a lifetime the feed's window covers, and every token is the gate's own failure while the feed is
+//     stale.
 //
 // The authorization server is the operator's (Cloud's control plane, M5), never part of the gate; oidctest is an
-// in-repository one for the tests. The A2A routes' OIDC principals (auth.oidc, audience kontra) and Cloud's
-// revocation feed reuse Verifier in M5: until then a JWT on an A2A route is 401, as any bearer that is not an API key.
+// in-repository one for the tests, with a revocation feed.
 //
-// Work package: M4 WP-06.
+// Work package: M4 WP-06; the A2A routes, tenant claims and revocation feeds M5 (M5-G1).
 package oidc
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
-	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/ids"
 )
 
@@ -62,14 +73,9 @@ type Claims struct {
 	Subject  string
 	Audience []string
 	Expiry   time.Time
-}
-
-// Principal is the principal a verified token stands for on an MCP route (spec §2.3, §12.1): oidc:sub:<sub>, the
-// buyer UUIDv5(issuer ‖ sub), no tenant (mapping a subject to a tenant is M5's), via mcp.
-func Principal(issuer string, c Claims) auth.Principal {
-	return auth.Principal{
-		Kind: auth.KindOIDC, ID: "oidc:sub:" + c.Subject, BuyerID: BuyerID(issuer, c.Subject), Via: auth.ViaMCP,
-	}
+	// members are the payload's members by their exact keys, for the issuer's own checks (Issuer: sid, iat and the
+	// tenant claim).
+	members map[string]json.RawMessage
 }
 
 // BuyerID is UUIDv5(issuer ‖ sub) (spec §2.3; ids.OIDCBuyer): the same subject of the same issuer is the same buyer

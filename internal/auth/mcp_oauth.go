@@ -10,7 +10,7 @@ import (
 
 // MCPResourceServer is the OAuth 2.1 resource server of the MCP routes (spec/relay.md §12.1, D276;
 // internal/oidc's ResourceServer, set on the Authenticator when auth.mcp_oauth is configured). It applies to /mcp and
-// every /mcp/{svc} and to nothing else: the A2A routes answer a JWT 401 until their OIDC principals (M5).
+// every /mcp/{svc} and to nothing else: the A2A routes verify auth.oidc's audience (A2AVerifier, M5).
 type MCPResourceServer interface {
 	// VerifyMCP verifies a bearer JWT for the MCP route svc ("" for /mcp, else name or tenant/name), whose canonical URI
 	// its audience must contain: the principal it stands for (oidc:sub:<sub>, via mcp), ErrUnauthenticated when it is

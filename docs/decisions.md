@@ -4894,3 +4894,143 @@ script as it was), `TestTeamGateRehearsal` (`make test-kits`). The VPS run was m
 (31 Oct, droplet 614610093: Docker 29.1.3 on the containerd image store, compose 2.40.3) and passed: `up -d --build
 --wait` exit 0 in 232 s with one build, `gate-migrate` and `gate` on the one image, the Let's Encrypt certificate, and
 a hire and an MCP `search` through the gate from another machine ([`gate-runs-m4.md`](gate-runs-m4.md)).
+
+## From M5's gate side (1 Nov)
+
+Kontra Cloud builds M5 against this gate, and its record (kontra-cloud `docs/m5-decisions.md`) names what it needs
+from this repository: decision 7's OIDC principals on the A2A routes with a tenant mapping and a revocation feed
+(public-repo PR M5-G1; its C4 and D-M5-35). D314 to D316 settle them. Where Cloud's record proposed something else, the entry
+says so and what Cloud changes.
+
+### D314. The A2A routes take an issuer's JWTs as OIDC principals — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 7; completes D268, D276)
+
+The owner's decision 7: the gate accepts Cloud's JWTs as OIDC principals, issuer = Cloud's control plane with its JWKS,
+audience `kontra`, revocation checked against `/v1/auth/revocations`. `auth.oidc` (PRD §11, [`relay.md`](../spec/relay.md)
+§2.3) was refused at load with a warning since M1, and D268 and D276 left it to M5 on §12.1's verifier. Decision
+(§2.3, §17; `spec/schema/config.json`):
+
+- **Which bearer.** With `auth.oidc`, a bearer of a JWT's shape (`auth.LooksLikeJWT`, as D296 reads one on the MCP
+  routes) on an A2A route is verified as the issuer's token and never looked up as an API key; any other bearer is an
+  API key. Without it nothing changes: a JWT is looked up as a key and is `401`.
+- **How.** §12.1's verifier (D276, D284, D296): metadata and key set as operator-configured endpoints, the `kid`
+  refetch at most once a minute, ES256, RS256 or EdDSA, `iss`, `exp`, `nbf` with 60 s of skew. `aud` must contain
+  `auth.oidc.audience` (exactly, as one member). The principal is `oidc:sub:<sub>`, `buyer_id` UUIDv5(issuer ‖ sub)
+  (the same buyer as the subject's MCP tokens, which Cloud's D-M5-11 pins), `via = oidc`, and the tenant D315 maps.
+- **Audiences never cross.** A token for an MCP route's canonical URI is `401` on the A2A routes; an
+  `auth.oidc.audience` token is `401` on the MCP routes (`AuthenticateMCP` never asks the A2A verifier). So Cloud's
+  `aud kontra` tokens (its D-M5-39) and its MCP tokens (`aud` = the route) are two credentials.
+- **One issuer, one verifier.** When `auth.oidc.issuer` equals `auth.mcp_oauth.issuer` (Cloud's case), the replica
+  builds one `oidc.Issuer` for it: one key-set cache, one revocation feed (D316), one tenant claim (D315). Both blocks
+  must then write the same `tenant_claim` and `revocations`, or the load fails: the two settings are the issuer's,
+  true of every token it signs on every route, and a block that left the feed out would be a hole on its routes.
+- **Failures.** A refused token is `401` (`Bearer`, as every A2A `401`); an issuer, feed or tenant the gate could not
+  read is the gate's own failure, answered as a database failure is on these routes (`-32603` on JSON-RPC, `503` on a
+  card), never `401`: a caller cannot tell a refused token from an outage of the operator's, and a client that
+  retried a `401` with a new token would be misled.
+- **Streams.** A token is checked when its request arrives. A stream it opened is not cut when it expires or is
+  revoked, as an API key's is not; the next request is checked.
+
+The `auth.oidc` warning (`Config.unbuilt`) and the `oidc:*` warning on a gate with `auth.oidc` alone go. Why reuse the
+MCP verifier rather than a second one: the checks are §12.1's, which D276 already settled and M4 tested, and Cloud's
+issuer is one population of tokens. What it does not do: no scope or `azp` check (Cloud mints `aud kontra` for one
+purpose), no token introspection (the feed is the revocation channel), no per-service audience.
+
+Tested: `TestAuthenticateA2A` (`internal/auth`: a JWT is the verifier's on A2A only, a key is a key, a refused token
+`401`, a feed stale the gate's own error, a node's request its session's), `TestA2A` and `TestNewIssuerRefuses`
+(`internal/oidc`: three algorithms, `aud` among others, an MCP audience, another audience, expired, a rotated key
+fetched once), `TestOIDCIssuerPolicy` and the `TestLoadErrors` rows (`internal/config`), `TestGateA2AOIDC` (`internal/gate`,
+a whole replica against `oidctest` with its own JWKS and feed: a task via `oidc` with the token's buyer, read back by
+another token of the subject; audiences not crossing; a key rotated at the issuer accepted after one refetch).
+
+### D315. An issuer's tenant claim maps its principals to a tenant by slug — **decided under the owner's standing instruction, 1 Nov** (completes D314; amends D276's "no tenant")
+
+[`relay.md`](../spec/relay.md) §2.3 gave an OIDC principal "none, unless the operator maps it" and §12.1 left the
+mapping to M5; Cloud's D-M5-35 asks for "a tenant claim mapping" without naming one. A principal's tenant is what
+`org:<tenant>` entries admit (a private listing is `[org:<tenant>]` in Cloud's PR-3) and what Admission receives as
+`principal.tenantId`. Decision (§2.3, §12.1, §17):
+
+- **Which claim.** `tenant_claim`, on `auth.oidc` and on `auth.mcp_oauth`, names one top-level claim (a name of 1 to
+  128 characters `[A-Za-z0-9_.:/#~+-]`, so a collision-resistant URI such as `https://kontra.sh/claims/tenant` or a
+  private name; never `iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `jti` or `sid`). Absent: no claim is read and no OIDC
+  principal has a tenant, as before. The gate does not fix the name: a team's IdP chooses its own claims, and the
+  operator writes the name it emits.
+- **Its value.** A string, the slug of a live tenant of this gate of kind `team` or `account` (not deleted, not
+  expired): the slug is what `org:` entries, routes and Cloud's party handles name, and a team's IdP can know it where
+  it cannot know a random UUIDv7. The principal then carries the tenant's id and slug.
+- **A token without the claim** is a principal without a tenant: admitted by `oidc:sub:`, `oidc:*` and `anonymous`,
+  never by `org:`. It is not refused, because a buyer with no tenant of its own (a signed-in person who hires) is the
+  normal case.
+- **A token with a claim the gate cannot honour** is `401`: a value that is not a slug (not a string, `null`, upper
+  case), a slug of no live tenant, or of an anonymous tenant (an anonymous tenant is a session's node key, never a
+  signed-in principal's; tunnel.md §6). The issuer asserted a membership that does not hold, so the token is refused
+  rather than accepted with less: it fails closed, and the operator's bug shows.
+- **Tenancy.** The rule is the same on both. On a multi-tenant gate the claim names one of the operator's tenants. On
+  a team gate the only tenant is `default`, so a team's IdP writes `default` for its members, and `org:default`
+  (which a handshake gives the services it creates, tunnel.md §5) admits them.
+- **Freshness.** `tenant.Resolver` keeps an answer 5 s and never past the tenant's `expires_at`, so a deleted tenant
+  stops mapping within 5 s, the bound an API key's tenant has (§2.3's revocation cache); an unknown slug is kept as
+  long, so one token cannot cost a query per request. A database failure is the gate's own error, not a `401`.
+- **The buyer does not change.** `buyer_id` is UUIDv5(issuer ‖ sub) whatever the tenant (D-M5-11).
+
+What Cloud changes: its `aud kontra` tokens (D-M5-39: `sub` = party, `sid`) and its MCP tokens carry the party's gate
+tenant slug in the claim its configuration names, when the party has a tenant; the two blocks of its gate
+configuration write the same `tenant_claim`.
+
+Tested: `TestIssuerTenantClaim` (`internal/oidc`: mapped, absent, unknown, malformed, a database failure, the setting
+off), `TestResolver` (`internal/tenant`, Postgres: team, account, anonymous, deleted, expired, unknown, the 5 s and
+`expires_at` bounds), `TestAllowList` (`internal/auth`: a mapped principal is an `org:` member and still an OIDC
+principal), `TestGateA2AOIDC` (`org:default` on A2A and on `/mcp/{svc}`), `TestGateA2AOIDCMultiTenant` (`org:acme` on
+a multi-tenant gate; an anonymous tenant's slug, an unknown slug and a case variant `401`).
+
+### D316. An issuer's revocation feed: polled, required of its tokens, failing closed after 30 s — **decided under the owner's standing instruction, 1 Nov** (completes D314; carries out Cloud's C4 and D-M5-35)
+
+A token the gate verifies by itself is good until it expires; decision 7 has Cloud's revocations reach it through
+`GET /v1/auth/revocations`, which at kontra-cloud `c16e182` (`gate/auth/service.py` `recent_revocations`, the
+`Revocations` model) answers `{"window_seconds": 1200, "sessions": [sha256(sid) hex, …]}`: every session revoked in
+the last 20 minutes (at most 200,000), newest first, `Cache-Control: no-store`, public. Its tokens carry `sid` and
+`iat`; access tokens live 15 minutes and MCP tokens 10 (its D-M5-38). Decision (§2.3, §10.3, §12.1, §17):
+
+- **Configuration.** `revocations: {url, poll, max_stale}` on `auth.oidc` and `auth.mcp_oauth` (equal when they name
+  one issuer, D314). `url` is an operator-configured endpoint (§10.3, D284: `https://`, or `http://` on a loopback
+  host; no redirect, no proxy), read with a 10 s timeout and a 32 MiB bound (262,144 entries of 67 bytes fit with
+  room; above Cloud's own 200,000). `poll` defaults to 5 s (1 s to 1 min), §2.3's bound for an API key's revocation;
+  `max_stale` to 30 s (at least twice `poll`, at most 5 min).
+- **The answer.** A JSON object with exact keys (`strictjson`), `window_seconds` an integer from 1 s to 30 days,
+  `sessions` an array of 64-hex-digit digests; other members are ignored. One malformed entry, or any other shape, is
+  a failed read: the gate cannot tell what it would miss. A failed read keeps the last list.
+- **What a token then needs.** A string `sid` of at most 255 bytes, whose sha256 (of its UTF-8 bytes, hex) is not
+  listed; an `iat` at most 60 s ahead; and a lifetime `exp − iat` of at most `window_seconds − 120 s` (1080 s under
+  Cloud's window). Otherwise `401`. The lifetime bound is what makes the list sufficient: a session revoked at R is
+  listed until R + W on the issuer's clock, its tokens were issued at `iat` ≤ R, and the gate accepts one until
+  `exp` + 60 s on its own clock, within 60 s of the issuer's; so with `exp − iat` ≤ W − 120 s the session is listed
+  for as long as any of its tokens is accepted. The gate therefore keeps no revocation of its own, and a replica that
+  restarts knows every revocation that matters from its first read. A token without `sid` or `iat` cannot be checked,
+  so it is refused rather than trusted.
+- **Staleness fails closed.** Before the first read, and once no read has succeeded for `max_stale` (counted from when
+  the last good read began), every token of the issuer is the gate's own failure (D314's: an internal error on the A2A
+  routes, `503` on the MCP routes and cards), never accepted; a revoked token keeps its `401`. API keys, nodes and
+  anonymous callers are unaffected. So a revocation reaches every replica within `max_stale`, normally within `poll`.
+  30 s is the trade: an outage of the operator's control plane longer than that stops its signed-in callers (not its
+  API keys) until it is back, which is the price of never accepting a token that may have been revoked; a longer
+  bound lets a revoked token work longer. The operator can set it from 2·`poll` to 5 min.
+- **Start.** Each replica polls each distinct feed from `Run`, and waits up to 5 s (`FeedWait`) for each one's first
+  read before it serves, so the tokens of its first instants are not refused for want of a read; a feed still unread
+  is logged and polled on.
+- **Watching it.** Gauges `kontra_gate_oidc_revocations_age_seconds` (since the last good read began; `+Inf` before
+  any) and `kontra_gate_oidc_revocations_fresh` (1 while under `max_stale`), labelled by `replica` and `issuer`; a
+  revoked session's token refused is logged at info with the digest's first 4 bytes and the subject.
+
+Conflict with Cloud's proposals: none in the feed's shape. Two requirements follow for Cloud: every token it mints for
+the gate (the `aud kontra` kind and the MCP AS's) carries `sid` and `iat` and lives at most `window_seconds − 120 s`
+(its 15 and 10 minutes do; `REVOCATION_WINDOW`'s comment already intends it), and its gate configuration writes the
+same `revocations` in both blocks. Its `/v1/auth/revocations` stays public, as decision 7 has it: a digest discloses
+nothing without the token.
+
+Tested: `TestParseFeed`, `TestNewFeedRefuses`, `TestIssuerRevocationFeed` (`internal/oidc`: never read, `sid` and `iat`
+required and bounded, the lifetime bound at 1080 s and 1081 s, a revocation refused on A2A and MCP audiences and
+another session not, a failed read keeping its list, stale at 30 s and fresh at 29, a malformed answer, the window
+shrinking), `TestFeedRun`, `TestA2A` (revoked; stale), `TestOIDCIssuerPolicy` and `TestLoadErrors` rows
+(`internal/config`), `TestGateA2AOIDC` (a revoked `sid` `401` within the poll on A2A and `/mcp`, another session
+served; the feed down: past `max_stale` `-32603` on A2A and `503` on `/mcp/fs` while an API key is served, the gauge
+0, then back), `TestOperatorFixtureLoads` (`spec/schema/examples/config.operator.json`).
+

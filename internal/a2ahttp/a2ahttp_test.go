@@ -174,7 +174,7 @@ func (f *streams) take() (string, sse.Stream, http.Header) {
 // authn maps bearer tokens to principals; "bad" is a refused credential.
 type authn map[string]auth.Principal
 
-func (a authn) Authenticate(r *http.Request, anonymousBuyer uuid.UUID) (auth.Principal, bool, error) {
+func (a authn) AuthenticateA2A(r *http.Request, anonymousBuyer uuid.UUID) (auth.Principal, bool, error) {
 	tok, present, err := auth.BearerToken(r.Header)
 	if !present {
 		return auth.Anonymous(anonymousBuyer), false, nil
