@@ -97,7 +97,7 @@ func (r *Replica) assembleOIDC(routes *edge.Router, authn *auth.Authenticator) e
 		if err != nil {
 			return err
 		}
-		a2a, err := oidc.NewA2A(iss, o.Audience)
+		a2a, err := oidc.NewA2A(iss, r.cfg.PublicURL, o.Audience)
 		if err != nil {
 			return err
 		}

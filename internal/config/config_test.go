@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"maps"
@@ -499,6 +500,18 @@ func TestLoadErrors(t *testing.T) {
 		{"remote lifecycle hook without a queue", head + "hooks: { lifecycle: {} }\n", "hooks.lifecycle.task_queue: required"},
 		{"oidc over http", head + "auth: { oidc: { issuer: http://login.example.com, audience: kontra } }\n", "auth.oidc.issuer"},
 		{"oidc without audience", head + "auth: { oidc: { issuer: https://login.example.com } }\n", "auth.oidc.audience: required"},
+		// D314: audiences never cross. An audience naming the gate or its MCP routes is refused, with auth.mcp_oauth or
+		// without it (the issuer may mint MCP tokens for this gate anyway).
+		{"oidc audience the MCP route", head + "auth: { oidc: { issuer: https://login.example.com, audience: \"http://localhost:8080/mcp\" } }\n",
+			`auth.oidc.audience "http://localhost:8080/mcp": names the gate itself or its MCP routes`},
+		{"oidc audience a service's MCP route", head + "auth: { oidc: { issuer: https://login.example.com, audience: \"http://localhost:8080/mcp/svc\" }, " +
+			"mcp_oauth: { issuer: https://login.example.com } }\n", "audiences never cross"},
+		{"oidc audience the gate's origin", head + "auth: { oidc: { issuer: https://login.example.com, audience: \"http://localhost:8080\" } }\n",
+			"audiences never cross"},
+		{"oidc audience the origin with a slash", head + "auth: { oidc: { issuer: https://login.example.com, audience: \"http://localhost:8080/\" } }\n",
+			"audiences never cross"},
+		{"oidc audience the MCP route in another case", head + "auth: { oidc: { issuer: https://login.example.com, audience: \"HTTP://LocalHost:8080/mcp/acme/fs/\" } }\n",
+			"audiences never cross"},
 		// D315: a tenant claim is a claim name, never one the gate reads for itself.
 		{"tenant claim sub", head + "auth: { oidc: { issuer: https://login.example.com, audience: kontra, tenant_claim: sub } }\n",
 			`auth.oidc.tenant_claim "sub": a registered claim`},
@@ -614,6 +627,43 @@ func TestMCPOAuthPublicURL(t *testing.T) {
 
 // A load error never prints a password written into a URL: the gate refuses credentials in its URLs, and
 // the refusal goes to stderr and the journal.
+// D314: the audiences that name the gate's own resources, which auth.oidc.audience may not be: the origin, public_url
+// and {public_url}/mcp with every path below it, compared as origins and decoded paths; anything else, an audience
+// that is no URL included, names none.
+func TestNamesGateResource(t *testing.T) {
+	for _, c := range []struct {
+		pub, aud string
+		want     bool
+	}{
+		{"https://gateway.example.com", "https://gateway.example.com/mcp", true},
+		{"https://gateway.example.com", "https://gateway.example.com/mcp/fs", true},
+		{"https://gateway.example.com", "https://gateway.example.com/mcp/acme/fs", true},
+		{"https://gateway.example.com", "https://gateway.example.com", true},
+		{"https://gateway.example.com", "https://gateway.example.com/", true},
+		{"https://gateway.example.com/", "https://gateway.example.com/mcp/", true},
+		{"https://gateway.example.com", "https://GATEWAY.example.com.:443/mcp", true},
+		{"https://gateway.example.com", "https://gateway.example.com/m%63p?x=1", true},
+		{"https://gateway.example.com:8443", "https://gateway.example.com:8443/mcp", true},
+		{"https://gateway.example.com/gate", "https://gateway.example.com/gate/mcp/fs", true},
+		{"https://gateway.example.com/gate", "https://gateway.example.com/gate/", true},
+		{"https://gateway.example.com/gate", "https://gateway.example.com", true},
+		{"https://gateway.example.com", "kontra", false},
+		{"https://gateway.example.com", "kontra:api", false},
+		{"https://gateway.example.com", "https://api.example.com", false},
+		{"https://gateway.example.com", "http://gateway.example.com/mcp", false},
+		{"https://gateway.example.com", "https://gateway.example.com:8443/mcp", false},
+		{"https://gateway.example.com", "https://gateway.example.com/mcpx", false},
+		{"https://gateway.example.com", "https://gateway.example.com/a2a/hello", false},
+		{"https://gateway.example.com/gate", "https://gateway.example.com/mcp", false},
+		{"https://gateway.example.com", "gateway.example.com/mcp", false},
+		{"", "https://gateway.example.com/mcp", false},
+	} {
+		if got := NamesGateResource(c.pub, c.aud); got != c.want {
+			t.Errorf("NamesGateResource(%q, %q) = %v, want %v", c.pub, c.aud, got, c.want)
+		}
+	}
+}
+
 func TestLoadErrorsHideURLCredentials(t *testing.T) {
 	const pw = "s3cretpw"
 	const head = "postgres: postgres://kontra@localhost/kontra\npublic_url: http://localhost:8080\n"
@@ -1343,5 +1393,42 @@ func TestTunnelAnonymous(t *testing.T) {
 	if a := staging.Tunnel.Anonymous; !a.Enabled || a.MaxTenants != 200 || a.Calls != 8 || a.TTL.D() != 2*time.Hour ||
 		a.PurgeAfter.D() != 24*time.Hour || a.PartsBytes != 64<<20 || staging.Tenancy != TenancyMulti {
 		t.Errorf("the staging fixture's tunnel.anonymous = %+v", a)
+	}
+}
+
+// The refused config fixtures (spec/schema/examples/invalid/config.*.json, which check_specs.py holds the schema to)
+// are refused by the loader too, each for its rule alone: config.search_hidden_string.json for a quoted hidden (D321),
+// and loads once hidden is the boolean.
+func TestRefusedConfigFixtures(t *testing.T) {
+	files, _ := filepath.Glob("../../spec/schema/examples/invalid/config.*.json")
+	want := map[string]struct{ refused, fixed, unfixed string }{
+		"config.search_hidden_string.json": {"services.hello.annotations.search.hidden: want true or false", `"hidden": true`, `"hidden": "true"`},
+	}
+	if len(files) != len(want) {
+		t.Fatalf("refused config fixtures %v, want %d", files, len(want))
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, ok := want[filepath.Base(f)]
+		if !ok {
+			t.Fatalf("%s: no rule named for it here", f)
+		}
+		var compact bytes.Buffer
+		if err := json.Indent(&compact, b, "", " "); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Parse(compact.Bytes(), t.TempDir()); err == nil || !strings.Contains(err.Error(), w.refused) {
+			t.Errorf("%s: %v, want %q", filepath.Base(f), err, w.refused)
+		}
+		fixed := strings.Replace(compact.String(), w.unfixed, w.fixed, 1)
+		if fixed == compact.String() {
+			t.Fatalf("%s: %q not found", filepath.Base(f), w.unfixed)
+		}
+		if _, err := Parse([]byte(fixed), t.TempDir()); err != nil {
+			t.Errorf("%s with %s: %v", filepath.Base(f), w.fixed, err)
+		}
 	}
 }

@@ -101,7 +101,7 @@
           "description": "The issuer whose JWTs are principals on the A2A routes (spec §2.3; built in M5, D314): a token whose aud contains audience is oidc:sub:<sub> with via oidc. Verified as auth.mcp_oauth's tokens are (spec §12.1, D276), on one verifier when both name the same issuer. When both name it, their tenant_claim and revocations must be equal (D315, D316).",
           "properties": {
             "issuer": { "$ref": "#/$defs/httpsURL" },
-            "audience": { "type": "string", "minLength": 1 },
+            "audience": { "type": "string", "minLength": 1, "description": "The aud the A2A routes' tokens must contain (Cloud: kontra). Never one of the gate's own resources: the gate refuses at load an absolute URL on public_url's origin whose path is empty, public_url's own, or {public_url}/mcp or below it, the MCP routes' audiences (spec §2.3, D314: audiences never cross)." },
             "tenant_claim": { "$ref": "#/$defs/tenantClaim" },
             "revocations": { "$ref": "#/$defs/revocations" }
           }
@@ -313,7 +313,17 @@
           }
         },
         "listed": { "type": "boolean", "default": false },
-        "annotations": { "type": "object", "default": {}, "description": "Operator data the gate attaches without interpreting (spec §13.4)." }
+        "annotations": {
+          "type": "object",
+          "default": {},
+          "description": "Operator data the gate attaches to what it serves (spec §13.4): it reads card_extensions, tool_meta, initialize_meta and search, and passes the rest through. search.hidden: true leaves the service out of every principal's search (spec §12.2, D321); the gate refuses at load a hidden that is not a boolean, null included.",
+          "properties": {
+            "search": {
+              "type": "object",
+              "properties": { "hidden": { "type": "boolean" } }
+            }
+          }
+        }
       },
       "allOf": [
         {

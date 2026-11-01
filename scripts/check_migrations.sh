@@ -25,6 +25,19 @@ files=(migrations/*.sql)
 for f in "${files[@]}"; do up "$f" | psql_; done
 { cat scripts/migration_tests.sql; echo "rollback;"; } | psql_ -At | grep -q 'migration behaviour: ok' \
   || { echo "migration behaviour tests failed" >&2; { cat scripts/migration_tests.sql; echo "rollback;"; } | psql_ >&2; exit 1; }
+# A fresh session for what depends on the session's settings (D317: standard_conforming_strings at the function's first
+# call in a backend).
+{ cat scripts/migration_tests_session.sql; echo "rollback;"; } | psql_ -At | grep -q 'migration session behaviour: ok' \
+  || { echo "migration session behaviour tests failed" >&2; { cat scripts/migration_tests_session.sql; echo "rollback;"; } | psql_ >&2; exit 1; }
+# 0004's down refuses while a service is tasks: required (D322), in its transaction, so nothing changes.
+required="set local search_path to kontra;
+insert into tenants (id, slug, kind) values ('01900000-0000-7000-8000-000000000001', 'acme', 'team');
+insert into services (tenant_id, name, kind, backend, source, tasks_mode)
+    values ('01900000-0000-7000-8000-000000000001', 'research', 'mcp', '{\"tunnel\": {}}', 'db', 'required');"
+if out=$({ echo "$required"; down migrations/0004_m5.sql; } | psql_ 2>&1); then
+  echo "0004's down ran with a tasks: required service" >&2; exit 1
+fi
+grep -q 'services acme/research are tasks: required' <<<"$out" || { echo "0004's down failed otherwise: $out" >&2; exit 1; }
 after_up=$(count kontra)
 [[ "$(count public)" == "0" ]] || { echo "a migration created relations in public" >&2; exit 1; }
 for ((i=${#files[@]}-1; i>=0; i--)); do down "${files[$i]}" | psql_; done

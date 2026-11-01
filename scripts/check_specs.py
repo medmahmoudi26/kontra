@@ -47,15 +47,26 @@ for p in sorted((SCHEMAS / "examples").glob("*.json")):
         problems.append(f"{p.relative_to(ROOT)}: {err.json_path}: {err.message}")
 
 # 2b. Refused fixtures: examples/invalid/<schema>.<variant>.json must not validate against <schema>.json (the CLI's own
-#     checks are held to the same files: internal/publish's tests, D323).
+#     checks are held to the same files: internal/publish's tests, D323; the gate's loader to config.*, D321). A rule
+#     JSON Schema cannot state is checked outside it: its fixture is listed here with the rule, and must validate, so
+#     that it tests that rule alone (the CLI and the control plane refuse it).
+BEYOND_SCHEMA = {
+    "listing.too_many_globs.json": "tools.allow and tools.deny hold at most 64 globs together",
+}
 for p in sorted((SCHEMAS / "examples" / "invalid").glob("*.json")):
     base = p.name.split(".")[0]
     schema = schemas.get(f"{base}.json")
     if schema is None:
         problems.append(f"{p.relative_to(ROOT)}: no schema for refused fixture")
         continue
-    if Draft202012Validator(schema, registry=registry).is_valid(json.loads(p.read_text())):
+    valid = Draft202012Validator(schema, registry=registry).is_valid(json.loads(p.read_text()))
+    if p.name in BEYOND_SCHEMA and not valid:
+        problems.append(f"{p.relative_to(ROOT)}: the schema refuses it, but it tests a rule outside the schema "
+                        f"({BEYOND_SCHEMA[p.name]})")
+    elif p.name not in BEYOND_SCHEMA and valid:
         problems.append(f"{p.relative_to(ROOT)}: validates, but is a refused fixture")
+for name in sorted(set(BEYOND_SCHEMA) - {p.name for p in (SCHEMAS / "examples" / "invalid").glob("*.json")}):
+    problems.append(f"spec/schema/examples/invalid/{name}: listed as a rule outside the schema, but missing")
 
 # 3. Relative links in markdown point at files that exist.
 for md in sorted(list((ROOT / "spec").glob("*.md")) + list((ROOT / "docs").glob("*.md")) + [ROOT / "README.md"]):

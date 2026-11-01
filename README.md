@@ -312,8 +312,9 @@ or `per_session` (`idleTimeoutSeconds`), its own `tools: {allow, deny}` and `tas
 `tasks: required`, so every call is a task its quote covers. `published: false` unpublishes the service and keeps the
 listing. Each publish is a new version of the listing; tasks keep the quote they were admitted with. `kontra publish`
 signs you in in the browser for that publish only, as `kontra login` does, and keeps nothing but the client
-registration: an API key never publishes. It replaces the version it read just before, and stops if another publish
-came in between (`--version` names the one you read). The CLI only carries the listing; the control plane decides
+registration: an API key never publishes. It never replaces a listing unseen: for a service that already has one it
+prints that listing's version, price and state and publishes nothing, until you name the version you read
+(`--version N`) or ask for whatever is current (`--replace`); it stops if another publish came in between. The CLI only carries the listing; the control plane decides
 what it accepts, and the gate holds no price. A team gate has no control plane: its services are its configuration.
 
 ## Layout

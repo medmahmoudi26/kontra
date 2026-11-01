@@ -14,12 +14,14 @@
 -- one chain, which audit.Verify checks. Every M5 schema change is in this one file, frozen when M5 merges. Section
 -- references are to spec/relay.md (R).
 --
--- What the function checks of row_jcs: not empty, UTF-8 JSON, an object with a non-empty string "event" and an "at"
--- in RFC 3339 form (every row carries what happened and when, under the hash). It does not re-canonicalize: the writer
--- sends the row's RFC 8785 (JCS) bytes, and the chain hashes and keeps exactly those. The at column is the database's
--- clock under the lock, when the row was appended; the row's own "at" is the writer's time of its change. The
--- function refuses a transaction above read committed: its snapshot could miss the last committed row, and the row it
--- linked would fork the chain.
+-- What the function checks of row_jcs: not empty, UTF-8 JSON, an object with a non-empty string "event" and an "at" in
+-- RFC 3339 form (every row carries what happened and when, under the hash). The pattern has no backslash: PL/pgSQL
+-- lexes the function's string literals under the calling session's standard_conforming_strings when a backend first
+-- runs it, and with it off '\d' would read as the letter d; [0-9] and [.] mean the same under either setting. It does
+-- not re-canonicalize: the writer sends the row's RFC 8785 (JCS) bytes, and the chain hashes and keeps exactly those.
+-- The at column is the database's clock under the lock, when the row was appended; the row's own "at" is the writer's
+-- time of its change. The function refuses a transaction above read committed: its snapshot could miss the last
+-- committed row, and the row it linked would fork the chain.
 --
 -- audit_prev_hash makes a fork impossible whoever writes: no two rows may name the same predecessor, and only one row
 -- may have none. A writer that links to a stale head (a raw INSERT, or a repeatable read transaction) fails with a
@@ -65,7 +67,7 @@ begin
     if json_typeof(doc) is distinct from 'object'
         or json_typeof(doc -> 'event') is distinct from 'string' or (doc ->> 'event') = ''
         or json_typeof(doc -> 'at') is distinct from 'string'
-        or (doc ->> 'at') !~ '^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?(Z|[+-]\d\d:\d\d)$' then
+        or (doc ->> 'at') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$' then
         raise exception 'kontra.audit_append: row_jcs is not an object with a string "event" and an RFC 3339 "at"'
             using errcode = 'invalid_parameter_value';
     end if;
@@ -94,8 +96,27 @@ alter table services add constraint services_tasks_mode_check
 
 -- +goose Down
 set local search_path to kontra;
--- A required service becomes durable, the mode required refines: it still owns its tasks, and takes plain calls again.
-update services set tasks_mode = 'durable' where tasks_mode = 'required';
+-- A gate before 0004 does not know tasks: required. It reads the mode unvalidated, advertises no task support and relays
+-- a plain tools/call to the service without Admission (unless the operator's hooks.admission.operations has call), so a
+-- per-task price would be skipped (R §11.5, D322). The down therefore refuses while any service is required, naming
+-- every one, disabled or not: the operator first decides what each becomes (every other mode takes plain calls, which
+-- such a gate admits only with call in the operations) or deletes it. Turning them durable here would open that hole
+-- unseen. An image rolled back below 0004 without this down meets the same rows: required services are disabled or
+-- repriced before it serves (D322).
+-- +goose StatementBegin
+do $$
+declare names text;
+begin
+    select string_agg(t.slug || '/' || s.name, ', ' order by t.slug, s.name) into names
+        from kontra.services s join kontra.tenants t on t.id = s.tenant_id
+        where s.tasks_mode = 'required';
+    if names is not null then
+        raise exception '0004 down: services % are tasks: required, which a gate before 0004 would serve plain calls of without Admission (D322); set each one''s tasks_mode, or delete it, and run the down again', names
+            using errcode = 'object_in_use';
+    end if;
+end
+$$;
+-- +goose StatementEnd
 alter table services drop constraint services_tasks_mode_check;
 alter table services add constraint services_tasks_mode_check check (tasks_mode in ('durable', 'passthrough', 'off'));
 drop index tasks_by_buyer;

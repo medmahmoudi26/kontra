@@ -453,7 +453,7 @@ converts into the team as an account's does; a gate that stopped opening anonymo
 
 ### 6.4 `kontra publish` (D323)
 
-`kontra publish [--gate URL] [--control-plane URL] [--version N] [--dry-run] [--no-browser] <listing.yaml>` sends a
+`kontra publish [--gate URL] [--control-plane URL] [--version N | --replace] [--dry-run] [--no-browser] <listing.yaml>` sends a
 listing, how one of the person's services is sold, to the gate operator's control plane. Its file is YAML (or JSON),
 one document, at most 64 KiB, as [`schema/listing.json`](schema/listing.json) describes it: `service` (the name at the
 gate, under the person's tenant), `kind` (`a2a` or `mcp`), `visibility` (`public`, `unlisted`, `private`), `price`
@@ -471,12 +471,18 @@ amount, and the gate holds no price ([`relay.md`](relay.md) §13.5).
    in lower case, the default port elided, no trailing `/`), and sends the access token it gets as `Authorization:
    Bearer` to the control plane only, following no redirect; it never stores or prints it. A publish is a person's change: an API key never publishes (kontra-cloud's `fresh` rule), so there is
    no `--api-key`, and a token is asked for each publish, which the person's consent confirms.
-4. Unless `--version` names one, it reads the version of the service's listing, `GET {control plane}/v1/services/
-   {service}` (`listing.version`, or 0 when the control plane has no listing of it: `404` `service_not_found`), then
-   sends `PUT {control plane}/v1/services/{service}` with `{kind, visibility, price, tools?, tasks?, sealed,
-   published, version}` (Cloud's `ListingPut`). A listing changed since that version is the control plane's `409`
-   `stale_version`: nothing is published, and the CLI names the version the listing is at. Any other refusal is
-   printed as the control plane wrote it (`code` and `message`, escaped), and exits 1.
+4. Unless `--version` names one, it reads the service's listing, `GET {control plane}/v1/services/{service}`
+   (`listing`, its `version`, `price` and `visibility`, and the service's `published`; version 0 when the control
+   plane has no listing of it: `404` `service_not_found`). A listing is never replaced unseen: when the service has
+   one (version above 0) and neither `--version` nor `--replace` was given, the CLI prints its version, price,
+   visibility and whether it is published, names the `--version` to replace it with, sends nothing and exits 1; the
+   file may predate a price set in the console or a teammate's unpublish, which the version the CLI just read cannot
+   tell. With `--replace` it replaces the version it read, printing what that version was.
+5. It sends `PUT {control plane}/v1/services/{service}` with `{kind, visibility, price, tools?, tasks?, sealed,
+   published, version}` (Cloud's `ListingPut`): the version `--version` names, the one read under `--replace`, or 0.
+   A listing changed since that version is the control plane's `409` `stale_version`: nothing is published, and the
+   CLI names the version the listing is at. Any other refusal is printed as the control plane wrote it (`code` and
+   `message`, escaped), and exits 1.
 
 The operator's authorization server issues, for `resource` = its control plane, an access token of the person's
 session, confirmed by the consent (D323); a gate API key only for the gate's origin (§6.3 step 4, D305).

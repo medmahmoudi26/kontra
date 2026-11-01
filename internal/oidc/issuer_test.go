@@ -359,11 +359,18 @@ func TestNewIssuerRefuses(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if _, err := NewA2A(nil, "kontra"); err == nil {
+	if _, err := NewA2A(nil, gateURL, "kontra"); err == nil {
 		t.Error("NewA2A without an issuer")
 	}
-	if _, err := NewA2A(issuer(t, v, IssuerConfig{}), ""); err == nil {
+	if _, err := NewA2A(issuer(t, v, IssuerConfig{}), gateURL, ""); err == nil {
 		t.Error("NewA2A without an audience")
+	}
+	// D314: audiences never cross. An audience naming the gate or one of its MCP routes would take that resource's
+	// tokens (RFC 8707) on every A2A route, so NewA2A refuses it as the configuration's load does.
+	for _, aud := range []string{mcpAud, CanonicalURI(gateURL, "fs"), CanonicalURI(gateURL, "acme/fs"), gateURL, gateURL + "/"} {
+		if _, err := NewA2A(issuer(t, v, IssuerConfig{}), gateURL, aud); err == nil {
+			t.Errorf("NewA2A with the audience %q", aud)
+		}
 	}
 }
 
@@ -375,7 +382,7 @@ func TestA2A(t *testing.T) {
 	clk := realClock()
 	v := verifier(t, as, clk)
 	f := feed(t, as, clk, time.Second, 10*time.Second)
-	a2a, err := NewA2A(issuer(t, v, IssuerConfig{Feed: f}), a2aAud)
+	a2a, err := NewA2A(issuer(t, v, IssuerConfig{Feed: f}), gateURL, a2aAud)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -144,8 +144,8 @@ func TestStatus(t *testing.T) {
 	}
 }
 
-// Down then up is clean: the first down removes 0004's function, its indexes and the tasks mode required (Check then
-// fails at version 3), the second
+// Down then up is clean: 0004's down refuses while a service is tasks: required, then removes 0004's function, its
+// indexes and the tasks mode required (Check then fails at version 3), the second
 // 0003's columns, indexes and checks (version 2), the third 0002's relations and column (version 1), the fourth every
 // relation of 0001 (the version table stays; Check fails at version 0), and up again builds the same schema.
 func TestDownThenUp(t *testing.T) {
@@ -157,6 +157,26 @@ func TestDownThenUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterUp := relations(t, c, "kontra")
+
+	// D322: 0004's down refuses while a service is tasks: required, naming every one, disabled or not, and changes
+	// nothing; a gate before 0004 would relay the service's plain calls without Admission.
+	if _, err := c.Exec(ctx, `insert into kontra.tenants (id, slug, kind) values ('01900000-0000-7000-8000-000000000001', 'acme', 'team');
+		insert into kontra.services (tenant_id, name, kind, backend, source, tasks_mode, disabled_at) values
+		('01900000-0000-7000-8000-000000000001', 'research', 'mcp', '{"tunnel": {}}', 'db', 'required', null),
+		('01900000-0000-7000-8000-000000000001', 'old', 'mcp', '{"tunnel": {}}', 'db', 'required', now()),
+		('01900000-0000-7000-8000-000000000001', 'free', 'mcp', '{"tunnel": {}}', 'db', 'durable', null)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Down(ctx); err == nil || !strings.Contains(err.Error(), "services acme/old, acme/research are tasks: required") {
+		t.Fatalf("Down with required services = %v", err)
+	}
+	if v := applied(t, m); len(v) != 4 || !scalar[bool](t, c, "select to_regprocedure('kontra.audit_append(bytea)') is not null") ||
+		scalar[int](t, c, "select count(*) from kontra.services where tasks_mode = 'required'") != 2 {
+		t.Fatalf("a refused down changed something: applied %v", v)
+	}
+	if _, err := c.Exec(ctx, "delete from kontra.tenants"); err != nil {
+		t.Fatal(err)
+	}
 
 	res, err := m.Down(ctx)
 	if err != nil {

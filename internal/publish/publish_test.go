@@ -42,6 +42,9 @@ func TestSchemaFixtures(t *testing.T) {
 			t.Errorf("%s: %v", filepath.Base(f), err)
 		}
 	}
+	// A fixture of a rule the schema cannot state (check_specs.py's BEYOND_SCHEMA, which the schema accepts) is refused
+	// for that rule.
+	beyond := map[string]string{"listing.too_many_globs.json": "at most 64 globs in allow and deny together"}
 	for _, f := range invalid {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -50,7 +53,13 @@ func TestSchemaFixtures(t *testing.T) {
 		var p Problems
 		if _, err := Parse(b); !errors.As(err, &p) || len(p) == 0 {
 			t.Errorf("%s: accepted (%v)", filepath.Base(f), err)
+		} else if want, ok := beyond[filepath.Base(f)]; ok && (len(p) != 1 || !strings.Contains(p[0], want)) {
+			t.Errorf("%s: %v, want only %q", filepath.Base(f), err, want)
 		}
+		delete(beyond, filepath.Base(f))
+	}
+	if len(beyond) != 0 {
+		t.Errorf("fixtures missing: %v", beyond)
 	}
 }
 
@@ -109,6 +118,61 @@ price:
 	}
 }
 
+// Numbers as YAML 1.2 reads them, or refused (rest-4 of the M5 gate-side review): the YAML decoder reads 0600 as octal
+// 384 and 1_000 as 1000, where YAML 1.2's core schema reads 600 and a string, so an integer is decimal without leading
+// zeros, underscores or a base prefix, and a float has no underscores; a sign is fine. A file starting with '{' is
+// JSON, whose standard escapes (a surrogate pair included, as Python's json.dumps writes a non-BMP character) the YAML
+// decoder refuses, with no key twice and in UTF-8; one that is not JSON is a YAML flow mapping.
+func TestParseNumbersAndJSON(t *testing.T) {
+	const head = "service: hello\nprice: { model: per_task, amount: \"1.00\", "
+	for _, n := range []string{"0600", "00", "1_000", "0x258", "0X258", "0o1130", "0b1", "-0x10", "!!int \"0600\""} {
+		_, err := Parse([]byte(head + "taskTimeoutSeconds: " + n + " }\n"))
+		if err == nil || !strings.Contains(err.Error(), "write an integer in decimal") || !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("taskTimeoutSeconds: %s: %v", n, err)
+		}
+	}
+	if _, err := Parse([]byte(head + "taskTimeoutSeconds: 6_0.0e1 }\n")); err == nil || !strings.Contains(err.Error(), "without underscores") {
+		t.Errorf("a float with an underscore: %v", err)
+	}
+	for in, want := range map[string]int64{"600": 600, "+600": 600, "6e2": 600, "600.0": 600, "6.0E+2": 600} {
+		if l, err := Parse([]byte(head + "taskTimeoutSeconds: " + in + " }\n")); err != nil || *l.Price.TaskTimeoutSeconds != want {
+			t.Errorf("taskTimeoutSeconds: %s: %v", in, err)
+		}
+	}
+	// A quoted number is a string, which the schema refuses as one.
+	if _, err := Parse([]byte(head + "taskTimeoutSeconds: \"0600\" }\n")); err == nil || !strings.Contains(err.Error(), "taskTimeoutSeconds: want an integer") {
+		t.Errorf("a quoted 0600: %v", err)
+	}
+
+	smile := `{"service":"t","kind":"mcp","price":{"model":"free","currency":"USD"},"tools":{"allow":["\ud83d\ude00","a\u00e9\/b"],"deny":[]},"tasks":"durable"}`
+	for name, file := range map[string]string{"JSON": smile, "JSON after a byte order mark": "\ufeff\n " + smile + "\n"} {
+		l, err := Parse([]byte(file))
+		if err != nil || l.Tools == nil || len(l.Tools.Allow) != 2 || l.Tools.Allow[0] != "\U0001F600" || l.Tools.Allow[1] != "aé/b" || l.Tasks != "durable" {
+			t.Errorf("%s: %+v %v", name, l, err)
+		}
+	}
+	if l, err := Parse([]byte(`{"service":"hello","price":{"model":"per_task","amount":"1.00","taskTimeoutSeconds":600,"reviewWindowSeconds":6e2}}`)); err != nil ||
+		*l.Price.TaskTimeoutSeconds != 600 || *l.Price.ReviewWindowSeconds != 600 {
+		t.Errorf("JSON numbers: %v", err)
+	}
+	for name, c := range map[string]struct{ file, want string }{
+		"a JSON key twice":         {`{"service":"hello","price":{"model":"free","model":"per_task"}}`, `the key "model" is written twice`},
+		"a JSON key twice on top":  {`{"service":"hello","service":"other","price":{"model":"free"}}`, `the key "service" is written twice`},
+		"JSON not in UTF-8":        {"{\"service\":\"hello\",\"price\":{\"model\":\"free\"},\"tools\":{\"allow\":[\"\xff\"]}}", "not UTF-8"},
+		"JSON, a fraction":         {`{"service":"hello","price":{"model":"per_task","amount":"1.00","taskTimeoutSeconds":60.5}}`, "taskTimeoutSeconds: want an integer"},
+		"JSON, an unquoted amount": {`{"service":"hello","price":{"model":"per_task","amount":1.5}}`, "quote it"},
+		"two JSON values":          {`{"service":"hello","price":{"model":"free"}} {"service":"other"}`, "more than one"},
+	} {
+		if _, err := Parse([]byte(c.file)); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", name, err, c.want)
+		}
+	}
+	// Not JSON, but a YAML flow mapping: read as YAML.
+	if l, err := Parse([]byte("{ service: hello, price: { model: free } }\n")); err != nil || l.Service != "hello" || l.Price.Model != ModelFree {
+		t.Errorf("a YAML flow mapping: %+v %v", l, err)
+	}
+}
+
 // The request is Cloud's ListingPut (D-M5-95): kind, visibility, sealed, published and currency always written, the
 // price's other keys as the file wrote them, tools and tasks only when written (an empty allow sent as []), and the
 // version given.
@@ -146,12 +210,15 @@ func TestParseArgs(t *testing.T) {
 		t.Fatalf("%+v %v", o, err)
 	}
 	if o, err := ParseArgs([]string{"--control-plane", "https://api.example.com/", "l.yaml"}, env); err != nil || o.ControlPlane != "https://api.example.com/" ||
-		o.Gate.String() != "https://gateway.kontra.sh" {
+		o.Gate.String() != "https://gateway.kontra.sh" || o.Replace || o.Version != nil {
 		t.Fatalf("%+v %v", o, err)
+	}
+	if o, err := ParseArgs([]string{"l.yaml", "--replace"}, env); err != nil || !o.Replace || o.Version != nil {
+		t.Fatalf("--replace: %+v %v", o, err)
 	}
 	for _, bad := range [][]string{{}, {"a.yaml", "b.yaml"}, {"--version", "-1", "a.yaml"}, {"--version", "x", "a.yaml"},
 		{"--control-plane", "http://api.example.com", "a.yaml"}, {"--control-plane", "https://api.example.com/?x=1", "a.yaml"},
-		{"--gate", "http://gate.example.com", "a.yaml"}, {"--nope", "a.yaml"}} {
+		{"--gate", "http://gate.example.com", "a.yaml"}, {"--nope", "a.yaml"}, {"--replace", "--version", "2", "a.yaml"}} {
 		if _, err := ParseArgs(bad, env); !errors.Is(err, ErrUsage) {
 			t.Errorf("%q: %v, want a usage error", bad, err)
 		}
@@ -172,7 +239,7 @@ func TestDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "PUT /v1/services/hello") || !strings.Contains(out.String(), `"amount": "1.00"`) ||
-		!strings.Contains(out.String(), "nothing was sent") {
+		!strings.Contains(out.String(), "nothing was sent") || !strings.Contains(out.String(), "it replaces no listing (version 0;") {
 		t.Fatalf("dry run: %s", out.String())
 	}
 	o.ReadFile = func(string) ([]byte, error) {
@@ -194,7 +261,8 @@ type rig struct {
 	creds string
 
 	mu       sync.Mutex
-	listings map[string]int64 // service -> current version
+	listings map[string]int64          // service -> current version
+	views    map[string]map[string]any // service -> its ListingView, as the last PUT left it
 	puts     []put
 	gets     int
 	answer   func(w http.ResponseWriter, r *http.Request) bool // overrides the control plane when it returns true
@@ -213,7 +281,7 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(as.Close)
-	r := &rig{t: t, as: as, creds: filepath.Join(t.TempDir(), ".kontra", "credentials"), listings: map[string]int64{}}
+	r := &rig{t: t, as: as, creds: filepath.Join(t.TempDir(), ".kontra", "credentials"), listings: map[string]int64{}, views: map[string]map[string]any{}}
 	r.gate = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/.well-known/oauth-protected-resource/mcp" {
 			http.NotFound(w, req)
@@ -244,8 +312,8 @@ func errorJSON(w http.ResponseWriter, status int, code, msg string, detail any) 
 }
 
 // serve is the control plane: the bearer must be the token the authorization server issued for it; GET answers a
-// ServiceView (404 service_not_found for none), PUT checks the version read (409 stale_version) and answers the
-// ListingView.
+// ServiceView with its ListingView (404 service_not_found for none), PUT checks the version read (409 stale_version)
+// and answers the ListingView.
 func (r *rig) serve(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	answer := r.answer
@@ -272,9 +340,14 @@ func (r *rig) serve(w http.ResponseWriter, req *http.Request) {
 			errorJSON(w, http.StatusNotFound, "service_not_found", "no such service", nil)
 			return
 		}
+		view := map[string]any{"service": name, "version": cur, "kind": "a2a", "visibility": "public", "published": true,
+			"price": map[string]any{"model": "per_task", "amount": "3.00", "currency": "USD"}}
+		if v, ok := r.views[name]; ok {
+			view = v
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "endpoint": "https://gateway.example/agents/acme/" + name,
-			"listing": map[string]any{"version": cur}})
+			"published": view["published"], "listing": view})
 	case http.MethodPut:
 		b, _ := io.ReadAll(req.Body)
 		var body map[string]any
@@ -286,10 +359,16 @@ func (r *rig) serve(w http.ResponseWriter, req *http.Request) {
 		}
 		r.listings[name] = cur + 1
 		price, _ := body["price"].(map[string]any)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"service": name, "version": cur + 1, "kind": body["kind"],
+		amount := price["amount"]
+		if amount == nil {
+			amount = "0"
+		}
+		view := map[string]any{"service": name, "version": cur + 1, "kind": body["kind"],
 			"visibility": body["visibility"], "published": body["published"], "price": map[string]any{
-				"model": price["model"], "amount": price["amount"], "currency": "USD"}})
+				"model": price["model"], "amount": amount, "currency": "USD"}}
+		r.views[name] = view
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(view)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -310,8 +389,10 @@ const perTask = "service: hello\nprice: { model: per_task, amount: \"1.00\", rev
 
 // A publish (§6.4, D323): the person signs in at the gate's authorization server with resource = the control plane
 // (the client registration kontra login keeps, made once and reused); the listing goes to PUT /v1/services/hello
-// with that token, version 0 for a service the control plane does not know; the next publish reads version 1 and
-// replaces it. The token is not kept, and nothing but the registration is written to the credentials.
+// with that token, version 0 for a service the control plane does not know. The next publish without --version or
+// --replace reads version 1 and refuses, printing what it is and sending nothing (a listing is never replaced
+// unseen); with --replace it replaces that version, printing what it replaced. The token is not kept, and nothing but
+// the registration is written to the credentials.
 func TestPublish(t *testing.T) {
 	r := newRig(t)
 	var out bytes.Buffer
@@ -342,19 +423,38 @@ func TestPublish(t *testing.T) {
 		t.Fatal("the control plane's token was written to the credentials")
 	}
 
-	// Again: the same registration, the version read, the endpoint printed.
+	// Again, with neither --version nor --replace: the listing at version 1 is shown, and nothing is sent.
+	twoDollars := strings.Replace(perTask, `"1.00"`, `"2.00"`, 1)
 	out.Reset()
-	if err := Run(context.Background(), r.options(&out, r.cp.URL, strings.Replace(perTask, `"1.00"`, `"2.00"`, 1))); err != nil {
+	err = Run(context.Background(), r.options(&out, r.cp.URL, twoDollars))
+	if err == nil || !strings.Contains(err.Error(), "hello already has a listing, at version 1: per_task 1.00 USD, public, published. Nothing was published") ||
+		!strings.Contains(err.Error(), "kontra publish --version 1 listing.yaml") || !strings.Contains(err.Error(), "--replace") ||
+		len(r.puts) != 1 || r.listings["hello"] != 1 {
+		t.Fatalf("a publish over a listing, unseen: %v, %d puts\n%s", err, len(r.puts), out.String())
+	}
+	// --replace: the same registration, the version read and what it was printed, the endpoint printed.
+	o := r.options(&out, r.cp.URL, twoDollars)
+	o.Replace = true
+	out.Reset()
+	if err := Run(context.Background(), o); err != nil {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 	if len(r.as.Registrations()) != 1 || len(r.puts) != 2 || r.puts[1].body["version"] != float64(1) ||
+		!strings.Contains(out.String(), "replacing hello's listing at version 1: per_task 1.00 USD, public, published.") ||
 		!strings.Contains(out.String(), "at version 2: per_task 2.00 USD") || !strings.Contains(out.String(), "https://gateway.example/agents/acme/hello") {
 		t.Fatalf("the second publish: %d registrations, %+v\n%s", len(r.as.Registrations()), r.puts, out.String())
 	}
-	// Unpublished: said so.
+	// Unpublished: said so; and a stale file published again without a flag is refused, naming the unpublished state.
 	out.Reset()
-	if err := Run(context.Background(), r.options(&out, r.cp.URL, perTask+"published: false\n")); err != nil || !strings.Contains(out.String(), "unpublished") {
+	o = r.options(&out, r.cp.URL, perTask+"published: false\n")
+	o.Replace = true
+	if err := Run(context.Background(), o); err != nil || !strings.Contains(out.String(), "unpublished") {
 		t.Fatalf("unpublish: %v %s", err, out.String())
+	}
+	out.Reset()
+	if err := Run(context.Background(), r.options(&out, r.cp.URL, perTask)); err == nil ||
+		!strings.Contains(err.Error(), "at version 3: per_task 1.00 USD, public, unpublished. Nothing was published") || len(r.puts) != 3 {
+		t.Fatalf("republishing an unpublished listing, unseen: %v, %d puts", err, len(r.puts))
 	}
 }
 

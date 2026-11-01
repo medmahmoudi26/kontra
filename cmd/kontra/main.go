@@ -7,7 +7,7 @@
 //	kontra seal --open <part.json>
 //	(spec/ext-sealed.md §5.1; internal/sealing)
 //	kontra login [--gate URL] [--no-browser] (spec/tunnel.md §6.3; internal/login; M4 WP-06)
-//	kontra publish [--gate URL] [--control-plane URL] [--version N] [--dry-run] [--no-browser] <listing.yaml>
+//	kontra publish [--gate URL] [--control-plane URL] [--version N | --replace] [--dry-run] [--no-browser] <listing.yaml>
 //	(spec/tunnel.md §6.4, spec/schema/listing.json; internal/publish; M5-G3, D323)
 //	kontra version
 package main
@@ -43,7 +43,7 @@ const usage = `usage:
               [--media-type <type>] [file | -]
   kontra seal --open <part.json>
   kontra login [--gate <url>] [--no-browser]
-  kontra publish [--gate <url>] [--control-plane <url>] [--version <n>] [--dry-run] [--no-browser] <listing.yaml>
+  kontra publish [--gate <url>] [--control-plane <url>] [--version <n> | --replace] [--dry-run] [--no-browser] <listing.yaml>
   kontra version
 
 kontra connect hosts the services on this machine at a gate, and lets local clients hire the gate's services,
@@ -104,8 +104,9 @@ with it becomes the account's (spec/tunnel.md §6.3). --no-browser prints the si
 
 kontra publish sends a listing file (spec/schema/listing.json: kind, visibility, price free, per_task, per_call or
 per_session in USD, MCP policy, sealing) to the gate operator's control plane, after a sign-in in the browser for that
-publish only: a person publishes, never an API key (spec/tunnel.md §6.4). --dry-run checks the file and prints the
-request; kontra publish -h has the flags.
+publish only: a person publishes, never an API key (spec/tunnel.md §6.4). It never replaces a listing unseen: name
+the version you read (--version N) or --replace. --dry-run checks the file and prints the request; kontra publish -h
+has the flags.
 `
 
 func main() {

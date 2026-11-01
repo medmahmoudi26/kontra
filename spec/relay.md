@@ -177,6 +177,11 @@ canonical URI. A token valid there is the principal `oidc:sub:<sub>` with `via =
 revocation feed or tenant the gate cannot read when a token needs it is the gate's own failure, answered as a database
 failure is (an internal error, `-32603` on JSON-RPC; `503` on a card), never `401`. Audiences never cross: a token for
 an MCP route's canonical URI is `401` on the A2A routes, and an `auth.oidc.audience` token is `401` on the MCP routes.
+So `auth.oidc.audience` never names one of the gate's own resources, and the gate refuses to start when it does: an
+absolute URL on `public_url`'s origin whose path is empty, `public_url`'s own, or `{public_url}/mcp` or below it (the
+MCP routes' canonical URIs, and the resource `kontra login` asks for), compared as origins (scheme and host
+case-insensitively, a default port left out) and decoded paths; a token an issuer minted for one MCP resource would
+otherwise be a principal on every A2A route.
 When `auth.oidc` and `auth.mcp_oauth` name the same issuer, one verifier (one key-set cache) serves both, and the
 issuer's `tenant_claim` and `revocations` must be written the same in both blocks, or the gate refuses to start: they
 hold for every token the issuer signs, on both kinds of route. A token is checked when its request arrives; a stream it
@@ -1128,7 +1133,11 @@ plainly by any client that does not augment the call, and Admission sees a plain
 `hooks.admission.operations` lists `call`, which puts every call of every service, free ones included, behind the
 hook. `required` makes every call of one service a gate task, which Admission sees as `task` and may quote (§13.1,
 §13.2): what an operator that prices an MCP service per task sets ([`ext-escrow.md`](ext-escrow.md) §6). A
-`2025-06-18` session, which has no tasks, can call nothing on it.
+`2025-06-18` session, which has no tasks, can call nothing on it. A gate before migration `0004` does not know the
+mode: it reads it unvalidated and relays the service's plain calls without Admission (unless `call` is in the
+operations). So an operator writes `required`, and lets such a service's sessions through Admission, only once every
+replica runs a gate with `0004`, and before an image goes back below it denies those sessions again or disables or
+reprices its `required` services; `0004`'s down refuses while any service is `required`, naming each (D322).
 
 **`durable`:**
 

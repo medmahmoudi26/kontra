@@ -48,6 +48,8 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"publish"}, 2, "", "kontra publish: usage: name the listing file"}, // spec/tunnel.md §6.4 (D323)
 		{[]string{"publish", "-h"}, 0, "--control-plane URL", ""},
 		{[]string{"publish", "--version", "x", "l.yaml"}, 2, "", "usage: kontra publish"},
+		{[]string{"publish", "--replace", "--version", "2", "l.yaml"}, 2, "", "--version and --replace"},
+		{[]string{"publish", "-h"}, 0, "--replace", ""},
 		{[]string{"publish", "--dry-run", "/nonexistent/listing.yaml"}, 1, "", "kontra publish: the listing file: open"},
 		{[]string{"--help"}, 0, "kontra publish sends a listing file", ""},
 		{[]string{"connect", "-h"}, 0, "--serve a2a:NAME=URL", ""},

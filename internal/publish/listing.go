@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	yaml "go.yaml.in/yaml/v3"
 )
@@ -89,21 +90,22 @@ func (p Problems) Error() string {
 
 // Parse reads a listing file (YAML 1.2, or JSON): one document, a mapping with string keys, no key twice, at most
 // MaxFile bytes. A file the schema refuses is Problems; one that is not YAML another error.
+//
+// A file whose first character is '{' is read as JSON first (RFC 8259, standard escapes and surrogate pairs included,
+// which the YAML decoder refuses), and as YAML only when it is not JSON (a YAML flow mapping). A YAML integer must be
+// written in decimal without leading zeros, underscores or a base prefix, and a float without underscores: the YAML
+// decoder reads 0600 as octal 384 and 1_000 as 1000, where YAML 1.2's core schema reads decimal 600 and a string, so
+// such a number is refused rather than sent as something the person did not write.
 func Parse(b []byte) (*Listing, error) {
 	if len(b) > MaxFile {
 		return nil, fmt.Errorf("the listing file is over %d bytes", MaxFile)
 	}
-	dec := yaml.NewDecoder(bytes.NewReader(b))
-	var doc any
-	if err := dec.Decode(&doc); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil, errors.New("the listing file is empty")
-		}
-		return nil, fmt.Errorf("the listing file is not YAML: %w", err)
+	doc, isJSON, err := parseJSON(b)
+	if !isJSON {
+		doc, err = parseYAML(b)
 	}
-	var more any
-	if err := dec.Decode(&more); !errors.Is(err, io.EOF) {
-		return nil, errors.New("the listing file holds more than one YAML document")
+	if err != nil {
+		return nil, err
 	}
 	v := &checker{}
 	l := v.listing(doc)
@@ -111,6 +113,120 @@ func Parse(b []byte) (*Listing, error) {
 		return nil, v.problems
 	}
 	return l, nil
+}
+
+// parseJSON reads b as one JSON value when it starts with '{' (after white space and a byte order mark): isJSON is
+// false when it does not, or is not JSON at all (then it may be a YAML flow mapping). A key twice in an object, or
+// anything after the value, is an error of a JSON file.
+func parseJSON(b []byte) (doc any, isJSON bool, err error) {
+	t := bytes.TrimLeft(bytes.TrimPrefix(b, []byte("\ufeff")), " \t\r\n")
+	if len(t) == 0 || t[0] != '{' || !json.Valid(t) {
+		return nil, false, nil
+	}
+	if !utf8.Valid(t) { // encoding/json would read each invalid byte as U+FFFD
+		return nil, true, errors.New("the listing file is not UTF-8")
+	}
+	dec := json.NewDecoder(bytes.NewReader(t))
+	doc, err = jsonValue(dec)
+	if err != nil {
+		return nil, true, fmt.Errorf("the listing file is not a listing in JSON: %w", err)
+	}
+	return doc, true, nil
+}
+
+// jsonValue reads one JSON value as the YAML decoder would give it (map[string]any, []any, string, float64, bool,
+// nil), refusing a key twice in an object.
+func jsonValue(dec *json.Decoder) (any, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	switch tok {
+	case json.Delim('{'):
+		m := map[string]any{}
+		for dec.More() {
+			kt, err := dec.Token()
+			if err != nil {
+				return nil, err
+			}
+			k, _ := kt.(string)
+			if _, dup := m[k]; dup {
+				return nil, fmt.Errorf("the key %q is written twice in one object", k)
+			}
+			if m[k], err = jsonValue(dec); err != nil {
+				return nil, err
+			}
+		}
+		_, err := dec.Token() // }
+		return m, err
+	case json.Delim('['):
+		xs := []any{}
+		for dec.More() {
+			x, err := jsonValue(dec)
+			if err != nil {
+				return nil, err
+			}
+			xs = append(xs, x)
+		}
+		_, err := dec.Token() // ]
+		return xs, err
+	}
+	return tok, nil
+}
+
+// parseYAML reads b as one YAML document, refusing numbers the YAML decoder reads otherwise than YAML 1.2's core
+// schema (yamlNumbers).
+func parseYAML(b []byte) (any, error) {
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	var root yaml.Node
+	if err := dec.Decode(&root); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("the listing file is empty")
+		}
+		return nil, fmt.Errorf("the listing file is not YAML: %w", err)
+	}
+	var more yaml.Node
+	if err := dec.Decode(&more); !errors.Is(err, io.EOF) {
+		return nil, errors.New("the listing file holds more than one YAML document")
+	}
+	if err := yamlNumbers(&root); err != nil {
+		return nil, err
+	}
+	var doc any
+	if err := root.Decode(&doc); err != nil {
+		return nil, fmt.Errorf("the listing file is not YAML: %w", err)
+	}
+	return doc, nil
+}
+
+var (
+	yamlDecimalRE = regexp.MustCompile(`^[-+]?(0|[1-9][0-9]*)$`)
+	yamlFloatRE   = regexp.MustCompile(`^([-+]?(\.[0-9]+|[0-9]+(\.[0-9]*)?)([eE][-+]?[0-9]+)?|[-+]?\.(inf|Inf|INF)|\.(nan|NaN|NAN))$`)
+)
+
+// yamlNumbers refuses an integer the YAML decoder would read in another base or with underscores removed (0600 is
+// 384 to it, 600 to YAML 1.2; 1_000 is 1000 to it, a string to YAML 1.2; 0x258, 0o1130 and 0b1 are refused too, so
+// every integer is written one way), and a float written with underscores.
+func yamlNumbers(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		switch n.ShortTag() {
+		case "!!int":
+			if !yamlDecimalRE.MatchString(n.Value) {
+				return fmt.Errorf("the listing file, line %d: %q: write an integer in decimal, without leading zeros, "+
+					"underscores or a base prefix (YAML 1.1 and 1.2 read it differently)", n.Line, n.Value)
+			}
+		case "!!float":
+			if !yamlFloatRE.MatchString(n.Value) {
+				return fmt.Errorf("the listing file, line %d: %q: write a number in decimal, without underscores", n.Line, n.Value)
+			}
+		}
+	}
+	for _, c := range n.Content {
+		if err := yamlNumbers(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // checker collects problems as it reads a document.

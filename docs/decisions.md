@@ -4903,7 +4903,9 @@ from this repository: decision 7's OIDC principals on the A2A routes with a tena
 C11, with D-M5-54 as the interim). D314 to D317 settle them. Where Cloud's record proposed something else, the entry
 says so and what Cloud changes. The second build of the gate side (D318 to D323) answers the rest: an observation of
 Cloud's end-to-end run on required extensions (D318), the indexes of its D-M5-120 (D319), the three issues its PRs
-opened against this repository (kontra#5, #6, #7: D320 to D322) and `kontra publish` (M5-G3, its D-M5-62: D323).
+opened against this repository (kontra#5, #6, #7: D320 to D322) and `kontra publish` (M5-G3, its D-M5-62: D323). The
+branch's review (findings AUTH-1, AUDIT-1 and rest-1 to rest-5, all minor) amended D314, D317 and D321 to D323 before
+the merge; each entry says what changed.
 
 ### D314. The A2A routes take an issuer's JWTs as OIDC principals — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 7; completes D268, D276)
 
@@ -4921,7 +4923,13 @@ audience `kontra`, revocation checked against `/v1/auth/revocations`. `auth.oidc
   (the same buyer as the subject's MCP tokens, which Cloud's D-M5-11 pins), `via = oidc`, and the tenant D315 maps.
 - **Audiences never cross.** A token for an MCP route's canonical URI is `401` on the A2A routes; an
   `auth.oidc.audience` token is `401` on the MCP routes (`AuthenticateMCP` never asks the A2A verifier). So Cloud's
-  `aud kontra` tokens (its D-M5-39) and its MCP tokens (`aud` = the route) are two credentials.
+  `aud kontra` tokens (its D-M5-39) and its MCP tokens (`aud` = the route) are two credentials. That holds only if
+  the audience names none of the gate's own resources, so the load refuses one that does (review AUTH-1): an absolute
+  URL on `public_url`'s origin whose path is empty, `public_url`'s own, or `{public_url}/mcp` or below it
+  (`config.NamesGateResource`: scheme and host compared case-insensitively, a default port elided, paths decoded and
+  without trailing slashes), with or without `auth.mcp_oauth`, since the issuer may mint MCP tokens for this gate
+  anyway; `oidc.NewA2A` refuses the same values. Otherwise a token minted for one MCP resource (RFC 8707; Cloud's
+  consent page, its D-M5-38) would be a principal on every A2A route. Cloud's `kontra` is unaffected.
 - **One issuer, one verifier.** When `auth.oidc.issuer` equals `auth.mcp_oauth.issuer` (Cloud's case), the replica
   builds one `oidc.Issuer` for it: one key-set cache, one revocation feed (D316), one tenant claim (D315). Both blocks
   must then write the same `tenant_claim` and `revocations`, or the load fails: the two settings are the issuer's,
@@ -4941,7 +4949,9 @@ purpose), no token introspection (the feed is the revocation channel), no per-se
 Tested: `TestAuthenticateA2A` (`internal/auth`: a JWT is the verifier's on A2A only, a key is a key, a refused token
 `401`, a feed stale the gate's own error, a node's request its session's), `TestA2A` and `TestNewIssuerRefuses`
 (`internal/oidc`: three algorithms, `aud` among others, an MCP audience, another audience, expired, a rotated key
-fetched once), `TestOIDCIssuerPolicy` and the `TestLoadErrors` rows (`internal/config`), `TestGateA2AOIDC` (`internal/gate`,
+fetched once; `NewA2A` refusing the gate's origin and MCP routes as its audience), `TestOIDCIssuerPolicy`,
+`TestNamesGateResource` and the `TestLoadErrors` rows (`internal/config`: `/mcp`, `/mcp/svc`, the origin with and
+without a slash, a case variant), `TestGateA2AOIDC` (`internal/gate`,
 a whole replica against `oidctest` with its own JWKS and feed: a task via `oidc` with the token's buyer, read back by
 another token of the subject; audiences not crossing; a key rotated at the issuer accepted after one refetch).
 
@@ -5053,7 +5063,10 @@ the link in Python with `INSERT` on `audit`. Decision (migration `0004_m5.sql`, 
   given). Go's appends are unchanged; the two take one lock, so they make one chain, and `audit.Verify` checks it.
 - **What it checks.** `row_jcs` not empty, UTF-8 JSON, an object with a non-empty string `event` and an `at` in RFC
   3339 form (`22023` otherwise): every row says what happened and when, under the hash. It does not re-canonicalize:
-  the writer sends RFC 8785 bytes and the chain keeps exactly those, as `Verify` reads them.
+  the writer sends RFC 8785 bytes and the chain keeps exactly those, as `Verify` reads them. The `at` pattern has no
+  backslash (`[0-9]`, `[.]`; review AUDIT-1): PL/pgSQL lexes a function's literals under the calling session's
+  `standard_conforming_strings` the first time a backend runs it and keeps the result, and with the setting off `\d`
+  read as the letter `d`, refusing every valid row on that connection and accepting `dddd-dd-ddTdd:dd:ddZ`.
 - **Read committed only.** Above read committed the transaction's snapshot can predate the last committed append, so
   the head it reads under the lock is stale and its row would fork the chain. The function refuses such a transaction
   (`25000`). And a unique index `audit_prev_hash (prev_hash) nulls not distinct` makes a fork impossible whoever
@@ -5077,9 +5090,12 @@ Tested: `TestSQLAppendJoinsTheChain` (`internal/audit`, Postgres: Go and SQL app
 verify as one chain of 44 rows; each answer is `Hash(prev, row)` of its row; a rolled-back call leaves nothing;
 repeatable read and serializable refused with `25000`; malformed rows `22023`; a role granted `USAGE` and `EXECUTE`
 appends and can neither insert into nor read `audit`; a role without `EXECUTE` cannot call it; a raw insert linking a
-stale head is a unique violation; the operator's row ends the verified chain), the 0004 blocks of
-`scripts/migration_tests.sql` (`make check-migrations` on Postgres 16 and 17: the links, ten refused rows, `null` and
-bytes that are not UTF-8, both forks refused, `PUBLIC` without `EXECUTE`, `SECURITY DEFINER`), `TestDownThenUp` and
+stale head is a unique violation; the operator's row ends the verified chain),
+`TestSQLAppendWithoutStandardConformingStrings` (`internal/audit`: a connection that starts with the setting off appends
+two RFC 3339 rows and refuses an `at` of letters; it fails on the pattern with backslashes), the 0004 blocks of
+`scripts/migration_tests.sql` (`make check-migrations` on Postgres 16 and 17: the links, eleven refused rows, `null` and
+bytes that are not UTF-8, both forks refused, `PUBLIC` without `EXECUTE`, `SECURITY DEFINER`) and
+`scripts/migration_tests_session.sql` (a session of its own, the setting off before its first call), `TestDownThenUp` and
 `TestUpOnEmptyDatabase` (`internal/migrate`: 0004's up and down), `TestMigrateCommand` (`cmd/kontra-gate`),
 `TestEmbeddedMigrations`.
 
@@ -5197,12 +5213,18 @@ service. It proposed an annotation such as `search.hidden: true`, or `listed` ap
   a third state. The `search` annotation already holds what search shows and filters on (`description`, `price`,
   `price_model`), needs no migration and no new column, and Cloud writes it in the same publish.
 
+`spec/schema/config.json` declares `annotations.search.hidden` a boolean, and no longer calls the annotations data the
+gate attaches "without interpreting": it reads `card_extensions`, `tool_meta`, `initialize_meta` and `search`, and
+passes the rest through (review rest-5: a configuration the schema accepted failed at load).
+
 What Cloud changes: an unlisted listing writes `search.hidden: true` beside `listed: false` and `[key:*, oidc:*,
 anonymous]`; its documentation of "unlisted" then holds for signed-in users and keys too.
 
 Tested: `TestSearchHidden` (`internal/gatemcp`, Postgres: an unlisted listing hidden from a signed-in user's, an API
 key's and the anonymous principal's search, described and hireable by ref; `hidden: false` and `"true"` hide nothing;
-a listed hidden service described by ref, not searched), the `TestLoad` and `TestLoadErrors` rows (`internal/config`).
+a listed hidden service described by ref, not searched), the `TestLoad` and `TestLoadErrors` rows (`internal/config`),
+`make check-specs` and `TestRefusedConfigFixtures` (`examples/invalid/config.search_hidden_string.json`, refused by the
+schema and by the loader for `hidden: "true"` alone, and loading with `true`).
 
 ### D322. `tasks: required`: an MCP service whose every call is a gate task — **decided under the owner's standing instruction, 1 Nov** (carries out kontra#6; completes D159, D178)
 
@@ -5229,20 +5251,33 @@ for `call`, or a `tasks: required` mode. Decision, the second ([`relay.md`](../s
   client would learn the rule from a refusal on every call, the operator would write the same deny twice (the mode and
   the hook), and the gate would still advertise `optional`. `required` says it in the tool list a client reads before
   calling, and refuses before any hook.
-- **Storage.** `services.tasks_mode` admits `required` (0004 replaces its check; its down turns a `required` service
-  `durable`, the mode it refines, before restoring the check). The configuration's `services.<name>.tasks` takes it.
+- **Storage.** `services.tasks_mode` admits `required` (0004 replaces its check). The configuration's
+  `services.<name>.tasks` takes it. 0004's down refuses (`55006`) while any service is `required`, disabled or not,
+  naming each as `tenant/name`, and changes nothing: a gate before 0004 reads the mode unvalidated, advertises no task
+  support and relays a plain `tools/call` without Admission unless `call` is in the operations, so turning those
+  services `durable` (as the down first did) would open the hole this mode closes, unseen. The operator decides what
+  each becomes, or deletes it, then runs the down again (review rest-2).
+- **Rollout.** The same holds of a replica still on an image before 0004, or one rolled back to it with the database
+  left at 0004. So the order is: every replica runs a gate with 0004; then the operator writes `required` and lets a
+  `per_task` MCP listing's sessions through Admission. Before an image goes back below 0004, the operator first denies
+  those sessions again, or disables or reprices its `required` services.
 
 What Cloud changes: its `ListingPut.tasks` accepts `required`, and a `per_task` MCP listing is published with
-`tasks: required` instead of being refused `per_task_mcp_unavailable` (its C42); its Admission's guard on a `per_task`
-listing's `session` may stay. Its listing schema here ([`schema/listing.json`](../spec/schema/listing.json), D323)
-already requires it.
+`tasks: required` instead of being refused `per_task_mcp_unavailable` (its C42). Its Admission allows `session` on such
+a listing, with no quote (the session opens nothing priced; each call in it is a task, which it quotes), where it now
+denies every `per_task` listing's `session` ("which MCP does not offer yet"); its deny of `call` stays. It does both
+only once every gate replica runs 0004, and undoes the second before any replica goes back (the rollout above): until
+then that guard is what keeps a replica before 0004 from serving the service's plain calls unsold. Its listing schema
+here ([`schema/listing.json`](../spec/schema/listing.json), D323) already requires it.
 
 Tested: `TestToolViewRequireTasks` (`internal/mcprelay`: the list as `required` shows it, other `execution` members
 kept), `TestRequiredTasks` (Postgres and Temporal, 2025-11-25: the list of two of four tools, `taskSupport` required;
 plain calls `-32601`, left-out tools `-32602`, no Admission, upstream call, task or `calls` row; a task-augmented call
 Admission's `task`, quoted, nothing dispatched), `TestModernRequiredTasks` (2026-07-28: the extension kept on
 `server/discover`; a call not declaring it `400` `-32021` with nothing asked or written; one declaring it a gate task),
-the `TestLoad` row (`internal/config`), the 0004 blocks of `scripts/migration_tests.sql` and `TestDownThenUp`.
+the `TestLoad` row (`internal/config`), the 0004 blocks of `scripts/migration_tests.sql`, `TestDownThenUp` (the down
+refused with a served and a disabled `required` service, naming both, nothing changed; then run) and
+`scripts/check_migrations.sh` (the same refusal on Postgres 16 and 17).
 
 ### D323. `kontra publish <listing.yaml>`: a listing file, a person's sign-in for the control plane, and the version it replaces — **decided under the owner's standing instruction, 1 Nov** (carries out the owner's decision 11 and Cloud's D-M5-62; one conflict with the build's brief and one with Cloud's record)
 
@@ -5268,11 +5303,28 @@ D-M5-111 adds `published`. Decision ([`tunnel.md`](../spec/tunnel.md) §6.4; [`s
   `--control-plane` or that server's issuer (Cloud's D-M5-38: the issuer is the control plane's public URL), runs §6.3
   step 3's flow with `resource` = the control plane, and sends the token it gets as the bearer of `GET` and `PUT
   /v1/services/{name}` there only (no redirect followed), never storing or printing it.
-- **The version.** Without `--version`, the CLI reads `GET /v1/services/{name}` (`listing.version`, 0 for none or `404
-  service_not_found`) and sends that: the file is the listing the person declares, and a publish that came in
-  between is `409`, which the CLI reports with the version the listing is at, publishing nothing. `--version N` sends
-  the version the person read, for a strict replace. `--dry-run` checks the file and prints the request, signing in
-  nowhere.
+- **The version: a listing is never replaced unseen.** Without `--version`, the CLI reads `GET /v1/services/{name}`
+  (its `listing`: version, price, visibility; the service's `published`; version 0 for none or `404
+  service_not_found`). A service with no listing gets version 0. One that has a listing is refused unless the person
+  says which: the CLI prints the listing's version, price, visibility and whether it is published, names `--version
+  N` to replace it, publishes nothing and exits 1. `--version N` sends the version the person read, with no read;
+  `--replace` sends the version just read and prints what it was. A publish that came in between is `409`, which the
+  CLI reports with the version the listing is at, publishing nothing. `--dry-run` checks the file and prints the
+  request, signing in nowhere. (Review rest-1: the first build sent the version it read itself, which reads Cloud's
+  D-M5-63, "a write to a listing carries the version it read ... never a silent overwrite", as the CLI's read rather
+  than the person's: a file that predated a price set in the console, or a teammate's unpublish, which D-M5-111 says a
+  stale writer cannot undo unseen, replaced it with no warning. A refused publish costs the person a second sign-in;
+  `--replace` is the one-step form for someone who means it.)
+- **Reading the file.** A file whose first character is `{` is JSON (RFC 8259: standard escapes, a surrogate pair
+  included, as Python's `json.dumps` writes a non-BMP tool name; no key twice; UTF-8), and YAML only when it is not
+  JSON (a flow mapping). In YAML an integer is decimal without leading zeros, underscores or a base prefix, and a float
+  has no underscores, or the file is refused naming the line: the YAML decoder reads `0600` as octal 384 and `1_000` as
+  1000, where YAML 1.2's core schema reads 600 and a string, and the CLI must not send a number the person did not
+  write (review rest-4).
+- **What the schema cannot say.** `tools.allow` and `tools.deny` hold at most 64 globs together; JSON Schema bounds
+  each list (64) but not their sum. `examples/invalid/listing.too_many_globs.json` (40 and 40) is the rule's fixture:
+  `check_specs.py` lists it as a rule outside the schema and requires the schema to accept it, and `TestSchemaFixtures`
+  requires the CLI to refuse it for that rule alone (review rest-3).
 
 Conflict with the build's brief: it asked for "the credential `kontra login` stored (or `--api-key`)". That credential
 is a gate API key (`kk_…`, D278, D305), which Cloud's control plane does not take as a bearer (its routes verify its own
@@ -5291,11 +5343,16 @@ the console's pricing view publishes (its D-M5-62).
 Not built: the PRD §13 sketch's `card: sha256:…` pin (Cloud's body has none) and a `--api-key`. A team gate has no
 control plane: `kontra publish` says so for a gate without a sign-in, and its services are its configuration.
 
-Tested: `TestSchemaFixtures`, `TestParseYAML` (`off` a string, an unquoted amount, a key twice, two documents, a
-scalar, unknown keys, `version`, 64 globs together, integral floats), `TestBody` (the exact request bytes),
-`TestParseArgs`, `TestDryRun`, and against `oidctest` and a fake control plane: `TestPublish` (the token asked for
-`resource` = the control plane and sent as the bearer, version 0 then the version read, one registration, nothing but it
-in the credentials, unpublishing), `TestPublishStaleVersion` (`--version` sent with no read, `409` naming the version
+Tested: `TestSchemaFixtures` (the 64 globs fixture refused for that rule alone), `TestParseYAML` (`off` a string, an
+unquoted amount, a key twice, two documents, a scalar, unknown keys, `version`, 64 globs together, integral floats),
+`TestParseNumbersAndJSON` (nine integer forms refused naming the line, an underscore in a float, `+600`, `6e2`,
+`600.0` and a quoted `"0600"` read as YAML 1.2 does; JSON with a surrogate pair, `\u00e9` and `\/`, after a byte
+order mark; a JSON key twice, at the top and below; JSON not in UTF-8; a YAML flow mapping), `TestBody` (the exact
+request bytes), `TestParseArgs` (`--replace`, and with `--version` a usage error), `TestDryRun`, and against
+`oidctest` and a fake control plane: `TestPublish` (the token asked for `resource` = the control plane and sent as the
+bearer, version 0; then a publish without a flag refused naming version 1, its price, visibility and state, nothing
+sent; `--replace` sending version 1 and printing what it replaced; one registration, nothing but it in the credentials;
+unpublishing, and the stale file then refused naming the unpublished state), `TestPublishStaleVersion` (`--version` sent with no read, `409` naming the version
 it is at, then the current one published), `TestPublishControlPlaneIsTheIssuer`, `TestPublishRefusals` (`403
 fresh_login_required`, `422` with an escape sequence printed escaped, a redirect not followed, an answer that is not a
 listing), `TestPublishNoSignIn`; `cmd/kontra`'s `TestRun` rows and `TestPublishDryRun`.

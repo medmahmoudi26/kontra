@@ -119,7 +119,7 @@
     "toolsPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "description": "relay.md §11.3: an absent allow allows every tool, an empty one none; deny wins. At most 64 globs in all.",
+      "description": "relay.md §11.3: an absent allow allows every tool, an empty one none; deny wins. At most 64 globs in allow and deny together: a bound on the sum this schema cannot state (it bounds each list at 64), which kontra publish and the control plane check (examples/invalid/listing.too_many_globs.json, which the schema accepts and they refuse).",
       "properties": {
         "allow": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/toolName" } },
         "deny": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/toolName" } }

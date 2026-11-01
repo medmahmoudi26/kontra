@@ -40,19 +40,22 @@ var bearerRE = regexp.MustCompile(`^[A-Za-z0-9\-._~+/]+=*$`)
 var ErrUsage = errors.New("usage")
 
 // Usage is the command's help.
-const Usage = `usage: kontra publish [--gate <url>] [--control-plane <url>] [--version <n>] [--dry-run] [--no-browser] <listing.yaml>
+const Usage = `usage: kontra publish [--gate <url>] [--control-plane <url>] [--version <n> | --replace] [--dry-run] [--no-browser] <listing.yaml>
 
 kontra publish sends a listing, how one of your services is sold, to the gate operator's control plane (Kontra Cloud):
 its kind (a2a or mcp), visibility, MCP policy, sealing and price, free, per_task, per_call or per_session, in USD
 (spec/schema/listing.json). It checks the file first, then signs you in at the gate's authorization server for the
 control plane, in the browser as kontra login does: a publish is a person's act, never an API key's, and the sign-in
-it gets is used for this publish only and not kept. The listing replaces the version it read just before (or
---version), and the control plane refuses it if another publish came in between.
+it gets is used for this publish only and not kept. A listing is never replaced unseen: without --version or
+--replace, kontra publish publishes only a service's first listing, and for one that has a listing it prints that
+listing's version, price and state and publishes nothing. The control plane refuses a publish if another came in
+between.
   --gate URL           the gate whose operator lists the service (default https://gateway.kontra.sh); https:// except
                        on localhost
   --control-plane URL  the operator's control plane (default: the gate's authorization server, which is Cloud's)
   --version N          the listing version this one replaces, as you read it (0: a new listing); refused if it is
-                       not the current one. Default: the current version, read just before the publish
+                       not the current one
+  --replace            replace whatever version is current when the publish runs, printing what it was
   --dry-run            check the file and print the request, without signing in or sending anything
   --no-browser         print the sign-in URL instead of opening it (open it on this machine)
 `
@@ -63,6 +66,7 @@ type Options struct {
 	Gate            *url.URL
 	ControlPlane    string // --control-plane; "" for the gate's authorization server
 	Version         *int64 // --version; nil reads the current one
+	Replace         bool   // --replace: replace the current version, whatever it is; without it (and --version) only a first listing is published
 	DryRun          bool
 	NoBrowser       bool
 	CredentialsPath string // ~/.kontra/credentials: the client registration kontra login keeps per gate
@@ -80,6 +84,7 @@ func ParseArgs(args []string, getenv func(string) string) (Options, error) {
 	gate := fs.String("gate", tunnel.DefaultGate, "")
 	cp := fs.String("control-plane", "", "")
 	ver := fs.String("version", "", "")
+	replace := fs.Bool("replace", false, "")
 	dry := fs.Bool("dry-run", false, "")
 	noBrowser := fs.Bool("no-browser", false, "")
 	var files []string
@@ -103,7 +108,7 @@ func ParseArgs(args []string, getenv func(string) string) (Options, error) {
 	default:
 		return Options{}, fmt.Errorf("%w: one listing file at a time, not %q", ErrUsage, tunnel.Printable(files[1]))
 	}
-	o := Options{File: files[0], ControlPlane: *cp, DryRun: *dry, NoBrowser: *noBrowser}
+	o := Options{File: files[0], ControlPlane: *cp, DryRun: *dry, NoBrowser: *noBrowser, Replace: *replace}
 	u, err := tunnel.CheckGateURL(*gate)
 	if err != nil {
 		return Options{}, fmt.Errorf("%w: %v", ErrUsage, err)
@@ -115,6 +120,9 @@ func ParseArgs(args []string, getenv func(string) string) (Options, error) {
 			return Options{}, fmt.Errorf("%w: --version %q: want 0 or a listing version", ErrUsage, tunnel.Printable(*ver))
 		}
 		o.Version = &n
+		if o.Replace {
+			return Options{}, fmt.Errorf("%w: --version and --replace: name the version you read, or replace the current one, not both", ErrUsage)
+		}
 	}
 	if o.ControlPlane != "" {
 		if _, err := controlPlaneURL(o.ControlPlane); err != nil {
@@ -164,7 +172,9 @@ func controlPlaneURL(raw string) (string, error) {
 }
 
 // Run publishes o.File (D323): the file checked; then, unless DryRun, the gate's authorization server discovered,
-// the person signed in for the control plane, the current version read (or --version), and the listing sent.
+// the person signed in for the control plane, the current listing read (unless --version), and the listing sent: the
+// version --version names, the current one with --replace, or 0 when the service has no listing. A service that has
+// one, with neither flag, is refused with what it is, and nothing is sent.
 func Run(ctx context.Context, o Options) error {
 	if o.Out == nil {
 		o.Out = io.Discard
@@ -192,9 +202,12 @@ func Run(ctx context.Context, o Options) error {
 		}
 		var pretty bytes.Buffer
 		_ = json.Indent(&pretty, body, "  ", "  ")
-		at := "the version read at publish"
-		if o.Version != nil {
+		at := "no listing (version 0; a service that has one is refused unless --version or --replace)"
+		switch {
+		case o.Version != nil:
 			at = "version " + strconv.FormatInt(*o.Version, 10)
+		case o.Replace:
+			at = "the version current at publish (--replace)"
 		}
 		fmt.Fprintf(o.Out, "%s: %s is a valid listing of %s; it replaces %s with:\n  PUT /v1/services/%s\n  %s\n(dry run: nothing was sent)\n",
 			Name, tunnel.Printable(o.File), l.Service, at, l.Service, pretty.String())
@@ -241,11 +254,21 @@ func Run(ctx context.Context, o Options) error {
 	if o.Version != nil {
 		ver = *o.Version
 	} else {
-		cur, ep, err := c.current(ctx, l.Service)
+		cur, err := c.current(ctx, l.Service)
 		if err != nil {
 			return err
 		}
-		ver, endpoint = cur, ep
+		ver, endpoint = cur.Version, cur.Endpoint
+		// D323, kontra-cloud D-M5-63 and D-M5-111: a listing is never replaced unseen. The file may predate a price set
+		// in the console or an unpublish by a teammate, which the version the CLI just read cannot tell.
+		switch {
+		case ver > 0 && !o.Replace:
+			return fmt.Errorf("%s already has a listing, at version %d: %s. Nothing was published. Look at it, then run "+
+				"kontra publish --version %d %s to replace that version (or --replace to replace whatever is current then)",
+				l.Service, ver, cur.describe(), ver, tunnel.Printable(o.File))
+		case ver > 0:
+			fmt.Fprintf(o.Out, "%s: replacing %s's listing at version %d: %s.\n", Name, l.Service, ver, cur.describe())
+		}
 	}
 	body, err := l.Body(ver)
 	if err != nil {
@@ -321,38 +344,65 @@ type errorBody struct {
 	Detail  json.RawMessage `json:"detail"`
 }
 
-// current reads the service's listing version (0: none) and its gate URL, GET /v1/services/{name}; a service the
+// current is a service's listing as the control plane holds it before a publish: its version (0: none), what it
+// sells and whether the gate serves the service.
+type current struct {
+	Version   int64
+	Endpoint  string
+	Listing   *ListingView
+	Published *bool // the gate serves it (Cloud's ServiceView.published); nil when not said
+}
+
+// describe is the current listing for the terminal: its price, visibility and whether it is published.
+func (c current) describe() string {
+	if c.Listing == nil {
+		return "no listing"
+	}
+	published := c.Listing.Published
+	if c.Published != nil {
+		published = *c.Published
+	}
+	state := "published"
+	if !published {
+		state = "unpublished"
+	}
+	return fmt.Sprintf("%s, %s, %s", describe(c.Listing), tunnel.Printable(c.Listing.Visibility), state)
+}
+
+// current reads the service's listing (version 0: none) and its gate URL, GET /v1/services/{name}; a service the
 // control plane does not know (404 service_not_found) has none.
-func (c *controlPlane) current(ctx context.Context, service string) (int64, string, error) {
+func (c *controlPlane) current(ctx context.Context, service string) (current, error) {
 	b, status, err := c.do(ctx, http.MethodGet, service, nil)
 	if err != nil {
-		return 0, "", err
+		return current{}, err
 	}
 	switch status {
 	case http.StatusOK:
 		var v struct {
-			Endpoint *string `json:"endpoint"`
-			Listing  *struct {
-				Version int64 `json:"version"`
-			} `json:"listing"`
+			Endpoint  *string      `json:"endpoint"`
+			Published *bool        `json:"published"`
+			Listing   *ListingView `json:"listing"`
 		}
 		if err := json.Unmarshal(b, &v); err != nil {
-			return 0, "", fmt.Errorf("the control plane's view of %s is not one kontra publish reads: %v", service, err)
+			return current{}, fmt.Errorf("the control plane's view of %s is not one kontra publish reads: %v", service, err)
 		}
-		ep := ""
+		cur := current{Listing: v.Listing, Published: v.Published}
 		if v.Endpoint != nil {
-			ep = *v.Endpoint
+			cur.Endpoint = *v.Endpoint
 		}
-		if v.Listing == nil {
-			return 0, ep, nil
+		if v.Listing != nil {
+			if v.Listing.Version < 0 {
+				return current{}, fmt.Errorf("the control plane's view of %s names version %d", service, v.Listing.Version)
+			}
+			cur.Version = v.Listing.Version
 		}
-		return v.Listing.Version, ep, nil
+		return cur, nil
 	case http.StatusNotFound:
 		if e := parseError(b); e.Code == "service_not_found" {
-			return 0, "", nil
+			return current{}, nil
 		}
 	}
-	return 0, "", refusal("reading the listing of "+service, status, b)
+	return current{}, refusal("reading the listing of "+service, status, b)
 }
 
 // put sends the listing.
@@ -380,7 +430,7 @@ func (c *controlPlane) put(ctx context.Context, service string, body []byte, ver
 			now = strconv.FormatInt(*d.Version, 10)
 		}
 		return nil, fmt.Errorf("the listing of %s changed since version %d was read: it is at version %s now (409 stale_version). "+
-			"Nothing was published. Look at it, then run kontra publish again (or with --version %s to replace it)", service, ver, now, now)
+			"Nothing was published. Look at it, then run kontra publish --version %s to replace it", service, ver, now, now)
 	}
 	return nil, refusal("the publish", status, b)
 }

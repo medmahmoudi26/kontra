@@ -276,7 +276,8 @@ declare bad text; before bigint;
 begin
     select count(*) into before from audit;
     foreach bad in array array['', '[1]', '"x"', '{"event":"x"}', '{"at":"2026-11-01T00:00:00Z"}', '{"event":"","at":"2026-11-01T00:00:00Z"}',
-        '{"event":1,"at":"2026-11-01T00:00:00Z"}', '{"event":"x","at":"yesterday"}', '{"event":"x","at":"2026-11-01 00:00:00Z"}', '{"event":"x",'] loop
+        '{"event":1,"at":"2026-11-01T00:00:00Z"}', '{"event":"x","at":"yesterday"}', '{"event":"x","at":"2026-11-01 00:00:00Z"}', '{"event":"x",',
+        '{"event":"x","at":"dddd-dd-ddTdd:dd:ddZ"}'] loop
         begin
             perform kontra.audit_append(convert_to(bad, 'UTF8'));
             raise exception 'FAIL: audit_append accepted %', bad;

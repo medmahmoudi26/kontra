@@ -395,8 +395,13 @@ func (c *Config) validateAuth(v *validator, pub *url.URL) {
 		if err := checkHTTPSURL(o.Issuer, false); err != nil {
 			v.add("auth.oidc.issuer: %v", err)
 		}
-		if o.Audience == "" {
+		switch {
+		case o.Audience == "":
 			v.add("auth.oidc.audience: required")
+		case pub != nil && NamesGateResource(c.PublicURL, o.Audience):
+			v.add("auth.oidc.audience %q: names the gate itself or its MCP routes ({public_url}/mcp and below), whose "+
+				"tokens would then be taken on every A2A route; name the A2A routes' own audience, such as kontra "+
+				"(spec §2.3, D314: audiences never cross)", redactURL(o.Audience))
 		}
 		validateIssuerPolicy(v, "auth.oidc", o.TenantClaim, o.Revocations)
 	}
@@ -426,6 +431,43 @@ func (c *Config) validateAuth(v *validator, pub *url.URL) {
 				"feed holds for all its tokens; write the same feed in both, or none (spec §2.3, D316)", redactURL(o.Issuer))
 		}
 	}
+}
+
+// NamesGateResource reports whether aud, as a token's audience, names one of the gate's own resources at publicURL:
+// the gate itself (its origin, or public_url, with or without a trailing slash) or its MCP routes ({public_url}/mcp and
+// every path below it, the canonical URIs of spec §12.1 that oidc.CanonicalURI builds, and the resource kontra login
+// asks for). Origins compare as RFC 3986 normalizes them (scheme and host case-insensitively, a default port left out);
+// paths compare decoded and case-sensitively, without trailing slashes, and a query is ignored. An aud that is not an
+// absolute URL (kontra, Cloud's) names none. auth.oidc.audience must name none (D314: audiences never cross): a token an
+// issuer mints for one MCP resource (RFC 8707) would otherwise be an OIDC principal on every A2A route.
+func NamesGateResource(publicURL, aud string) bool {
+	pub, err := url.Parse(publicURL)
+	if err != nil || pub.Host == "" {
+		return false
+	}
+	a, err := url.Parse(strings.TrimSpace(aud))
+	if err != nil || a.Host == "" || a.Opaque != "" {
+		return false
+	}
+	port := func(u *url.URL) string {
+		if p := u.Port(); p != "" {
+			return p
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "http":
+			return "80"
+		case "https":
+			return "443"
+		}
+		return ""
+	}
+	host := func(u *url.URL) string { return strings.ToLower(strings.TrimSuffix(u.Hostname(), ".")) }
+	if !strings.EqualFold(a.Scheme, pub.Scheme) || host(a) != host(pub) || port(a) != port(pub) {
+		return false
+	}
+	base := strings.TrimRight(pub.Path, "/")
+	p := strings.TrimRight(a.Path, "/")
+	return p == "" || p == base || p == base+"/mcp" || strings.HasPrefix(p, base+"/mcp/")
 }
 
 // tenantClaimRE is the shape of a tenant_claim: a JWT claim name (RFC 7519 §4), printable ASCII without white space,

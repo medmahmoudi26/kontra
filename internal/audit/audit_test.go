@@ -357,3 +357,39 @@ func TestSQLAppendJoinsTheChain(t *testing.T) {
 		t.Fatalf("the chain after every writer: %d rows, %v", len(rows), err)
 	}
 }
+
+// D317: kontra.audit_append's check of "at" does not depend on the session. PL/pgSQL lexes the function's literals
+// under the session's standard_conforming_strings when a backend first runs it, so a connection that starts with it off
+// (a role's, database's or driver's setting) still appends an RFC 3339 row and still refuses another shape.
+func TestSQLAppendWithoutStandardConformingStrings(t *testing.T) {
+	dsn := pgtest.Migrated(t)
+	ctx := context.Background()
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.RuntimeParams["standard_conforming_strings"] = "off"
+	c, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close(ctx)
+	var scs string
+	if err := c.QueryRow(ctx, "show standard_conforming_strings").Scan(&scs); err != nil || scs != "off" {
+		t.Fatalf("standard_conforming_strings = %q, %v", scs, err)
+	}
+	for _, row := range [][]byte{operatorRow(t, 1), []byte(`{"at":"2026-11-01T00:00:01.5+01:00","event":"test.session"}`)} {
+		var h []byte
+		if err := c.QueryRow(ctx, `select kontra.audit_append($1)`, row).Scan(&h); err != nil || len(h) != 32 {
+			t.Fatalf("%s: %x %v", row, h, err)
+		}
+	}
+	var pe *pgconn.PgError
+	if _, err := c.Exec(ctx, `select kontra.audit_append($1)`, []byte(`{"at":"dddd-dd-ddTdd:dd:ddZ","event":"test.session.bad"}`)); !errors.As(err, &pe) || pe.Code != "22023" {
+		t.Errorf("an at of letters: %v, want SQLSTATE 22023", err)
+	}
+	pool := pgtest.Pool(t, dsn)
+	if rows, err := Verify(ctx, pool); err != nil || len(rows) != 2 {
+		t.Fatalf("the chain: %d rows, %v", len(rows), err)
+	}
+}

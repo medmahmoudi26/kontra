@@ -151,10 +151,15 @@ type A2A struct {
 
 var _ auth.A2AVerifier = (*A2A)(nil)
 
-// NewA2A is the A2A routes' check of iss's tokens for audience (auth.oidc.audience).
-func NewA2A(iss *Issuer, audience string) (*A2A, error) {
+// NewA2A is the A2A routes' check of iss's tokens for audience (auth.oidc.audience) on the gate at publicURL. An
+// audience naming the gate itself or its MCP routes (config.NamesGateResource) is refused, as the configuration's
+// load refuses it: audiences never cross (D314).
+func NewA2A(iss *Issuer, publicURL, audience string) (*A2A, error) {
 	if iss == nil || audience == "" {
 		return nil, errors.New("oidc: the A2A routes need an issuer and an audience")
+	}
+	if config.NamesGateResource(publicURL, audience) {
+		return nil, fmt.Errorf("oidc: the A2A routes' audience %q names the gate or its MCP routes (D314: audiences never cross)", audience)
 	}
 	return &A2A{iss: iss, audience: audience}, nil
 }
