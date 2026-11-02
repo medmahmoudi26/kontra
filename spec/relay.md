@@ -344,10 +344,13 @@ A2UI messages in data parts marked `metadata.mimeType: "application/a2ui+json"` 
 - **Sealed services.** Only a part's content is sealed; `metadata`, A2UI's mark included, stays readable
   ([`ext-sealed.md`](ext-sealed.md) §2). A sealed A2A service needs an A2A 1.0 agent (ext-sealed.md §1).
 - **What does not carry it.** The gate serves A2A 1.0 only (§2.4): a client on A2A 0.3, such as A2UI's reference web
-  clients on `@a2a-js/sdk` 0.3, cannot call it as it is. `/mcp`'s `hire` carries no A2UI (§12.2, D328).
+  clients on `@a2a-js/sdk` 0.3, cannot call it as it is. `/mcp`'s `hire` and `reply` cannot activate A2UI nor send
+  message metadata, so a seller that negotiates never sends them its form, and their result drops a part's marks; a
+  part they send keeps its own `metadata` and `mediaType`, so an action reaches the seller marked (§12.2, D328).
 
 [`examples/sellers/a2ui`](../examples/sellers/a2ui/README.md) is an A2UI seller (A2A 1.0, the basic catalog, a booking
-form), and `a2ui_passthrough` (§16) runs it through two replicas.
+form on a surface of each task's own, in the A2UI version the client reads, deleted when the task ends: D329), and
+`a2ui_passthrough` (§16) runs it through two replicas.
 
 ## 3. The served A2A card
 
@@ -1590,10 +1593,11 @@ the route to use (`/mcp/…`; the service's A2A URL through a node, which seals)
   the sealed extension whoever asserts it, is answered as above with the text naming the service's A2A URL and the
   URIs to activate there; a `reply` to a task of such a service is refused the same way, nothing sent.
 
-An optional extension is never activated by `hire`, whose message carries no message metadata either, and the hire
-result keeps a data part's value without its `mediaType` or `metadata`: A2UI does not reach a seller, nor a client,
-through `hire` and `reply` (a known limit, D328). A seller that negotiates A2UI, as A2UI's own do, answers them as it
-answers a client that renders none.
+An optional extension is never activated by `hire` or `reply`, whose messages carry no message metadata either, and
+the hire result keeps a data part's value without its `mediaType` or `metadata` (a known limit, D328). So a seller that
+negotiates A2UI, as A2UI's own do, answers them as it answers a client that renders none, and A2UI a seller sends
+regardless reaches the client as unmarked JSON. A part of their `message` keeps its own `mediaType` and `metadata`:
+an A2UI action in a part marked `application/a2ui+json` reaches the seller marked.
 
 **What `/mcp` serves (D303).** `search`, `describe` and `hire` see exactly the services the replica serves on its A2A
 route and `/mcp/{svc}`: an enabled row its registry has loaded, admitted by the registry's `allow:`. A row the
@@ -2116,7 +2120,7 @@ met, are D297.
 | `mcp_tool_denied` | §11.3 |
 | `mcp_batch_refused` | §11.1: an array of two `tools/call`, one to a denied tool, is `400` with no upstream traffic |
 | `mcp_case_smuggling` | §11.1: a `tools/call` carrying `"method"` and `"METHOD"`, `"name": "echo"` (denied) and `"NAME": "add"`, a repeated `name`, or a repeated or case-variant key in `params._meta` or at the top level of `arguments`, is `400` with `-32600` and reaches no upstream, Admission or `calls` row; an upstream result `{"isError": true, "ISERROR": false}` is not relayed (`502`, `-32603`) and its `calls` row has `is_error` true |
-| `a2ui_passthrough` | §2.6 (D326, D328): the A2UI example seller hosted through the tunnel, the caller on the other replica, A2A 1.0 only: the served card keeps the seller's A2UI and input-schema entries equal under JCS; a `SendMessage` activating A2UI has the URI echoed and waits at `input-required` with the seller's form, its A2UI part equal to the example's fixture (which `make check-specs` validates against the vendored A2UI v0.9.1 schemas) with its mark, on `SendMessage`, `GetTask` and an HTTP+JSON stream; the form's action through the other replica completes the task with the seller's summary; capabilities in the message metadata alone reach the seller; without either the seller asks in text; `/mcp` `hire` gets the text, and `reply` with the input schema's data part books |
+| `a2ui_passthrough` | §2.6 (D326, D328, D329): the A2UI example seller hosted through the tunnel, the caller on the other replica, A2A 1.0 only: the served card keeps the seller's A2UI and input-schema entries equal under JCS; a `SendMessage` activating A2UI has the URI echoed and waits at `input-required` with the seller's form, its A2UI part equal to the example's fixture (which `make check-specs` validates against the vendored A2UI v0.9.1 schemas) in v0.9.1 on a surface of the task's own, with its mark, on `SendMessage`, `GetTask` and an HTTP+JSON stream, two tasks' forms on two surfaces; the form's action through the other replica completes the task with the seller's summary and the form's `deleteSurface`; capabilities in the message metadata alone (under `v0.9`) reach the seller, which sends the form in v0.9; without either the seller asks in text; `/mcp` `hire` gets the text, and `reply` with the input schema's data part books, as does `reply` with the form's action in a part marked `application/a2ui+json` |
 | `a2a_case_smuggling` | §2.4: a JSON-RPC `SendMessage` carrying `"method"` and `"METHOD"`, `"tenant"` and `"TENANT"` in `params`, or a part with two `mediaType` keys, is `-32600` with HTTP `400`, before any task row |
 | `mcp_meta_spoof` | §2.5: an upstream's `sh.kontra/price`, `sh.kontra/escrow`, `sh.kontra/approve-url` and `capabilities.experimental["sh.kontra/sealed"]` never reach a client; an A2A upstream's `kontra.approve.url` and `kontra.escrow.*` never reach a caller; `_meta["sh.kontra/sealed"]` on an `elicitation/create` of a service without `sealed` is removed, and on a sealed service only an exact `{v, envelope}` reaches the client |
 | `mcp_task_resume` | §11.9: a replica killed during a task-augmented call; `tasks/result` still returns on the other replica, with the task's result if the killed replica held only the client's connection, with the §11.8 form of `failed: tunnel_lost` if it held the tunnel and the upstream task already existed. It never hangs. Modern variant (§11.12, D178): the tunnel killed after the upstream answered the dispatch's `tools/call` with an `InputRequiredResult` fails the task `tunnel_lost`, which `tasks/get` shows on either replica, and the upstream never receives that `tools/call` again |

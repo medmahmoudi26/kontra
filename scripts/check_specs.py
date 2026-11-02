@@ -117,7 +117,9 @@ for what, value in [
 #    each file pinned by SHA256SUMS: the agent's form and a renderer's action, a client's capabilities and the card's
 #    A2UI params; its input-schema params against spec/schema, and the booking against the schema they hold. A file
 #    under invalid/ must not validate. The A2UI schemas name the catalog `catalog.json` relative to their $ids: the
-#    basic catalog is served under that name too, as A2UI's own test runner does.
+#    basic catalog is served under that name too, as A2UI's own test runner does. Formats are asserted, as A2UI's own
+#    runner does (ajv-formats): an action's `timestamp` and the booking's `date` are RFC 3339 date-times, which
+#    jsonschema checks only with rfc3339-validator installed (`make check-specs` installs it; without it, this fails).
 import hashlib  # noqa: E402
 
 A2UI = ROOT / "examples" / "sellers" / "a2ui" / "testdata"
@@ -142,18 +144,22 @@ except Exception as e:  # noqa: BLE001
     problems.append(f"examples/sellers/a2ui/testdata/card/input-schema-params.json: params.schema: {e.message}")
 A2UI_SCHEMAS = {
     "surface": {"$ref": A2UI_BASE + "server_to_client_list.json"},
+    "delete": {"$ref": A2UI_BASE + "server_to_client_list.json"},
     "action": {"$ref": A2UI_BASE + "client_to_server_list.json"},
     "capabilities": {"$ref": A2UI_BASE + "client_capabilities.json"},
     "a2ui-params": {"$ref": A2UI_BASE + "server_capabilities.json#/properties/v0.9"},
     "input-schema-params": {"$ref": "https://kontra.sh/schema/ext/input-schema/v1/params.json"},
     "input-schema-data": params["schema"],
 }
+FORMATS = Draft202012Validator.FORMAT_CHECKER
+if not {"date-time", "date", "time"} <= set(FORMATS.checkers):
+    problems.append("check_specs.py §6: jsonschema checks no date-time format here: install rfc3339-validator")
 for f in sorted(A2UI.glob("messages/*.json")) + sorted(A2UI.glob("card/*.json")) + sorted(A2UI.glob("invalid/*.json")):
     schema = A2UI_SCHEMAS.get(f.name.split(".")[0])
     if schema is None:
         problems.append(f"{f.relative_to(ROOT)}: no schema for fixture")
         continue
-    v = Draft202012Validator(schema, registry=a2ui)
+    v = Draft202012Validator(schema, registry=a2ui, format_checker=FORMATS)
     errors = list(v.iter_errors(json.loads(f.read_text())))
     if f.parent.name == "invalid" and not errors:
         problems.append(f"{f.relative_to(ROOT)}: validates, but is a refused fixture")

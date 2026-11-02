@@ -168,9 +168,40 @@ func statusParts(t *testing.T, task *a2a.Task) (string, []*a2a.Part) {
 	return text.String(), ui
 }
 
+// placeholder is the surface id the fixtures write for a task's own: surfacePrefix and the task's id.
+const placeholder = surfacePrefix + "{taskId}"
+
+// asFixture is A2UI messages as the fixtures write them: each message's version, which must be version, as v0.9.1
+// (v0.9's schemas differ from v0.9.1's only in the version they accept), and its surfaceId, which must be id, as
+// placeholder.
+func asFixture(t *testing.T, data any, id, version string) any {
+	t.Helper()
+	msgs, ok := roundTrip(t, data).([]any)
+	if !ok {
+		t.Fatalf("not a list of A2UI messages: %s", mustJSON(t, data))
+	}
+	for _, msg := range msgs {
+		m, _ := msg.(map[string]any)
+		if m["version"] != version {
+			t.Errorf("version %v, want %s: %s", m["version"], version, mustJSON(t, m))
+		}
+		m["version"] = v091
+		for _, body := range m {
+			if b, ok := body.(map[string]any); ok && b["surfaceId"] != nil {
+				if b["surfaceId"] != id {
+					t.Errorf("surfaceId %v, want %s", b["surfaceId"], id)
+				}
+				b["surfaceId"] = placeholder
+			}
+		}
+	}
+	return msgs
+}
+
 // formPart is the one part of a question that holds the form: the A2UI messages of testdata/messages/surface.json
-// (with -update, written from it), marked as A2UI by metadata.mimeType alone and by mediaType.
-func formPart(t *testing.T, task *a2a.Task) {
+// (with -update, written from it) on the task's own surface, in version, marked as A2UI by metadata.mimeType alone
+// and by mediaType. It returns the surface's id.
+func formPart(t *testing.T, task *a2a.Task, version string) string {
 	t.Helper()
 	if task.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("state %s, want input-required", task.Status.State)
@@ -179,16 +210,45 @@ func formPart(t *testing.T, task *a2a.Task) {
 	if text != askForm || len(ui) != 1 || len(task.Status.Message.Parts) != 2 {
 		t.Fatalf("the question %q with %d A2UI parts in %d, want %q and the form", text, len(ui), len(task.Status.Message.Parts), askForm)
 	}
-	p := ui[0]
-	if *update {
-		writeFixture(t, "messages/surface.json", p.Data())
+	id := surfacePrefix + string(task.ID)
+	checkUI(t, ui[0], "messages/surface.json", id, version)
+	return id
+}
+
+// checkUI fails unless p holds testdata/<name>'s A2UI messages (with -update, written from it) on the surface id, in
+// version, marked as A2UI by metadata.mimeType alone and by mediaType.
+func checkUI(t *testing.T, p *a2a.Part, name, id, version string) {
+	t.Helper()
+	got := asFixture(t, p.Data(), id, version)
+	if *update && version == v091 {
+		writeFixture(t, name, got)
 	}
-	if !same(t, p.Data(), fixture(t, "messages/surface.json")) {
-		t.Errorf("the form is not testdata/messages/surface.json:\n%s", mustJSON(t, p.Data()))
+	if !same(t, got, fixture(t, name)) {
+		t.Errorf("the A2UI part is not testdata/%s:\n%s", name, mustJSON(t, p.Data()))
 	}
 	if !maps.Equal(p.Metadata, map[string]any{"mimeType": MimeA2UI}) || p.MediaType != MimeA2UI {
-		t.Errorf("the form's part: metadata %v, mediaType %q", p.Metadata, p.MediaType)
+		t.Errorf("the A2UI part: metadata %v, mediaType %q", p.Metadata, p.MediaType)
 	}
+}
+
+// closed fails unless task ended in state with text and, when id is not empty, deleted the surface id in version
+// (testdata/messages/delete.json); with id empty, with no A2UI part.
+func closed(t *testing.T, task *a2a.Task, state a2a.TaskState, text, id, version string) {
+	t.Helper()
+	got, ui := statusParts(t, task)
+	if task.Status.State != state || got != text {
+		t.Fatalf("%s %q, want %s %q", task.Status.State, got, state, text)
+	}
+	if id == "" {
+		if len(ui) != 0 {
+			t.Fatalf("%d A2UI parts, want none: no form was sent", len(ui))
+		}
+		return
+	}
+	if len(ui) != 1 || len(task.Status.Message.Parts) != 2 {
+		t.Fatalf("%d A2UI parts in %d, want the text and the form's deleteSurface", len(ui), len(task.Status.Message.Parts))
+	}
+	checkUI(t, ui[0], "messages/delete.json", id, version)
 }
 
 func mustJSON(t *testing.T, v any) string {
@@ -263,18 +323,48 @@ func TestFormThenAction(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c := client(t, serve(t), protocol, activate())
 			first := send(t, c, textMessage("a table, please"), nil)
-			formPart(t, first)
+			id := formPart(t, first, v091)
 			done := send(t, c, actionMessage(t, "messages/action.json"), first)
-			if text, ui := statusParts(t, done); done.Status.State != a2a.TaskStateCompleted || text != booked || len(ui) != 0 || done.ID != first.ID {
-				t.Fatalf("after the action: %s %q (%d A2UI parts) on task %s, want completed %q on %s", done.Status.State, text, len(ui), done.ID, booked, first.ID)
+			if done.ID != first.ID {
+				t.Fatalf("the action answered on task %s, want %s", done.ID, first.ID)
 			}
+			closed(t, done, a2a.TaskStateCompleted, booked, id, v091)
 		})
 	}
 }
 
+// Each task's form is a surface of its own, so a context holds as many as it has tasks: A2UI refuses a createSurface
+// for an id the client still shows. The form's version is the one the task negotiated, and the message that ends the
+// task deletes it in that version, whatever that message's client sent.
+func TestSurfacePerTask(t *testing.T) {
+	base := serve(t)
+	c := client(t, base, a2a.TransportProtocolJSONRPC, nil)
+	ask := func(contextID string) *a2a.Task {
+		m := textMessage("a table, please")
+		m.ContextID = contextID
+		m.Metadata = map[string]any{capsKey: fixture(t, "messages/capabilities.json")}
+		return send(t, c, m, nil)
+	}
+	first := ask("")
+	second := ask(first.ContextID)
+	a, b := formPart(t, first, v09), formPart(t, second, v09)
+	if second.ContextID != first.ContextID || second.ID == first.ID || a == b {
+		t.Fatalf("two tasks: %s in context %s and %s in context %s, on surfaces %s and %s", first.ID, first.ContextID, second.ID, second.ContextID, a, b)
+	}
+	// The action carries no capabilities: the form's version is the one the task sent it in.
+	closed(t, send(t, c, actionMessage(t, "messages/action.json"), first), a2a.TaskStateCompleted, booked, a, v09)
+	canceled, err := c.CancelTask(ctxT(t), &a2a.CancelTaskRequest{ID: second.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed(t, canceled, a2a.TaskStateCanceled, "The booking was canceled.", b, v09)
+}
+
 // A client renders the form when its a2uiClientCapabilities list the basic catalog under v0.9.1 or v0.9 (message
 // metadata, or the request's), or, without them, when it activates the extension (A2A-Extensions in any spelling,
-// X-A2A-Extensions, or the message's extensions). Anything else is asked for the input schema's data part.
+// X-A2A-Extensions, or the message's extensions). Anything else is asked for the input schema's data part. The form
+// is in v0.9.1 for a client that said it reads v0.9.1 (a v0.9.1 entry, or the activation), else in v0.9, which a
+// v0.9 renderer's schemas require.
 func TestNegotiation(t *testing.T) {
 	basic := map[string]any{"supportedCatalogIds": []any{BasicCatalog}}
 	other := map[string]any{"supportedCatalogIds": []any{"https://example.com/catalogs/other.json"}}
@@ -284,17 +374,20 @@ func TestNegotiation(t *testing.T) {
 		exts    []string
 		caps    map[string]any // message metadata
 		reqCaps map[string]any // request metadata
-		form    bool
+		form    string         // the form's version; none when empty
 	}{
 		{name: "nothing"},
-		{name: "A2A-Extensions", header: activate(), form: true},
-		{name: "A2A-Extensions among others", header: http.Header{"A2A-Extensions": {"urn:other, " + ExtA2UI}}, form: true},
-		{name: "X-A2A-Extensions", header: http.Header{"X-A2A-Extensions": {ExtA2UI}}, form: true},
+		{name: "A2A-Extensions", header: activate(), form: v091},
+		{name: "A2A-Extensions among others", header: http.Header{"A2A-Extensions": {"urn:other, " + ExtA2UI}}, form: v091},
+		{name: "X-A2A-Extensions", header: http.Header{"X-A2A-Extensions": {ExtA2UI}}, form: v091},
 		{name: "another A2UI version", header: http.Header{"A2A-Extensions": {"https://a2ui.org/a2a-extension/a2ui/v0.8"}}},
-		{name: "message extensions", exts: []string{ExtA2UI}, form: true},
-		{name: "capabilities v0.9 (fixture)", caps: fixture(t, "messages/capabilities.json").(map[string]any), form: true},
-		{name: "capabilities v0.9.1", caps: map[string]any{"v0.9.1": basic}, form: true},
-		{name: "request capabilities", reqCaps: map[string]any{"v0.9": basic}, form: true},
+		{name: "message extensions", exts: []string{ExtA2UI}, form: v091},
+		{name: "capabilities v0.9 (fixture)", caps: fixture(t, "messages/capabilities.json").(map[string]any), form: v09},
+		{name: "capabilities v0.9.1", caps: map[string]any{"v0.9.1": basic}, form: v091},
+		{name: "capabilities v0.9 and v0.9.1", caps: map[string]any{"v0.9": basic, "v0.9.1": basic}, form: v091},
+		{name: "capabilities v0.9, the v0.9.1 extension activated", header: activate(), caps: map[string]any{"v0.9": basic}, form: v091},
+		{name: "capabilities v0.9, v0.9.1 without the basic catalog", caps: map[string]any{"v0.9": basic, "v0.9.1": other}, form: v09},
+		{name: "request capabilities", reqCaps: map[string]any{"v0.9": basic}, form: v09},
 		{name: "capabilities without the basic catalog", header: activate(), caps: map[string]any{"v0.9": other}},
 		{name: "capabilities of v0.8 only", caps: map[string]any{"v0.8": basic}},
 	} {
@@ -314,8 +407,8 @@ func TestNegotiation(t *testing.T) {
 				t.Fatal(err)
 			}
 			task := res.(*a2a.Task)
-			if tc.form {
-				formPart(t, task)
+			if tc.form != "" {
+				formPart(t, task, tc.form)
 				return
 			}
 			if text, ui := statusParts(t, task); task.Status.State != a2a.TaskStateInputRequired || text != askData || len(ui) != 0 {
@@ -346,14 +439,14 @@ func TestInputSchemaData(t *testing.T) {
 	}
 	msgs := parts[0].Data().([]any)
 	model := msgs[len(msgs)-1].(map[string]any)["updateDataModel"]
-	if !same(t, model, map[string]any{"surfaceId": surfaceID, "path": modelPath, "value": map[string]any{"name": "Robin", "guests": []any{"2"}, "date": ""}}) {
+	if !same(t, model, map[string]any{"surfaceId": surfacePrefix + string(partial.ID), "path": modelPath, "value": map[string]any{"name": "Robin", "guests": []any{"2"}, "date": ""}}) {
 		t.Errorf("the form's data model: %s, want the name filled in, two guests and no date", mustJSON(t, model))
 	}
 
 	// A data part that is not a booking (the A2UI samples send {"useStreaming": false} beside every message) is the
 	// first question's.
 	other := send(t, ui, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello"), a2a.NewDataPart(map[string]any{"useStreaming": false})), nil)
-	formPart(t, other)
+	formPart(t, other, v091)
 }
 
 // The action is read in each shape a renderer may send it: v0.9.1's list, one message on its own, the legacy MIME
@@ -384,7 +477,7 @@ func TestActionShapes(t *testing.T) {
 		})
 	}
 
-	other := map[string]any{"version": "v0.9.1", "action": map[string]any{"name": "cancel", "surfaceId": surfaceID, "context": action["action"].(map[string]any)["context"]}}
+	other := map[string]any{"version": "v0.9.1", "action": map[string]any{"name": "cancel", "surfaceId": placeholder, "context": action["action"].(map[string]any)["context"]}}
 	for _, tc := range []struct {
 		name string
 		part *a2a.Part
@@ -427,10 +520,7 @@ func TestCorrections(t *testing.T) {
 	if text, ui := statusParts(t, again); text != "That was not a booking. "+askCorrect || len(ui) != 0 {
 		t.Fatalf("a second question: %q with %d A2UI parts", text, len(ui))
 	}
-	done := send(t, c, actionMessage(t, "messages/action.json"), first)
-	if text, _ := statusParts(t, done); done.Status.State != a2a.TaskStateCompleted || text != booked {
-		t.Fatalf("the corrected action: %s %q", done.Status.State, text)
-	}
+	closed(t, send(t, c, actionMessage(t, "messages/action.json"), first), a2a.TaskStateCompleted, booked, surfacePrefix+string(first.ID), v091)
 
 	// A task asked in text whose next message comes from a client that renders A2UI is sent the form, once.
 	base := serve(t)
@@ -446,15 +536,31 @@ func TestCorrections(t *testing.T) {
 	if again := send(t, ui, textMessage("?"), asked); len(again.Status.Message.Parts) != 1 {
 		t.Fatalf("the form was sent twice: %d parts", len(again.Status.Message.Parts))
 	}
+	// The form it was sent is deleted when the task ends, by a client that renders none too.
+	closed(t, send(t, plain, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewDataPart(fixture(t, "card/input-schema-data.json"))), asked),
+		a2a.TaskStateCompleted, `Booked a table for 4 under "Robin" on Monday, 9 November 2026 at 19:30 +01:00.`, surfacePrefix+string(asked.ID), v091)
 }
 
-// CancelTask ends a task waiting for its booking canceled.
+// CancelTask ends a task waiting for its booking canceled, deleting the form it was sent; a task asked in text ends
+// with the text alone.
 func TestCancel(t *testing.T) {
-	c := client(t, serve(t), a2a.TransportProtocolJSONRPC, activate())
-	first := send(t, c, textMessage("a table, please"), nil)
-	task, err := c.CancelTask(ctxT(t), &a2a.CancelTaskRequest{ID: first.ID})
-	if err != nil || task.Status.State != a2a.TaskStateCanceled {
-		t.Fatalf("CancelTask: %+v %v", task, err)
+	for _, tc := range []struct {
+		name   string
+		header http.Header
+	}{{"with the form", activate()}, {"asked in text", nil}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := client(t, serve(t), a2a.TransportProtocolJSONRPC, tc.header)
+			first := send(t, c, textMessage("a table, please"), nil)
+			task, err := c.CancelTask(ctxT(t), &a2a.CancelTaskRequest{ID: first.ID})
+			if err != nil {
+				t.Fatalf("CancelTask: %v", err)
+			}
+			id := ""
+			if tc.header != nil {
+				id = surfacePrefix + string(first.ID)
+			}
+			closed(t, task, a2a.TaskStateCanceled, "The booking was canceled.", id, v091)
+		})
 	}
 }
 

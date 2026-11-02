@@ -3,7 +3,7 @@
     "version": "v0.9.1",
     "action": {
       "name": "book",
-      "surfaceId": "booking",
+      "surfaceId": "booking-{taskId}",
       "sourceComponentId": "book",
       "context": {
         "name": "Robin",

@@ -2,7 +2,7 @@
   {
     "createSurface": {
       "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
-      "surfaceId": "booking"
+      "surfaceId": "booking-{taskId}"
     },
     "version": "v0.9.1"
   },
@@ -141,14 +141,14 @@
           "variant": "primary"
         }
       ],
-      "surfaceId": "booking"
+      "surfaceId": "booking-{taskId}"
     },
     "version": "v0.9.1"
   },
   {
     "updateDataModel": {
       "path": "/booking",
-      "surfaceId": "booking",
+      "surfaceId": "booking-{taskId}",
       "value": {
         "date": "",
         "guests": [

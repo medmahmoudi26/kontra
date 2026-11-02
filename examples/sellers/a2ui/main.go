@@ -3,11 +3,11 @@
 //
 // Its card declares two extensions, neither required: A2UI v0.9.1 (https://a2ui.org/a2a-extension/a2ui/v0.9.1, with
 // the basic catalog as its one catalog) and the input-schema extension (spec/ext-input-schema.md), which is a JSON
-// entry of the card like any seller's own. A first message stops at input-required with the form, as A2UI v0.9.1
-// messages in one data part, when the client renders A2UI; the form's Book button sends an A2UI action whose context
-// holds the three fields, and the agent completes with a text that sums the booking up. A client that renders no
-// A2UI is asked in text for the input schema's data part instead, and a first message that already carries that data
-// part, complete, is booked at once.
+// entry of the card like any seller's own. A first message stops at input-required with the form, as A2UI messages in
+// one data part, when the client renders A2UI; the form's Book button sends an A2UI action whose context holds the
+// three fields, and the agent completes with a text that sums the booking up and deletes the form. Each task's form is
+// its own surface, so one context holds several. A client that renders no A2UI is asked in text for the input
+// schema's data part instead, and a first message that already carries that data part, complete, is booked at once.
 //
 // It is an example seller (examples/README.md): a plain A2A agent that imports nothing from Kontra and has no
 // Kontra-specific endpoint. It serves its card at /.well-known/agent-card.json, JSON-RPC at its root and HTTP+JSON
@@ -55,23 +55,29 @@ const (
 	mimeA2UILegacy = "application/json+a2ui"
 	// BasicCatalog is the id of the basic catalog of v0.9 and v0.9.1, the only catalog this agent builds with.
 	BasicCatalog = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"
-	// a2uiVersion is the version every message the agent writes carries.
-	a2uiVersion = "v0.9.1"
 	// capsKey is the message metadata key under which a client lists what it renders, by A2UI version.
 	capsKey = "a2uiClientCapabilities"
+)
+
+// The A2UI versions the agent writes in its messages' version: v0.9.1, or v0.9 to a client that says it reads only
+// v0.9 (negotiate). v0.9.1's schemas accept both; v0.9's accept only "v0.9", and differ from v0.9.1's in nothing else.
+const (
+	v091 = "v0.9.1"
+	v09  = "v0.9"
 )
 
 // ExtInputSchema is the input-schema extension's URI (spec/ext-input-schema.md): the card says what a first
 // message's data part may hold.
 const ExtInputSchema = "https://kontra.sh/ext/input-schema/v1"
 
-// The form.
+// The form. A task's surface is surfacePrefix and the task's id: A2UI refuses a createSurface for an id a client
+// still shows, and a context (A2UI's session) holds as many forms as it has tasks.
 const (
-	surfaceID  = "booking"
-	actionBook = "book"
-	modelPath  = "/booking"
-	maxGuests  = 6
-	maxName    = 100 // runes
+	surfacePrefix = "booking-"
+	actionBook    = "book"
+	modelPath     = "/booking"
+	maxGuests     = 6
+	maxName       = 100 // runes
 )
 
 // restPrefix is where the HTTP+JSON binding is served; JSON-RPC is served at the root.
@@ -273,27 +279,28 @@ func (agent) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2
 		var question string
 		switch {
 		case in.found && len(problems) == 0:
-			yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted,
-				a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart(in.booking.summary()))), nil)
+			parts := append([]*a2a.Part{a2a.NewTextPart(in.booking.summary())}, closeForm(ec)...)
+			yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, parts...)), nil)
 			return
 		case in.found:
 			question = strings.Join(problems, " ") + " "
 		case ec.StoredTask != nil:
 			question = "That was not a booking. "
 		}
-		yield(ask(ec, question, in.booking, rendersA2UI(ec)), nil)
+		version, ui := negotiate(ec)
+		yield(ask(ec, question, in.booking, version, ui), nil)
 	}
 }
 
-// Cancel ends a task that is not over yet canceled.
+// Cancel ends a task that is not over yet canceled, deleting its form.
 func (agent) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		if ec.StoredTask != nil && ec.StoredTask.Status.State.Terminal() {
 			yield(nil, a2a.ErrTaskNotCancelable)
 			return
 		}
-		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCanceled,
-			a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("The booking was canceled."))), nil)
+		parts := append([]*a2a.Part{a2a.NewTextPart("The booking was canceled.")}, closeForm(ec)...)
+		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCanceled, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, parts...)), nil)
 	}
 }
 
@@ -306,43 +313,72 @@ const (
 )
 
 // ask ends the turn at input-required with why (what was wrong, or nothing) and the question. A client that renders
-// A2UI is sent the form, holding what b holds, unless the task has sent it the form already: a surface is created
-// once, and the one the client has keeps what the person typed.
-func ask(ec *a2asrv.ExecutorContext, why string, b booking, ui bool) *a2a.TaskStatusUpdateEvent {
+// A2UI (ui) is sent the form in version, holding what b holds, unless the task has sent it the form already: a
+// surface is created once, and the one the client has keeps what the person typed.
+func ask(ec *a2asrv.ExecutorContext, why string, b booking, version string, ui bool) *a2a.TaskStatusUpdateEvent {
 	parts := []*a2a.Part{a2a.NewTextPart(why + askData)}
+	_, _, sent := shown(ec)
 	switch {
-	case ui && shown(ec):
+	case ui && sent:
 		parts = []*a2a.Part{a2a.NewTextPart(why + askCorrect)}
 	case ui:
-		parts = []*a2a.Part{a2a.NewTextPart(why + askForm), a2uiPart(surface(b))}
+		parts = []*a2a.Part{a2a.NewTextPart(why + askForm), a2uiPart(surface(surfacePrefix+string(ec.TaskID), version, b))}
 	}
 	return a2a.NewStatusUpdateEvent(ec, a2a.TaskStateInputRequired, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, parts...))
 }
 
+// closeForm is what ends a task's form, for the message that ends the task: a deleteSurface, in the form's own
+// version, when the task sent one; nothing otherwise. The client stops showing a form whose Book has nothing left to
+// book.
+func closeForm(ec *a2asrv.ExecutorContext) []*a2a.Part {
+	id, version, ok := shown(ec)
+	if !ok {
+		return nil
+	}
+	return []*a2a.Part{a2uiPart([]any{map[string]any{"version": version, "deleteSurface": map[string]any{"surfaceId": id}}})}
+}
+
 // a2uiPart holds A2UI messages: a data part whose data is the list of messages, marked by metadata.mimeType (the
-// A2UI extension's data encoding). mediaType, A2A 1.0's own field, says the same to a client that reads only it.
+// A2UI extension's data encoding). mediaType, A2A 1.0's own field, says the same to a client that reads only it. The
+// mark is v0.9.1's name in either version, as A2UI's own Node sample agent marks its v0.9 messages and A2UI's Lit
+// sample client, which lists only v0.9, marks its actions.
 func a2uiPart(msgs []any) *a2a.Part {
 	return &a2a.Part{Content: a2a.Data{Value: msgs}, MediaType: MimeA2UI, Metadata: map[string]any{"mimeType": MimeA2UI}}
 }
 
-// shown reports whether the agent has sent this task's form: one of its messages (the history, then the question
-// the task waits on) carried an A2UI part.
-func shown(ec *a2asrv.ExecutorContext) bool {
+// shown is the form the agent has sent this task, if it has: the surface id and the A2UI version of the first
+// createSurface in its messages' A2UI parts (the history, then the question the task waits on).
+func shown(ec *a2asrv.ExecutorContext) (id, version string, ok bool) {
 	if ec.StoredTask == nil {
-		return false
+		return "", "", false
 	}
 	for _, m := range append(slices.Clone(ec.StoredTask.History), ec.StoredTask.Status.Message) {
-		if m != nil && m.Role == a2a.MessageRoleAgent && slices.ContainsFunc(m.Parts, isA2UI) {
-			return true
+		if m == nil || m.Role != a2a.MessageRoleAgent {
+			continue
+		}
+		for _, p := range m.Parts {
+			if !isA2UI(p) {
+				continue
+			}
+			msgs, _ := p.Data().([]any)
+			for _, msg := range msgs {
+				mm, _ := msg.(map[string]any)
+				create, _ := mm["createSurface"].(map[string]any)
+				if sid, _ := create["surfaceId"].(string); sid != "" {
+					v, _ := mm["version"].(string)
+					return sid, v, true
+				}
+			}
 		}
 	}
-	return false
+	return "", "", false
 }
 
-// --- the form, as A2UI v0.9.1 messages (basic catalog) ---
+// --- the form, as A2UI v0.9.x messages (basic catalog) ---
 
-// surface is the form: createSurface, updateComponents and updateDataModel, in that order.
-func surface(b booking) []any {
+// surface is the form on the surface id, in version: createSurface, updateComponents and updateDataModel, in that
+// order.
+func surface(id, version string, b booking) []any {
 	bound := func(field string) map[string]any { return map[string]any{"path": modelPath + "/" + field} }
 	required := func(field, message string) map[string]any {
 		return map[string]any{
@@ -375,21 +411,21 @@ func surface(b booking) []any {
 				"name": bound("name"), "guests": bound("guests"), "date": bound("date")}}}},
 	}
 	return []any{
-		map[string]any{"version": a2uiVersion, "createSurface": map[string]any{"surfaceId": surfaceID, "catalogId": BasicCatalog}},
-		map[string]any{"version": a2uiVersion, "updateComponents": map[string]any{"surfaceId": surfaceID, "components": components}},
-		dataModel(b),
+		map[string]any{"version": version, "createSurface": map[string]any{"surfaceId": id, "catalogId": BasicCatalog}},
+		map[string]any{"version": version, "updateComponents": map[string]any{"surfaceId": id, "components": components}},
+		dataModel(id, version, b),
 	}
 }
 
 // dataModel sets the form's values to b's: the fields that checked out, and two guests when the number did not. The
 // ChoicePicker's value is a list of strings.
-func dataModel(b booking) map[string]any {
+func dataModel(id, version string, b booking) map[string]any {
 	guests := 2
 	if b.guests > 0 {
 		guests = b.guests
 	}
 	value := map[string]any{"name": b.name, "guests": []any{strconv.Itoa(guests)}, "date": b.date}
-	return map[string]any{"version": a2uiVersion, "updateDataModel": map[string]any{"surfaceId": surfaceID, "path": modelPath, "value": value}}
+	return map[string]any{"version": version, "updateDataModel": map[string]any{"surfaceId": id, "path": modelPath, "value": value}}
 }
 
 // --- reading a message ---
@@ -462,22 +498,36 @@ func isA2UI(p *a2a.Part) bool {
 	return false
 }
 
-// rendersA2UI reports whether the client renders this agent's form. Its a2uiClientCapabilities (message metadata,
-// else the request's), when it sent them, decide: an entry for v0.9.1 or v0.9 that lists the basic catalog. Without
-// them, a client that activated the extension (A2A-Extensions, its 0.3 name X-A2A-Extensions, or the message's
-// extensions) renders the card's one catalog.
-func rendersA2UI(ec *a2asrv.ExecutorContext) bool {
-	caps, ok := capabilities(ec)
-	if ok {
-		for _, version := range []string{"v0.9.1", "v0.9"} {
-			entry, _ := caps[version].(map[string]any)
-			ids, _ := entry["supportedCatalogIds"].([]any)
-			if slices.Contains(ids, any(BasicCatalog)) {
-				return true
-			}
-		}
-		return false
+// negotiate reports whether the client renders this agent's form (ui), and in which A2UI version. Its
+// a2uiClientCapabilities (message metadata, else the request's), when it sent them, decide whether: an entry for
+// v0.9.1 or v0.9 that lists the basic catalog. Without them, a client that activated the extension (A2A-Extensions,
+// its 0.3 name X-A2A-Extensions, or the message's extensions) renders the card's one catalog. The version is v0.9.1
+// when the client said it reads v0.9.1, by a v0.9.1 entry that lists the basic catalog or by activating the v0.9.1
+// URI, and v0.9 otherwise: a client that lists the catalog under v0.9 alone may be a v0.9 renderer, whose schemas
+// refuse "v0.9.1", and a v0.9.1 renderer reads "v0.9" too.
+func negotiate(ec *a2asrv.ExecutorContext) (version string, ui bool) {
+	on := activated(ec)
+	caps, sent := capabilities(ec)
+	if !sent {
+		return v091, on
 	}
+	lists := func(version string) bool {
+		entry, _ := caps[version].(map[string]any)
+		ids, _ := entry["supportedCatalogIds"].([]any)
+		return slices.Contains(ids, any(BasicCatalog))
+	}
+	switch {
+	case lists(v091), on && lists(v09):
+		return v091, true
+	case lists(v09):
+		return v09, true
+	}
+	return "", false
+}
+
+// activated reports whether the client activated the A2UI v0.9.1 extension: in A2A-Extensions, its 0.3 name
+// X-A2A-Extensions, or the message's extensions.
+func activated(ec *a2asrv.ExecutorContext) bool {
 	if ec.Message != nil && slices.Contains(ec.Message.Extensions, ExtA2UI) {
 		return true
 	}

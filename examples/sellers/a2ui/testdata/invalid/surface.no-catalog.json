@@ -1,7 +1,7 @@
 [
   {
     "createSurface": {
-      "surfaceId": "booking"
+      "surfaceId": "booking-{taskId}"
     },
     "version": "v0.9.1"
   },
@@ -156,14 +156,14 @@
           "variant": "primary"
         }
       ],
-      "surfaceId": "booking"
+      "surfaceId": "booking-{taskId}"
     },
     "version": "v0.9.1"
   },
   {
     "updateDataModel": {
       "path": "/booking",
-      "surfaceId": "booking",
+      "surfaceId": "booking-{taskId}",
       "value": {
         "date": "",
         "guests": [

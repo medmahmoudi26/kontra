@@ -81,19 +81,77 @@ func a2uiParts(m *a2a.Message) (string, []*a2a.Part) {
 	return text.String(), ui
 }
 
-// checkForm fails unless m is the seller's question with the form: its text, and one part whose data is the example's
-// testdata/messages/surface.json, marked application/a2ui+json by metadata.mimeType alone and by mediaType.
-func checkForm(t *testing.T, where string, m *a2a.Message, surface any) {
+// a2uiAsFixture is a part's A2UI messages as the example's fixtures write them, and the surface they are on: each
+// message's version, which must be version, as v0.9.1, and its surfaceId, the seller's "booking-" and its own task
+// id, which must be the same in every message (and id, unless id is empty), as "booking-{taskId}".
+func a2uiAsFixture(t *testing.T, where string, p *a2a.Part, id, version string) (any, string) {
+	t.Helper()
+	msgs, ok := jsonValue(t, p.Data()).([]any)
+	if !ok {
+		t.Fatalf("%s: not a list of A2UI messages: %v", where, p.Data())
+	}
+	for _, msg := range msgs {
+		m, _ := msg.(map[string]any)
+		if m["version"] != version {
+			t.Fatalf("%s: an A2UI message's version is %v, want %s", where, m["version"], version)
+		}
+		m["version"] = "v0.9.1"
+		for _, body := range m {
+			b, ok := body.(map[string]any)
+			if !ok || b["surfaceId"] == nil {
+				continue
+			}
+			sid, _ := b["surfaceId"].(string)
+			if id == "" {
+				id = sid
+			}
+			if sid != id || !strings.HasPrefix(sid, "booking-") || len(sid) == len("booking-") {
+				t.Fatalf("%s: surfaceId %v, want the task's own (booking-<task id>) in every message, %q", where, b["surfaceId"], id)
+			}
+			b["surfaceId"] = "booking-{taskId}"
+		}
+	}
+	return msgs, id
+}
+
+// checkA2UIPart fails unless p, as a2uiAsFixture reads it, is the example's testdata/<name>, marked
+// application/a2ui+json by metadata.mimeType alone and by mediaType. It returns the surface's id.
+func checkA2UIPart(t *testing.T, where string, p *a2a.Part, name, id, version string) string {
+	t.Helper()
+	got, id := a2uiAsFixture(t, where, p, id, version)
+	if !reflect.DeepEqual(got, jsonValue(t, a2uiFixture(t, name))) || !reflect.DeepEqual(p.Metadata, map[string]any{"mimeType": a2uiMime}) || p.MediaType != a2uiMime {
+		raw, _ := json.Marshal(p)
+		t.Fatalf("%s: the A2UI part %s is not the example's %s marked %s", where, raw, name, a2uiMime)
+	}
+	return id
+}
+
+// checkForm fails unless m is the seller's question with the form: its text, and one part holding the example's
+// testdata/messages/surface.json in version, on a surface of the task's own. It returns the surface's id.
+func checkForm(t *testing.T, where string, m *a2a.Message, version string) string {
 	t.Helper()
 	text, ui := a2uiParts(m)
 	if text != a2uiAskForm || len(ui) != 1 || len(m.Parts) != 2 {
 		t.Fatalf("%s: %q with %d A2UI parts, want %q and the form", where, text, len(ui), a2uiAskForm)
 	}
-	p := ui[0]
-	if !reflect.DeepEqual(jsonValue(t, p.Data()), surface) || !reflect.DeepEqual(p.Metadata, map[string]any{"mimeType": a2uiMime}) || p.MediaType != a2uiMime {
-		got, _ := json.Marshal(p)
-		t.Fatalf("%s: the form's part %s is not the example's surface.json marked %s", where, got, a2uiMime)
+	return checkA2UIPart(t, where, ui[0], "messages/surface.json", "", version)
+}
+
+// checkBooked fails unless task is completed with the seller's summary and the deleteSurface of the form on the
+// surface id, in version (the example's testdata/messages/delete.json).
+func checkBooked(t *testing.T, where string, res a2a.SendMessageResult, id, version string) *a2a.Task {
+	t.Helper()
+	task, ok := res.(*a2a.Task)
+	if !ok || task.Status.State != a2a.TaskStateCompleted {
+		raw, _ := json.Marshal(res)
+		t.Fatalf("%s: %s, want a completed task", where, raw)
 	}
+	text, ui := a2uiParts(task.Status.Message)
+	if text != a2uiBooked || len(ui) != 1 || len(task.Status.Message.Parts) != 2 {
+		t.Fatalf("%s: %q with %d A2UI parts, want %q and the form deleted", where, text, len(ui), a2uiBooked)
+	}
+	checkA2UIPart(t, where, ui[0], "messages/delete.json", id, version)
+	return task
 }
 
 // actionPart is a renderer's A2UI action list (the example's testdata/messages/action.json) in a data part marked as
@@ -113,16 +171,20 @@ func actionPart(t *testing.T) *a2a.Part {
 //     the input schema) equal under JCS to the seller's own card;
 //   - JSON-RPC SendMessage with A2A-Extensions naming A2UI v0.9.1 and no capabilities: the response's A2A-Extensions
 //     echoes the URI, and the task waits at input-required with the form, so the activation reached the seller: the
-//     A2UI part's data is the example's testdata/messages/surface.json, which make check-specs validates against the
-//     A2UI v0.9.1 schemas, marked application/a2ui+json (metadata.mimeType and mediaType); GetTask on B shows it too;
+//     A2UI part's data is the example's testdata/messages/surface.json in v0.9.1 on a surface of the task's own, which
+//     make check-specs validates against the A2UI v0.9.1 schemas, marked application/a2ui+json (metadata.mimeType and
+//     mediaType); GetTask on B shows it too;
 //   - the form's action (testdata/messages/action.json) sent through B completes the same task with the seller's
-//     summary of the choices;
+//     summary of the choices and the form's deleteSurface (testdata/messages/delete.json);
 //   - without the header or capabilities the seller asks in text alone; with a2uiClientCapabilities in the message
-//     metadata alone it sends the form, so the metadata reached it;
-//   - over HTTP+JSON, SendStreamingMessage with the header streams the form in the input-required status update and
-//     echoes the URI, and a2a-go's own REST client completes the task with the action;
+//     metadata alone (the fixture lists v0.9) it sends the form in v0.9, so the metadata reached it;
+//   - over HTTP+JSON, SendStreamingMessage with the header streams the form, on a surface other than the first
+//     task's, in the input-required status update and echoes the URI, and a2a-go's own REST client completes the
+//     task with the action;
 //   - /mcp hire activates no optional extension and carries no message metadata (D328's known limit): the seller asks
-//     in text, structuredContent holds no data, and reply with the input schema's data part completes the booking.
+//     in text, structuredContent holds no data, and reply with the input schema's data part completes the booking; a
+//     part's own marks do reach the seller: reply with the form's action in a part marked application/a2ui+json
+//     books another hire.
 func TestA2UIPassthrough(t *testing.T) {
 	h := start(t, Options{Tunnel: map[string]TunnelService{"a2ui": {}}})
 	ctx := ctxFor(t, 6*time.Minute)
@@ -132,7 +194,6 @@ func TestA2UIPassthrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	hostOn(t, ctx, h, b, map[string]string{"a2ui": seller.URL})
-	surface := a2uiFixture(t, "messages/surface.json")
 	buyer := h.BuyerA()
 	activate := http.Header{"A2A-Extensions": {a2uiExt}}
 	call := Call{Service: "a2ui", Header: activate}
@@ -179,21 +240,22 @@ func TestA2UIPassthrough(t *testing.T) {
 	if !ok || task.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("SendMessage: %s, want a task at input-required", res.Result)
 	}
-	checkForm(t, "SendMessage", task.Status.Message, surface)
+	surface := checkForm(t, "SendMessage", task.Status.Message, "v0.9.1")
 	got, err := buyer.Client(t, b, "a2ui").GetTask(ctx, &a2a.GetTaskRequest{ID: task.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkForm(t, "GetTask on B", got.Status.Message, surface)
+	if id := checkForm(t, "GetTask on B", got.Status.Message, "v0.9.1"); id != surface {
+		t.Fatalf("GetTask on B: the form on surface %s, SendMessage's on %s", id, surface)
+	}
 	reply := a2a.NewMessage(a2a.MessageRoleUser, actionPart(t))
 	reply.TaskID, reply.ContextID = task.ID, task.ContextID
 	done, err := buyer.Client(t, b, "a2ui").SendMessage(ctx, &a2a.SendMessageRequest{Message: reply})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dt, ok := done.(*a2a.Task); !ok || dt.ID != task.ID || dt.Status.State != a2a.TaskStateCompleted || dt.Status.Message.Parts[0].Text() != a2uiBooked {
-		raw, _ := json.Marshal(done)
-		t.Fatalf("the action: %s, want task %s completed: %s", raw, task.ID, a2uiBooked)
+	if dt := checkBooked(t, "the action", done, surface, "v0.9.1"); dt.ID != task.ID {
+		t.Fatalf("the action completed task %s, want %s", dt.ID, task.ID)
 	}
 	if as, err := h.Attempts(ctx, task.ID); err != nil || len(as) != 1 {
 		t.Fatalf("the task's attempts: %+v %v, want the one", as, err)
@@ -215,7 +277,7 @@ func TestA2UIPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkForm(t, "capabilities alone", capsRes.(*a2a.Task).Status.Message, surface)
+	checkForm(t, "capabilities alone", capsRes.(*a2a.Task).Status.Message, "v0.9")
 
 	// HTTP+JSON: the form on a stream, then the action through a2a-go's REST client.
 	stream, err := buyer.SendStreaming(ctx, a, newMessage("a table, please"), Call{Service: "a2ui", Binding: HTTPJSON, Header: activate})
@@ -237,7 +299,10 @@ func TestA2UIPassthrough(t *testing.T) {
 	case *a2a.Task:
 		asked = e.Status.Message
 	}
-	checkForm(t, "the stream's last event", asked, surface)
+	streamedSurface := checkForm(t, "the stream's last event", asked, "v0.9.1")
+	if streamedSurface == surface {
+		t.Fatalf("two tasks' forms on one surface, %s: A2UI refuses the second", surface)
+	}
 	streamed := stream.TaskID()
 	reply = a2a.NewMessage(a2a.MessageRoleUser, actionPart(t))
 	reply.TaskID = streamed
@@ -245,9 +310,7 @@ func TestA2UIPassthrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dt, ok := done.(*a2a.Task); !ok || dt.Status.State != a2a.TaskStateCompleted || dt.Status.Message.Parts[0].Text() != a2uiBooked {
-		t.Fatalf("the action over HTTP+JSON: %+v", done)
-	}
+	checkBooked(t, "the action over HTTP+JSON", done, streamedSurface, "v0.9.1")
 
 	// /mcp hire: no activation and no capabilities reach the seller, which asks in text; reply with the input schema's
 	// data part books.
@@ -261,5 +324,15 @@ func TestA2UIPassthrough(t *testing.T) {
 	if booked.IsError || booked.State() != "TASK_STATE_COMPLETED" ||
 		!strings.Contains(booked.Text(), `Booked a table for 4 under "Robin" on Monday, 9 November 2026 at 19:30 +01:00.`) {
 		t.Fatalf("reply with the input schema's data: %+v", booked)
+	}
+	// A part's metadata and mediaType do pass: the form's action, marked as A2UI in its part, books.
+	again := Tool(t, s.Tool("hire", `{"service":"a2ui","message":"a table, please"}`))
+	if again.IsError || again.TaskID() == "" || !strings.Contains(again.Text(), a2uiAskData) {
+		t.Fatalf("the second hire: %+v", again)
+	}
+	action, _ := json.Marshal(a2uiFixture(t, "messages/action.json"))
+	acted := Tool(t, s.Tool("reply", `{"taskId":"`+again.TaskID()+`","message":{"parts":[{"data":`+string(action)+`,"metadata":{"mimeType":"`+a2uiMime+`"}}]}}`))
+	if acted.IsError || acted.State() != "TASK_STATE_COMPLETED" || !strings.Contains(acted.Text(), a2uiBooked) {
+		t.Fatalf("reply with the form's action marked as A2UI: %+v", acted)
 	}
 }

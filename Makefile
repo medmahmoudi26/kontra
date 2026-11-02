@@ -11,7 +11,7 @@ check: check-specs check-migrations check-go
 
 # Schemas are valid JSON Schema 2020-12, fixtures validate, links and decision references resolve.
 check-specs:
-	uv run --no-project --with jsonschema==4.26.0 python scripts/check_specs.py
+	uv run --no-project --with jsonschema==4.26.0 --with rfc3339-validator==0.1.4 python scripts/check_specs.py
 
 # 0001.. apply up, down and up again on scratch Postgres 16 and 17 (Cloud runs 16, compose ships 17).
 check-migrations:
