@@ -37,6 +37,8 @@ already serves, e.g. through `a2a server --card card.json`). The gate passes it 
 
 `required` SHOULD be `false`: the schema describes the agent's preferred input, not a protocol
 requirement.
+[`examples/sellers/a2ui`](../examples/sellers/a2ui/README.md) declares one beside its A2UI entry: a booking, which it
+books at once when a first message's data part holds it ([`relay.md`](relay.md) §2.6).
 
 ## 2. Use
 

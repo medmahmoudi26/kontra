@@ -378,6 +378,7 @@ func (s *Stream) ReadAll(ctx context.Context) ([]Event, error) {
 type RPCResult struct {
 	HTTPStatus  int
 	ContentType string
+	Header      http.Header // the response headers
 	Result      json.RawMessage
 	Error       *RPCError
 	Body        []byte
@@ -385,11 +386,13 @@ type RPCResult struct {
 
 // RPC posts one JSON-RPC request to {svc} on g.
 func (b *Buyer) RPC(ctx context.Context, g *Gate, svc, method string, params any) (*RPCResult, error) {
-	if svc == "" {
-		svc = "slow"
-	}
+	return b.RPCCall(ctx, g, method, params, Call{Service: svc})
+}
+
+// RPCCall is RPC to c's service with c's extra headers (its binding is JSON-RPC whatever c says).
+func (b *Buyer) RPCCall(ctx context.Context, g *Gate, method string, params any, c Call) (*RPCResult, error) {
 	env := rpcEnvelope{JSONRPC: "2.0", ID: rpcID.Add(1), Method: method, Params: params}
-	req, err := b.request(ctx, http.MethodPost, g.Svc(svc), env, Call{})
+	req, err := b.request(ctx, http.MethodPost, g.Svc(c.svc()), env, c)
 	if err != nil {
 		return nil, err
 	}
@@ -402,7 +405,7 @@ func (b *Buyer) RPC(ctx context.Context, g *Gate, svc, method string, params any
 	if err != nil {
 		return nil, err
 	}
-	r := &RPCResult{HTTPStatus: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw}
+	r := &RPCResult{HTTPStatus: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Header: resp.Header, Body: raw}
 	var out rpcEnvelope
 	if err := json.Unmarshal(raw, &out); err == nil {
 		r.Result, r.Error = out.Result, out.Error

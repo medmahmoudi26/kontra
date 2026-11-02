@@ -10,6 +10,7 @@ import sys
 
 from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
+from referencing.jsonschema import DRAFT202012
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCHEMAS = ROOT / "spec" / "schema"
@@ -111,6 +112,53 @@ for what, value in [
 ]:
     if f"`{value}`" not in relay:
         problems.append(f"spec/relay.md §2.3: {what} is {value}, which it does not write")
+
+# 6. The A2UI example's fixtures (examples/sellers/a2ui/testdata) against the A2UI v0.9.1 schemas vendored beside them,
+#    each file pinned by SHA256SUMS: the agent's form and a renderer's action, a client's capabilities and the card's
+#    A2UI params; its input-schema params against spec/schema, and the booking against the schema they hold. A file
+#    under invalid/ must not validate. The A2UI schemas name the catalog `catalog.json` relative to their $ids: the
+#    basic catalog is served under that name too, as A2UI's own test runner does.
+import hashlib  # noqa: E402
+
+A2UI = ROOT / "examples" / "sellers" / "a2ui" / "testdata"
+VENDORED = A2UI / "a2ui-v0.9.1"
+for line in (VENDORED / "SHA256SUMS").read_text().splitlines():
+    digest, name = line.split(None, 1)
+    f = VENDORED / name.strip()
+    if not f.exists() or hashlib.sha256(f.read_bytes()).hexdigest() != digest:
+        problems.append(f"{f.relative_to(ROOT)}: not the vendored file SHA256SUMS pins")
+a2ui = registry
+A2UI_BASE = "https://a2ui.org/specification/v0_9/"
+for f in sorted((VENDORED / "json").glob("*.json")) + [VENDORED / "catalogs" / "basic" / "catalog.json"]:
+    doc = json.loads(f.read_text())
+    res = Resource.from_contents(doc, default_specification=DRAFT202012)
+    a2ui = a2ui.with_resource(doc.get("$id", A2UI_BASE + f.name), res)
+    if f.name == "catalog.json":
+        a2ui = a2ui.with_resource(A2UI_BASE + "catalog.json", res)
+params = json.loads((A2UI / "card" / "input-schema-params.json").read_text())
+try:
+    Draft202012Validator.check_schema(params["schema"])
+except Exception as e:  # noqa: BLE001
+    problems.append(f"examples/sellers/a2ui/testdata/card/input-schema-params.json: params.schema: {e.message}")
+A2UI_SCHEMAS = {
+    "surface": {"$ref": A2UI_BASE + "server_to_client_list.json"},
+    "action": {"$ref": A2UI_BASE + "client_to_server_list.json"},
+    "capabilities": {"$ref": A2UI_BASE + "client_capabilities.json"},
+    "a2ui-params": {"$ref": A2UI_BASE + "server_capabilities.json#/properties/v0.9"},
+    "input-schema-params": {"$ref": "https://kontra.sh/schema/ext/input-schema/v1/params.json"},
+    "input-schema-data": params["schema"],
+}
+for f in sorted(A2UI.glob("messages/*.json")) + sorted(A2UI.glob("card/*.json")) + sorted(A2UI.glob("invalid/*.json")):
+    schema = A2UI_SCHEMAS.get(f.name.split(".")[0])
+    if schema is None:
+        problems.append(f"{f.relative_to(ROOT)}: no schema for fixture")
+        continue
+    v = Draft202012Validator(schema, registry=a2ui)
+    errors = list(v.iter_errors(json.loads(f.read_text())))
+    if f.parent.name == "invalid" and not errors:
+        problems.append(f"{f.relative_to(ROOT)}: validates, but is a refused fixture")
+    elif f.parent.name != "invalid":
+        problems.extend(f"{f.relative_to(ROOT)}: {err.json_path}: {err.message}" for err in errors)
 
 for line in problems:
     print(line)
