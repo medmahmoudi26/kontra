@@ -116,13 +116,37 @@ type ReplyArgs struct {
 	Message json.RawMessage `json:"message"`
 }
 
-// PlainState is the structuredContent of a plain hire or reply (and of tasks/result): {taskId, state, data?}, state
-// the A2A state, data the values of the rendered data parts in order, message first, then each artifact's (§12.2,
-// D289).
-type PlainState struct {
-	TaskID string `json:"taskId"`
-	State  string `json:"state"`
-	Data   []any  `json:"data,omitempty"`
+// HireResult is the structuredContent of every CallToolResult a hire or a reply answers, and of a hire task's
+// tasks/result (and a modern tasks/get's result): what a person needs, since a client may show its model and its user
+// nothing else (§12.2; D289, D324). taskId and state (the A2A state) always; url, the task's thread on the operator's
+// page (its approve URL, kontra.approve.url, exactly as the URL elicitation carries it), whenever the task has one;
+// quote, the quote's terms, while the task is quoted; text, the text the content's text blocks carry (the agent's
+// answer, its question, or what the gate says of the task), each of its parts bounded as the content's is (§10.4);
+// data, the values of the rendered data parts in order, message first, then each artifact's; files, the file parts'
+// links. The hire and reply tools declare it as their outputSchema (schemaHireResult).
+type HireResult struct {
+	TaskID string      `json:"taskId"`
+	State  string      `json:"state"`
+	URL    string      `json:"url,omitempty"`
+	Quote  *QuoteTerms `json:"quote,omitempty"`
+	Text   string      `json:"text,omitempty"`
+	Data   []any       `json:"data,omitempty"`
+	Files  []FileRef   `json:"files,omitempty"`
+}
+
+// QuoteTerms are a quoted task's terms as a HireResult shows them: the approve URL and the quote's expiry (RFC 3339,
+// UTC), hooks.json's QuoteTerms.
+type QuoteTerms struct {
+	ApproveURL string `json:"approveUrl"`
+	ExpiresAt  string `json:"expiresAt"`
+}
+
+// FileRef is a rendered file part as a HireResult names it: the URI of its content block (an embedded resource's
+// kontra:task/… name, its bytes in the content; a link's URL), its file name and media type when it has them.
+type FileRef struct {
+	URI       string `json:"uri"`
+	Name      string `json:"name,omitempty"`
+	MediaType string `json:"mediaType,omitempty"`
 }
 
 // The tools' input schemas: spec/schema/mcp-tools.json's $defs, each made self-contained (the $refs to message and
@@ -146,14 +170,33 @@ const (
 		`"properties":{"taskId":{"type":"string","format":"uuid"},"message":` + schemaMessage + `}}`
 )
 
+// schemaHireResult is the outputSchema of hire and reply: mcp-tools.json#/$defs/hireResult, HireResult's shape, strict
+// (a stock client validates structuredContent against it). It uses only keywords JSON Schema draft-07 and 2020-12
+// read alike and names no $schema, since a client's validator may default to either (D324).
+const schemaHireResult = `{"type":"object","description":"A hire task as hire and reply answer it: taskId and state always; ` +
+	`url, the task's page on the operator's site, whenever the task has one; quote while a person must approve it there; ` +
+	`text, the agent's answer or question or what the gate says of the task; data and files from the agent's parts.",` +
+	`"required":["taskId","state"],"additionalProperties":false,"properties":{` +
+	`"taskId":{"type":"string","format":"uuid"},` +
+	`"state":{"enum":["TASK_STATE_SUBMITTED","TASK_STATE_WORKING","TASK_STATE_INPUT_REQUIRED","TASK_STATE_AUTH_REQUIRED",` +
+	`"TASK_STATE_COMPLETED","TASK_STATE_FAILED","TASK_STATE_CANCELED","TASK_STATE_REJECTED"]},` +
+	`"url":{"type":"string","pattern":"^https://"},` +
+	`"quote":{"type":"object","required":["approveUrl","expiresAt"],"additionalProperties":false,` +
+	`"properties":{"approveUrl":{"type":"string","pattern":"^https://"},"expiresAt":{"type":"string","format":"date-time"}}},` +
+	`"text":{"type":"string"},` +
+	`"data":{"type":"array","minItems":1},` +
+	`"files":{"type":"array","minItems":1,"items":{"type":"object","required":["uri"],"additionalProperties":false,` +
+	`"properties":{"uri":{"type":"string"},"name":{"type":"string"},"mediaType":{"type":"string"}}}}}}`
+
 // tool is one entry of tools/list.
 type tool struct {
-	Name        string          `json:"name"`
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema"`
-	Annotations toolAnnotations `json:"annotations"`
-	Execution   *toolExecution  `json:"execution,omitempty"`
+	Name         string          `json:"name"`
+	Title        string          `json:"title"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"inputSchema"`
+	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
+	Annotations  toolAnnotations `json:"annotations"`
+	Execution    *toolExecution  `json:"execution,omitempty"`
 }
 
 type toolAnnotations struct {
@@ -179,11 +222,11 @@ var tools = []tool{
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolHire, Title: "Hire an agent",
 		Description: "Send a message to an A2A agent as a new task, and answer its result. A priced task asks a person to approve its quote first, at the URL given.",
-		InputSchema: json.RawMessage(schemaHire),
+		InputSchema: json.RawMessage(schemaHire), OutputSchema: json.RawMessage(schemaHireResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
 	{Name: ToolReply, Title: "Reply to a task",
 		Description: "Answer the question a hired task asks (input required), and answer its new state.",
-		InputSchema: json.RawMessage(schemaReply),
+		InputSchema: json.RawMessage(schemaReply), OutputSchema: json.RawMessage(schemaHireResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
 }
 

@@ -630,9 +630,12 @@ func TestAdmission(t *testing.T) {
 	if last := adm.asked[len(adm.asked)-1]; last.Operation != hooks.OpCall || last.Tool != "echo" {
 		t.Errorf("call admission %+v", last)
 	}
-	adm.set(hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: -32001, Message: "over budget"}}, nil)
-	if rep := c.call(r.url+"/mcp/fs", 2, "echo", "x"); rep.errCode(t) != -32001 || !strings.Contains(string(rep.body), "over budget") {
-		t.Errorf("deny: %s", rep.body)
+	// A deny's code is answered as it is, an A2A code, the operator's (D325) or any other (spec §13.1, hooks.json).
+	for i, code := range []int{-32001, -32060, -32000} {
+		adm.set(hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: code, Message: "over budget"}}, nil)
+		if rep := c.call(r.url+"/mcp/fs", 20+i, "echo", "x"); rep.errCode(t) != code || !strings.Contains(string(rep.body), "over budget") {
+			t.Errorf("deny %d: %s", code, rep.body)
+		}
 	}
 	adm.set(hooks.Decision{}, errors.New("hook down"))
 	if rep := c.call(r.url+"/mcp/fs", 3, "echo", "x"); rep.status != 503 || !strings.Contains(string(rep.body), "admission unavailable") {

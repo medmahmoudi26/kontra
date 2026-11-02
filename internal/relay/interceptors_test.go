@@ -330,6 +330,13 @@ func TestAdmissionRefusals(t *testing.T) {
 	if err := send(); !errors.Is(err, a2a.ErrInvalidParams) || !strings.Contains(err.Error(), "over budget") {
 		t.Errorf("deny: %v", err)
 	}
+	// An operator's code (D325): PERMISSION_DENIED carrying the code, which /mcp answers as it is.
+	adm.decision = hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: -32061, Message: "save a card at https://app.kontra.sh/#/billing"}}
+	if err := send(); !errors.Is(err, a2a.ErrUnauthorized) {
+		t.Errorf("an operator's code: %v", err)
+	} else if code, msg := CodeOf(err); code != -32061 || msg != "save a card at https://app.kontra.sh/#/billing" {
+		t.Errorf("an operator's code to /mcp: %d %q", code, msg)
+	}
 	adm.decision, adm.err = hooks.Decision{}, errors.New("hook down")
 	if err := send(); !errors.Is(err, a2a.ErrInternalError) || !strings.Contains(err.Error(), "admission unavailable") {
 		t.Errorf("admission error: %v", err)

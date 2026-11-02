@@ -83,6 +83,18 @@ type Refusal struct {
 	Message string `json:"message"`
 }
 
+// The operator's refusal codes (spec §13.1, D325): the upper half of JSON-RPC's implementation-defined server errors
+// (-32099 to -32000), which neither A2A (-32001 to -32009; a2a-go's -32000) nor MCP (-32000 to -32042 so far) uses.
+// Cloud's are -32060 to -32063 (its D-M5-10). A deny whose code is one of them reaches the caller as that code on the
+// MCP routes and in the A2A error's data.
+const (
+	OperatorCodeMin = -32099
+	OperatorCodeMax = -32050
+)
+
+// OperatorCode reports whether code is one of the operator's refusal codes.
+func OperatorCode(code int) bool { return code >= OperatorCodeMin && code <= OperatorCodeMax }
+
 // QuoteTerms is a quote decision's approval URL and expiry.
 type QuoteTerms struct {
 	ApproveURL string `json:"approveUrl"`

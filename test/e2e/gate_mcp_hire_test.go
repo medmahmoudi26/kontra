@@ -21,12 +21,15 @@ import (
 // (examples/sellers/tck, a stock seller that completes at once) and the in-test seller (the TCK seller's artifact
 // kinds, a slow exec, a failing exec). Asserted, clause by clause:
 //
-//   - a plain hire that ends within the wait answers the rendered outcome and structuredContent exactly {taskId, state}
-//     (no data without data parts), the task being an ordinary A2A task marked hired;
-//   - a plain hire still running after the 25 s wait answers {taskId, state: working} with the A2A URL that follows it;
+//   - a plain hire that ends within the wait answers the rendered outcome and structuredContent exactly {taskId, state,
+//     text} (no data without data parts; the text the content's, D324), the task being an ordinary A2A task marked
+//     hired;
+//   - a plain hire still running after the 25 s wait answers the hire result of a task still running: structuredContent
+//     exactly {taskId, state: working, text}, the text the content's, which names the A2A URL that follows it (no url:
+//     the task was not quoted; D324);
 //   - a task-augmented hire answers CreateTaskResult; tasks/result (on B) renders text parts as text, data parts as JSON
 //     text and in structuredContent.data, a raw file part as an embedded resource and a URL part as a resource_link;
-//     structuredContent is {taskId, state, data};
+//     structuredContent is {taskId, state, text, data, files};
 //   - a failed upstream is a CallToolResult with isError and _meta sh.kontra/failure, never a JSON-RPC error;
 //   - tasks/list lists only this buyer's hire tasks, newest first: not the buyer's ordinary A2A task (SendMessage with
 //     the same API key), whose tasks/get is -32602 as an unknown task's; another buyer's tasks/list is empty and its
@@ -86,27 +89,35 @@ func TestGateMCPHire(t *testing.T) {
 	s := OpenGateSession(t, ctx, a, h.APIKey, `{}`)
 	sb := s.On(b)
 
-	// A plain hire that completes at once, on the TCK seller: rendered text, structuredContent {taskId, state}.
+	// A plain hire that completes at once, on the TCK seller: rendered text, structuredContent {taskId, state, text}, the
+	// text the content's (D324).
 	r := Tool(t, s.Tool("hire", `{"service":"tck","message":"tck-complete-task hi"}`))
 	if r.IsError || r.State() != "TASK_STATE_COMPLETED" || r.TaskID() == "" || !strings.HasPrefix(r.Text(), "Unhandled messageId prefix: ") {
 		t.Fatalf("a plain fast hire: %+v", r)
 	}
 	var keys map[string]json.RawMessage
-	if err := json.Unmarshal(r.StructuredRaw, &keys); err != nil || len(keys) != 2 || keys["taskId"] == nil || keys["state"] == nil {
-		t.Errorf("structuredContent of a hire without data parts: %s, want exactly {taskId, state}", r.StructuredRaw)
+	if err := json.Unmarshal(r.StructuredRaw, &keys); err != nil || len(keys) != 3 || keys["taskId"] == nil || keys["state"] == nil ||
+		r.Structured.Text != r.Text() {
+		t.Errorf("structuredContent of a hire without data parts: %s, want exactly {taskId, state, text}", r.StructuredRaw)
 	}
 	fast := r.TaskID()
 	if !scalar[bool](t, h, `select hired and protocol = 'a2a' and first_request is not null from kontra.tasks where id::text = $1`, fast) {
 		t.Error("the hire task is not an A2A task marked hired with the hire's resend key")
 	}
 
-	// A plain hire of a slow exec: {taskId, working} after the 25 s wait, with the A2A URL that follows it.
+	// A plain hire of a slow exec: after the 25 s wait, the hire result of a task still running, its text (the content's)
+	// naming the A2A URL that follows it, and no url, the task not having been quoted (D324).
 	began := time.Now()
 	r = Tool(t, s.Tool("hire", `{"service":"kinds","message":"slow"}`))
 	took := time.Since(began)
 	if r.IsError || r.State() != "TASK_STATE_WORKING" || r.TaskID() == "" || !strings.Contains(r.Text(), h.Front.URL+"/agents/kinds") ||
 		took < 20*time.Second || took > 50*time.Second {
 		t.Fatalf("a plain slow hire after %v: %+v", took, r)
+	}
+	keys = nil
+	if err := json.Unmarshal(r.StructuredRaw, &keys); err != nil || len(keys) != 3 || keys["taskId"] == nil || keys["state"] == nil ||
+		r.Structured.Text != r.Text() || !strings.Contains(r.Structured.Text, "Follow it with GetTask at "+h.Front.URL+"/agents/kinds") {
+		t.Errorf("structuredContent of a plain hire still running: %s, want exactly {taskId, state, text}, the text naming GetTask", r.StructuredRaw)
 	}
 	slowPlain := r.TaskID()
 

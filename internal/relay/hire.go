@@ -293,13 +293,17 @@ func send(ctx context.Context, sh *ServiceHandler, p auth.Principal, req *a2a.Se
 	return ss, a2a.NewError(a2a.ErrInternalError, "the request produced no task")
 }
 
-// CodeOf is the JSON-RPC code of an error the relay answered (an a2a-go sentinel's, -32603 for any other), and its
-// message for a caller.
+// CodeOf is the JSON-RPC code of an error the relay answered (an operator's refusal code, D325; an a2a-go
+// sentinel's; -32603 for any other), and its message for a caller.
 func CodeOf(err error) (int, string) {
 	var ae *a2a.Error
 	msg := ""
 	if errors.As(err, &ae) {
 		msg = ae.Message
+	}
+	var oe *OperatorRefusalError
+	if errors.As(err, &oe) {
+		return oe.Code, msg
 	}
 	return codeForError(err), msg
 }

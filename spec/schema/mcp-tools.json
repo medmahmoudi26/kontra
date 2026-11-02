@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kontra.sh/schema/mcp/tools/v1.json",
-  "title": "Input schemas of the gate's own MCP tools (spec/relay.md §12.2)",
+  "title": "Input schemas of the gate's own MCP tools, and the output schema of hire and reply (spec/relay.md §12.2)",
   "$defs": {
     "part": {
       "type": "object",
@@ -37,6 +37,28 @@
     "reply": {
       "type": "object", "required": ["taskId", "message"], "additionalProperties": false,
       "properties": { "taskId": { "type": "string", "format": "uuid" }, "message": { "$ref": "#/$defs/message" } }
+    },
+    "hireResult": {
+      "type": "object",
+      "description": "A hire task as hire and reply answer it: taskId and state always; url, the task's page on the operator's site, whenever the task has one; quote while a person must approve it there; text, the agent's answer or question or what the gate says of the task; data and files from the agent's parts.",
+      "required": ["taskId", "state"], "additionalProperties": false,
+      "properties": {
+        "taskId": { "type": "string", "format": "uuid" },
+        "state": { "enum": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED",
+                            "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"] },
+        "url": { "type": "string", "pattern": "^https://" },
+        "quote": {
+          "type": "object", "required": ["approveUrl", "expiresAt"], "additionalProperties": false,
+          "properties": { "approveUrl": { "type": "string", "pattern": "^https://" }, "expiresAt": { "type": "string", "format": "date-time" } }
+        },
+        "text": { "type": "string" },
+        "data": { "type": "array", "minItems": 1 },
+        "files": {
+          "type": "array", "minItems": 1,
+          "items": { "type": "object", "required": ["uri"], "additionalProperties": false,
+                     "properties": { "uri": { "type": "string" }, "name": { "type": "string" }, "mediaType": { "type": "string" } } }
+        }
+      }
     }
   }
 }

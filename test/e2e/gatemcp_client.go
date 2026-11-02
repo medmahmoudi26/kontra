@@ -291,7 +291,13 @@ type ToolResult struct {
 	Structured *struct {
 		TaskID string `json:"taskId"`
 		State  string `json:"state"`
-		Data   []any  `json:"data"`
+		URL    string `json:"url"`
+		Quote  *struct {
+			ApproveURL string `json:"approveUrl"`
+			ExpiresAt  string `json:"expiresAt"`
+		} `json:"quote"`
+		Text string `json:"text"`
+		Data []any  `json:"data"`
 	} `json:"structuredContent"`
 	StructuredRaw json.RawMessage `json:"-"`
 	IsError       bool            `json:"isError"`

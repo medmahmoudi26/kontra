@@ -1,0 +1,8 @@
+{
+  "name": "kontra-e2e-mcp-client-2",
+  "private": true,
+  "description": "The stock MCP TypeScript SDK client 2.4.0 for the gate_mcp_stock_client e2e test (Node 24; test/e2e gate_mcp_stock_client_test.go)",
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0"
+  }
+}

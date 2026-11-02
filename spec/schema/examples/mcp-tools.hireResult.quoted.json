@@ -1,0 +1,10 @@
+{
+  "taskId": "019a0000-0000-7000-8000-000000000001",
+  "state": "TASK_STATE_INPUT_REQUIRED",
+  "url": "https://app.kontra.sh/#/t/019a0000-0000-7000-8000-000000000001",
+  "quote": {
+    "approveUrl": "https://app.kontra.sh/#/t/019a0000-0000-7000-8000-000000000001",
+    "expiresAt": "2026-11-01T18:30:00Z"
+  },
+  "text": "This task needs a person to approve its quote before it runs: open https://app.kontra.sh/#/t/019a0000-0000-7000-8000-000000000001 to review and approve it (task 019a0000-0000-7000-8000-000000000001; the quote expires at 2026-11-01T18:30:00Z). Then call hire again with the same arguments to get its result."
+}

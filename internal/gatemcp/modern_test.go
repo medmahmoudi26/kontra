@@ -82,7 +82,8 @@ func TestModernToolsList(t *testing.T) {
 		if _, ok := tool["execution"]; ok {
 			t.Errorf("%s has execution in the modern list", tool["name"])
 		}
-		if !bytes.Equal(tool["inputSchema"], old.Tools[i]["inputSchema"]) || !bytes.Equal(tool["name"], old.Tools[i]["name"]) {
+		if !bytes.Equal(tool["inputSchema"], old.Tools[i]["inputSchema"]) || !bytes.Equal(tool["name"], old.Tools[i]["name"]) ||
+			!bytes.Equal(tool["outputSchema"], old.Tools[i]["outputSchema"]) {
 			t.Errorf("tool %d differs from the legacy list: %s", i, tool["name"])
 		}
 	}

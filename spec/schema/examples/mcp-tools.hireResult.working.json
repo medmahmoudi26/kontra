@@ -1,0 +1,6 @@
+{
+  "taskId": "019a0000-0000-7000-8000-000000000001",
+  "state": "TASK_STATE_WORKING",
+  "url": "https://app.kontra.sh/#/t/019a0000-0000-7000-8000-000000000001",
+  "text": "The task 019a0000-0000-7000-8000-000000000001 is still working. Follow it with GetTask at https://gateway.example.com/agents/hello (the same credential), or call reply when it asks a question."
+}
