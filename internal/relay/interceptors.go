@@ -398,8 +398,8 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 // denied is the error of an Admission deny (spec §13.1, D325): a refusal code that names an A2A error is that error;
 // one of the operator's codes (hooks.OperatorCode) is PERMISSION_DENIED (a2a.ErrUnauthorized, the nearest A2A error:
 // the caller may not do this, as the operator decided) carrying the code, which the A2A bindings write in the error's
-// data ({"code": <code>}) and /mcp answers as it is (CodeOf); any other is PERMISSION_DENIED. The message is the
-// refusal's, "admission denied" when it has none.
+// data ({"code": <code>}) and /mcp answers as it is (CodeOf); any other is PERMISSION_DENIED with the message
+// alone, which /mcp answers -32603 (CodeOf). The message is the refusal's, "admission denied" when it has none.
 func denied(r *hooks.Refusal) error {
 	sentinel, msg := a2a.ErrUnauthorized, "admission denied"
 	if r == nil {

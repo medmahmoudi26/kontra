@@ -24,7 +24,8 @@ import (
 )
 
 // PlainWait is how long a plain hire and every reply wait for the task to end, ask a question or be quoted
-// before answering {taskId, state} (§12.2, D272): below the 60 s request timeout of the MCP SDKs.
+// before answering the hire result of a task still running: its state, the follow-up text, and the thread URL when
+// it was quoted (§12.2, D272, D324). It is below the 60 s request timeout of the MCP SDKs.
 const PlainWait = 25 * time.Second
 
 // PlainBudget bounds a plain hire's or reply's request from its arrival to its answer: the plain wait is cut so that

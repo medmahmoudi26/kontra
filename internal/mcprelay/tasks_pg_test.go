@@ -573,10 +573,13 @@ func TestDurableTaskRefusals(t *testing.T) {
 	if up.Count("tools/call") != 0 {
 		t.Fatal("a refused call reached the upstream")
 	}
-	// Admission denies: no task either.
-	adm.set(hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: -32003, Message: "no credit"}}, nil)
-	if got := c.taskCall(4, "research", map[string]any{}).errCode(t); got != -32003 {
-		t.Errorf("a denied task: %d", got)
+	// Admission denies: no task either, and the deny's code is answered as it is, an A2A code, the operator's (D325) or
+	// any other (spec §13.1, hooks.json).
+	for i, code := range []int{-32003, -32061, -32000} {
+		adm.set(hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: code, Message: "no credit"}}, nil)
+		if got := c.taskCall(40+i, "research", map[string]any{}).errCode(t); got != code {
+			t.Errorf("a denied task: %d, want %d", got, code)
+		}
 	}
 	// Admission quotes: the task is created quoted, working to the client with the approve URL (D21).
 	adm.set(hooks.Decision{Outcome: hooks.Quote, MCPMeta: map[string]any{"sh.kontra/price": "1 USD"},

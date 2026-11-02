@@ -213,7 +213,7 @@
           "properties": {
             "code": {
               "type": "integer",
-              "description": "The JSON-RPC code of the refusal (relay.md §13.1, D325): one of A2A's own codes is that A2A error; -32099 to -32050 is the operator's own range (Cloud's -32060 to -32063), which /mcp answers as that code and the A2A routes as PERMISSION_DENIED with {\"code\": <code>} in the error's details; any other is PERMISSION_DENIED."
+              "description": "The JSON-RPC code of the refusal (relay.md §13.1, D325): one of A2A's own codes is that A2A error; -32099 to -32050 is the operator's own range (Cloud's -32060 to -32063), which /mcp answers as that code and the A2A routes as PERMISSION_DENIED with {\"code\": <code>} in the error's details. Any other code is PERMISSION_DENIED with the message alone on the A2A routes and -32603 on /mcp. /mcp/{svc} answers every code as it is."
             },
             "message": {
               "type": "string"

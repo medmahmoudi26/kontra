@@ -285,6 +285,8 @@ type toolResult struct {
 	Structured struct {
 		TaskID string `json:"taskId"`
 		State  string `json:"state"`
+		URL    string `json:"url"`
+		Text   string `json:"text"`
 		Data   []any  `json:"data"`
 	} `json:"structuredContent"`
 	IsError bool           `json:"isError"`
@@ -351,11 +353,11 @@ func (e *gateEnv) hireServices(kinds *hireSeller, extra string) string {
 }
 
 // The gate's own /mcp, legacy era, through two whole replicas on one database (spec §12, M4 WP-04): no credential is
-// 401 (D270); a session opened on A is served by B; tools/list; a plain hire completes inline, a slow one answers
-// {taskId, working} after the plain wait; a task-augmented hire answers CreateTaskResult and tasks/result renders the
-// TCK seller's artifact kinds with structuredContent {taskId, state, data}; a question is the reply-tool text, reply
-// answers it, and a form-declaring session gets the question as an elicitation/create on tasks/result whose accept is
-// the follow-up once; tasks/list is the buyer's hire tasks across services, newest first, and another buyer's
+// 401 (D270); a session opened on A is served by B; tools/list; a plain hire completes inline, a slow one answers the
+// hire result of a working task after the plain wait; a task-augmented hire answers CreateTaskResult and tasks/result
+// renders the TCK seller's artifact kinds with their data parts in structuredContent.data; a question is the reply-tool
+// text, reply answers it, and a form-declaring session gets the question as an elicitation/create on tasks/result whose
+// accept is the follow-up once; tasks/list is the buyer's hire tasks across services, newest first, and another buyer's
 // tasks/get is -32602; tasks/cancel is cancelled within 10 s and the seller saw CancelTask; an MCP service and a ref
 // the principal may not hire are tool errors; /mcp writes no calls rows (D289); hire tasks are marked hired with the
 // hire's resend key.
@@ -417,7 +419,8 @@ func TestGateMCPHire(t *testing.T) {
 		t.Error("a second hire of an allowed task answered the first task")
 	}
 
-	// A slow seller: {taskId, working} after the plain wait, with the A2A URL that follows it; on JSON.
+	// A slow seller: the hire result of a working task after the plain wait, its text naming the A2A URL that follows it;
+	// on JSON.
 	c.accept = "application/json"
 	began := time.Now()
 	_, ans = c.call("hire", `{"service":"kinds","message":"slow"}`)
@@ -426,6 +429,10 @@ func TestGateMCPHire(t *testing.T) {
 	if took := time.Since(began); took < 3*time.Second || took > 15*time.Second || slow.IsError ||
 		slow.Structured.State != "TASK_STATE_WORKING" || !strings.Contains(slow.text(), a.url+"/agents/kinds") {
 		t.Fatalf("a slow hire after %v: %s", took, ans.raw)
+	}
+	if slow.Structured.Text != slow.text() || !strings.Contains(slow.Structured.Text, "Follow it with GetTask at "+a.url+"/agents/kinds") ||
+		slow.Structured.URL != "" {
+		t.Errorf("a slow hire's structuredContent is not the hire result of a task still running (D324): %s", ans.raw)
 	}
 
 	// tasks/cancel (§11.6, D57) on b: cancelled within 10 s, and the seller received CancelTask.

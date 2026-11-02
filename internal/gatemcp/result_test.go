@@ -191,6 +191,62 @@ func TestHireResultShapes(t *testing.T) {
 	}
 }
 
+// A plain hire or reply still running after the plain wait answers the hire result of a task still running (§12.2,
+// D272, D324): its state, the follow-up text, and the thread URL when the task was quoted; and the texts that describe
+// that answer, relay.md §16's gate_mcp_hire row and PlainWait's doc, say so, not D272's {taskId, state} (G3's review).
+func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
+	h := &Handler{deps: Deps{PublicURL: "https://gateway.example.com/"}}
+	follow := "The task " + shapeTask + " is still working. Follow it with GetTask at https://gateway.example.com/agents/hello " +
+		"(the same credential), or call reply when it asks a question."
+	for _, c := range []struct {
+		name string
+		meta map[string]any
+		url  string
+	}{
+		{"quoted, then approved", map[string]any{lifecycle.MetaApproveURL: shapeApprove}, shapeApprove},
+		{"never quoted", nil, ""},
+	} {
+		row := &store.TaskRow{ID: uuid.MustParse(shapeTask), Service: "hello", State: store.StateWorking,
+			Snapshot: taskWith(a2a.TaskStateWorking, nil, c.meta)}
+		r, hr := decodeShape(t, c.name, h.plainAnswer(context.Background(), row, auth.Principal{Kind: auth.KindKey, ID: "key:kk_buyer"}))
+		if r.IsError || hr.TaskID != shapeTask || hr.State != "TASK_STATE_WORKING" || hr.Text != follow || hr.URL != c.url ||
+			hr.Quote != nil || hr.Data != nil || hr.Files != nil || !slices.Equal(texts(r, nil), []string{follow}) {
+			t.Errorf("%s: isError %v, structuredContent %s", c.name, r.IsError, r.Structured)
+		}
+	}
+
+	const says = "the hire result of a task still running"
+	read := func(path string) string {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	var row string
+	for line := range strings.Lines(read(filepath.Join("..", "..", "spec", "relay.md"))) {
+		if strings.HasPrefix(line, "| `gate_mcp_hire` |") {
+			row = line
+		}
+	}
+	if !strings.Contains(row, "within 25 s and "+says+" (its state, the follow-up text, and the thread URL when it was quoted) otherwise") ||
+		strings.Contains(row, "{taskId, state}") {
+		t.Errorf("relay.md §16's gate_mcp_hire row does not say a plain hire still running answers %s:\n%s", says, row)
+	}
+	src := read("hire.go")
+	end := strings.Index(src, "\nconst PlainWait ")
+	start := strings.LastIndex(src[:max(end, 0)], "\n\n")
+	if end < 0 || start < 0 {
+		t.Fatal("hire.go: no PlainWait")
+	}
+	doc := strings.Join(strings.Fields(strings.ReplaceAll(src[start:end], "//", "")), " ")
+	if !strings.Contains(doc, says+": its state, the follow-up text, and the thread URL when it was quoted") ||
+		strings.Contains(doc, "{taskId, state}") {
+		t.Errorf("PlainWait's doc does not say a plain hire still running answers %s: %s", says, doc)
+	}
+}
+
 // Every shape validates against the outputSchema hire and reply declare, and is the fixture make check-specs validates.
 func TestHireResultSchema(t *testing.T) {
 	var schema map[string]any

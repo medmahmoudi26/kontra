@@ -5415,7 +5415,10 @@ task's thread as `url` and `quote.approveUrl`, byte-equal to the URL a legacy se
 approval the retried `hire` is the answer "Hello World" with the URL; a free hire's text, data and files with no
 `url`; a question and `reply`'s answer); e2e `gate_mcp_stock_client` (`@modelcontextprotocol/client` 2.4.0 on Node 24
 in 2026-07-28 and `@modelcontextprotocol/sdk` 1.32.2 in 2025-11-25, unmodified: every call accepted by the client's own
-validator, which accepts each fixture and refuses bad shapes), and the `gate_mcp_hire` and `gate_mcp_hire_quote` rows.
+validator, which accepts each fixture and refuses bad shapes), and the `gate_mcp_hire` and `gate_mcp_hire_quote` rows;
+`TestStillRunningIsWhatTheTextsSay` (`internal/gatemcp`: a plain `hire` still running after the wait answers its state,
+the follow-up text and, when it was quoted, the URL, and relay.md §16's `gate_mcp_hire` row and `PlainWait`'s doc say
+so rather than `{taskId, state}`).
 
 ### D325. An operator's refusal code reaches the caller: as it is on `/mcp`, in the error's details on A2A — **decided under the owner's standing instruction, 1 Nov** (carries out Cloud's D-M5-10 on the public routes)
 
@@ -5441,7 +5444,11 @@ code as it is; `relay.md` §13.1 said nothing of codes. Decision (§13.1; `hooks
   alone on A2A and `-32603` on `/mcp`.
 
 Tested: `TestDeniedCodes` (`internal/relay`: `-32060` to `-32063` and the range's ends are `PERMISSION_DENIED` with the
-code in the JSON-RPC data and the HTTP+JSON details, and `CodeOf` gives the code; `-32049`, `-32100`, `-32042` and `403`
-are not; A2A codes stay their errors; a deny without a refusal or a message), `TestAdmissionRefusals` (a `-32061` deny
-through the interceptors), and `TestGateMCPHireStructured` (a whole replica: `-32060` on `/mcp` in both eras, `-31403`
-with the code in JSON-RPC's data, `403` `PERMISSION_DENIED` with it in HTTP+JSON's details, no task).
+code in the JSON-RPC data and the HTTP+JSON details, and `CodeOf` gives the code; `-32049`, `-32100`, `-32042`,
+`-32000` and `403` are not, and `CodeOf` gives `-32603`; A2A codes stay their errors; a deny without a refusal or a message), `TestAdmissionRefusals` (a `-32061` deny
+through the interceptors), `TestGateMCPHireStructured` (a whole replica: `-32060` on `/mcp` in both eras, `-31403`
+with the code in JSON-RPC's data, `403` `PERMISSION_DENIED` with it in HTTP+JSON's details, no task),
+`TestDeniedCodesAreWhatTheTextsSay` (hooks.json's `refusal.code` and §13.1 say what `CodeOf` gives any other code,
+`-32603` on `/mcp`, and that `/mcp/{svc}` answers every code as it is), and `TestAdmission` and
+`TestDurableTaskRefusals` (`internal/mcprelay`: `/mcp/{svc}` answers an A2A code, an operator's and `-32000` as they
+are).
