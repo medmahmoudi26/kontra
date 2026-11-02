@@ -1,0 +1,16 @@
+[
+  {
+    "version": "v0.9.1",
+    "action": {
+      "name": "book",
+      "surfaceId": "booking-{taskId}",
+      "sourceComponentId": "book",
+      "timestamp": "2026-11-02T18:02:11Z",
+      "context": {
+        "name": "Robin",
+        "guests": ["4"],
+        "date": "2026-11-09T19:30"
+      }
+    }
+  }
+]

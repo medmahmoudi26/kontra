@@ -5452,3 +5452,174 @@ with the code in JSON-RPC's data, `403` `PERMISSION_DENIED` with it in HTTP+JSON
 `-32603` on `/mcp`, and that `/mcp/{svc}` answers every code as it is), and `TestAdmission` and
 `TestDurableTaskRefusals` (`internal/mcprelay`: `/mcp/{svc}` answers an A2A code, an operator's and `-32000` as they
 are).
+
+## From the A2UI work (2 Nov)
+
+A2UI (<https://a2ui.org>, Apache-2.0; v0.9.1 is its production release, v1.0 a release candidate) lets an agent send a
+user interface as declarative JSON that the client draws from a catalog of its own components. Over A2A it rides in data
+parts marked `metadata.mimeType: "application/a2ui+json"`, under the extension URI
+`https://a2ui.org/a2a-extension/a2ui/v0.9.1`. The architecture page said the gate passes A2UI through as data parts; no
+spec section said what that means, nothing ran an A2UI agent through the gate, and what happens to part size, to A2A 0.3
+agents and to `/mcp`'s `hire` was not written down. D326 to D328 settle it; D329 settles what the branch's review found
+in the example. All four are **decided under the owner's standing instruction, 2 Nov**.
+
+### D326. Extensions the gate does not own pass through, A2UI the worked case; an A2UI example seller — **decided under the owner's standing instruction, 2 Nov** (completes D14 for A2UI; one conflict with the brief)
+
+Decision ([`relay.md`](../spec/relay.md) §2.6):
+
+- **No A2UI code in the gate.** An extension whose URI neither the gate nor the operator asserts passes as A2A carries
+  it, as D14 has the gate relay parts it does not interpret: the card entry as the seller wrote it (§3, D311's key
+  rules), the activation and its echo (§2.4), data parts with their `metadata` and `mediaType`, and message and request
+  metadata (A2UI's `a2uiClientCapabilities`), with Kontra's keys alone removed (§2.5). §2.6 writes down what holds for
+  A2UI: the card, the activation, the parts, the 256 KiB rule and what a bucketed part becomes (a `url` or `raw` part,
+  which no A2UI renderer draws: an agent splits a large surface across parts), sealing (metadata stays readable; a
+  sealed service needs an A2A 1.0 agent), and that the gate's downstream is A2A 1.0 only, so A2UI's reference web
+  clients (`@a2a-js/sdk` 0.3) cannot call it as they are.
+- **Equal under JCS, not byte for byte.** The brief asked that A2UI pass "byte-equivalently". The gate cannot hand a
+  part's bytes on unchanged: a2a-go decodes every part into its types, and the log holds the event as `encoding/json`
+  writes it. What it guarantees, and what the tests hold it to, is equality under RFC 8785: member order, number
+  spelling (`1e2` arrives as `100`) and string escapes (`<` as `\u003c`, as `encoding/json` writes it) may change.
+  Bytes would need a relay path beside a2a-go, which §15's design does not have; nothing in A2UI depends on bytes.
+- **`examples/sellers/a2ui`.** A booking form, with a2a-go v2.7.0 and A2A 1.0, without an LLM, importing nothing from
+  Kontra. Its card declares A2UI v0.9.1 (`params.supportedCatalogIds`: the basic catalog) and `input-schema/v1` (a
+  name, 1 to 6 guests, an RFC 3339 date-time), each with an explicit `"required": false` (a2a-go's struct leaves a false
+  `required` out; both specifications write it). A client renders the form when its capabilities list the basic catalog
+  under `v0.9.1` or `v0.9`, or, without capabilities, when it activates the extension; the form is one data part whose
+  data is A2UI's list (`createSurface`, `updateComponents`, `updateDataModel`), marked by `metadata.mimeType` (A2UI's
+  mark) and `mediaType` (A2A 1.0's own field). The action is read in each shape a renderer sends (the list or one
+  message, either MIME name, `mediaType`, v0.8's `userAction`); a task is sent its form once (A2UI creates a surface
+  once) and asked again in text; a complete input-schema data part books at once, and a client without A2UI is asked
+  for that data part. Its surface ids, the version it writes and the end of a form are D329's.
+- **The A2UI schemas are vendored, not fetched.** `specification/v0_9_1/json/*` and the basic catalog at A2UI commit
+  `c1baa4e`, with A2UI's Apache-2.0 `LICENSE` and a `SHA256SUMS`, under the example's `testdata/a2ui-v0.9.1`. `make
+  check-specs` checks the sums and validates the example's fixtures against them with a 2020-12 validator (its form, a
+  renderer's action, a client's capabilities, its card's A2UI params; refused fixtures must fail), its input-schema
+  params against `spec/schema`, and the booking against the schema those hold; the example's Go tests hold its output to
+  the fixtures. No Go JSON Schema library is added: the module has none, and check-specs already validates with
+  Python's `jsonschema`. A test that fetches the schemas would need the network in `make check`.
+- **Rejected**: drawing or checking A2UI at the gate. A2UI's validation is the agent's and the renderer's by its own
+  specification, a sealed part cannot be read, and D14 has the gate interpret no part.
+
+Tested: `TestA2UIPassthrough` (e2e `a2ui_passthrough`: the card's entries equal under JCS on both replicas, the
+activation echoed on JSON-RPC and an HTTP+JSON stream and reaching the seller, the form equal to the fixture on
+`SendMessage`, `GetTask` and the stream, the action through the other replica completing the task with the summary,
+capabilities in the message metadata alone reaching the seller, a client with neither asked in text), the example's
+`TestCard`, `TestFormThenAction`, `TestNegotiation`, `TestInputSchemaData`, `TestActionShapes`, `TestCorrections`,
+`TestCancel`, `TestRun`, and `scripts/check_specs.py` §6.
+
+### D327. A2UI through an A2A 0.3 agent: one message per part; a list rides in the SDKs' compat form — **decided under the owner's standing instruction, 2 Nov** (one conflict with A2UI's text)
+
+A2UI v0.9.1's A2A binding says a data part's `data` "MUST be an array of messages". A2A 0.3's `DataPart.data` is an
+object (A2A `v0.3.0`, `specification/json/a2a.json`: `"type": "object"`), and A2UI's own Python binding (`a2ui-a2a`,
+pinned to `a2a-sdk>=0.3,<0.4`) sends one message object per part. The gate reaches a 0.3 upstream through a2a-go's 0.3
+client (§6.2): a2a-go v2.7.0 (`a2acompat/a2av0`, `FromV1Part`, `ToV1Part`) writes a value that is not an object as
+`{"value": <value>}` with `metadata.data_part_compat: true` and reads that form back as the value, and a2a-python 1.x's
+0.3 layer (`a2a/compat/v0_3/conversions.py`) does the same.
+
+Decision (§2.6):
+
+- **The gate adds no conversion of its own.** A2A 0.3 cannot carry a list in a data part, so an A2UI list survives a
+  0.3 hop only between ends that read the compat form (an agent on a 1.x SDK serving 0.3); an agent on a 0.3 SDK sees
+  `{"value": [...]}`.
+- **0.3 agents send one A2UI message per part**, A2UI's Python reference shape. That shape passes both ways equal under
+  JCS, `metadata.mimeType` kept and nothing added (no `data_part_compat`). A 0.3 agent whose `data` is not an object
+  fails the task `upstream_error`: a2a-go cannot read the 0.3 answer ("the service sent a malformed response"), as any
+  malformed body (§6.4).
+- **`mediaType` does not cross a 0.3 hop**: 0.3's data part has no such field. A2UI's mark is `metadata.mimeType`, which
+  does.
+- **Rejected**: (a) splitting a caller's list into one part per message for a 0.3 agent: the gate would interpret A2UI
+  (D14), change the number of parts and misread every other list; (b) refusing a caller's non-object data part to a 0.3
+  service: it would break the agents on 1.x SDKs that read the compat form; (c) rewriting a 0.3 agent's bare list into
+  the compat form before a2a-go reads it: the gate would repair, by rewriting the upstream's body, what that agent's
+  own protocol forbids.
+- **The conflict**: A2UI's "MUST be an array" against A2A 0.3. On a 0.3 hop this follows A2A 0.3, as A2UI's own Python
+  reference does; the example seller, on A2A 1.0, sends the list.
+
+Tested: `TestDataPartsOn03` (`internal/upstream`: the 0.3 wire both ways, one message per part unchanged, the list
+wrapped and unwrapped, `mediaType` dropped, a bare list a protocol failure), `TestA2UIThroughA03Agent` (`internal/gate`,
+a whole replica and a 0.3 agent written by hand as a 0.3 SDK writes the wire: the activation echoed and sent as
+`X-A2A-Extensions`, the capabilities delivered, the agent's form equal under JCS on `SendMessage` and `GetTask` with
+HTML characters, non-ASCII text and `1e2`, the compat list reaching the caller as the list, the caller's action reaching
+the agent equal under JCS and its list in the compat form, a bare list failing `upstream_error`).
+
+### D328. `/mcp` `hire` does not carry A2UI: a known limit, with a proposal — **decided under the owner's standing instruction, 2 Nov** (records a limit of D272, D289 and D294; proposes D294's unbuilt argument again)
+
+`hire` takes `{service, message, contextId}` and `reply` `{taskId, message}`: no extension argument (D294 proposed
+`extensions: [uri]`; it was never built) and no message metadata. They activate only the operator's required extensions
+(D300). Their result renders data parts as JSON text and as `structuredContent.data` values, without their `mediaType`
+or `metadata` (D289, D324), from the final status message and the artifacts. A part of their `message` does keep its
+own `mediaType` and `metadata` (`mcp-tools.json` `$defs.part`; `internal/gatemcp` copies both onto the A2A part, and
+only Kontra's keys are removed, §2.5).
+
+Decision: a known limit, written down (relay.md §2.6, §12.2). What is missing is the client's side of the negotiation
+and the seller's mark on the way back: a seller that negotiates A2UI, as A2UI's own agents and the example do, never
+hears from a `hire` or `reply` that the client renders A2UI, so it answers as it answers a client that renders none; the
+example asks for its input schema's data part, which `reply` carries (tested), and a seller that sends A2UI regardless
+reaches the client as unmarked JSON values. The other direction is not missing: an A2UI action a client sends in a part
+marked `application/a2ui+json` reaches the seller marked, and the example books from it (tested). The first version of
+this entry, and of §2.6 and §12.2, said `hire` and `reply` carry no A2UI at all; the branch's review showed `reply`
+carries a marked part, and the three now say what is missing.
+
+Proposal, not built: it changes `hire`, `reply` and `hireResult` in `mcp-tools.json`, and a client that draws A2UI (a
+web console with A2UI's renderer) reaches the agent over the A2A route, which carries it, not through `/mcp`:
+
+1. `hire` and `reply` take `extensions: [uri]`, activating the optional URIs the served card declares, sent upstream as
+   §2.4's (D294's proposal).
+2. `hire` and `reply` take `metadata` for the A2A message, Kontra's keys removed as §2.5's, so a client can send
+   `a2uiClientCapabilities`.
+3. The result renders a data part marked `application/a2ui+json` (by `metadata.mimeType` or `mediaType`) as an MCP
+   embedded resource of that MIME type, as A2UI's MCP binding serves A2UI, and `hireResult` gains an optional `parts`
+   member keeping each part's `mediaType` and `metadata`; `structuredContent.data` stays as it is for the clients that
+   read it.
+
+Tested: `TestA2UIPassthrough`'s `/mcp` step (the seller asked in text, `structuredContent` without data; `reply` with
+the input schema's data part books; `reply` with the form's action in a part marked `application/a2ui+json` books a
+second hire).
+
+### D329. The A2UI example: a surface per task, deleted when the task ends; the version the client reads; formats checked — **decided under the owner's standing instruction, 2 Nov** (from the review of the A2UI branch; two conflicts with its proposals, one with A2UI's Python binding)
+
+The review of D326's example found that every task's form was the surface `booking`, never deleted. A2UI v0.9.1
+(`a2ui_protocol.md`) makes a `createSurface` for an id that already exists an error until it is deleted, and an A2UI
+session is the A2A context: a second task in a context drew nothing in a standard renderer (`@a2ui/web_core` 0.15.0's
+`MessageProcessor` answers `INTEGRITY_ERROR`, "Surface booking already exists."), and a booked task's form stayed live,
+its Book button sending to a task that had ended. The console only avoided it by deleting a surface before creating it
+again. It also found that a client listing only `v0.9` capabilities was sent `"version": "v0.9.1"`, which A2UI's v0.9
+schemas refuse (`"const": "v0.9"`), and that check-specs asserted no JSON Schema format, so an action's `timestamp` of
+`"yesterday"` passed.
+
+Decision (examples/sellers/a2ui; relay.md §2.6):
+
+- **A surface per task**: `booking-` and the agent's task id, unique in any context. The agent reads the booking, never
+  the action's `surfaceId`.
+- **The message that ends a task deletes its form**: a completed or canceled task that sent a form carries a second
+  A2UI part, `[{"version": <the form's>, "deleteSurface": {"surfaceId": <its id>}}]`, in the version the form was sent
+  in (read from the task's own history, since the message that ends it may come from a client that sends no
+  capabilities). A task that sent none ends with its text alone.
+- **The version is the client's**: `v0.9.1` when the client said it reads v0.9.1 (a `v0.9.1` capabilities entry that
+  lists the basic catalog, or the activation of the v0.9.1 URI, which A2UI's extension specification says means the
+  client "supports the v0.9.1 schema format"), `v0.9` otherwise. v0.9.1's schemas accept both; v0.9's differ from
+  them only in accepting `"v0.9"` alone (checked by diffing the two at A2UI `c1baa4e`), so the v0.9 form is the
+  fixture with its versions changed, which the Go tests check.
+- **The mark stays `application/a2ui+json` in either version**, as A2UI's Node sample agent sends its v0.9 messages
+  (`samples/agent/node/restaurant_finder/src/versions.ts`) and A2UI's Lit sample client, which lists only `v0.9`,
+  marks its actions. **Conflict**: A2UI's Python binding (`a2ui_a2a` `create_a2ui_part`) marks a v0.9 message with
+  the legacy `application/json+a2ui`; this follows the samples, since a client of A2UI's own that reads only the new
+  name exists and every reader we know of (the Python binding, the console) takes both.
+- **Conflict with the review's version rule**, which wrote `v0.9.1` only for a `v0.9.1` entry or an activation
+  *without* capabilities: an activation of the v0.9.1 URI beside capabilities under `v0.9` alone also gets `v0.9.1`.
+  A2UI v0.9.1's own capabilities schema defines only the `v0.9` key (and requires it), and A2UI's Python agents read
+  that key for v0.9.1, so a v0.9.1 client may list only `v0.9`; its activation is what says it reads v0.9.1.
+- **Conflict with the review's optional step**, which the review left optional: the `deleteSurface` is sent, not
+  only the per-task id, so no ended task's form stays live.
+- **Formats are asserted**: check-specs §6 validates with `jsonschema`'s format checker, as A2UI's own test runner
+  does with `ajv-formats`; `make check-specs` installs `rfc3339-validator` 0.1.4, without which `jsonschema` checks no
+  date-time and §6 fails. `invalid/action.bad-timestamp.json` and `invalid/input-schema-data.bad-date.json` are
+  refused by the format alone.
+
+Tested: the example's `TestSurfacePerTask` (two tasks in one context on two surfaces; the form in v0.9; the action,
+with no capabilities, deleting the first in v0.9; `CancelTask` deleting the second), `TestNegotiation` (each case's
+version), `TestFormThenAction`, `TestCorrections` and `TestCancel` (the `deleteSurface`, or none for a task asked in
+text), `testdata/messages/delete.json` under check-specs; `TestA2UIPassthrough` (the form on a surface of its task's
+own through the gate, two tasks on two surfaces, the `deleteSurface` on both bindings, the form in v0.9 for
+capabilities under `v0.9` alone). By hand: both forms of one context and the `deleteSurface` fed to one
+`@a2ui/web_core` 0.15.0 `MessageProcessor` with no error, and the v0.9 form valid under A2UI's v0.9 schemas.

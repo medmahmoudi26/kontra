@@ -1,0 +1,178 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "booking-{taskId}"
+    },
+    "version": "v0.9.1"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "children": [
+            "title",
+            "name",
+            "guests",
+            "date",
+            "book"
+          ],
+          "component": "Column",
+          "id": "root"
+        },
+        {
+          "component": "Text",
+          "id": "title",
+          "text": "Book a table",
+          "variant": "h2"
+        },
+        {
+          "checks": [
+            {
+              "condition": {
+                "args": {
+                  "value": {
+                    "path": "/booking/name"
+                  }
+                },
+                "call": "required"
+              },
+              "message": "A name is required."
+            }
+          ],
+          "component": "TextField",
+          "id": "name",
+          "label": "Name for the booking",
+          "value": {
+            "path": "/booking/name"
+          }
+        },
+        {
+          "component": "ChoicePicker",
+          "id": "guests",
+          "label": "Guests",
+          "options": [
+            {
+              "label": "1 guest",
+              "value": "1"
+            },
+            {
+              "label": "2 guests",
+              "value": "2"
+            },
+            {
+              "label": "3 guests",
+              "value": "3"
+            },
+            {
+              "label": "4 guests",
+              "value": "4"
+            },
+            {
+              "label": "5 guests",
+              "value": "5"
+            },
+            {
+              "label": "6 guests",
+              "value": "6"
+            }
+          ],
+          "value": {
+            "path": "/booking/guests"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "checks": [
+            {
+              "condition": {
+                "args": {
+                  "value": {
+                    "path": "/booking/date"
+                  }
+                },
+                "call": "required"
+              },
+              "message": "A date and time are required."
+            }
+          ],
+          "component": "DateTimeInput",
+          "enableDate": true,
+          "enableTime": true,
+          "id": "date",
+          "label": "Date and time",
+          "value": {
+            "path": "/booking/date"
+          }
+        },
+        {
+          "component": "Text",
+          "id": "book_label",
+          "text": "Book"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "date": {
+                  "path": "/booking/date"
+                },
+                "guests": {
+                  "path": "/booking/guests"
+                },
+                "name": {
+                  "path": "/booking/name"
+                }
+              },
+              "name": "book"
+            }
+          },
+          "checks": [
+            {
+              "condition": {
+                "args": {
+                  "value": {
+                    "path": "/booking/name"
+                  }
+                },
+                "call": "required"
+              },
+              "message": "A name is required."
+            },
+            {
+              "condition": {
+                "args": {
+                  "value": {
+                    "path": "/booking/date"
+                  }
+                },
+                "call": "required"
+              },
+              "message": "A date and time are required."
+            }
+          ],
+          "child": "book_label",
+          "component": "Button",
+          "id": "book",
+          "variant": "primary"
+        }
+      ],
+      "surfaceId": "booking-{taskId}"
+    },
+    "version": "v0.9.1"
+  },
+  {
+    "updateDataModel": {
+      "path": "/booking",
+      "surfaceId": "booking-{taskId}",
+      "value": {
+        "date": "",
+        "guests": [
+          "2"
+        ],
+        "name": ""
+      }
+    },
+    "version": "v0.9.1"
+  }
+]

@@ -4,7 +4,8 @@
 // it as it is. Otherwise the package starts one development server per test binary from the pinned CLI
 // (KONTRA_TEMPORAL_CLI, else `temporal` on PATH, which must report Server 1.32; spec §0 pins the server)
 // on free loopback ports, in memory, and stops it when the binary's TestMain calls Stop (or when the test
-// process dies: the server runs with a parent-death signal). At most one runs at a time, which is what
+// process dies: the server runs with a parent-death signal). The server is handed out once a workflow has run
+// on it end to end (warm). At most one runs at a time, which is what
 // `go test -p 1` gives. Under -short every caller is skipped; without -short a missing CLI fails the test
 // rather than skipping it, so a run that tested nothing cannot read as a pass.
 package temporaltest
@@ -26,8 +27,11 @@ import (
 	"testing"
 	"time"
 
+	enums "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
 	tlog "go.temporal.io/sdk/log"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 )
 
 // Env names an existing server, host:port; CLIEnv the temporal CLI to start a development server with.
@@ -161,17 +165,70 @@ func start() (string, *exec.Cmd, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	for {
-		if err := ready(ctx, addr); err == nil {
-			return addr, cmd, nil
+		err := ready(ctx, addr)
+		if err == nil {
+			if err = warm(ctx, addr); err == nil {
+				return addr, cmd, nil
+			}
 		}
 		select {
 		case <-ctx.Done():
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
-			return "", nil, fmt.Errorf("the development server on %s did not become ready: %s", addr, stderr.String())
+			return "", nil, fmt.Errorf("the development server on %s did not become ready: %v: %s", addr, err, stderr.String())
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
+}
+
+// warmName is the warm-up workflow's type, task queue and id, and its Update's name: nothing a test uses.
+const warmName = "temporaltest-warmup"
+
+// warm runs one workflow end to end on the server: started with an Update (UpdateWithStart, as the lifecycle
+// starts a task), its Update completed and the workflow closed, through a worker of its own. The frontend's health
+// and the namespace (ready) say only that the frontend has joined the cluster: history may not own its shards yet
+// and matching may not serve a task queue, and a worker whose first polls fail backs off (the SDK's poll retry
+// grows from 200 ms to 10 s), so a test's first Update could spend lifecycle.AcceptWait (10 s) on the server's own
+// start, which a CI runner did once (TestStreamsOverTheRealStack, "the task's lifecycle did not answer in time").
+// After a workflow has run, a test's workers poll a server that serves.
+func warm(ctx context.Context, addr string) error {
+	c, err := client.DialContext(ctx, client.Options{HostPort: addr, Namespace: Namespace, Logger: quiet()})
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	w := worker.New(c, warmName, worker.Options{})
+	w.RegisterWorkflowWithOptions(func(ctx workflow.Context) error {
+		updated := false
+		if err := workflow.SetUpdateHandler(ctx, warmName, func(workflow.Context) error {
+			updated = true
+			return nil
+		}); err != nil {
+			return err
+		}
+		return workflow.Await(ctx, func() bool { return updated })
+	}, workflow.RegisterOptions{Name: warmName})
+	if err := w.Start(); err != nil {
+		return err
+	}
+	defer w.Stop()
+	op := c.NewWithStartWorkflowOperation(client.StartWorkflowOptions{
+		ID: warmName, TaskQueue: warmName, WorkflowIDConflictPolicy: enums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+	}, warmName)
+	h, err := c.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
+		StartWorkflowOperation: op,
+		UpdateOptions:          client.UpdateWorkflowOptions{UpdateName: warmName, UpdateID: warmName, WaitForStage: client.WorkflowUpdateStageCompleted},
+	})
+	if err != nil {
+		return fmt.Errorf("warm-up update: %w", err)
+	}
+	if err := h.Get(ctx, nil); err != nil {
+		return fmt.Errorf("warm-up update: %w", err)
+	}
+	if err := c.GetWorkflow(ctx, warmName, "").Get(ctx, nil); err != nil {
+		return fmt.Errorf("warm-up workflow: %w", err)
+	}
+	return nil
 }
 
 // ready reports whether the server answers in the kontra namespace.

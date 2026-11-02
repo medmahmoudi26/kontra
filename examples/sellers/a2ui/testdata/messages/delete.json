@@ -1,0 +1,8 @@
+[
+  {
+    "deleteSurface": {
+      "surfaceId": "booking-{taskId}"
+    },
+    "version": "v0.9.1"
+  }
+]

@@ -455,7 +455,12 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 				if err != nil {
 					return err
 				}
-				*res = *out
+				// Response edits res in place and returns it; on an event stream it has already started the goroutine
+				// that reads res's body, whose trailerStripper reads res.Trailer. Copying res onto itself would write
+				// every field under that reader (a data race, though the values do not change).
+				if out != res {
+					*res = *out
+				}
 				return nil
 			}
 		}

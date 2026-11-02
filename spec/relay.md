@@ -308,6 +308,50 @@ the operator may assert: approve URLs, escrow state, failure reasons, prices, se
 
 The gate itself names no escrow key: the escrow keys belong to the operator and its extension spec (D51).
 
+### 2.6 Extensions the gate does not own: A2UI
+
+An extension whose URI neither the gate nor the operator asserts (§3) — a seller's own, `input-schema/v1`
+([`ext-input-schema.md`](ext-input-schema.md)), A2UI (`https://a2ui.org/a2a-extension/a2ui/v0.9.1`, `…/v1.0`) — passes
+through as A2A carries it; the gate interprets none of it (D14, D326). For A2UI, whose agents send a user interface as
+A2UI messages in data parts marked `metadata.mimeType: "application/a2ui+json"` and whose clients answer with an
+`action` in a data part marked the same way:
+
+- **Card.** The seller's entry is served as written (§3), `params` (`supportedCatalogIds`) included, under §3's key
+  rules (D311).
+- **Activation.** As §2.4 says: a URI the served card declares is activated and echoed in the response's
+  `A2A-Extensions`, and sent upstream when the upstream card declares it (as `X-A2A-Extensions` to a 0.3 upstream,
+  §6.2). Activating A2UI is optional for its clients, which also say what they render in message metadata.
+- **Parts and metadata.** Data parts with their `metadata` and `mediaType`, and message and request metadata (A2UI's
+  `a2uiClientCapabilities`, `a2uiClientDataModel`), are relayed on both bindings, on streams and in `GetTask`; only
+  Kontra's keys are removed (§2.5). The gate decodes and re-encodes every part (a2a-go's types, then the log), so a
+  part's `data` and `metadata` reach the other side equal under RFC 8785 (JCS), not byte for byte: member order,
+  number spelling and string escapes may change, and an integer beyond 2^53 becomes the nearest double, as JCS reads
+  it.
+- **Size.** Each part is measured alone (§10.4; a data part by its JSON). A part over 256 KiB is stored in the bucket
+  and is no longer a data part: a caller, and an agent behind a direct backend, receive a `url` part (a presigned
+  URL), and a tunnel-hosted agent a `raw` part holding the JSON's bytes, each keeping the part's `metadata` and
+  `mediaType` (`application/json` when it had none); without a bucket the caller's request is refused and an agent's
+  part fails the task. An A2UI renderer draws neither, so an agent keeps each A2UI part under 256 KiB, splitting a
+  large surface's messages across parts (A2UI processes them in order).
+- **A2A 0.3 agents (D327).** A2A 0.3's `DataPart.data` is a JSON object. One A2UI message per part, the shape A2UI's
+  Python reference sends, passes both ways as above. A value that is not an object (A2UI's list of messages) goes to a
+  0.3 agent as `{"value": <the value>}` with `metadata.data_part_compat: true`, the convention both official SDKs'
+  0.3 layers write and read back (a2a-go v2, a2a-python 1.x); an agent's part in that form reaches the caller as the
+  value, without the flag. A data part's `mediaType` has no 0.3 field and does not reach a 0.3 agent. A 0.3 agent
+  whose data is not an object breaks 0.3: a2a-go cannot read its answer, and the task fails `upstream_error` (§6.4).
+  So a 0.3 agent sends one A2UI message per part, and a caller that wants its action read by a 0.3 agent built on a
+  0.3 SDK sends it so too.
+- **Sealed services.** Only a part's content is sealed; `metadata`, A2UI's mark included, stays readable
+  ([`ext-sealed.md`](ext-sealed.md) §2). A sealed A2A service needs an A2A 1.0 agent (ext-sealed.md §1).
+- **What does not carry it.** The gate serves A2A 1.0 only (§2.4): a client on A2A 0.3, such as A2UI's reference web
+  clients on `@a2a-js/sdk` 0.3, cannot call it as it is. `/mcp`'s `hire` and `reply` cannot activate A2UI nor send
+  message metadata, so a seller that negotiates never sends them its form, and their result drops a part's marks; a
+  part they send keeps its own `metadata` and `mediaType`, so an action reaches the seller marked (§12.2, D328).
+
+[`examples/sellers/a2ui`](../examples/sellers/a2ui/README.md) is an A2UI seller (A2A 1.0, the basic catalog, a booking
+form on a surface of each task's own, in the A2UI version the client reads, deleted when the task ends: D329), and
+`a2ui_passthrough` (§16) runs it through two replicas.
+
 ## 3. The served A2A card
 
 The gate fetches the service's card through the backend (`GET /.well-known/agent-card.json`, then
@@ -901,7 +945,8 @@ Every other operator URL (a `seller_keys` URL, §3) follows the dialer above (D6
 
 ### 10.4 Parts and size
 
-Parts up to 256 KiB (measured on the decoded bytes, before base64; for a sealed part, its ciphertext) are
+Parts up to 256 KiB (measured on the decoded bytes, before base64; for a sealed part, its ciphertext; for a data
+part, its JSON: an A2UI part over the limit is no longer a data part, §2.6) are
 stored inline in `task_events.payload`. Larger ones go to the bucket (`blobs:` in `kontra.yaml`), and the event's
 payload carries each as a `url` part `kontra-blob:<ref>`, a name that is never dialed; the `blobs` table maps each
 ref to its task, since one `payload_ref` column cannot name the several large parts of one message (D167). They
@@ -1548,6 +1593,12 @@ the route to use (`/mcp/…`; the service's A2A URL through a node, which seals)
   the sealed extension whoever asserts it, is answered as above with the text naming the service's A2A URL and the
   URIs to activate there; a `reply` to a task of such a service is refused the same way, nothing sent.
 
+An optional extension is never activated by `hire` or `reply`, whose messages carry no message metadata either, and
+the hire result keeps a data part's value without its `mediaType` or `metadata` (a known limit, D328). So a seller that
+negotiates A2UI, as A2UI's own do, answers them as it answers a client that renders none, and A2UI a seller sends
+regardless reaches the client as unmarked JSON. A part of their `message` keeps its own `mediaType` and `metadata`:
+an A2UI action in a part marked `application/a2ui+json` reaches the seller marked.
+
 **What `/mcp` serves (D303).** `search`, `describe` and `hire` see exactly the services the replica serves on its A2A
 route and `/mcp/{svc}`: an enabled row its registry has loaded, admitted by the registry's `allow:`. A row the
 registry refused to build (an `allow:` or an annotation it cannot read) is left out of `search` and logged, never
@@ -2069,6 +2120,7 @@ met, are D297.
 | `mcp_tool_denied` | §11.3 |
 | `mcp_batch_refused` | §11.1: an array of two `tools/call`, one to a denied tool, is `400` with no upstream traffic |
 | `mcp_case_smuggling` | §11.1: a `tools/call` carrying `"method"` and `"METHOD"`, `"name": "echo"` (denied) and `"NAME": "add"`, a repeated `name`, or a repeated or case-variant key in `params._meta` or at the top level of `arguments`, is `400` with `-32600` and reaches no upstream, Admission or `calls` row; an upstream result `{"isError": true, "ISERROR": false}` is not relayed (`502`, `-32603`) and its `calls` row has `is_error` true |
+| `a2ui_passthrough` | §2.6 (D326, D328, D329): the A2UI example seller hosted through the tunnel, the caller on the other replica, A2A 1.0 only: the served card keeps the seller's A2UI and input-schema entries equal under JCS; a `SendMessage` activating A2UI has the URI echoed and waits at `input-required` with the seller's form, its A2UI part equal to the example's fixture (which `make check-specs` validates against the vendored A2UI v0.9.1 schemas) in v0.9.1 on a surface of the task's own, with its mark, on `SendMessage`, `GetTask` and an HTTP+JSON stream, two tasks' forms on two surfaces; the form's action through the other replica completes the task with the seller's summary and the form's `deleteSurface`; capabilities in the message metadata alone (under `v0.9`) reach the seller, which sends the form in v0.9; without either the seller asks in text; `/mcp` `hire` gets the text, and `reply` with the input schema's data part books, as does `reply` with the form's action in a part marked `application/a2ui+json` |
 | `a2a_case_smuggling` | §2.4: a JSON-RPC `SendMessage` carrying `"method"` and `"METHOD"`, `"tenant"` and `"TENANT"` in `params`, or a part with two `mediaType` keys, is `-32600` with HTTP `400`, before any task row |
 | `mcp_meta_spoof` | §2.5: an upstream's `sh.kontra/price`, `sh.kontra/escrow`, `sh.kontra/approve-url` and `capabilities.experimental["sh.kontra/sealed"]` never reach a client; an A2A upstream's `kontra.approve.url` and `kontra.escrow.*` never reach a caller; `_meta["sh.kontra/sealed"]` on an `elicitation/create` of a service without `sealed` is removed, and on a sealed service only an exact `{v, envelope}` reaches the client |
 | `mcp_task_resume` | §11.9: a replica killed during a task-augmented call; `tasks/result` still returns on the other replica, with the task's result if the killed replica held only the client's connection, with the §11.8 form of `failed: tunnel_lost` if it held the tunnel and the upstream task already existed. It never hangs. Modern variant (§11.12, D178): the tunnel killed after the upstream answered the dispatch's `tools/call` with an `InputRequiredResult` fails the task `tunnel_lost`, which `tasks/get` shows on either replica, and the upstream never receives that `tools/call` again |
