@@ -49,8 +49,12 @@ const ServerVersion = "Server 1.32"
 var (
 	mu      sync.Mutex
 	started *exec.Cmd
+	exited  <-chan struct{} // closed once started has exited (its Wait has returned)
 	address string
 )
+
+// errExited is a development server that exited before it was ready.
+var errExited = errors.New("the development server exited at start")
 
 // Address returns the server's host:port, starting the development server on first use. It skips under
 // -short and fails the test when no server can be had.
@@ -67,12 +71,25 @@ func Address(t testing.TB) string {
 	if address != "" {
 		return address
 	}
-	a, cmd, err := start()
-	if err != nil {
-		t.Fatalf("temporaltest: %v", err)
+	// A server that exits while it starts (its own port choice colliding with another process, say) is
+	// started again on fresh ports, three times at most, as test/e2e's harness does.
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		var (
+			a    string
+			cmd  *exec.Cmd
+			done <-chan struct{}
+		)
+		if a, cmd, done, err = start(); err == nil {
+			address, started, exited = a, cmd, done
+			return address
+		}
+		if !errors.Is(err, errExited) {
+			break
+		}
 	}
-	address, started = a, cmd
-	return address
+	t.Fatalf("temporaltest: %v", err)
+	return ""
 }
 
 // Client dials the server's kontra namespace; it is closed when the test ends.
@@ -99,18 +116,13 @@ func Stop() {
 		return
 	}
 	_ = started.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() {
-		_ = started.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case <-exited:
 	case <-time.After(10 * time.Second):
 		_ = started.Process.Kill()
-		<-done
+		<-exited
 	}
-	started, address = nil, ""
+	started, exited, address = nil, nil, ""
 }
 
 func cli() (string, error) {
@@ -132,25 +144,43 @@ func cli() (string, error) {
 	return path, nil
 }
 
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
+// freePorts returns n distinct free loopback ports, reserved for the minute that follows, as test/e2e's
+// freePorts does. Every probe listener stays open until all n are chosen, and each port is left in
+// TIME_WAIT by a connection its listening side closes first: for a minute the kernel then gives it to no
+// other bind(:0), such as the development server's own choice of ports for its history, matching and worker
+// services, while the server's explicit bind still succeeds. A port closed plainly could come back to the
+// server that way: its worker failed to bind the frontend's port and the server exited (CI, 3 Nov).
+func freePorts(n int) ([]int, error) {
+	ports := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return nil, err
+		}
+		defer l.Close()
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			return nil, err
+		}
+		defer c.Close() // after the accepted side: the listening side closes first
+		a, err := l.Accept()
+		if err != nil {
+			return nil, err
+		}
+		a.Close()
+		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
 	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port, nil
+	return ports, nil
 }
 
-func start() (string, *exec.Cmd, error) {
+func start() (string, *exec.Cmd, <-chan struct{}, error) {
 	path, err := cli()
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	var ports [3]int
-	for i := range ports {
-		if ports[i], err = freePort(); err != nil {
-			return "", nil, err
-		}
+	ports, err := freePorts(3)
+	if err != nil {
+		return "", nil, nil, err
 	}
 	addr := "127.0.0.1:" + strconv.Itoa(ports[0])
 	cmd := exec.Command(path, "server", "start-dev", "--headless", "--ip", "127.0.0.1",
@@ -160,22 +190,30 @@ func start() (string, *exec.Cmd, error) {
 	cmd.Stdout, cmd.Stderr = io.Discard, &stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL, Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		return "", nil, fmt.Errorf("start %s: %w", path, err)
+		return "", nil, nil, fmt.Errorf("start %s: %w", path, err)
 	}
+	done := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(done)
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	for {
 		err := ready(ctx, addr)
 		if err == nil {
 			if err = warm(ctx, addr); err == nil {
-				return addr, cmd, nil
+				return addr, cmd, done, nil
 			}
 		}
 		select {
+		case <-done:
+			// stderr is complete once Wait has returned.
+			return "", nil, nil, fmt.Errorf("%w (%s): %v: %s", errExited, addr, err, stderr.String())
 		case <-ctx.Done():
 			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-			return "", nil, fmt.Errorf("the development server on %s did not become ready: %v: %s", addr, err, stderr.String())
+			<-done
+			return "", nil, nil, fmt.Errorf("the development server on %s did not become ready: %v: %s", addr, err, stderr.String())
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
