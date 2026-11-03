@@ -28,14 +28,15 @@ Times are UTC.
 |---|---|---|---|
 | [`tck_*` green bar with expected failures](#the-tck-tck_) | **Green in CI** on pull request #8, [`tck` run 41243927553](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553): the direct, tunnel and caddy jobs, both bindings each, 0 failed, 0 xpassed, every listed expected failure xfailed and every listed skip skipped ([per variant](#in-ci-on-the-pull-request)). **Green on this host** before, for the same three variants | `3b890f3` (this host), **`4a53750`** (CI; the merge commit's tree) | nothing: the nightly `auth` variant's first run passed ([below](#the-nightly-auth-variant)) |
 | [`anon_limits`](#anon_limits) | **Passed**: `TestAnonLimits` on its own with `-v`, and in the second review's full `make test-e2e` on the same tree; then in CI's `e2e` workflow on pull request #8 (`--- PASS: TestAnonLimits (64.33s)`) | `3b890f3`, **`4a53750`** (CI) | nothing |
-| Demo from a clean laptop against staging ([staging](#the-staging-gate-gatewaykontrarun), [the laptop](#the-clean-laptop-against-staging)) | **Passed** in source mode against the staging gate deployed from `3b890f3`, and **passed in published mode at the merge commit** ([the published run](#the-published-run-at-the-merge-commit)): `go install kontra.sh/kontra/cmd/kontra@latest` installed `v0.0.0-20261031215600-4831e40fc393`, against the staging gate [redeployed from `4831e40`](#redeployed-from-the-merge-commit); commands 1 to 10 and the host checks passed, exit 0 | `3b890f3` (source), **`4831e40`** (published; the laptop and the staging gate) | **An anonymous tenant's purge observed on staging**: `gate-v4` was retired before its tenants' purge fell due, so the observation moved to staging's current gate, due 2026-11-02 23:43:01Z ([the purge](#the-purge-after-gate-v4s-retirement)) |
+| Demo from a clean laptop against staging ([staging](#the-staging-gate-gatewaykontrarun), [the laptop](#the-clean-laptop-against-staging)) | **Passed** in source mode against the staging gate deployed from `3b890f3`, and **passed in published mode at the merge commit** ([the published run](#the-published-run-at-the-merge-commit)): `go install kontra.sh/kontra/cmd/kontra@latest` installed `v0.0.0-20261031215600-4831e40fc393`, against the staging gate [redeployed from `4831e40`](#redeployed-from-the-merge-commit); commands 1 to 10 and the host checks passed, exit 0 | `3b890f3` (source), **`4831e40`** (published; the laptop and the staging gate) | nothing: **an anonymous tenant's purge was observed on staging** at 2026-11-02 23:43:09Z, 8 s after it fell due ([the purge, observed](#the-purge-observed-2-nov)) |
 | [Team gate up on a clean VPS](#the-team-gate-on-a-clean-vps) | **Failed at `3b890f3`** at `docker compose up -d --build --wait`, on a defect of `compose.yaml` (two services built one image tag, which races on a fresh Ubuntu 24.04's containerd image store). **Passed at `f9f5e61`** with D313's fix: one build on Docker 29.1.3's containerd store, a Let's Encrypt certificate, a hire and an MCP `search` through the gate from another machine. Both droplets were torn down and the teardowns checked | `3b890f3` (failed), **`f9f5e61` (passed)** | nothing |
 
 Every gate item has a passing run, and D306's condition on the merge, the published clean-laptop run at the merge
-commit, passed at `4831e40` (22:05:54Z–22:08:42Z) against staging redeployed from it. **One item of D306's list is
-still open**: an anonymous tenant's purge, observed on a running staging gate. `gate-v4` was retired (M5 PR-7) before
-its first tenant's purge fell due, so the observation moved to staging's current gate; it falls due at 2026-11-02
-23:43:01Z ([the purge](#the-purge-after-gate-v4s-retirement)). M4 is gated when it is confirmed. The nightly `auth`
+commit, passed at `4831e40` (22:05:54Z–22:08:42Z) against staging redeployed from it. **M4 is fully gated**: D306's
+last item, an anonymous tenant's purge observed on a running staging gate, was confirmed on 2 Nov. `gate-v4` was
+retired (M5 PR-7) before its first tenant's purge fell due, so the observation moved to staging's current gate, where
+`anon-835027ae5bdf23d3` was purged at 23:43:09Z, 8 s after it fell due, leaving its tombstone and no other row
+([the purge, observed](#the-purge-observed-2-nov)). The nightly `auth`
 variant's first run passed ([below](#the-nightly-auth-variant)). Production, `gateway.kontra.sh`, has run the merge commit since
 21:58:48Z ([below](#production-gatewaykontrash-at-4831e40)).
 
@@ -231,8 +232,9 @@ $ kubectl -n kontra-staging exec statefulset/gate-v4-pg -- psql -U kontra -d kon
 `created_from` is the /24 of the build host's public IPv4 (`'<host>'::inet <<= created_from` true) and does not
 overlap `10.0.0.0/8` (false): Traefik's PROXY v2 header carried the client's address to the gate, not the cluster's.
 It was the only tenant on the gate, and the run used one of the three anonymous sessions a /24 may open in two hours.
-The tenant expired at 21:28:21Z; the gate purges it 24 h later (`purge_after`), leaving a tombstone, which is still
-to be confirmed ([below](#the-anonymous-tenants-after-the-merge)).
+The tenant expired at 21:28:21Z; the gate purges it 24 h later (`purge_after`), leaving a tombstone. That purge never
+ran, because `gate-v4` was retired before it fell due; the purge was observed on another tenant
+([below](#the-purge-observed-2-nov)).
 
 ### The published run, at the merge commit
 
@@ -328,7 +330,8 @@ $ … psql … -c "select now() as db_now, slug, kind, created_from, created_at,
 at 2026-11-01 21:28:21Z. It still had 2 services, 1 tunnel key, 0 tunnels and 0 rows in `anon_calls`. At 22:09:15Z,
 after the published run, the gate held exactly these two tenants, both anonymous from the same /24, neither with a
 live tunnel or `deleted_at` set; `anon-0d0d079ae3f6c7a5` expires at 2026-11-01 00:07:49Z and is due for purge at
-2026-11-02 00:07:49Z. The purge of `anon-2d1d2dc15fff9177` is still to be confirmed ([below](#what-is-still-to-do)).
+2026-11-02 00:07:49Z. The purge of `anon-2d1d2dc15fff9177` never ran: `gate-v4` was retired first; another tenant's purge was observed
+instead ([below](#the-purge-observed-2-nov)).
 
 ## The TCK (`tck_*`)
 
@@ -691,11 +694,8 @@ CI's `e2e` on the same pull request; production deployed from the merge commit; 
 `gate-v4`'s images changed; healthz, the certificate and Traefik's secrets checked); and the published clean-laptop run
 at it, which passed with `kontra version` naming the merge commit.
 
-Still to do:
-
-1. **An anonymous tenant's purge** (D306's last item), on staging's current gate: `anon-835027ae5bdf23d3` must show
-   `deleted_at` set after 2026-11-02 23:43:01Z ([the purge](#the-purge-after-gate-v4s-retirement)). M4 is gated when
-   this is confirmed.
+Still to do: **nothing**. D306's last item, an anonymous tenant's purge on staging's current gate, was observed on
+2 Nov ([the purge, observed](#the-purge-observed-2-nov)): M4 is fully gated.
 
 ### The purge after `gate-v4`'s retirement
 
@@ -711,5 +711,31 @@ clean-up. The purge itself is covered by `internal/anon`'s `TestPurgeLeavesTheTo
 To observe it on a running gate, an anonymous session was opened on staging's current gate at 2026-11-01 21:43Z from
 this host (`kontra connect --gate https://gateway.kontra.run --serve a2a:hello=… --public hello --listen off`, the CLI
 at `9f97492`): tenant `anon-835027ae5bdf23d3`, its public card served at
-`https://gateway.kontra.run/agents/anon-835027ae5bdf23d3/hello`, the session ending at 23:43:01Z. Its purge falls due at
-2026-11-02 23:43:01Z and is checked after that.
+`https://gateway.kontra.run/agents/anon-835027ae5bdf23d3/hello`, the session ending at 23:43:01Z. Its purge fell due at
+2026-11-02 23:43:01Z.
+
+### The purge, observed (2 Nov)
+
+Checked read-only at 23:57Z on 2 Nov, on the gate's database in staging's CNPG cluster (namespace `kontra-staging-db`,
+cluster `pg`, primary `pg-1`, database `gate`, schema `kontra`: the chart's `gate-config` names
+`pg-rw.kontra-staging-db.svc`), with `PGOPTIONS='-c default_transaction_read_only=on'`:
+
+```
+$ kubectl -n kontra-staging-db exec pg-1 -c postgres -- env PGOPTIONS='-c default_transaction_read_only=on' psql -d gate -At -c "select * from kontra.tenants where slug='anon-835027ae5bdf23d3'"
+01a19910-dc76-7903-babf-97f7baa794c9 | anon-835027ae5bdf23d3 | anonymous | 2026-11-01 21:43:01.485921+00 | 2026-11-01 23:43:01.485921+00 | <the build host's /48> | 2026-11-02 23:43:09.398762+00
+```
+
+- **The tombstone**: the tenant's row stays, with `deleted_at` 2026-11-02 23:43:09.398762Z, 8 s after `expires_at` +
+  `purge_after` (24 h).
+- **Nothing else is left**: 0 rows for its `tenant_id` in every table of schema `kontra` that has one (`anon_calls`,
+  `api_keys`, `blobs`, `calls`, `enrollment_tokens`, `key_services`, `mcp_sessions`, `services`, `tasks`,
+  `tunnel_keys`, `tunnels`), and 0 `tunnel_keys` rows for its node's key `k1_e3cegs2rnbd3wdu6ban3ipyi4p`.
+- **The audit chain** holds the tenant's three events: `tunnel.anonymous_session` (n 24, 2026-11-01 21:43:01Z),
+  `tunnel.anonymous_expired` (n 26, 23:43:04Z, services `hello`) and `tunnel.anonymous_purged` (n 30,
+  2026-11-02 23:43:09Z, `keys` 1).
+- **The gate's log** (replica `gate-5c5dffbdfb-9zc75`): `anonymous purge sweep: expired anonymous tenants purged`,
+  `tenants` 1, at 23:43:09.44Z.
+- **From outside**: `https://gateway.kontra.run/agents/anon-835027ae5bdf23d3/hello/.well-known/agent-card.json`
+  answers 404.
+- No anonymous tenant on the gate is past its purge without a tombstone (`kind='anonymous' and deleted_at is null and
+  expires_at < now() - interval '24 hours'`: 0).

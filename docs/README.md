@@ -55,8 +55,9 @@ and `test/vps` test both (`make test-kits` with Docker rehearses each against a 
 WP-09, recorded in [`gate-runs-m4.md`](gate-runs-m4.md) (31 Oct) with each gate item's verdict and commit: the staging
 gate `gateway.kontra.run` is deployed, and the clean laptop, the TCK and `anon_limits` passed at `3b890f3`; the VPS run
 failed there on a defect of `compose.yaml` (two services build one image tag) and, with its fix (D313), passed at
-`f9f5e61`. The `tck` workflow's first CI run, staging's redeploy from the merge commit, the published laptop run and
-the anonymous tenant's purge are still to do (D306).
+`f9f5e61`. After the merge, D306's list passed too: the `tck` workflow's first CI run, staging's redeploy from the
+merge commit, the published laptop run at `4831e40`, and an anonymous tenant's purge observed on staging (2 Nov): M4 is
+fully gated.
 
 ## Hiring from another agent (decided 25 Oct)
 
