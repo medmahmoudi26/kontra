@@ -5623,3 +5623,35 @@ text), `testdata/messages/delete.json` under check-specs; `TestA2UIPassthrough` 
 own through the gate, two tasks on two surfaces, the `deleteSurface` on both bindings, the form in v0.9 for
 capabilities under `v0.9` alone). By hand: both forms of one context and the `deleteSurface` fed to one
 `@a2ui/web_core` 0.15.0 `MessageProcessor` with no error, and the v0.9 form valid under A2UI's v0.9 schemas.
+
+## From an operator's report on adding a service (4 Nov)
+
+An operator whose node served two services on Kontra Cloud added a third `--serve` and was refused `service_denied`
+("the key is not enrolled for it; nothing was enrolled"). Their only token had been used two days earlier, so they
+passed a gate API key and then a Cloud account key as `--enroll`, and both were refused as "not an enrollment token
+(… from `kontra-gate enroll <service>`)", which names a command no Cloud user has. Nothing documented how to add a
+service to a node that already serves others. D330 settles it, **decided under the owner's standing instruction, 4
+Nov**.
+
+### D330. `kontra connect` names the credential it was given, and says how to add a service; the README documents both — **decided under the owner's standing instruction, 4 Nov** (no change to the protocol or to the gate)
+
+Decision (internal/node; README's Credentials and Add a service to a node):
+
+- **`--enroll` names what it was given**, by prefix, and never prints the value: `kk_` is a gate API key, whose place
+  is `--api-key` and which enrolls a node only with an `enroll:` scope, for services that already exist (§5);
+  `kontra_sk_` is a Kontra Cloud account key, for Cloud's control plane, which the gate never takes. Every refusal says
+  where tokens come from on both kinds of gate: Kontra Cloud's console (Network, Add a node or the node's Add a
+  service) and `kontra-gate enroll <service>` on a self-hosted gate. `New` refuses with the same words.
+- **The hint.** When a handshake is refused `service_denied` and the message names declared services as "<name>: the
+  key is not enrolled for it" (`internal/enroll`'s step 8), the node logs once how to add them: a token naming them,
+  then the same command with `--enroll <token>` and every `--serve`; the key keeps its bindings, and when nothing else
+  was denied, the command without the new `--serve` flags serves the others meanwhile. The node reads the gate's
+  words rather than a new field, since `service_denied` carries only a message (§4) and the rule is no protocol
+  change; only names the hello declared are printed back. `TestRealAdmissionAddAService` holds the words to the real
+  admission, so a change of them fails a test instead of silencing the hint.
+- **What the README says**, each checked against §5, §11, §13 and relay.md §6.4: a binding belongs to the key, not
+  the token, so a used token needs no replacing and a token naming only the new service, with every `--serve`, adds it
+  (the test above runs exactly that against the real admission); the restart ends the node's running tasks
+  `tunnel_lost`, and a task arriving meanwhile is retried `no_session` within `task.retries`; the alternative that
+  touches nothing running is a second node with its own key (`HOME`), enrolled for the new service alone.
+- spec/tunnel.md is unchanged: §5 already says all of this, if not as a recipe.

@@ -317,6 +317,56 @@ prints that listing's version, price and state and publishes nothing, until you 
 (`--version N`) or ask for whatever is current (`--replace`); it stops if another publish came in between. The CLI only carries the listing; the control plane decides
 what it accepts, and the gate holds no price. A team gate has no control plane: its services are its configuration.
 
+### Credentials
+
+Three kinds of secret, each with one place to go. `kontra connect` names the other two when one is passed as
+`--enroll`, and never prints the value.
+
+| Credential | Looks like | Goes to | What it does |
+|---|---|---|---|
+| Enrollment token | `ket_` and 32 letters or digits | `kontra connect --enroll` | Binds the node's identity key to the services it names, at one gate. Single use, valid 15 minutes. On Kontra Cloud only a person signed in to the console mints one (Network: Add a node, or a node's Add a service), never an API key or a CLI; on a self-hosted team gate its operator runs `kontra-gate enroll <service>`. |
+| Gate API key | `kk_…` | `kontra connect --api-key`, `kontra login` (which stores one), `Authorization: Bearer` on the gate's routes | Hires with the `hire` scope. With `enroll:<service>` or `enroll:*`, on a gate that allows it (Kontra Cloud), it also enrolls a node for services that already exist, such as a second node for one; it never creates a service. |
+| Kontra Cloud account key | `kontra_sk_…` | Kontra Cloud's control plane API (`/v1/…`) | Nothing at the gate: neither `--enroll` nor `--api-key` takes it. |
+
+A binding belongs to the node's key (`~/.kontra/identity.key`), not to the token that made it: once a welcome
+confirms a token, the node records it in `~/.kontra/credentials` and never sends it again, so a used token left on
+the command line is harmless while that file is kept. Nothing about a used token needs replacing.
+
+### Add a service to a node
+
+To host one more service on a node that already serves others, enroll the same key for the new service alone:
+
+1. Get a token that names only the new service. On Kontra Cloud: the console's Network page, the node's Add a
+   service (or Add a node, naming only the new service). On a self-hosted gate: add the service to the gate's
+   `services:` and run `kontra-gate enroll <service>`.
+2. Stop the node and start it again with the same identity key, `--enroll <new token>` and every `--serve` flag,
+   old and new:
+
+```sh
+kontra connect --gate https://gateway.kontra.sh --enroll <new token> \
+  --serve a2a:search=http://127.0.0.1:8001 --serve a2a:fetch=http://127.0.0.1:8002 \
+  --serve a2a:translate=http://127.0.0.1:8003
+```
+
+The welcome binds `translate` and keeps `search` and `fetch`; later starts need no `--enroll`. A session serves the
+`--serve` services its key is bound to, so a start without `--serve search` no longer serves `search`, and a start
+that declares a service the key is not bound to, with nothing in it that enrolls it, is refused `service_denied` and
+serves nothing at all: `kontra connect` then logs how to add that service ([`spec/tunnel.md`](spec/tunnel.md) §5).
+
+The restart is not seamless. Tasks the node is running when it stops fail `tunnel_lost`, which is not retried once
+the agent has the task ([`spec/relay.md`](spec/relay.md) §6.4); the agents themselves keep running. A task that
+arrives while the node is away is retried `no_session` after 1 s, then 2 s (`task.retries`, default 2), and fails if
+the node is not back by then. To leave the running node alone, start a second `kontra connect` with an identity key
+of its own, enrolled for the new service only:
+
+```sh
+HOME=~/.kontra-translate kontra connect --gate https://gateway.kontra.sh --name laptop-translate --listen off \
+  --enroll <new token> --serve a2a:translate=http://127.0.0.1:8003
+```
+
+Its own `HOME` gives it its own `~/.kontra` (identity key, credentials, sealed state), and `--listen off` leaves
+local hiring to the first node. Each node is its own row on Cloud's Network page and is restarted on its own.
+
 ## Layout
 
 ```

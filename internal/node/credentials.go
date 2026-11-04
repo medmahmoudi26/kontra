@@ -414,3 +414,26 @@ func readSecret(v string, stdin io.Reader) (string, error) {
 // tokenRE is an enrollment token's shape (§5: `ket_` + 32 base62 characters; enroll.ValidToken), service
 // and tenant tokens alike. The gate looks up no token of another shape.
 var tokenRE = regexp.MustCompile(`^ket_[0-9A-Za-z]{32}$`)
+
+// tokenSource says what an enrollment token looks like and who mints one, on either kind of gate (§5): Kontra
+// Cloud's console (a tenant token for services that do not exist yet, a service token for one another node
+// serves), or the operator of a self-hosted gate.
+const tokenSource = "ket_ and 32 letters or digits, from the gate's operator: Kontra Cloud's console (Network, " +
+	"Add a node / Add a service) or `kontra-gate enroll <service>` on a self-hosted gate"
+
+// checkEnrollToken refuses an --enroll value that is not an enrollment token, naming what it is when its prefix
+// says so: a gate API key (kk_, relay.md §2.3), whose place is --api-key, or a Kontra Cloud account key
+// (kontra_sk_), which is for Cloud's control plane and never reaches a gate. The value itself is never printed.
+func checkEnrollToken(t string) error {
+	switch {
+	case tokenRE.MatchString(t):
+		return nil
+	case strings.HasPrefix(t, "kk_"):
+		return errors.New("--enroll: that is a gate API key (kk_…): pass it with --api-key; it enrolls a node only " +
+			"with an enroll: scope, and only for services that already exist (an enrollment token is " + tokenSource + ")")
+	case strings.HasPrefix(t, "kontra_sk_"):
+		return errors.New("--enroll: that is a Kontra Cloud account key for its control plane API; the gate never " +
+			"takes it (an enrollment token is " + tokenSource + ")")
+	}
+	return errors.New("--enroll: not an enrollment token (" + tokenSource + ")")
+}

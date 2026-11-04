@@ -63,9 +63,13 @@ through one outbound connection (spec/tunnel.md):
   --max-sessions N           stdio server processes per service at most, durable tasks included (default 8); when
                              full, a new session stops the one idle longest, if idle for 5 minutes or more
   --key PATH                 the identity key (default ~/.kontra/identity.key, or $KONTRA_KEY)
-  --enroll TOKEN|@FILE|-     a one-time enrollment token from kontra-gate enroll <service>; repeatable
-  --api-key KEY|@FILE|-      an API key for this gate: who this node hires as (else node:<key id>); a node that only
-                             hires is admitted on it, and only while it is valid
+  --enroll TOKEN|@FILE|-     a one-time enrollment token (ket_…) from the gate's operator: Kontra Cloud's console
+                             (Network, Add a node / Add a service), or kontra-gate enroll <service> on a self-hosted
+                             gate; repeatable. It binds this node's key to the services it names; to add a service,
+                             pass a token naming it and keep every --serve (the key keeps the others)
+  --api-key KEY|@FILE|-      an API key for this gate (kk_…): who this node hires as (else node:<key id>); a node that
+                             only hires is admitted on it, and only while it is valid. Never a Cloud account key
+                             (kontra_sk_…), which is for Cloud's control plane
   --name NAME                the node's name in the operator's view (default the hostname)
   --rotate                   rotate the identity key (the old one stays decrypt-only for 24 h)
   --require-channel-binding  refuse a gate that offers no TLS channel binding

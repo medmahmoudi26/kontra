@@ -296,8 +296,8 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 		if err != nil {
 			return Config{}, err
 		}
-		if !tokenRE.MatchString(t) {
-			return Config{}, usage("--enroll: not an enrollment token (ket_ and 32 letters or digits, from `kontra-gate enroll <service>`)")
+		if err := checkEnrollToken(t); err != nil {
+			return Config{}, &UsageError{Err: err}
 		}
 		if !slices.Contains(cfg.Enroll, t) {
 			cfg.Enroll = append(cfg.Enroll, t)
@@ -487,8 +487,8 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		return nil, err
 	}
 	for _, t := range cfg.Enroll {
-		if !tokenRE.MatchString(t) {
-			return nil, errors.New("--enroll: not an enrollment token")
+		if err := checkEnrollToken(t); err != nil {
+			return nil, err
 		}
 	}
 	if cfg.MaxInflight <= 0 {
