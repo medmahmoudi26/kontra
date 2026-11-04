@@ -361,6 +361,9 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		if !herr.Code.Retryable() {
 			log.Error("the gate refused the handshake; kontra connect does not retry this without a change by its operator",
 				"code", herr.Code, "message", herr.Message)
+			if names, only := notEnrolled(herr, h.Services); len(names) > 0 {
+				log.Warn(addServiceHint(names, only && len(names) < len(h.Services)), "services", names)
+			}
 			return nil, nextFatal, err
 		}
 		switch {
@@ -368,7 +371,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 			log.Error("the gate does not know this node's key: a node that only hires is admitted on an --api-key with "+
 				"the hire scope (spec/tunnel.md §9)", "message", herr.Message)
 		case herr.Code == tunnel.CodeUnknownKey:
-			log.Error("the gate does not know this node's key: enroll it with --enroll <token> (kontra-gate enroll <service>)",
+			log.Error("the gate does not know this node's key: enroll it with --enroll <token> ("+tokenSource+")",
 				"message", herr.Message)
 		default:
 			log.Warn("the gate refused the handshake; retrying", "code", herr.Code, "message", herr.Message)
@@ -602,6 +605,54 @@ func (n *Node) refused(kid string, herr *tunnel.HandshakeError, h *tunnel.Hello,
 	if err != nil {
 		n.logger.Error("the credentials file could not be updated", "err", err)
 	}
+}
+
+// notEnrolledSuffix ends each part of a service_denied message that names a declared service the key was never
+// enrolled for and that nothing in the hello enrolls (internal/enroll's admission, step 8: the parts are joined
+// with "; ", then "; nothing was enrolled").
+const notEnrolledSuffix = ": the key is not enrolled for it"
+
+// notEnrolled is the declared services a service_denied refusal names as not enrolled for this node's key, in the
+// message's order, and whether the refusal named nothing else. Only names the hello declared are returned: nothing
+// the gate wrote is printed back as a name.
+func notEnrolled(herr *tunnel.HandshakeError, declared []tunnel.Service) (names []string, only bool) {
+	if herr.Code != tunnel.CodeServiceDenied {
+		return nil, false
+	}
+	only = true
+	for part := range strings.SplitSeq(herr.Message, "; ") {
+		name, ok := strings.CutSuffix(part, notEnrolledSuffix)
+		switch {
+		case ok && slices.ContainsFunc(declared, func(s tunnel.Service) bool { return s.Name == name }):
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		case part != "nothing was enrolled":
+			only = false
+		}
+	}
+	return names, only
+}
+
+// addServiceHint says how to add services to a node (spec/tunnel.md §5): a binding belongs to the key, not to a
+// token, so a token that names only the new services, in a hello that declares every service, enrolls them and keeps
+// the key's other bindings; a session serves the declared services its key is bound to, so every --serve stays on
+// the command line. The refusal is all-or-nothing: while it stands the node serves nothing, and when the hello
+// declared other services (others), the same command without the new ones serves those.
+func addServiceHint(names []string, others bool) string {
+	list, it, mint, without := names[0], "it", "kontra-gate enroll "+names[0], "--serve "+names[0]
+	if len(names) > 1 {
+		list = strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+		it, mint, without = "them", "kontra-gate enroll <service> for each", "their --serve flags"
+	}
+	hint := fmt.Sprintf("to add %s to this node, get an enrollment token that names %s (Kontra Cloud: the console's "+
+		"Network page, the node's Add a service, or Add a node naming only %s; a self-hosted gate: %s, once its "+
+		"services: has %s), then run kontra connect again with --enroll <token> and every --serve flag: the node's "+
+		"key keeps the services it is already enrolled for", list, it, list, mint, it)
+	if others {
+		hint += "; until then, the same command without " + without + " serves the others"
+	}
+	return hint
 }
 
 func (n *Node) credential() Credential {
