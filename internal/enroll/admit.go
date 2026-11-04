@@ -96,7 +96,8 @@ const (
 //     declared one;
 //  8. service_denied: a declared service the key was never enrolled for and that no authority in the hello
 //     enrolls, or that an authority cannot enroll (a missing service for a service token or an enroll:
-//     scope, a disabled or non-tunnel one, a tenant token for a service that already has a key).
+//     scope, unless a tenant token in the hello names it: that token creates it, D331; a disabled or
+//     non-tunnel one, a tenant token for a service that already has a key).
 //
 // So a hello carrying a consumed token and a service nothing enrolls is enroll_invalid, not service_denied.
 // A declared service whose binding was revoked is never refused: it is left out of Served (§5), and only a
@@ -344,7 +345,8 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	}
 
 	// Which authority enrolls each declared service that is not bound yet: a service token, else an enroll:
-	// scope, else a tenant token (the narrowest authority last: it never adds a key to a served service).
+	// scope, else a tenant token (the narrowest authority last: it never adds a key to a served service). A
+	// scope never creates a service, so a missing one a tenant token also names is that token's (D331, below).
 	//
 	// SPEC-CONFLICT (§5, §12; M2 WP-02 review): a declared service whose binding was revoked is "left out"
 	// (§5), and §5 does not say what may enroll it again. The auth API key never does: it rides on every
@@ -376,11 +378,8 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 			usesScope = true
 		}
 		if p.via == "" {
-			for _, t := range toks {
-				if t.scope == ScopeTenant && slices.Contains(t.bind, d.Name) {
-					p.via, p.token = viaTenantToken, t
-					break
-				}
+			if t := tenantToken(toks, d.Name); t != nil {
+				p.via, p.token = viaTenantToken, t
 			}
 		}
 		if p.via != "" {
@@ -475,6 +474,12 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 			// §6.3 (D278, D296): a conversion creates the services the anonymous session serves that the account
 			// does not have, under the same names; any other declared name is §5's (below).
 			p.create = true
+		case !p.exists && p.via == viaAPIKey && tenantToken(toks, p.svc.Name) != nil:
+			// D331: an enroll: scope is tried before a tenant token (a replica needs it: a tenant token never adds a
+			// key to a served service), but it never creates a service; a tenant token in the same hello that names
+			// a missing one does. Without this a node whose auth API key has enroll:* (kontra login's) could never
+			// add a new service with the operator's token: "no such service", and nothing was enrolled.
+			p.via, p.token, p.create = viaTenantToken, tenantToken(toks, p.svc.Name), true
 		case !p.exists:
 			// SPEC-CONFLICT (M2 plan, C10): §5 does not say what an enroll: scope naming a missing service
 			// does. Only tenant tokens (and the operator) create services.
@@ -500,6 +505,16 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 
 	// The writes.
 	return a.write(ctx, toks, plans)
+}
+
+// tenantToken is the first tenant token of the hello whose list names the service, or nil.
+func tenantToken(toks []*consumed, name string) *consumed {
+	for _, t := range toks {
+		if t.scope == ScopeTenant && slices.Contains(t.bind, name) {
+			return t
+		}
+	}
+	return nil
 }
 
 // lockKey reads and locks the tunnel_keys row of a key, keyed by its full public key: a row with the key

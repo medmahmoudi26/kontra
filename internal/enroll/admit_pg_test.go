@@ -884,6 +884,83 @@ func TestAdmitAPIKey(t *testing.T) {
 	}
 }
 
+// D331: a tenant token creates the service it names even when the hello's auth API key has an enroll: scope,
+// which is tried first and never creates one. A node whose machine ran `kontra login` (hire + enroll:*) adds a
+// service with the operator's token; the scope still makes a replica of a served service, and alone still
+// refuses a missing one.
+func TestAdmitTenantTokenBesideEnrollScope(t *testing.T) {
+	ctx := context.Background()
+	e := newPGEnv(t, func(o *Options) { o.Multi, o.EnrollWithAPIKey = true, true })
+	acme := e.tenant("acme")
+	login, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: acme, Name: "login",
+		Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenantTok := func(names ...string) string {
+		tok, err := e.store.MintTenantToken(ctx, acme, names, "cloud")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+
+	// The node's first enrollment: search, created by a tenant token.
+	k := newTestKey(t)
+	h := hello(k, a2a("search"))
+	h.Enroll = []string{tenantTok("search")}
+	e.mustAdmit(k, h)
+
+	// Its restart with the API key, a tenant token naming only translate, and both --serve.
+	h = hello(k, a2a("search"), a2a("translate"))
+	h.Auth = login.Secret
+	h.Enroll = []string{tenantTok("translate")}
+	d := e.mustAdmit(k, h)
+	want := []string{"a2a:search@https://gate.example/agents/acme/search", "a2a:translate@https://gate.example/agents/acme/translate"}
+	if got := served(d); !slices.Equal(got, want) || d.HirePrincipal != login.Principal() {
+		t.Errorf("served %v (want %v), hire principal %q", got, want, d.HirePrincipal)
+	}
+	if n := e.count(`select count(*) from kontra.services where tenant_id = $1 and name = 'translate'`, acme); n != 1 {
+		t.Errorf("translate rows %d", n)
+	}
+	ev := e.verifyAudit()
+	last := ev[len(ev)-1]
+	rows := last["services"].([]any)
+	if last["event"] != EventEnrolled || len(rows) != 1 || rows[0].(map[string]any)["service"] != "translate" ||
+		rows[0].(map[string]any)["via"] != viaTenantToken || rows[0].(map[string]any)["token_id"] == nil {
+		t.Errorf("audit %v", last)
+	}
+
+	// A second key: the scope makes it a replica of search (a tenant token never adds a key to a served
+	// service), and the token in the same hello creates fetch.
+	k2 := newTestKey(t)
+	h2 := hello(k2, a2a("search"), a2a("fetch"))
+	h2.Auth = login.Secret
+	h2.Enroll = []string{tenantTok("search", "fetch")}
+	d = e.mustAdmit(k2, h2)
+	if len(d.Served) != 2 || len(d.Enrolled) != 1 || d.Enrolled[0].Service != "search" {
+		t.Errorf("replica: served %v, enrolled %+v", served(d), d.Enrolled)
+	}
+	ev = e.verifyAudit()
+	vias := map[string]any{}
+	for _, r := range ev[len(ev)-1]["services"].([]any) {
+		vias[r.(map[string]any)["service"].(string)] = r.(map[string]any)["via"]
+	}
+	if vias["search"] != viaAPIKey || vias["fetch"] != viaTenantToken {
+		t.Errorf("replica audit vias %v", vias)
+	}
+
+	// The scope alone still never creates a service: service_denied, nothing written.
+	h3 := hello(k, a2a("search"), a2a("translate"), a2a("wiki"))
+	h3.Auth = login.Secret
+	_, err = e.admit(k, h3, nil)
+	wantCode(t, "enroll:* for a missing service, no token", err, tunnel.CodeServiceDenied)
+	if n := e.count(`select count(*) from kontra.services where name = 'wiki'`); n != 0 {
+		t.Error("a refused handshake created a service")
+	}
+	e.verifyAudit()
+}
+
 // Rotation (§12): the new key in the old key's tenant with the old key's bindings (a revoked one stays
 // revoked, TestAdmitRotationKeepsRevokedBindings), the old key
 // rotated with a 24 h overlap, under a row lock: of two concurrent rotations one wins. A rotated

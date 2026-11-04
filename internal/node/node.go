@@ -308,6 +308,9 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 		if err != nil {
 			return Config{}, err
 		}
+		if err := checkAPIKey(k); err != nil {
+			return Config{}, &UsageError{Err: err}
+		}
 		cfg.APIKey = k
 	}
 
@@ -490,6 +493,9 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		if err := checkEnrollToken(t); err != nil {
 			return nil, err
 		}
+	}
+	if err := checkAPIKey(cfg.APIKey); err != nil {
+		return nil, err
 	}
 	if cfg.MaxInflight <= 0 {
 		cfg.MaxInflight = tunnel.NodeMaxInflight

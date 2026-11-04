@@ -437,3 +437,19 @@ func checkEnrollToken(t string) error {
 	}
 	return errors.New("--enroll: not an enrollment token (" + tokenSource + ")")
 }
+
+// checkAPIKey refuses an --api-key value whose prefix says it is no gate API key (D331): an enrollment token
+// (ket_), whose place is --enroll, or a Kontra Cloud account key (kontra_sk_), for Cloud's control plane only. A
+// value that passed would be written to the credentials file and sent in every later hello to the gate --gate
+// names. Any other value goes on to the gate, which judges it (a kk_ key, or a credential its auth takes). The
+// value itself is never printed.
+func checkAPIKey(k string) error {
+	switch {
+	case strings.HasPrefix(k, "ket_"):
+		return errors.New("--api-key: that is an enrollment token (ket_…): pass it with --enroll")
+	case strings.HasPrefix(k, "kontra_sk_"):
+		return errors.New("--api-key: that is a Kontra Cloud account key for its control plane API; the gate never " +
+			"takes it (a gate API key is kk_…, from the console's Gate keys or kontra login)")
+	}
+	return nil
+}

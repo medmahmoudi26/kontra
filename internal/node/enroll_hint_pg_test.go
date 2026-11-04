@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"kontra.sh/kontra/internal/auth"
+	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -16,9 +18,18 @@ import (
 // words the node's hint reads (nothing enrolled, nothing served), and the node logs how to add it. Restarted with a
 // tenant token naming only the new service and every --serve, it is welcomed for all three: the key keeps its
 // bindings, and the used token still on the command line is not sent. A later restart needs no --enroll.
+//
+// D331: the same with kontra login's API key (hire + enroll:*) on a gate that takes enroll: scopes, as Kontra
+// Cloud's does: the scope names the new service but never creates it ("no such service", the same hint), and the
+// tenant token naming it creates it although the scope is tried first.
 func TestRealAdmissionAddAService(t *testing.T) {
+	t.Run("no API key", func(t *testing.T) { testAddAService(t, false) })
+	t.Run("kontra login's API key", func(t *testing.T) { testAddAService(t, true) })
+}
+
+func testAddAService(t *testing.T, login bool) {
 	ctx := context.Background()
-	rg := newRealGate(t)
+	rg := newRealGateWith(t, func(o *enroll.Options) { o.EnrollWithAPIKey = login })
 	rec := newRecorder(t)
 	first, err := rg.store.MintTenantToken(ctx, rg.team, []string{"search", "fetch"}, "test")
 	if err != nil {
@@ -26,6 +37,16 @@ func TestRealAdmissionAddAService(t *testing.T) {
 	}
 	cfg := testConfig(t, rg.url, "", a2aServe("search", rec.url()), a2aServe("fetch", rec.url()))
 	cfg.Enroll = []string{first}
+	refusal := "translate: the key is not enrolled for it; nothing was enrolled"
+	if login {
+		key, err := rg.keys.Mint(ctx, auth.MintRequest{TenantID: rg.team, Name: "login",
+			Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.APIKey = key.Secret
+		refusal = "translate: no such service; nothing was enrolled"
+	}
 	tn := mustNode(t, rg.testGate, cfg).run(t)
 	rg.next(t)
 	rg.session(t)
@@ -45,8 +66,7 @@ func TestRealAdmissionAddAService(t *testing.T) {
 	}
 	err = tn.result(t, 10*time.Second)
 	var herr *tunnel.HandshakeError
-	if !errors.As(err, &herr) || herr.Code != tunnel.CodeServiceDenied ||
-		herr.Message != "translate: the key is not enrolled for it; nothing was enrolled" {
+	if !errors.As(err, &herr) || herr.Code != tunnel.CodeServiceDenied || herr.Message != refusal {
 		t.Fatalf("Run = %v", err)
 	}
 	logs := tn.logs.String()
