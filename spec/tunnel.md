@@ -256,7 +256,9 @@ the proof. A service the gate creates during a handshake gets `allow: [org:<its 
 - An enrollment that would bind a key already enrolled under another tenant is `enroll_invalid`; a token for a
   service of another `kind` than declared is `kind_mismatch`.
 - A service token is minted only for an existing, enabled tunnel service, and an `enroll:` scope binds only such
-  services (naming another is `service_denied`); only a tenant token creates a service. A bound service that is no
+  services (naming another is `service_denied`); only a tenant token creates a service. The `auth` API key's scope is
+  tried before a tenant token, so that it can add a replica, but a service that does not exist and that a tenant
+  token in the same hello names is enrolled through that token, which creates it (D331). A bound service that is no
   longer an enabled tunnel service is left out like a revoked binding. A token that applies to no declared service
   is `enroll_invalid` and is not consumed (D132).
 - A declared service the key was never enrolled for, and is not enrolling in this handshake, is `service_denied`,

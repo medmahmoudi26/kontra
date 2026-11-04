@@ -609,8 +609,13 @@ func (n *Node) refused(kid string, herr *tunnel.HandshakeError, h *tunnel.Hello,
 
 // notEnrolledSuffix ends each part of a service_denied message that names a declared service the key was never
 // enrolled for and that nothing in the hello enrolls (internal/enroll's admission, step 8: the parts are joined
-// with "; ", then "; nothing was enrolled").
-const notEnrolledSuffix = ": the key is not enrolled for it"
+// with "; ", then "; nothing was enrolled"). noSuchServiceSuffix ends a part naming a service that does not exist,
+// which the hello's API key scope (or a service token) named and only a tenant token creates (D331): the same
+// hint applies.
+const (
+	notEnrolledSuffix   = ": the key is not enrolled for it"
+	noSuchServiceSuffix = ": no such service"
+)
 
 // notEnrolled is the declared services a service_denied refusal names as not enrolled for this node's key, in the
 // message's order, and whether the refusal named nothing else. Only names the hello declared are returned: nothing
@@ -622,6 +627,9 @@ func notEnrolled(herr *tunnel.HandshakeError, declared []tunnel.Service) (names 
 	only = true
 	for part := range strings.SplitSeq(herr.Message, "; ") {
 		name, ok := strings.CutSuffix(part, notEnrolledSuffix)
+		if !ok {
+			name, ok = strings.CutSuffix(part, noSuchServiceSuffix)
+		}
 		switch {
 		case ok && slices.ContainsFunc(declared, func(s tunnel.Service) bool { return s.Name == name }):
 			if !slices.Contains(names, name) {

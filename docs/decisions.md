@@ -5655,3 +5655,31 @@ Decision (internal/node; README's Credentials and Add a service to a node):
   `tunnel_lost`, and a task arriving meanwhile is retried `no_session` within `task.retries`; the alternative that
   touches nothing running is a second node with its own key (`HOME`), enrolled for the new service alone.
 - spec/tunnel.md is unchanged: §5 already says all of this, if not as a recipe.
+
+### D331. A tenant token creates the service it names beside an `enroll:` scope; `--api-key` refuses a token and a Cloud account key — **decided under the owner's standing instruction, 4 Nov** (found by the review of D330 and of Cloud's Add a service)
+
+The admission tried the hello's `auth` API key's `enroll:` scope before a tenant token for each declared service that
+is not bound yet (a tenant token never adds a key to a served service, so a replica needs the scope), and an `enroll:`
+scope never creates a service (§5). So a hello carrying both, for a service that does not exist, was refused
+`service_denied` "<name>: no such service; nothing was enrolled", the tenant token ignored. `kontra login` stores a
+`kk_` key with `hire` and `enroll:*` (D278), every hello sends the stored key, and Kontra Cloud's gate sets
+`tunnel.enroll_with_api_key`: on any machine that ran `kontra login`, neither Add a node for new services nor D330's
+recipe could work, and the node logged no hint. Reproduced against the real admission (Postgres 17) before the fix.
+
+Decision (internal/enroll's admission, internal/node; spec/tunnel.md §5):
+
+- **A missing service that an `enroll:` scope named is enrolled through a tenant token in the same hello that names
+  it**, which creates it, as it would without the API key. The order is unchanged otherwise: a service token first,
+  then the scope (a replica of a served service), then a tenant token; the scope alone still never creates a service.
+  The audit row says `via: tenant_token` with the token's id. `TestAdmitTenantTokenBesideEnrollScope` (a restart
+  adding a service, a replica made by the scope while the token creates another service in the same hello, and the
+  scope alone refused) and `TestRealAdmissionAddAService`'s new case with `kontra login`'s key fail without it.
+- **The hint also reads "<name>: no such service"** (the scope naming a service that does not exist, with no token
+  naming it): the remedy is the same token. A conversion's longer wording is not matched.
+- **`--api-key` refuses `ket_` (its place is `--enroll`) and `kontra_sk_` (Cloud's control plane only)**, in the
+  parser and in `New`, never printing the value: such a value used to be written to the credentials file and sent in
+  every later hello to whatever gate `--gate` names. Other values go on to the gate, which judges them.
+
+Reason: D330's recipe and Cloud's console (kontra-cloud D-M5-220, D-M5-221) must work on the machines that have
+run `kontra login`, which is the CLI's own sign-in.
+

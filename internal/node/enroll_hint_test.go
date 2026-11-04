@@ -88,6 +88,42 @@ func TestEnrollNamesTheCredential(t *testing.T) {
 	}
 }
 
+// --api-key refuses an enrollment token and a Kontra Cloud account key (D331), never printing the value, so neither
+// is written to the credentials file and sent to the gate; a gate API key, or any other value, goes on to the gate.
+func TestAPIKeyNamesTheCredential(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(k string) string { return map[string]string{"HOME": home}[k] }
+	for _, c := range []struct{ name, value, want string }{
+		{"enrollment token", tokA, "--api-key: that is an enrollment token (ket_…): pass it with --enroll"},
+		{"Cloud account key", cloudAccessKey, "--api-key: that is a Kontra Cloud account key for its control plane API; " +
+			"the gate never takes it (a gate API key is kk_…, from the console's Gate keys or kontra login)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseArgs([]string{"--name", "build-box", "--serve", "a2a:hello=http://127.0.0.1:9999", "--api-key", c.value},
+				getenv, nil)
+			var uerr *UsageError
+			if !errors.As(err, &uerr) || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), c.value[4:]) {
+				t.Fatalf("parseArgs = %v, want a usage error saying %q and not the value", err, c.want)
+			}
+			gate, _ := url.Parse("https://gate.example")
+			target, _ := url.Parse("http://127.0.0.1:9999")
+			cfg := testConfig(t, gate, "", a2aServe("hello", target))
+			cfg.APIKey = c.value
+			if _, err := New(cfg, nil); err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), c.value[4:]) {
+				t.Errorf("New = %v, want %q and not the value", err, c.want)
+			}
+			if _, err := os.Stat(cfg.CredentialsPath); err == nil {
+				t.Error("the refused key was written to the credentials file")
+			}
+		})
+	}
+	cfg, err := parseArgs([]string{"--name", "build-box", "--serve", "a2a:hello=http://127.0.0.1:9999", "--api-key", gateAPIKey},
+		getenv, nil)
+	if err != nil || cfg.APIKey != gateAPIKey {
+		t.Fatalf("a gate API key: %v", err)
+	}
+}
+
 // The service_denied of a known key that declares a service it is not enrolled for (the admission's step 8) names
 // the services; notEnrolled reads them back, only for services the hello declared.
 func TestNotEnrolled(t *testing.T) {
@@ -107,7 +143,14 @@ func TestNotEnrolled(t *testing.T) {
 			[]string{"scanner"}, false},
 		{"a name the hello did not declare", denied("other: the key is not enrolled for it; nothing was enrolled"), nil, false},
 		{"an escape in the name", denied("scan\x1bner: the key is not enrolled for it; nothing was enrolled"), nil, false},
-		{"another reason", denied("scanner: no such service; nothing was enrolled"), nil, false},
+		// D331: an enroll: scope naming a service that does not exist (the gate's words when the hello carries no
+		// tenant token naming it): the same hint.
+		{"no such service", denied("scanner: no such service; nothing was enrolled"), []string{"scanner"}, true},
+		{"no such service and not enrolled", denied("scanner: no such service; fs: the key is not enrolled for it; nothing was enrolled"),
+			[]string{"scanner", "fs"}, true},
+		{"another reason", denied("scanner: not an enabled tunnel service; nothing was enrolled"), nil, false},
+		{"a conversion's missing service", denied("scanner: no such service, and the anonymous session does not serve it " +
+			"(a conversion creates only the session's services); nothing was enrolled"), nil, false},
 		{"a tenant token on a served service", denied("crawler: it already has an enrolled key, which a tenant token never adds to; nothing was enrolled"), nil, false},
 		{"another code", tunnel.Refuse(tunnel.CodeEnrollInvalid, "scanner: the key is not enrolled for it"), nil, false},
 	} {
@@ -176,7 +219,7 @@ func TestServiceDeniedHint(t *testing.T) {
 	// Any other service_denied gets no hint.
 	g2 := newTestGate(t, nil)
 	g2.adm.set(func(int, enroll.Request) (*enroll.Decision, error) {
-		return nil, tunnel.Refuse(tunnel.CodeServiceDenied, "scanner: no such service; nothing was enrolled")
+		return nil, tunnel.Refuse(tunnel.CodeServiceDenied, "scanner: not an enabled tunnel service; nothing was enrolled")
 	})
 	cfg2 := testConfig(t, g2.url, "", a2aServe("scanner", rec.url()))
 	tn2 := mustNode(t, g2, cfg2).run(t)
