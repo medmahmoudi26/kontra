@@ -19,6 +19,10 @@ type Input struct {
 	// Protocol is tasks.protocol: ProtocolMCP for a gate-owned MCP task, whose kontra.cancel follows spec §11.6
 	// (D57); empty for an A2A task, as every input recorded before M3 is.
 	Protocol string `json:"protocol,omitempty"`
+	// ReattachGraceSeconds is task.reattach_grace when the task started (spec §6.4, §17; D345): how long a tunnel
+	// attempt whose session is lost after its first upstream task id waits for its node to reconnect. Nil (every input
+	// recorded before it) is DefaultReattachGrace; 0 turns the wait off, and such a task fails tunnel_lost at once.
+	ReattachGraceSeconds *int64 `json:"reattachGraceSeconds,omitempty"`
 }
 
 // ProtocolMCP is Input.Protocol of a gate-owned MCP task (tasks.protocol mcp, spec §11.5).
@@ -107,6 +111,9 @@ type (
 	InputResponseSignal struct {
 		Seq int64 `json:"seq"`
 	}
+	// ReconnectedSignal is kontra.reconnected (D344): a session of the node of the task's attempt registered. It
+	// carries nothing: the workflow id names the task, and the workflow checks the session itself (reattach_session).
+	ReconnectedSignal struct{}
 )
 
 // CancelModeMCP is CancelUpdate.Mode for MCP's cancel semantics (spec §11.6, D57; relay.md §12.2).
@@ -168,6 +175,10 @@ type (
 	AttemptRef struct {
 		TaskID string `json:"taskId"`
 		N      int    `json:"n"`
+		// Session, on forward_cancel only, is the tunnel session to send the cancel on instead of the attempt's
+		// recorded one: the session a node that came back after its task was canceled during a reconnect wait
+		// opened (D346). Empty everywhere else.
+		Session string `json:"session,omitempty"`
 	}
 	// PrepareInput is prepare's input: attempt N to create, and, when the dispatch of attempt N-1 was lost
 	// (a heartbeat or schedule-to-start timeout, a lost context) so that no dispatch could end it, the
@@ -267,6 +278,33 @@ type (
 	ReviewAppendInput struct {
 		TaskID     string `json:"taskId"`
 		WorkItemID string `json:"workItemId"`
+	}
+	// ReconnectWaitInput is reconnect_wait's input (D341): the wait of attempt N began at Since and ends at Until.
+	ReconnectWaitInput struct {
+		TaskID string    `json:"taskId"`
+		N      int       `json:"n"`
+		Since  time.Time `json:"since"`
+		Until  time.Time `json:"until"`
+	}
+	// ReconnectWaitResult is reconnect_wait's result: whether the waiting status is in the log (a task at
+	// input-required or auth-required gets none).
+	ReconnectWaitResult struct {
+		Logged bool `json:"logged"`
+	}
+	// ReattachInput is reattach_session's input (D342, D343). Bind records the session found on attempt N for the
+	// resume dispatch; without it the activity only looks (the cancel of a task whose node came back, D346).
+	ReattachInput struct {
+		TaskID string `json:"taskId"`
+		N      int    `json:"n"`
+		Bind   bool   `json:"bind,omitempty"`
+	}
+	// ReattachResult is reattach_session's result: a session to resume on (Queue, its kontra-tunnel-<replica>), none
+	// yet (all empty), or Gone, why none can ever come.
+	ReattachResult struct {
+		Queue     string `json:"queue,omitempty"`
+		SessionID string `json:"sessionId,omitempty"`
+		ReplicaID string `json:"replicaId,omitempty"`
+		Gone      string `json:"gone,omitempty"` // ReattachKeyRevoked, ReattachBindingRevoked, ReattachAttemptEnded
 	}
 	// PushInput is push_webhook's input. ConfigID is the config's ConfigRef, never its id.
 	PushInput struct {

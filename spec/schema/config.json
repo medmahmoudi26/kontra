@@ -175,6 +175,14 @@
       }
     },
     "drain_timeout": { "$ref": "#/$defs/duration", "default": "10m" },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The gate's own task policy (relay.md §6.4, §17), apart from each service's task block.",
+      "properties": {
+        "reattach_grace": { "$ref": "#/$defs/duration", "default": "15m", "description": "How long a task whose node lost its tunnel session after the first upstream task id waits for the node to reconnect, never past the task's deadline; then failed: tunnel_lost (relay.md §6.4, D345). 1s to 24h." }
+      }
+    },
     "tunnel": {
       "type": "object",
       "additionalProperties": false,

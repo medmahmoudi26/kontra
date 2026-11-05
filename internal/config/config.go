@@ -55,6 +55,7 @@ type Config struct {
 	Peer                     *Peer    `yaml:"peer"` // spec §11.2, D163; M3 WP-04
 	Hooks                    Hooks    `yaml:"hooks"`
 	DrainTimeout             Duration `yaml:"drain_timeout"` // §14.3 and D76, default 10m
+	Task                     GateTask `yaml:"task"`          // the gate's own task policy (spec §6.4, §17)
 	Tunnel                   Tunnel   `yaml:"tunnel"`        // spec/tunnel.md; M2
 
 	Services map[string]Service `yaml:"services"`
@@ -518,6 +519,14 @@ func (p TaskPolicy) RetryCount() int {
 		return DefaultTaskRetries
 	}
 	return *p.Retries
+}
+
+// GateTask is the gate-wide task block (spec relay.md §17), apart from each service's task: block.
+type GateTask struct {
+	// ReattachGrace is how long a task whose node lost its tunnel session after the first upstream task id waits for
+	// the node to reconnect before it fails tunnel_lost (spec §6.4, D345): default 15m, 1s to 24h. It never runs past
+	// the task's deadline.
+	ReattachGrace Duration `yaml:"reattach_grace"`
 }
 
 // Duration is a positive time.Duration that also accepts a d (days) suffix ("7d", "1d12h").

@@ -308,6 +308,18 @@ func (c *Client) SignalInputResponse(ctx context.Context, taskID a2a.TaskID, seq
 	return err
 }
 
+// SignalReconnected sends kontra.reconnected to the task's workflow (D344): a session of its node registered. It
+// carries no content (spec §14: events never enter Temporal history). A workflow that does not exist (any more) is not
+// an error, and neither is one that is not waiting: it ignores the signal until it waits.
+func (c *Client) SignalReconnected(ctx context.Context, taskID a2a.TaskID) error {
+	err := c.c.SignalWorkflow(ctx, WorkflowID(taskID), "", SignalReconnected, ReconnectedSignal{})
+	var nf *serviceerror.NotFound
+	if errors.As(err, &nf) {
+		return nil
+	}
+	return err
+}
+
 // WorkflowExists reports whether the task's workflow exists, running or closed, for the orphan sweep
 // (spec §14.5).
 func (c *Client) WorkflowExists(ctx context.Context, taskID a2a.TaskID) (bool, error) {

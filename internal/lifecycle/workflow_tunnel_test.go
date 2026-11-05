@@ -2,9 +2,12 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
+
+	"go.temporal.io/sdk/activity"
 
 	"kontra.sh/kontra/internal/store"
 )
@@ -140,16 +143,23 @@ func TestTunnelLostRetriesOnAnotherSession(t *testing.T) {
 		})
 	}
 
-	// After the first upstream task id: failed: tunnel_lost, no retry.
+	// After the first upstream task id, with task.reattach_grace off: failed: tunnel_lost, no retry, no wait (with it
+	// on, the reconnect wait of workflow_reconnect_test.go).
 	w := newWorld(t)
 	w.backend = string(store.BackendTunnel)
 	w.firstID[1] = true
 	w.prepareRes = func(PrepareInput) PrepareResult { return placed(sessionA, "r1") }
 	w.dispatchFn = outcome(DispatchTunnelLost, string(store.ReasonTunnelLost))
 	env := w.env()
-	start(env, newUpdates(), input(2))
+	in := input(2)
+	off := int64(0)
+	in.ReattachGraceSeconds = &off
+	start(env, newUpdates(), in)
 	done(t, env)
 	s := w.snapshot()
+	if len(s.reattaches) != 0 || len(s.waits) != 0 {
+		t.Fatalf("reattach_session %d, reconnect_wait %d: no wait with the grace off", len(s.reattaches), len(s.waits))
+	}
 	if len(s.prepares) != 1 || len(s.dispatches) != 1 {
 		t.Fatalf("prepares %d dispatches %d: no retry after the first upstream id", len(s.prepares), len(s.dispatches))
 	}
@@ -189,11 +199,12 @@ func TestTunnelFollowUpOnTheSessionsReplica(t *testing.T) {
 	}
 }
 
-// The cancel of a tunnel task whose sticky session is gone (spec §8's row "exists, session gone",
-// lifecycle.CancelTunnelLost's SPEC-CONFLICT): forward_cancel, on kontra-ctl-<the session's replica>,
-// answers tunnel_lost or is not started within 10 s; the task fails tunnel_lost (its attempt too, although
-// it waited at input-required), and the caller gets that task (outcome tunnel_lost). A running dispatch is
-// canceled (the workflow, which waits for its dispatch, completes before the dispatch would end).
+// The cancel of a tunnel task whose sticky session is gone (spec §8's row "exists, session gone"; D346, which
+// replaced lifecycle.CancelTunnelLost's failed: tunnel_lost): forward_cancel, on kontra-ctl-<the session's replica>,
+// answers tunnel_lost or is not started within 10 s; nothing could be forwarded, so the task is canceled at once
+// (its attempt canceled too, although it waited at input-required), and the caller gets canceled. A running
+// dispatch is canceled (the workflow, which waits for its dispatch, completes before the dispatch would end). The
+// node never comes back here: the run looks for it until the grace ends (lateCancel), and sends nothing more.
 func TestCancelWhenTheTunnelSessionIsGone(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -221,8 +232,18 @@ func TestCancelWhenTheTunnelSessionIsGone(t *testing.T) {
 					w.setState(string(store.StateInputRequired))
 					return DispatchResult{Outcome: DispatchInterrupted}, nil
 				}
-				// Runs until canceled (or the test's end): the workflow completes only once it canceled it.
-				return DispatchResult{}, w.block(ctx)
+				// Runs until canceled (or the test's end): the workflow completes only once it canceled it. It
+				// heartbeats, which is how the test environment, like the server, delivers the cancellation.
+				for {
+					activity.RecordHeartbeat(ctx)
+					select {
+					case <-ctx.Done():
+						return DispatchResult{}, ctx.Err()
+					case <-w.release:
+						return DispatchResult{}, errors.New("released")
+					case <-time.After(20 * time.Millisecond):
+					}
+				}
 			}
 			env := w.env()
 			u := newUpdates()
@@ -238,13 +259,16 @@ func TestCancelWhenTheTunnelSessionIsGone(t *testing.T) {
 			if len(s.forwards) != 1 || s.forwards[0] != QueueCtl("r1") {
 				t.Fatalf("forward_cancel %v, want once on kontra-ctl-r1", s.forwards)
 			}
-			if len(s.terminals) != 1 || s.terminals[0].State != "failed" || s.terminals[0].Reason != string(store.ReasonTunnelLost) ||
-				s.terminals[0].EndAttempt != string(store.OutcomeTunnelLost) || !s.terminals[0].EndAttemptAsIs {
-				t.Fatalf("terminal writes %+v, want failed: tunnel_lost", s.terminals)
+			if len(s.terminals) != 1 || s.terminals[0].State != "canceled" || s.terminals[0].Canceled != store.CanceledClient ||
+				s.terminals[0].EndAttempt != string(store.OutcomeCanceled) || !s.terminals[0].EndAttemptAsIs {
+				t.Fatalf("terminal writes %+v, want canceled", s.terminals)
 			}
 			r, err := u.result("c1")
-			if err != nil || r.(CancelResult).Outcome != CancelTunnelLost {
+			if err != nil || r.(CancelResult).Outcome != CancelCanceled {
 				t.Fatalf("cancel %+v %v", r, err)
+			}
+			if len(s.reattaches) == 0 || s.reattaches[0].Bind {
+				t.Fatalf("reattach_session %+v: the canceled task's node is looked for, never bound", s.reattaches)
 			}
 		})
 	}

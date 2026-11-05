@@ -13,6 +13,8 @@
 package lifecycle
 
 import (
+	"time"
+
 	"github.com/a2aproject/a2a-go/v2/a2a"
 )
 
@@ -49,6 +51,7 @@ const (
 	SignalPush          = "kontra.push"
 	SignalInputResponse = "kontra.input_response"
 	SignalClose         = "kontra.close"
+	SignalReconnected   = "kontra.reconnected"
 )
 
 // Activity type names (spec §14.2, §13.3). Hook names keep unique last dotted segments, which is what the
@@ -71,6 +74,10 @@ const (
 	ActTaskRef             = "task_ref"
 	ActSubmit              = "submit"
 	ActAppendReviewMessage = "append_review_message"
+	// reconnect_wait logs the waiting status of a reconnect wait, and reattach_session looks for the session of the
+	// attempt's node to resume on (§6.4's reconnect wait, D341, D342).
+	ActReconnectWait   = "reconnect_wait"
+	ActReattachSession = "reattach_session"
 
 	HookOnDispatched    = "kontra.lifecycle.OnDispatched"
 	HookOnTerminal      = "kontra.lifecycle.OnTerminal"
@@ -86,6 +93,21 @@ const MaxTurns = 1000
 // MaxResumes caps the successive resume dispatches of one attempt (D42): when an 11th would be needed, the
 // task fails upstream_error, "re-attach limit reached" (spec §6.4).
 const MaxResumes = 10
+
+// MaxReconnects caps the reconnect waits of one task (D343), besides D42's resume cap: when an 11th would be needed,
+// the task fails tunnel_lost saying how often its node disconnected.
+const MaxReconnects = 10
+
+// DefaultReattachGrace is task.reattach_grace's default (spec §17, D345): how long a task waits for its node to
+// reconnect.
+const DefaultReattachGrace = 15 * time.Minute
+
+// Why reattach_session found that no session of the node can ever resume the attempt (ReattachResult.Gone).
+const (
+	ReattachKeyRevoked     = "key_revoked"
+	ReattachBindingRevoked = "binding_revoked"
+	ReattachAttemptEnded   = "attempt_ended"
+)
 
 // Application error types the workflow, its Update handlers and its activities use; Client maps them back.
 const (

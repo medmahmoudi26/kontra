@@ -16,6 +16,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"maps"
 	"reflect"
 	"slices"
 	"strings"
@@ -241,6 +242,9 @@ type run struct {
 	// shows is the previous turn's end, which the upstream shows until it processes the follow-up, not this
 	// turn's (D81).
 	turnOpen bool
+	// resumed is a re-attach that ends a reconnect wait: the first Task it handles logs the upstream's status as a
+	// status event marked kontra.reconnect {state: resumed} (D341).
+	resumed bool
 	// full is the run of exchanges a tunnel's node refused with Kontra-Node: full after the first upstream
 	// task id (nodeFull); resendFull asks send to send the turn's message again.
 	full       fullRetry
@@ -317,12 +321,9 @@ func (r *run) execute(ctx context.Context) {
 	case errors.Is(err, upstream.ErrTunnelLost):
 		// The attempt's session is not held by this replica, or no longer serves the service (spec §6.1
 		// key_scope, §14.2): no stream is opened. Before the first upstream task id the workflow retries on
-		// another session; after it (a follow-up turn of a sticky task) the task fails tunnel_lost here (§7).
+		// another session; after it (a follow-up turn of a sticky task, a resume) the workflow waits for the node
+		// to reconnect (§6.4, §7; D340): nothing is logged here.
 		r.logger.Info("the attempt's tunnel session is gone; no stream opened", "error", err)
-		if r.ids.UpstreamTaskID != "" {
-			r.fail(store.ReasonTunnelLost, "the tunnel session to the service was lost")
-			return
-		}
 		d.running.SetOutcome(lifecycle.DispatchTunnelLost, store.ReasonTunnelLost)
 		r.finish(nil, err)
 		return
@@ -350,6 +351,18 @@ func (r *run) execute(ctx context.Context) {
 		return
 	}
 	r.send(ctx)
+}
+
+// sessionLost ends the turn when the attempt's tunnel session was lost after its first upstream task id (a stream
+// cut without an answer the node wrote itself, the session closed or no longer held): nothing is logged, the dispatch
+// returns tunnel_lost, and the workflow waits for the node to reconnect and resumes the attempt on its new session
+// (spec §6.4, D340). An answer the node wrote itself (Kontra-Node) is not a lost session: the node is up and
+// refused, and the caller fails the task as before.
+func (r *run) sessionLost(f upstream.Failure, err error) {
+	r.logger.Info("the attempt's tunnel session was lost after its first upstream task id; the workflow waits for the node",
+		"error", f.Message)
+	r.d.running.SetOutcome(lifecycle.DispatchTunnelLost, store.ReasonTunnelLost)
+	r.finish(nil, fmt.Errorf("%w: %w", upstream.ErrTunnelLost, err))
 }
 
 // resume runs a resume dispatch of the attempt (spec §6.4, D42, D81). A follow-up turn whose delivery is
@@ -532,6 +545,10 @@ func (r *run) upstreamFailed(ctx context.Context, err error) {
 		// the upstream task's state is unrecoverable from outside.
 		if !first {
 			r.retry(store.ReasonTunnelLost, 0, err)
+			return
+		}
+		if r.ex.Node() == "" {
+			r.sessionLost(f, err)
 			return
 		}
 		r.fail(store.ReasonTunnelLost, f.Message)
@@ -896,6 +913,10 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 			g.fullWait = min(2*full, r.e.opts.PollMax)
 		}
 	case upstream.ClassTunnelLost:
+		if r.ex.Node() == "" {
+			r.sessionLost(f, err)
+			return nil
+		}
 		r.fail(store.ReasonTunnelLost, f.Message)
 		return nil
 	case upstream.ClassSealedRejected:
@@ -908,6 +929,11 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 		r.finish(nil, err)
 		return nil
 	default:
+		if errors.Is(err, a2a.ErrTaskNotFound) && r.d.resume && r.attempt.Backend == store.BackendTunnel {
+			// The node is back but its agent no longer knows the task: it restarted while the node was away (D343).
+			r.fail(store.ReasonTunnelLost, TextAgentLostTask)
+			return nil
+		}
 		r.fail(store.ReasonUpstreamError, "the service returned an error: "+f.Message)
 		return nil
 	}
@@ -942,6 +968,9 @@ func (r *run) reattach(ctx context.Context) {
 		r.retry(store.ReasonUpstreamUnreachable, 0, errors.New("relay: re-attach without an upstream task id"))
 		return
 	}
+	// The re-attach that ends a reconnect wait replaces the gate's waiting status with the upstream's current one,
+	// marked kontra.reconnect {state: resumed}, even when the upstream's own status did not change (D341).
+	r.resumed = store.ReconnectState(r.proj) == store.ReconnectWaiting
 	t := r.awaitTask(ctx)
 	if t == nil || r.handle(ctx, t) {
 		return
@@ -1141,6 +1170,11 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 	if stale {
 		evs = slices.DeleteFunc(evs, func(e a2a.Event) bool { _, st := e.(*a2a.TaskStatusUpdateEvent); return st })
 	}
+	if r.resumed && t != nil && !stale {
+		r.resumed = false
+		evs = markResumed(t, evs, time.Now())
+		unchanged = false // the status is logged again: the turn goes on from it, or ends with it
+	}
 	for _, out := range evs {
 		out, err := r.externalize(ctx, out)
 		if errors.Is(err, errOverTaskBytes) {
@@ -1169,6 +1203,37 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		return true
 	}
 	return false
+}
+
+// TextAgentLostTask is the failed: tunnel_lost text of a re-attach whose upstream answers TaskNotFound (D343).
+const TextAgentLostTask = "The agent's node reconnected, but the agent no longer has the task: it may have restarted while the node was disconnected."
+
+// markResumed marks the re-attach that ends a reconnect wait (D341): the first status event of evs, or a new one
+// carrying the upstream task t's current status (gate ids) when the projection's difference holds none, gets
+// metadata["kontra.reconnect"] = {state: resumed, at}, so the gate's waiting message is replaced in the log.
+func markResumed(t *a2a.Task, evs []a2a.Event, at time.Time) []a2a.Event {
+	mark := func(st *a2a.TaskStatusUpdateEvent) *a2a.TaskStatusUpdateEvent {
+		cp := *st
+		cp.Metadata = maps.Clone(st.Metadata)
+		if cp.Metadata == nil {
+			cp.Metadata = map[string]any{}
+		}
+		cp.Metadata[store.MetaReconnect] = store.ReconnectResumedMeta(at)
+		return &cp
+	}
+	for i, e := range evs {
+		if st, ok := e.(*a2a.TaskStatusUpdateEvent); ok {
+			out := slices.Clone(evs)
+			out[i] = mark(st)
+			return out
+		}
+	}
+	st := a2a.NewStatusUpdateEvent(t, t.Status.State, t.Status.Message)
+	if t.Status.Timestamp != nil {
+		ts := *t.Status.Timestamp
+		st.Status.Timestamp = &ts
+	}
+	return append([]a2a.Event{mark(st)}, evs...)
 }
 
 // statusChanged is a2aevent's own test of a changed status, which Recover applies but does not export: the

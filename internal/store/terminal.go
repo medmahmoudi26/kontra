@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -75,13 +74,7 @@ func TerminalStatus(info a2a.TaskInfoProvider, state a2a.TaskState, meta map[str
 			text = "the task's status changed"
 		}
 	}
-	msg := a2a.NewMessageForTask(a2a.MessageRoleAgent, info, a2a.NewTextPart(text))
-	ev := a2a.NewStatusUpdateEvent(info, state, msg)
-	if len(meta) > 0 {
-		msg.Metadata = maps.Clone(meta)
-		ev.Metadata = maps.Clone(meta)
-	}
-	return ev
+	return GateStatus(info, state, meta, text)
 }
 
 // FailedStatus is `failed: <reason>` (spec §6.4): metadata["kontra.failure"] = reason and one text part

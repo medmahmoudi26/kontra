@@ -459,6 +459,15 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 	if attempt.UpstreamTaskID == "" {
 		return lifecycle.ForwardCancelResult{}, fmt.Errorf("relay: attempt %d of task %s has no upstream task to cancel", in.N, in.TaskID)
 	}
+	if in.Session != "" {
+		// The session the node of a task canceled during a reconnect wait came back on (D346): the cancel goes
+		// there, through this replica, which holds it.
+		s, err := uuid.Parse(in.Session)
+		if err != nil || attempt.Backend != store.BackendTunnel {
+			return lifecycle.ForwardCancelResult{}, fmt.Errorf("relay: forward_cancel of task %s: session %q", in.TaskID, in.Session)
+		}
+		attempt.TunnelSession = &s
+	}
 	row, err := d.Log.Load(ctx, taskUUID)
 	if err != nil {
 		return lifecycle.ForwardCancelResult{}, err

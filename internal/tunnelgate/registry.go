@@ -97,6 +97,7 @@ type Registry struct {
 	closing   bool // CloseAll ran: Add refuses
 	onConnect []func(ctx context.Context, tenantID uuid.UUID, service string)
 	onMCP     []func(tenantID uuid.UUID, service string)
+	onReg     []func(ctx context.Context, s *Session)
 
 	async sync.WaitGroup // control messages and revocation writes in flight
 }
@@ -240,7 +241,34 @@ func (r *Registry) Add(ctx context.Context, s *Session, mux *yamux.Session, serv
 		r.tellDrain(s)
 	}
 	r.mcpChanged(s)
+	r.registered(s)
 	return nil
+}
+
+// OnRegistered registers fn to run once a session is a candidate (its tunnels row committed, Add): the gate signals
+// the tasks waiting for that node to reconnect (relay.md §6.4, D344). fn runs on its own goroutine, counted for
+// CloseAll, with a context bounded by writeTimeout.
+func (r *Registry) OnRegistered(fn func(ctx context.Context, s *Session)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onReg = append(r.onReg, fn)
+}
+
+// registered runs the OnRegistered callbacks for s, asynchronously.
+func (r *Registry) registered(s *Session) {
+	r.mu.Lock()
+	fns := slices.Clone(r.onReg)
+	r.mu.Unlock()
+	if len(fns) == 0 {
+		return
+	}
+	r.goAsync(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), writeTimeout)
+		defer cancel()
+		for _, fn := range fns {
+			fn(ctx, s)
+		}
+	})
 }
 
 // OnMCPChange registers fn to run, once per MCP service of the session, when a session serving MCP services becomes a

@@ -408,6 +408,12 @@ type Node struct {
 	muxConfig     *yamux.Config
 	maintainEvery time.Duration
 	backoff       Backoff
+	// The reconnect the CLI reports (§13): when the current session was lost (zero while connected, and before the
+	// first session), how many dials since, and the last welcome's service lines, so a reconnect that serves the same
+	// services prints one line. Only Run's goroutine touches them.
+	lostAt      time.Time
+	redials     int
+	lastWelcome string
 	// slotWait is how long a node-opened stream waits for one of its session's slots (§14) before the open
 	// gives up (hiring: 429; a hosted exchange's blob fetch: 503 full); tests shorten it.
 	slotWait time.Duration

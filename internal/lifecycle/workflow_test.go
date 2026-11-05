@@ -53,25 +53,31 @@ type world struct {
 	abortErr   error
 	pushFn     func(ctx context.Context, in PushInput) (PushResult, error)
 	reviewFn   func(args hooks.ReviewMessageArgs) hooks.ReviewMessageResult
+	// reattachFn is reattach_session's answer (a reconnect wait, D342); nil: no session yet, every time.
+	reattachFn func(in ReattachInput) ReattachResult
 
 	now     func() time.Time // the test environment's clock
 	release chan struct{}    // closed at cleanup: every blocked fake returns
 	aborted chan struct{}    // closed by abort
 
-	events     []string // ordered log of what happened, "dispatch:1", "terminal:failed", …
-	prepares   []PrepareInput
-	prepareAt  []time.Time
-	dispatches []dispatchRec
-	terminals  []WriteTerminalInput
-	forwards   []string // queues
-	aborts     []string // queues
-	patches    []ApplyMetadataInput
-	pushes     []string // config ids
-	pushQueues []string
-	hookCalls  []string
-	lists      int
-	submits    []SubmitInput
-	appends    []ReviewAppendInput
+	events      []string // ordered log of what happened, "dispatch:1", "terminal:failed", …
+	prepares    []PrepareInput
+	prepareAt   []time.Time
+	dispatches  []dispatchRec
+	terminals   []WriteTerminalInput
+	forwards    []string // queues
+	forwardRefs []AttemptRef
+	aborts      []string // queues
+	patches     []ApplyMetadataInput
+	pushes      []string // config ids
+	pushQueues  []string
+	hookCalls   []string
+	lists       int
+	submits     []SubmitInput
+	appends     []ReviewAppendInput
+	waits       []ReconnectWaitInput // reconnect_wait calls
+	reattaches  []ReattachInput      // reattach_session calls
+	reattachAt  []time.Time
 }
 
 type dispatchRec struct {
@@ -105,7 +111,8 @@ func (w *world) snapshot() world {
 		terminals: slices.Clone(w.terminals), forwards: slices.Clone(w.forwards), aborts: slices.Clone(w.aborts),
 		patches: slices.Clone(w.patches), pushes: slices.Clone(w.pushes), pushQueues: slices.Clone(w.pushQueues),
 		hookCalls: slices.Clone(w.hookCalls), lists: w.lists, submits: slices.Clone(w.submits),
-		appends: slices.Clone(w.appends), state: w.state,
+		appends: slices.Clone(w.appends), state: w.state, waits: slices.Clone(w.waits), reattaches: slices.Clone(w.reattaches),
+		reattachAt: slices.Clone(w.reattachAt), forwardRefs: slices.Clone(w.forwardRefs),
 	}
 }
 
@@ -218,6 +225,28 @@ func (w *world) appendReview(ctx context.Context, in ReviewAppendInput) (int64, 
 	return 11, nil
 }
 
+func (w *world) reconnectWait(ctx context.Context, in ReconnectWaitInput) (ReconnectWaitResult, error) {
+	w.mu.Lock()
+	w.waits = append(w.waits, in)
+	logged := w.state == string(store.StateWorking) || w.state == string(store.StateSubmitted)
+	w.mu.Unlock()
+	w.event("reconnect_wait")
+	return ReconnectWaitResult{Logged: logged}, nil
+}
+
+func (w *world) reattach(ctx context.Context, in ReattachInput) (ReattachResult, error) {
+	w.mu.Lock()
+	w.reattaches = append(w.reattaches, in)
+	w.reattachAt = append(w.reattachAt, w.now())
+	fn := w.reattachFn
+	w.mu.Unlock()
+	w.event(fmt.Sprintf("reattach:%v", in.Bind))
+	if fn == nil {
+		return ReattachResult{}, nil
+	}
+	return fn(in), nil
+}
+
 func (w *world) dispatch(ctx context.Context, in DispatchInput) (DispatchResult, error) {
 	info := activity.GetInfo(ctx)
 	w.mu.Lock()
@@ -254,6 +283,7 @@ func (w *world) forwardCancel(ctx context.Context, in AttemptRef) (ForwardCancel
 	w.mu.Lock()
 	k := len(w.forwards)
 	w.forwards = append(w.forwards, q)
+	w.forwardRefs = append(w.forwardRefs, in)
 	fn := w.forwardFn
 	w.mu.Unlock()
 	w.event("forward:" + q)
@@ -305,6 +335,8 @@ func (w *world) env() *testsuite.TestWorkflowEnvironment {
 	reg(w.abort, ActAbort)
 	reg(w.forwardCancel, ActForwardCancel)
 	reg(w.push, ActPushWebhook)
+	reg(w.reconnectWait, ActReconnectWait)
+	reg(w.reattach, ActReattachSession)
 	reg(func(ctx context.Context, t hooks.TaskRef, a hooks.DispatchedArgs) error {
 		w.hook(HookOnDispatched)
 		return nil
