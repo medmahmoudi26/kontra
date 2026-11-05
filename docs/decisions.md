@@ -5872,3 +5872,168 @@ Decision (spec/relay.md §12.6):
 - **The e2e client** is the official MCP Go SDK (`github.com/modelcontextprotocol/go-sdk` v1.8.0, test only), which
   speaks both eras; adding it raised `golang.org/x/time` from v0.3.0 to v0.15.0 (the edge's and the tunnel's
   `rate.Limiter`, whose API did not change).
+
+### D340. A task survives its node's disconnect: the reconnect wait — **decided under the owner's standing instruction, 5 Nov** (amends D42, D149 and relay.md §6.4, §7, the owner's call, now made)
+
+The owner's request, 5 Nov: "Also when a client disconnects, the user must be notified, and given some time to
+reconnect, with auto reconnect trials, temporal's durability comes in handy here". Long scans through a laptop node
+failed `tunnel_lost` 22 and 49 minutes in when the node lost its connection, and every gate roll failed every running
+tunnel task the same way: §6.4 failed a tunnel attempt whose session was lost after its first upstream task id, and
+re-attached only direct backends (D42). The node already redials for ever with jittered backoff (tunnel.md §13), and
+its agent keeps the task: nothing but the gate's rule lost it.
+
+Decision ([`relay.md`](../spec/relay.md) §6.4, §7, §14.2; `internal/lifecycle/workflow_reconnect.go`,
+`internal/relay/executor.go`):
+
+- **A tunnel attempt of an A2A task whose session is lost after its first upstream task id waits for its node** instead
+  of failing: the dispatch's stream or session dropped without an answer the node wrote itself, the session no longer
+  held by the dispatch's replica (a forward to a closed session), or the replica holding it died or ended its drain (a
+  heartbeat or schedule-to-start timeout of a tunnel dispatch). `TaskLifecycle` waits durably (a Temporal timer, the
+  `kontra.reconnected` signal, and a re-check of Postgres every 10 s), then re-attaches on the node's new session
+  (D343). The gate never dials a node: it waits for the node's own dial.
+- **The relay no longer logs that failure** (D149 amended): after the first upstream task id a lost session ends the
+  dispatch with the outcome `tunnel_lost` and nothing logged, as before it; the workflow decides. An exchange the node
+  answers itself (`Kontra-Node`) is not a lost session: the node is up and refused, and fails the task as before.
+- **The wait lasts `task.reattach_grace`** (D345, default 15 minutes) and never past the task's deadline, where §6.5's
+  `failed: timeout` ends it. Before a first upstream task id, §6.4's retry rules are unchanged.
+- A follow-up sent to an `input-required` task whose node is gone waits for the node instead of failing (§7's row 2):
+  its turn is resumed on the new session and the follow-up sent there per D81.
+
+### D341. The buyer is told in band; gate-written statuses end no turn — **decided under the owner's standing instruction, 5 Nov**
+
+Decision (relay.md §6.4, §9; `internal/store/reconnect.go`, `reconnect_wait`):
+
+- **Entering the wait**, the gate logs a `working` status event whose agent-role message has one text part, "The
+  agent's node disconnected. Waiting up to 15 minutes for it to reconnect." (the grace in words, or the time to the
+  deadline when that is shorter), with `metadata["kontra.reconnect"] = {"state": "waiting", "since", "until"}` (RFC
+  3339, UTC, seconds). It is a status row like any other: A2A streams, `SubscribeToTask`, push, `/mcp` and Cloud's
+  console read it from the log. `kontra.` keys are the gate's (§2.5), so an upstream cannot forge it.
+- **No event** for a task at `input-required` or `auth-required`: its question or instructions stay the status. Nor
+  when the node is already back at the wait's first look (a node that redialed during the 30 s heartbeat timeout of a
+  dead replica): the task resumes at once and there was nothing to wait for. The status is written once per wait (a
+  retried activity finds its own `since` and writes nothing).
+- **On resume** the re-attach logs the upstream's current status as a status event, even when the upstream's own
+  status did not change, with `kontra.reconnect = {"state": "resumed", "at"}`, so the gate's message is replaced. The
+  relay marks the first status event of the re-attach's first `Task`, or adds one carrying that `Task`'s status.
+- **Giving up**: `failed: tunnel_lost`, "The agent's node did not reconnect within 15 minutes."
+- **Turn rules.** These statuses are `working` (or, for `resumed`, the upstream's own state), so §9's stream close
+  rules (terminal, `input-required`, `quoted`), a2a-go's blocking `SendMessage` and `/mcp`'s plain-call wait
+  (`internal/gatemcp` `turnOver`) end no turn on them; nothing needed changing there. The store needed no new
+  classification: the waiting status is written by a lifecycle activity at the task's current version, with no fence,
+  while no dispatch holds the attempt, through the same `Log.Append` as `submit`'s status; only a terminal task, which
+  the wait never writes to, refuses it.
+
+### D342. Only the same node resumes the task; rotation is followed, revocation ends the wait — **decided under the owner's standing instruction, 5 Nov**
+
+Decision (relay.md §6.4; `store.FindReattachSession`, `reattach_session`):
+
+- **The candidate** is a connected session that passes §6.1's checks for the task's service (key not revoked and not
+  past a rotation's overlap, binding not revoked, a live replica that is not draining, serving the service) **of the
+  attempt's key** (`attempts.key_id`) **or of a key it was rotated to**, never another node's: another node runs another
+  agent instance, which never saw the task. A session of the attempt's own key that is still up counts too (a stream
+  reset, not a lost session).
+- **A rotation within the wait** is followed (tunnel.md §12): `rotate_from` proves the old key, so the new key is the
+  same node and its identity file still opens the parts sealed to the old one; a rotated key's own new handshake is
+  refused, so after a rotation the node comes back with the new key. The chain is read through `tunnel_keys.rotated_to`,
+  16 rotations deep at most, newest key first; a resume records the new key on the attempt.
+- **No session can ever come** when every key of the chain that can still connect (not revoked, not rotated) is
+  revoked, or none of them is still bound to the service: the task fails `tunnel_lost` at once, saying the key was
+  revoked or the node is no longer enrolled for the service. A revoked key or binding during the wait is found by the
+  next look, within 10 s.
+- **Sealed services** (ext-sealed.md §5): the hosting node keeps its jobs on disk, keyed by the gate task id, and the
+  preamble of every resumed exchange names the same gate task, so the same key is the same hosting node and its job is
+  found; nothing changes for sealing.
+
+### D343. The resume is §6.4's re-attach on the new session, bounded; an agent that lost the task ends it — **decided under the owner's standing instruction, 5 Nov**
+
+Decision (relay.md §6.4; `ReattachSession`, `Dispatcher`, `run.resume`):
+
+- **Resume** = a fresh fenced `dispatch(resume)` of the same attempt on `kontra-tunnel-<replica of the new session>`.
+  `reattach_session` records the session on the attempt first (`tunnel_session`, `key_id`, `replica_id`), since the
+  replica's backend reads the attempt's session; the dispatch then writes its own `replica_id` and `dispatch_id`
+  (fencing any older dispatch still alive), calls `GetTask` on the recorded upstream id, logs the difference (§6.3),
+  and follows with `SubscribeToTask` when the card streams, else polls. A follow-up turn not yet delivered is resent
+  (D81).
+- **TaskNotFound** to that `GetTask` (the agent restarted while its node was away): `failed: tunnel_lost`, "The agent's
+  node reconnected, but the agent no longer has the task: it may have restarted while the node was disconnected."
+- **Bounds.** At most 10 reconnect waits per task (`MaxReconnects`); the 11th fails `tunnel_lost` saying how often the
+  node disconnected. D42's resume cap counts the re-attaches of lost dispatches and is separate. An attempt ended
+  meanwhile fails `upstream_error` ("the relay could not follow the task"), as D42's re-attach does.
+- **Nodes.** `internal/node` keeps no per-session task state: an exchange's preamble names the gate task, and the proxy
+  forwards `GetTask` and `SubscribeToTask` for an upstream task created on an earlier session like any other (the
+  sealing host reads its jobs from disk, D342), so no node change was needed and an older node resumes as well. A node
+  that refused the exchange itself would fail the task `tunnel_lost` with its reason, as before.
+
+### D344. Waiting tasks are found by a query, and signalled with ids only — **decided under the owner's standing instruction, 5 Nov** (no migration)
+
+Decision (`store.WaitingForKey`, `gate.signalReconnected`, `tunnelgate.Registry.OnRegistered`):
+
+- When a node's session becomes a candidate (its `tunnels` row committed), the replica sends `kontra.reconnected` (an
+  empty payload: the workflow id names the task; events never enter Temporal history) to every open A2A task whose
+  latest attempt is a tunnel attempt with a first upstream task id, on the session's key or a key rotated to it, whose
+  recorded session is no live candidate (no `tunnels` row, or a silent or draining replica), at most 1,000 per
+  registration.
+- **A query, not a column.** It starts from the open tasks (`tasks_open`, a partial index on `terminal_at is null`)
+  and reads each one's latest attempt by its primary key, so it needs no index of its own and no migration 0005, which
+  would also have to be run by Cloud before its gate image. The signal is a hint: each workflow checks the session
+  itself (`reattach_session`), a task that is not waiting ignores it, and a signal lost (a replica dying between the
+  commit and the send, more than 1,000 tasks) costs the task its next 10 s re-check.
+
+### D345. `task.reattach_grace`: a gate-wide key, 15 minutes by default, fixed at the task's start — **decided under the owner's standing instruction, 5 Nov**
+
+Decision (relay.md §17; `internal/config`, `spec/schema/config.json`, `lifecycle.Input.ReattachGraceSeconds`):
+
+- A new top-level `task:` block with `reattach_grace` (default `15m`, 1 s to 24 h). It is the gate's policy for a
+  node's absence, not a listing's term: a per-service key would need a `services` column (a migration Cloud's control
+  plane writes) for a value no seller has asked to set.
+- The workflow takes it from its start input (`reattachGraceSeconds`), so a config reload never changes a running task
+  (§14.1). An input recorded before it carries none and gets the default; a grace of 0 in an input turns the wait off
+  (the task then fails `tunnel_lost` at once, as before).
+
+### D346. A cancel during the wait cancels at once, and tells the node if it comes back — **decided under the owner's standing instruction, 5 Nov** (amends D148)
+
+Decision (relay.md §8's row "exists, session gone"; `cancelGone`, `lateCancel`):
+
+- **A cancel during a reconnect wait** writes `canceled` (`kontra.canceled: client`, the attempt `canceled`) at once:
+  nothing can be forwarded, and failing a caller's cancel `tunnel_lost` (D148) told them something other than what they
+  asked for. The same holds for a task whose sticky session is gone when the cancel arrives (`forward_cancel` answers
+  `tunnel_lost` or is not started within 10 s), at `input-required` or with a dispatch running, which D148 failed
+  `tunnel_lost` because "a running dispatch is failing `tunnel_lost` anyway", no longer true.
+- **If the node comes back** within the grace, the gate sends `forward_cancel` on its new session (best effort, through
+  that session's replica's control queue, `AttemptRef.session`), so the agent stops working on a task nobody waits for;
+  the task is not resumed and stays canceled whatever the node answers. It is cheap: the workflow keeps looking for
+  the session as the wait does, and ends once that is over; its terminal hooks are not held up by it.
+- **A timeout during the wait** is §6.5's: `forward_cancel` (best effort, to the old session's replica, which answers
+  `tunnel_lost` or does not start it), then `failed: timeout`.
+
+### D347. MCP tasks keep `tunnel_lost` — **decided under the owner's standing instruction, 5 Nov**
+
+A gate-owned MCP task (protocol `mcp`, §11.5) lives in an upstream MCP session that the node opened for its tunnel
+session: the node stops a stdio service's child when the tunnel session closes, and the gate closes the pinned
+`mcp_sessions` row `tunnel_lost` (§11.2, §11.10). A new tunnel session reaches a new MCP session where the task does
+not exist, so there is nothing to re-attach to; such a task fails `tunnel_lost` as before (`canReconnect`). A `hire`
+task of `/mcp` is an A2A task and waits like any other.
+
+### D348. The change is versioned and replay-tested; a gate roll fails no tunnel task — **decided under the owner's standing instruction, 5 Nov**
+
+Decision (relay.md §14.3, §14.4; `changeReconnect`):
+
+- `TaskLifecycle`'s new branches (the wait, and the canceled answer of D346) are behind
+  `workflow.GetVersion("tunnel-reconnect")`. `TestReplayTunnelLossBeforeReconnect` replays histories the code before it
+  recorded on exactly those branches (`e2e_replica_kill_tunnel`, the two `cancel_tunnel_session_gone`, `tunnel_kill`,
+  `input_required_sticky_session_gone`, `tunnel_drain`): they carry no marker, so they replay to the `tunnel_lost` they
+  recorded and a task in flight across the deploy replays deterministically. The `e2e_reconnect_*` histories recorded
+  since carry the marker.
+- **Draining** (§14.3) is unchanged: a draining replica keeps polling and serving its tunnel dispatches until they end
+  or `drain_timeout` passes. A dispatch still running then is cut, which is a lost session: its node dialed a session on
+  another replica when the drain began (make-before-break), so the wait finds it at once and the task resumes there. A
+  roll no longer fails tunnel tasks; it still waits up to `drain_timeout` for them, which handing them over at the
+  drain's start could shorten later.
+
+### D349. `kontra connect` says it lost the gate and when it is back — **decided under the owner's standing instruction, 5 Nov**
+
+On a session that closes (not one retired by a drain, a rotation or its stream ids) the node prints one line, "kontra
+connect: lost the gate <origin>; reconnecting in 3s (tasks in flight wait for this node)", one line per failed dial,
+"kontra connect: reconnect attempt 2 failed; next in 7s", and when a session is welcomed again "kontra connect: back
+after 12s (attempt 3); tasks in flight resume" before the usual "connected to" line, whose service lines it repeats
+only when they changed. The JSON log keeps its own lines (tunnel.md §13).

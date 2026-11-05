@@ -227,11 +227,12 @@ select t.session_id, t.key_id, t.replica_id from chain c
  order by c.depth desc, t.session_id desc
  limit 1`
 
-// reattachUsableSQL counts the keys of the chain that could still connect and serve the service: not revoked
-// (a rotated key in its overlap still counts: its session may be up), with a binding to the service not revoked.
+// reattachUsableSQL counts the keys of the chain that could still connect and serve the service: neither revoked nor
+// rotated (tunnel.md §12: a rotated key's new handshake is refused; its session already up is reattachCandidateSQL's),
+// and of those the ones with a binding to the service not revoked.
 const reattachUsableSQL = keyChainSQL + `
-select count(*) filter (where k.revoked_at is null and (k.revoked_reason is distinct from 'rotated' or k.overlap_until > now())),
-       count(*) filter (where k.revoked_at is null and (k.revoked_reason is distinct from 'rotated' or k.overlap_until > now())
+select count(*) filter (where k.revoked_at is null and k.revoked_reason is distinct from 'rotated'),
+       count(*) filter (where k.revoked_at is null and k.revoked_reason is distinct from 'rotated'
                           and exists (select 1 from kontra.key_services ks
                                        where ks.key_id = k.key_id and ks.service = $3 and ks.revoked_at is null))
   from chain c join kontra.tunnel_keys k on k.key_id = c.key_id and k.tenant_id = $2`

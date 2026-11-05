@@ -72,8 +72,9 @@ func workingTask(t *testing.T, ctx context.Context, h *Harness, svc, text string
 //	    target_unreachable), the cancel of a task at input-required is not delivered: the caller gets
 //	    TaskNotCancelableError, the task stays input-required with no kontra.failure and its attempt open,
 //	    and once the seller is back a follow-up completes it.
-//	(e) With the node gone (SIGKILL), the cancel of a task at input-required fails it tunnel_lost (§8's row
-//	    "exists, session gone"; the SPEC-CONFLICT CancelTunnelLost of M2 WP-05).
+//	(e) With the node gone (SIGKILL), the cancel of a task at input-required cancels it at once, nothing reaching
+//	    the seller (§8's row "exists, session gone", D346); when the node comes back within task.reattach_grace,
+//	    the seller receives the cancel through it, best effort, and the task stays canceled.
 //
 // The node never listens on a TCP socket: the gate never opened a connection to it (spec/tunnel.md §1).
 func TestCancelForwardedTunnel(t *testing.T) {
@@ -196,7 +197,7 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	}
 	t.Logf("kontra connect's TCP sockets: %+v", socks)
 
-	// (e) The node is gone: the cancel of a waiting task fails it tunnel_lost.
+	// (e) The node is gone: the cancel of a waiting task cancels it at once.
 	res, err = buyer.Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel, session gone"))
 	if err != nil {
 		t.Fatal(err)
@@ -211,14 +212,22 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	waitRowGone(t, ctx, h, sess, 5*time.Second, "the node was SIGKILLed")
 	cancels := slow.Count("CancelTask")
 	got, err := buyer.Client(t, h.Gates[1], "").CancelTask(ctx, &a2a.CancelTaskRequest{ID: gone.ID})
-	if err != nil || got.Status.State != a2a.TaskStateFailed || got.Metadata["kontra.failure"] != "tunnel_lost" {
-		t.Fatalf("the cancel with the session gone: %+v %v, want the task failed: tunnel_lost", got, err)
+	if err != nil || got.Status.State != a2a.TaskStateCanceled || got.Metadata["kontra.canceled"] != "client" {
+		t.Fatalf("the cancel with the session gone: %+v %v, want the task canceled", got, err)
 	}
 	if errors.Is(err, a2a.ErrTaskNotCancelable) || slow.Count("CancelTask") != cancels {
 		t.Fatal("the cancel with the session gone reached the seller")
 	}
-	if a := endedAttempt(t, ctx, h, gone.ID); a.Outcome != "tunnel_lost" {
-		t.Fatalf("the attempt %+v, want ended tunnel_lost", a)
+	if a := endedAttempt(t, ctx, h, gone.ID); a.Outcome != "canceled" {
+		t.Fatalf("the attempt %+v, want ended canceled", a)
+	}
+	// The node comes back: the seller is sent the cancel through it (D346), and the task stays canceled.
+	if err := n.Restart(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 40*time.Second, "the seller received the late cancel", func() bool { return slow.Count("CancelTask") == cancels+1 })
+	if state, _, err := h.TaskFailure(ctx, gone.ID); err != nil || state != "canceled" {
+		t.Fatalf("the task after the late cancel: %s %v", state, err)
 	}
 	checkHistory(t, h, gone.ID, "e2e_cancel_tunnel_session_gone", tunnelForbidden(h)...)
 }

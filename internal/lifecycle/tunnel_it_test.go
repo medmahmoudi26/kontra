@@ -54,9 +54,11 @@ func (goneSession) ForwardCancel(context.Context, AttemptRef) (ForwardCancelResu
 // A tunnel service over a development server, with the real lifecycle activities on Postgres (spec §6.1,
 // §6.4, §8, §14.2): the first attempt finds no candidate session and is written no_session; the workflow
 // retries after 1 s and the second attempt, placed on a session of this replica, is dispatched on
-// kontra-tunnel-<replica> and completes. A task at input-required whose session is gone is canceled into
-// failed: tunnel_lost. Both histories take the new GetVersion branches (tunnel-no-session,
-// cancel-tunnel-lost); with KONTRA_RECORD_HISTORIES=1 they are recorded under new names for
+// kontra-tunnel-<replica> and completes. A task at input-required whose session is gone is canceled at once
+// (D346). A task whose session is lost after its first upstream task id waits for its node (D340): the waiting
+// status is logged, a session of its key registers and kontra.reconnected resumes it there; with a grace of 2 s and
+// no node, it fails tunnel_lost. The histories take the new GetVersion branches (tunnel-no-session,
+// cancel-tunnel-lost, tunnel-reconnect); with KONTRA_RECORD_HISTORIES=1 they are recorded under new names for
 // TestReplayRecordedHistories (never over an existing file).
 func TestTunnelLifecycleOverTemporal(t *testing.T) {
 	e := newPGEnv(t)
@@ -119,18 +121,81 @@ func TestTunnelLifecycleOverTemporal(t *testing.T) {
 		}
 		eventually(t, "the task at input-required", func() bool { return e.state(pre) == store.StateInputRequired })
 		res, done, err := lc.Cancel(ctx, a2a.TaskID(pre))
-		if err != nil || !done || res.Outcome != CancelTunnelLost {
+		if err != nil || !done || res.Outcome != CancelCanceled {
 			t.Fatalf("cancel %+v %v %v", res, done, err)
 		}
 		row, _ := e.log.Load(ctx, uuid.MustParse(pre))
-		if row.State != store.StateFailed || row.Snapshot.Metadata[store.MetaFailure] != "tunnel_lost" {
+		if row.State != store.StateCanceled || row.Snapshot.Metadata[store.MetaCanceled] != store.CanceledClient {
 			t.Fatalf("task %s %v", row.State, row.Snapshot.Metadata)
 		}
-		if a, _ := e.log.GetAttempt(ctx, uuid.MustParse(pre), 1); a.Outcome != store.OutcomeTunnelLost {
-			t.Errorf("attempt outcome %q, want tunnel_lost", a.Outcome)
+		if a, _ := e.log.GetAttempt(ctx, uuid.MustParse(pre), 1); a.Outcome != store.OutcomeCanceled {
+			t.Errorf("attempt outcome %q, want canceled", a.Outcome)
+		}
+		// No key row: the node can never come back, so the late forward_cancel gives up at once and the run ends.
+		eventually(t, "the workflow closed", func() bool { return closedStatus(t, c, pre) == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED })
+		recordNewHistory(t, c, pre, "tunnel_reconnect_cancel_session_gone")
+	})
+
+	// The node's key, bound to the service, and this replica, live: what reattach_session reads.
+	key := "k1_" + "aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	e.exec(`insert into kontra.tunnel_keys (key_id, tenant_id, pubkey, node_name) values ($1, $2, $3, 'node')`,
+		key, e.svc.TenantID, make([]byte, 32))
+	e.exec(`insert into kontra.key_services (key_id, tenant_id, service) values ($1, $2, 'hello')`, key, e.svc.TenantID)
+	e.exec(`insert into kontra.gate_replicas (replica_id, version) values ('it-replica', 'test')`)
+
+	t.Run("the node reconnects", func(t *testing.T) {
+		cctx, pre := caller(true)
+		d.set(pre, turn{state: a2a.TaskStateWorking, outcome: DispatchTunnelLost, reason: string(store.ReasonTunnelLost)},
+			turn{state: a2a.TaskStateCompleted, outcome: DispatchTerminal})
+		if _, err := q.Write(cctx, payloadOf(requestOf("r-1", "scan"))); err != nil {
+			t.Fatal(err)
+		}
+		id := uuid.MustParse(pre)
+		eventually(t, "the waiting status", func() bool {
+			row, err := e.log.Load(ctx, id)
+			return err == nil && store.ReconnectState(row.Snapshot) == store.ReconnectWaiting && row.State == store.StateWorking
+		})
+		s2 := uuid.Must(uuid.NewV7())
+		e.exec(`insert into kontra.tunnels (session_id, key_id, tenant_id, replica_id, services, cli_version)
+			values ($1, $2, $3, 'it-replica', '{hello}', 'test')`, s2, key, e.svc.TenantID)
+		signalled := time.Now()
+		if err := lc.SignalReconnected(ctx, a2a.TaskID(pre)); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "the task completed", func() bool { return e.state(pre) == store.StateCompleted })
+		if took := time.Since(signalled); took > 8*time.Second {
+			t.Errorf("resumed %v after the signal: the signal did not wake the wait", took)
+		}
+		a, err := e.log.GetAttempt(ctx, id, 1)
+		if err != nil || a.TunnelSession == nil || *a.TunnelSession != s2 || a.Outcome != store.OutcomeCompleted {
+			t.Fatalf("attempt %+v %v: want it re-attached on %s, completed", a, err, s2)
+		}
+		d.mu.Lock()
+		calls := d.calls[pre]
+		d.mu.Unlock()
+		if len(calls) != 2 || calls[1].N != 1 || !calls[1].Resume {
+			t.Fatalf("dispatches %+v: want the first and a resume of attempt 1", calls)
+		}
+		e.exec(`delete from kontra.tunnels where session_id = $1`, s2)
+		eventually(t, "the workflow closed", func() bool { return closedStatus(t, c, pre) == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED })
+		recordNewHistory(t, c, pre, "tunnel_reconnect_resume")
+	})
+
+	t.Run("the node does not come back", func(t *testing.T) {
+		grace := 2 * time.Second
+		q2 := NewQueue(e.svc, e.log, lc, QueueOptions{Owner: ownerFrom, Hooks: HooksSnapshot{LifecycleQueue: QueueLifecycle}, ReattachGrace: &grace})
+		cctx, pre := caller(true)
+		d.set(pre, turn{state: a2a.TaskStateWorking, outcome: DispatchTunnelLost, reason: string(store.ReasonTunnelLost)})
+		if _, err := q2.Write(cctx, payloadOf(requestOf("r-2", "scan"))); err != nil {
+			t.Fatal(err)
+		}
+		eventually(t, "the task failed", func() bool { return e.state(pre) == store.StateFailed })
+		row, _ := e.log.Load(ctx, uuid.MustParse(pre))
+		if row.Snapshot.Metadata[store.MetaFailure] != "tunnel_lost" || row.Snapshot.Status.Message.Parts[0].Text() != "The agent's node did not reconnect within 2 seconds." {
+			t.Fatalf("task %+v %v", row.Snapshot.Status, row.Snapshot.Metadata)
 		}
 		eventually(t, "the workflow closed", func() bool { return closedStatus(t, c, pre) == enums.WORKFLOW_EXECUTION_STATUS_COMPLETED })
-		recordNewHistory(t, c, pre, "tunnel_cancel_session_gone")
+		recordNewHistory(t, c, pre, "tunnel_reconnect_gave_up")
 	})
 }
 

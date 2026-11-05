@@ -165,6 +165,9 @@ type Options struct {
 	Tunnel map[string]TunnelService
 	// DrainTimeout is drain_timeout (default 10 s, spec §14.3).
 	DrainTimeout time.Duration
+	// ReattachGrace is task.reattach_grace (spec §6.4, §17; D345): how long a tunnel task whose node lost its session
+	// after the first upstream task id waits for it. Zero leaves the gate's default, 15 minutes.
+	ReattachGrace time.Duration
 
 	// M3 (WP-09). MCP declares the MCP services (kind mcp, spec §11): a direct mcp: {url} backend with
 	// allow_private, or, without a URL, a tunnel service hosted by the nodes enrolled for it.
@@ -713,6 +716,9 @@ signing_key: %q
 `, listenPort, h.Front.URL, h.PostgresURL, temporalAddr, Namespace, authYAML, drain, h.opts.PushAllowPrivate, tunnelYAML, "file:"+h.SigningKey)
 	if h.Bucket != nil {
 		fmt.Fprintf(&b, "blobs: %q\n", h.Bucket.URL)
+	}
+	if g := h.opts.ReattachGrace; g > 0 {
+		fmt.Fprintf(&b, "task: { reattach_grace: %s }\n", g)
 	}
 	if h.opts.Peer {
 		// Each replica's own --peer-listen replaces this one, which only has to be valid.

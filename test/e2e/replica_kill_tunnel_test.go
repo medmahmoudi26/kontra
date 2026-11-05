@@ -30,10 +30,10 @@ func replicaGone(t *testing.T, ctx context.Context, h *Harness, g *Gate, session
 // Front; the buyers call replica B.
 //
 // After the first upstream id: the Front is routed to B and A is SIGKILLed mid-stream. The dispatch's
-// heartbeat times out within 60 s of the kill and the task fails tunnel_lost on its one attempt (a tunnel
-// attempt is never re-attached: the upstream task lives behind a session that is gone); the seller saw its
-// message once. A's gate_replicas row is reaped within 40 s, and its tunnels row with it. The node
-// re-registers on B, and a second task completes there.
+// heartbeat times out within 60 s of the kill; the node has redialed B meanwhile, so the task's reconnect wait finds
+// its session there at once and the attempt is re-attached on B (D340): the task completes on its one attempt, now
+// recorded on the node's session on B, with every chunk, and the seller saw its message once. A's gate_replicas row
+// is reaped within 40 s, and its tunnels row with it. A second task completes on B.
 //
 // Before the first upstream id (the seller holds its first event back 5 s): A is SIGKILLed while the
 // seller holds the task. Attempt 1 ends with no upstream id, and the task completes on a later attempt on
@@ -72,22 +72,19 @@ func TestReplicaKillTunnel(t *testing.T) {
 			t.Fatal(err)
 		}
 		killed := time.Now()
-		state, failure, as := endedAs(t, ctx, h, task, 2*HeartbeatTimeout)
+		state, failure, as := endedAs(t, ctx, h, task, 2*HeartbeatTimeout+time.Minute)
 		ended := time.Since(killed)
-		if state != "failed" || failure != "tunnel_lost" {
-			t.Fatalf("the task ended %s (%q) %.1f s after the kill, want failed: tunnel_lost", state, failure, ended.Seconds())
+		if state != "completed" {
+			t.Fatalf("the task ended %s (%q) %.1f s after the kill, want completed on the node's session on B", state, failure, ended.Seconds())
 		}
-		t.Logf("the task failed tunnel_lost %.1f s after A's SIGKILL", ended.Seconds())
-		if len(as) != 1 || as[0].Outcome != "tunnel_lost" || as[0].ReplicaID != a.ReplicaID || as[0].TunnelSession != sess {
-			t.Fatalf("attempts %+v: want only attempt 1, on A's session, ended tunnel_lost (no re-attach, no retry)", as)
-		}
+		t.Logf("the task completed %.1f s after A's SIGKILL, re-attached on B", ended.Seconds())
 		if got := sendsOf(h.Upstream, req.Message.ID); got != 1 {
 			t.Fatalf("the seller received the message %d times, want once", got)
 		}
 		reaped := replicaGone(t, ctx, h, a, sess, killed)
 		t.Logf("A's gate_replicas and tunnels rows were reaped %.1f s after the kill", reaped.Seconds())
 
-		// The node re-registers on B and the next task completes there.
+		// The node re-registered on B: the task's one attempt was re-attached there, and the next task completes there.
 		var onB string
 		eventually(t, Reregister, "the node's session on B", func() bool {
 			sessions, err := h.Sessions(ctx, n.KeyID)
@@ -98,6 +95,12 @@ func TestReplicaKillTunnel(t *testing.T) {
 			}
 			return err == nil && onB != ""
 		})
+		if len(as) != 1 || as[0].Outcome != "completed" || as[0].ReplicaID != b.ReplicaID || as[0].TunnelSession != onB {
+			t.Fatalf("attempts %+v: want only attempt 1, re-attached on the node's session %s on B, completed (no retry)", as, onB)
+		}
+		if got := chunksLogged(t, ctx, h, task); got != 20 {
+			t.Fatalf("%d chunks in the task's log, want all 20", got)
+		}
 		res, err := h.BuyerA().Client(t, b, "").SendMessage(ctx, newMessage("replica_kill tunnel, after"))
 		if err != nil {
 			t.Fatal(err)

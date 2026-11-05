@@ -71,12 +71,14 @@ func requestWith(a *slowagent.Agent, messageID string) *slowagent.Request {
 // sent through the other replica, reaches the seller holding the task, with that seller's own upstream
 // task and context ids, never the other seller; it runs on the same attempt, dispatched on the session's
 // replica (attempts.replica_id), and both tasks complete. A third task waits on N1; N1 is SIGKILLed; the
-// reply fails the task tunnel_lost on its one attempt, and nothing reaches S2. Both nodes then restart with
+// reply waits for N1 (relay.md §7, D340) for task.reattach_grace (5 s here), then fails the task tunnel_lost on its
+// one attempt, and nothing reaches S2 (another node is never a candidate, D342). Both nodes then restart with
 // their original command lines and reconnect, their used tokens not sent again.
 func TestInputRequiredSticky(t *testing.T) {
 	h := start(t, Options{
-		Upstream: slowagent.Config{Chunks: 3, Interval: 100 * time.Millisecond, Streaming: true},
-		Tunnel:   map[string]TunnelService{"slow": {}},
+		Upstream:      slowagent.Config{Chunks: 3, Interval: 100 * time.Millisecond, Streaming: true},
+		Tunnel:        map[string]TunnelService{"slow": {}},
+		ReattachGrace: 5 * time.Second,
 	})
 	ctx := ctxFor(t, 6*time.Minute)
 	s1 := h.Upstream
@@ -146,7 +148,8 @@ func TestInputRequiredSticky(t *testing.T) {
 	}
 	checkHistory(t, h, t1.ID, "e2e_input_required_sticky", tunnelForbidden(h)...)
 
-	// A third task waits on N1; N1 dies; the reply fails the task tunnel_lost and reaches no other node.
+	// A third task waits on N1; N1 dies; the reply waits for N1 through the grace, then fails the task tunnel_lost,
+	// and reaches no other node.
 	t3, a3 := askOn(t, ctx, h, sess1, "sticky, session gone")
 	if err := n1.Kill(); err != nil {
 		t.Fatal(err)

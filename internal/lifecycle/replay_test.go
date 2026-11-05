@@ -1,10 +1,12 @@
 package lifecycle
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +80,7 @@ func TestReplayTunnelLossBeforeReconnect(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(b), changeReconnect) {
+			if slices.Contains(changeIDs(t, b), changeReconnect) {
 				t.Fatalf("%s carries the %s marker: it was not recorded before the change", name, changeReconnect)
 			}
 			r := worker.NewWorkflowReplayer()
@@ -88,4 +90,55 @@ func TestReplayTunnelLossBeforeReconnect(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReplayReconnectHistories checks that the histories recorded through the reconnect wait (the wait then a resume,
+// the wait given up, the cancel of a task whose session was gone) carry the tunnel-reconnect marker, so the replay of
+// TestReplayRecordedHistories goes through the new branches.
+func TestReplayReconnectHistories(t *testing.T) {
+	files, _ := filepath.Glob(filepath.Join("testdata", "histories", "*reconnect*.json"))
+	if len(files) < 3 {
+		t.Fatalf("recorded reconnect histories: %v, want at least the three of TestTunnelLifecycleOverTemporal", files)
+	}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(changeIDs(t, b), changeReconnect) {
+			t.Errorf("%s holds no %s marker", f, changeReconnect)
+		}
+	}
+}
+
+// changeIDs are the GetVersion change ids a JSON history's markers record.
+func changeIDs(t *testing.T, history []byte) []string {
+	t.Helper()
+	var h struct {
+		Events []struct {
+			Marker *struct {
+				Details map[string]struct {
+					Payloads []struct {
+						Data []byte `json:"data"`
+					} `json:"payloads"`
+				} `json:"details"`
+			} `json:"markerRecordedEventAttributes"`
+		} `json:"events"`
+	}
+	if err := json.Unmarshal(history, &h); err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range h.Events {
+		if e.Marker == nil {
+			continue
+		}
+		for _, p := range e.Marker.Details["change-id"].Payloads {
+			var id string
+			if json.Unmarshal(p.Data, &id) == nil {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
 }

@@ -9,6 +9,7 @@ import (
 	"iter"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -305,9 +306,10 @@ func cutAll(_ string, _ json.RawMessage, _ int, w http.ResponseWriter) bool {
 	return true
 }
 
-// After the first upstream task id a lost session fails the task tunnel_lost (spec §6.4: "the upstream
-// task's state is unrecoverable from outside"), with kontra.failure and the gate's status message: a stream
-// cut after its first event, a poll whose session is gone, and a node's target_unreachable answer to a poll.
+// After the first upstream task id a lost session no longer fails the task (spec §6.4, D340): a stream cut after its
+// first event and a poll whose session is gone end the dispatch tunnel_lost with nothing logged and the attempt open,
+// for the workflow's reconnect wait. A node's own answer (target_unreachable to a poll) is not a lost session: the
+// node is up and refused, and the task fails tunnel_lost, with kontra.failure and the gate's status message.
 func TestTunnelLostAfterFirstUpstreamID(t *testing.T) {
 	working := a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 		return func(yield func(a2a.Event, error) bool) {
@@ -324,6 +326,7 @@ func TestTunnelLostAfterFirstUpstreamID(t *testing.T) {
 		name      string
 		streaming bool
 		arm       func(n *testNode)
+		fails     bool
 	}{
 		{"stream cut after its first event", true, func(n *testNode) {
 			n.setAnswer(func(method string, id json.RawMessage, _ int, w http.ResponseWriter) bool {
@@ -334,7 +337,7 @@ func TestTunnelLostAfterFirstUpstreamID(t *testing.T) {
 				cutExchange(w)
 				return true
 			})
-		}},
+		}, false},
 		{"the session gone while polling", false, func(n *testNode) {
 			n.setAnswer(func(method string, _ json.RawMessage, _ int, w http.ResponseWriter) bool {
 				if method == "GetTask" {
@@ -342,7 +345,7 @@ func TestTunnelLostAfterFirstUpstreamID(t *testing.T) {
 				}
 				return false
 			})
-		}},
+		}, false},
 		{"target_unreachable on a poll", false, func(n *testNode) {
 			n.setAnswer(func(method string, _ json.RawMessage, _ int, w http.ResponseWriter) bool {
 				if method != "GetTask" {
@@ -351,7 +354,7 @@ func TestTunnelLostAfterFirstUpstreamID(t *testing.T) {
 				nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable)
 				return true
 			})
-		}},
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s1 := newSession()
@@ -360,6 +363,16 @@ func TestTunnelLostAfterFirstUpstreamID(t *testing.T) {
 			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
 			res := e.dispatch(context.Background(), id, 1, wid, false)
 			p := projection(t, e, id)
+			if !tc.fails {
+				if res.Outcome != lifecycle.DispatchTunnelLost || res.Reason != "tunnel_lost" || p.Status.State != a2a.TaskStateWorking ||
+					p.Metadata[store.MetaFailure] != nil {
+					t.Fatalf("%+v %+v %v", res, p.Status, p.Metadata)
+				}
+				if a := e.attempt(id, 1); a.EndedAt != nil || a.FirstUpstreamIDAt == nil {
+					t.Errorf("attempt %+v: open, with its first upstream id, for the reconnect wait", a)
+				}
+				return
+			}
 			if res.Outcome != lifecycle.DispatchTerminal || res.Reason != "tunnel_lost" || p.Status.State != a2a.TaskStateFailed ||
 				p.Metadata[store.MetaFailure] != "tunnel_lost" || p.Status.Message == nil || p.Status.Message.Parts[0].Text() == "" {
 				t.Fatalf("%+v %+v %v", res, p.Status, p.Metadata)
@@ -490,14 +503,31 @@ func TestTunnelFollowUp(t *testing.T) {
 	w2 := e.followUp(id2, buyerA, "the red one")
 	res = e.dispatch(context.Background(), id2, 1, w2, false)
 	p = projection(t, e, id2)
-	if res.Outcome != lifecycle.DispatchTerminal || res.Reason != "tunnel_lost" || p.Metadata[store.MetaFailure] != "tunnel_lost" {
+	// The follow-up waits for the node (D340): nothing logged, the attempt open, the question still the status.
+	if res.Outcome != lifecycle.DispatchTunnelLost || res.Reason != "tunnel_lost" || p.Metadata[store.MetaFailure] != nil ||
+		p.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("a follow-up on a gone session: %+v %+v", res, p.Status)
 	}
 	if n.opens.Load() != opens {
 		t.Fatalf("a follow-up on a gone session opened %d streams", n.opens.Load()-opens)
 	}
-	if a := e.attempt(id2, 1); a.Outcome != store.OutcomeTunnelLost || a.EndedAt == nil {
+	if a := e.attempt(id2, 1); a.EndedAt != nil {
 		t.Errorf("attempt %+v", a)
+	}
+	// The node is back on another session, the same agent behind it: the resume sends the undelivered follow-up there
+	// once (D81) and the turn completes.
+	s2 := newSession()
+	ss.mu.Lock()
+	ss.nodes[s2] = n
+	ss.mu.Unlock()
+	a2 := e.attempt(id2, 1)
+	if err := e.log.RebindAttempt(context.Background(), uid(t, id2), 1, s2, a2.KeyID, a2.ReplicaID); err != nil {
+		t.Fatal(err)
+	}
+	res = e.dispatch(context.Background(), id2, 1, w2, true)
+	if p = projection(t, e, id2); res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted ||
+		p.Status.Message.Parts[0].Text() != "done: the red one" {
+		t.Fatalf("the follow-up resumed on the new session: %+v %+v", res, p.Status)
 	}
 }
 
@@ -696,5 +726,102 @@ func TestUpstreamContextsStayOnTheirSession(t *testing.T) {
 	e.dispatch(context.Background(), td, 1, wd, false)
 	if got := seller.sentMessages(t); len(got) != 1 || got[0].ContextID != "" || len(got[0].ReferenceTasks) != 0 {
 		t.Fatalf("a direct attempt got a tunnel session's ids: %+v", got)
+	}
+}
+
+// The resume that ends a reconnect wait (spec §6.4, D341, D343): the task lost its session while polling, the gate
+// logged its waiting status, and the node came back on another session with the same agent behind it. The resume on
+// the new session logs the upstream's current status marked kontra.reconnect {state: resumed} (replacing the gate's
+// waiting message) and follows the task to its end, its artifact included. An agent that restarted meanwhile answers
+// TaskNotFound: the task fails tunnel_lost, saying the agent lost it.
+func TestTunnelResumeAfterReconnect(t *testing.T) {
+	var release chan struct{}
+	slow := a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+		release := release
+		return func(yield func(a2a.Event, error) bool) {
+			if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
+				return
+			}
+			if !yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateWorking, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("scanning"))), nil) {
+				return
+			}
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return
+			}
+			if !yield(a2a.NewArtifactEvent(ec, a2a.NewTextPart("report")), nil) {
+				return
+			}
+			yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("scan done"))), nil)
+		}
+	})
+	for _, lostTask := range []bool{false, true} {
+		t.Run(fmt.Sprintf("agent lost the task=%v", lostTask), func(t *testing.T) {
+			release = make(chan struct{})
+			s1, s2 := newSession(), newSession()
+			e, ss, nodes := tunnelEnv(t, envOptions{}, false, slow, s1, s2)
+			if !lostTask {
+				nodes[s2].setService(nodes[s1].svc) // the same agent instance behind the node's new session
+			}
+			n := nodes[s1]
+			n.setAnswer(func(method string, _ json.RawMessage, k int, w http.ResponseWriter) bool {
+				if method == "GetTask" && k >= 2 {
+					n.gone.Store(true) // the node disconnects while the task runs
+				}
+				return false
+			})
+			id, wid := e.newTask(taskSpec{owner: buyerA, text: "scan", session: &s1})
+			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTunnelLost {
+				t.Fatalf("the lost session: %+v %+v %v", res, projection(t, e, id).Status, e.states(id))
+			}
+			ss.drop(s1)
+			since := time.Now().UTC().Truncate(time.Second)
+			if _, err := e.log.LogReconnectWait(context.Background(), uid(t, id), since, since.Add(15*time.Minute), "waiting"); err != nil {
+				t.Fatal(err)
+			}
+			a := e.attempt(id, 1)
+			if err := e.log.RebindAttempt(context.Background(), uid(t, id), 1, s2, a.KeyID, a.ReplicaID); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+			res := e.dispatch(context.Background(), id, 1, wid, true)
+			p := projection(t, e, id)
+			if lostTask {
+				if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateFailed || p.Metadata[store.MetaFailure] != "tunnel_lost" ||
+					p.Status.Message.Parts[0].Text() != TextAgentLostTask {
+					t.Fatalf("an agent that lost the task: %+v %+v %v", res, p.Status, p.Metadata)
+				}
+				return
+			}
+			if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted || len(p.Artifacts) != 1 {
+				t.Fatalf("resumed: %+v %+v, %d artifacts", res, p.Status, len(p.Artifacts))
+			}
+			if got := nodes[s2].seenTasks(); len(got) == 0 || got[0].TaskID != string(id) {
+				t.Fatalf("the resume's exchanges on the new session: %+v", got)
+			}
+			// In the log: the waiting status, then the resumed one (the upstream's own), before the end.
+			var marks []string
+			for _, ev := range e.events(id) {
+				var sr a2a.StreamResponse
+				if json.Unmarshal(ev.Payload, &sr) != nil {
+					continue
+				}
+				if st, ok := sr.Event.(*a2a.TaskStatusUpdateEvent); ok {
+					if m, ok := st.Metadata[store.MetaReconnect].(map[string]any); ok {
+						marks = append(marks, fmt.Sprint(m["state"]))
+						if m["state"] == store.ReconnectResumed && (st.Status.Message == nil || st.Status.Message.Parts[0].Text() == "waiting") {
+							t.Fatalf("the resumed status keeps the gate's message: %+v", st.Status)
+						}
+					}
+				}
+			}
+			if !slices.Equal(marks, []string{store.ReconnectWaiting, store.ReconnectResumed}) {
+				t.Fatalf("kontra.reconnect marks %v, want waiting then resumed", marks)
+			}
+			if store.ReconnectState(p) != store.ReconnectResumed {
+				t.Fatalf("the projection's kontra.reconnect: %v", p.Metadata)
+			}
+		})
 	}
 }
