@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +121,40 @@ func TestReattachSession(t *testing.T) {
 	}
 	e.exec(`delete from kontra.tunnels where key_id = $1`, k2)
 
+	// The attempt's key revoked by an operator after its rotation (a leak): the chain stops there, and the task is not
+	// resumed on the key it was rotated to, which may be the thief's (D342); a revoked key in the middle of a chain
+	// alike.
+	{
+		ka := e.key("hello")
+		sa := e.session(ka, r1, "hello")
+		ida := e.placedTask(ka, r1, sa)
+		e.exec(`delete from kontra.tunnels where session_id = $1`, sa)
+		kb := e.key("hello")
+		e.exec(`update kontra.tunnel_keys set revoked_reason = 'rotated', rotated_to = $2, overlap_until = now() + interval '1 day' where key_id = $1`, ka, kb)
+		e.session(kb, r1, "hello")
+		e.exec(`update kontra.tunnel_keys set revoked_at = now(), revoked_reason = 'operator' where key_id = $1`, ka)
+		if r := e.reattach(ida, true); r.Gone != lifecycle.ReattachKeyRevoked {
+			t.Fatalf("the attempt's key revoked after its rotation: %+v, want key_revoked", r)
+		}
+		kc, kd, ke := e.key("hello"), e.key("hello"), e.key("hello")
+		sc := e.session(kc, r1, "hello")
+		idc := e.placedTask(kc, r1, sc)
+		e.exec(`delete from kontra.tunnels where session_id = $1`, sc)
+		e.exec(`update kontra.tunnel_keys set revoked_reason = 'rotated', rotated_to = $2, overlap_until = now() + interval '1 day' where key_id = $1`, kc, kd)
+		e.exec(`update kontra.tunnel_keys set revoked_reason = 'rotated', rotated_to = $2, overlap_until = now() + interval '1 day' where key_id = $1`, kd, ke)
+		e.session(ke, r1, "hello")
+		if r := e.reattach(idc, false); r.SessionID == "" {
+			t.Fatalf("a chain of two rotations: %+v, want the newest key's session", r)
+		}
+		e.exec(`update kontra.tunnel_keys set revoked_at = now(), revoked_reason = 'operator' where key_id = $1`, kd)
+		if r := e.reattach(idc, false); r.SessionID != "" {
+			t.Fatalf("a revoked key in the middle of the chain: %+v, want no session", r)
+		}
+		if got, _ := e.log.WaitingForKey(ctx, e.team, kb, uuid.Must(uuid.NewV7()), time.Hour); slices.Contains(got, ida) {
+			t.Fatalf("the successor of a revoked key signals its tasks: %v", got)
+		}
+	}
+
 	// Revoked: the binding of the chain's live key, then the key itself.
 	e.exec(`update kontra.key_services set revoked_at = now() where key_id = $1`, k2)
 	if r := e.reattach(id, true); r.Gone != lifecycle.ReattachBindingRevoked {
@@ -169,7 +204,7 @@ func TestWaitingForKey(t *testing.T) {
 	e.exec(`delete from kontra.tunnels where session_id = any($1)`, []uuid.UUID{gone, o})
 	// The replica of the running task's session goes silent: it is waiting too.
 	newS := e.session(k, r1, "hello")
-	got, err := e.log.WaitingForKey(ctx, e.team, k, newS)
+	got, err := e.log.WaitingForKey(ctx, e.team, k, newS, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,19 +212,56 @@ func TestWaitingForKey(t *testing.T) {
 		t.Fatalf("waiting for %s: %v, want only %s (running %s, ended %s, done %s, other's %s)", k, got, waiting, running, ended, done, others)
 	}
 	e.exec(`update kontra.gate_replicas set last_seen_at = now() - interval '31 seconds' where replica_id = $1`, r2)
-	got, _ = e.log.WaitingForKey(ctx, e.team, k, newS)
+	got, _ = e.log.WaitingForKey(ctx, e.team, k, newS, time.Hour)
 	if want := []uuid.UUID{waiting, running}; !slices.Equal(got, want) {
 		t.Fatalf("with r-2 silent: %v, want %v", got, want)
 	}
 	// A key rotated to: the old key's tasks are its node's.
 	k2 := e.key("hello")
 	e.exec(`update kontra.tunnel_keys set revoked_reason = 'rotated', rotated_to = $2, overlap_until = now() + interval '1 day' where key_id = $1`, k, k2)
-	got, _ = e.log.WaitingForKey(ctx, e.team, k2, e.session(k2, r1, "hello"))
+	got, _ = e.log.WaitingForKey(ctx, e.team, k2, e.session(k2, r1, "hello"), time.Hour)
 	if len(got) != 2 {
 		t.Fatalf("for the rotated-to key: %v", got)
 	}
-	if got, _ := e.log.WaitingForKey(ctx, uuid.Must(uuid.NewV7()), k, newS); len(got) != 0 {
+	if got, _ := e.log.WaitingForKey(ctx, uuid.Must(uuid.NewV7()), k, newS, time.Hour); len(got) != 0 {
 		t.Fatalf("another tenant: %v", got)
+	}
+
+	// Tasks that ended canceled, timed out or given up while their session was gone, within the grace: their workflow
+	// sends the node forward_cancel when it comes back (lateCancel, D346), so they are signalled too; not once the
+	// grace is over, and never a task that completed.
+	k3 := e.key("hello")
+	s3 := e.session(k3, r1, "hello")
+	var ended3 []uuid.UUID
+	for _, o := range []struct {
+		state   store.State
+		reason  store.FailureReason
+		outcome store.Outcome
+	}{{store.StateCanceled, "", store.OutcomeCanceled}, {store.StateFailed, store.ReasonTimeout, store.OutcomeTimeout},
+		{store.StateFailed, store.ReasonTunnelLost, store.OutcomeTunnelLost}} {
+		id := e.placedTask(k3, r1, s3)
+		if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: id, State: o.state, Reason: o.reason, Canceled: store.CanceledClient}); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.log.EndAttempt(ctx, id, 1, o.outcome); err != nil {
+			t.Fatal(err)
+		}
+		ended3 = append(ended3, id)
+	}
+	completed := e.placedTask(k3, r1, s3)
+	e.status(completed, a2a.TaskStateCompleted)
+	e.exec(`delete from kontra.tunnels where session_id = $1`, s3)
+	back3 := e.session(k3, r1, "hello")
+	got, err = e.log.WaitingForKey(ctx, e.team, k3, back3, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.SortFunc(ended3, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	if !slices.Equal(got, ended3) {
+		t.Fatalf("ended within the grace: %v, want %v", got, ended3)
+	}
+	if got, _ := e.log.WaitingForKey(ctx, e.team, k3, back3, time.Millisecond); len(got) != 0 {
+		t.Fatalf("ended before the grace: %v, want none", got)
 	}
 }
 
@@ -242,6 +314,27 @@ func TestReconnectWaitStatus(t *testing.T) {
 	if store.ReconnectState(row.Snapshot) != store.ReconnectWaiting || row.State != store.StateWorking {
 		t.Fatalf("the projection: %s %v", row.State, row.Snapshot.Metadata)
 	}
+
+	// The wait's end in a terminal status says so: kontra.reconnect {ended}, the task never ends "waiting" (D341).
+	if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: id, State: store.StateFailed, Reason: store.ReasonTunnelLost, Text: "gone"}); err != nil {
+		t.Fatal(err)
+	}
+	if row, _ := e.log.Load(ctx, id); store.ReconnectState(row.Snapshot) != store.ReconnectEnded {
+		t.Fatalf("the terminal task's kontra.reconnect: %v", row.Snapshot.Metadata)
+	}
+
+	// A sealed service's task: the status has no message (a hiring node refuses any unsealed part of a sealed job but
+	// a terminal gate text, ext-sealed.md rule 4a), the metadata alone says the task waits (D342).
+	e.exec(`update kontra.services set sealed = 'optional' where tenant_id = $1 and name = 'hello'`, e.team)
+	sl := e.placedTask(k, r1, s)
+	if r, err := e.acts.ReconnectWait(ctx, lifecycle.ReconnectWaitInput{TaskID: sl.String(), N: 1, Since: since, Until: since.Add(time.Minute)}); err != nil || !r.Logged {
+		t.Fatalf("sealed: %+v %v", r, err)
+	}
+	if row, _ := e.log.Load(ctx, sl); row.Snapshot.Status.State != a2a.TaskStateWorking || row.Snapshot.Status.Message != nil ||
+		store.ReconnectState(row.Snapshot) != store.ReconnectWaiting {
+		t.Fatalf("a sealed service's waiting status: %+v %v", row.Snapshot.Status, row.Snapshot.Metadata)
+	}
+	e.exec(`update kontra.services set sealed = 'off' where tenant_id = $1 and name = 'hello'`, e.team)
 
 	// At input-required: nothing.
 	q := e.placedTask(k, r1, s)

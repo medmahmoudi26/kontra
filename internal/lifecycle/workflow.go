@@ -102,9 +102,18 @@ const (
 	changeReconnect = "tunnel-reconnect"
 )
 
-// reconnectRecheck is how often a reconnect wait reads Postgres for a session of its node besides the
-// kontra.reconnected signal (D344): a lost signal costs at most this long, never the task.
-const reconnectRecheck = 10 * time.Second
+// A reconnect wait (and a late cancel's look for the node) reads Postgres for a session of its node besides the
+// kontra.reconnected signal (D344): every reconnectRecheck for its first minute, then backing off to every
+// reconnectRecheckMax, so a lost signal costs at most a minute, never the task. Each re-check costs about 11 history
+// events; once the run's history is past reconnectHistoryBudget events it re-checks every reconnectRecheckSlow, so
+// that no grace (at most 24 h) and no number of waits brings a run near Temporal's history limit (spec §14.1).
+const (
+	reconnectRecheck       = 10 * time.Second
+	reconnectRecheckFast   = 6 // re-checks at reconnectRecheck before the backoff
+	reconnectRecheckMax    = time.Minute
+	reconnectRecheckSlow   = 10 * time.Minute
+	reconnectHistoryBudget = 10_000
+)
 
 // mcpCancelWait is how long an MCP task's cancel waits for abort or forward_cancel before it writes canceled (spec
 // §11.6: "it waits at most 10 s"): 8 s, so that the canceled write, and the caller's read of it, land within the

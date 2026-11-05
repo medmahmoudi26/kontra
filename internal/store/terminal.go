@@ -181,6 +181,7 @@ func (l *Log) terminalWrite(ctx context.Context, q querier, row *TaskRow, w Term
 	if err != nil {
 		return Write{}, err
 	}
+	EndReconnect(row.Snapshot, ev)
 	next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
 	if err != nil {
 		return Write{}, fmt.Errorf("store: terminal write to task %s: %w", w.TaskID, err)

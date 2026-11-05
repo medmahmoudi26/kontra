@@ -432,6 +432,12 @@ func (r *run) emit(ev a2a.Event) bool {
 	}
 	r.emits++
 	final := a2aevent.IsFinal(ev)
+	if st, ok := ev.(*a2a.TaskStatusUpdateEvent); ok && st.Status.State.Terminal() && store.ReconnectState(r.proj) == store.ReconnectWaiting {
+		// A terminal status while the task's reconnect wait is on: say the wait ended (D341).
+		cp := *st
+		store.EndReconnect(r.proj, &cp)
+		ev = &cp
+	}
 	if final {
 		if st, ok := ev.(*a2a.TaskStatusUpdateEvent); ok {
 			if st.Status.State == a2a.TaskStateInputRequired {
@@ -1210,7 +1216,10 @@ const TextAgentLostTask = "The agent's node reconnected, but the agent no longer
 
 // markResumed marks the re-attach that ends a reconnect wait (D341): the first status event of evs, or a new one
 // carrying the upstream task t's current status (gate ids) when the projection's difference holds none, gets
-// metadata["kontra.reconnect"] = {state: resumed, at}, so the gate's waiting message is replaced in the log.
+// metadata["kontra.reconnect"] = {state: resumed, at}, so the gate's waiting message is replaced in the log. A
+// working or submitted status goes first, before the artifacts the agent made while the node was away, so that a
+// caller never reads them under the gate's waiting message; one that ends the turn (terminal, input-required,
+// auth-required) stays after them, as it must.
 func markResumed(t *a2a.Task, evs []a2a.Event, at time.Time) []a2a.Event {
 	mark := func(st *a2a.TaskStatusUpdateEvent) *a2a.TaskStatusUpdateEvent {
 		cp := *st
@@ -1224,8 +1233,12 @@ func markResumed(t *a2a.Task, evs []a2a.Event, at time.Time) []a2a.Event {
 	for i, e := range evs {
 		if st, ok := e.(*a2a.TaskStatusUpdateEvent); ok {
 			out := slices.Clone(evs)
-			out[i] = mark(st)
-			return out
+			if st.Status.State != a2a.TaskStateWorking && st.Status.State != a2a.TaskStateSubmitted {
+				out[i] = mark(st)
+				return out
+			}
+			out = slices.Delete(out, i, i+1)
+			return append([]a2a.Event{mark(st)}, out...)
 		}
 	}
 	st := a2a.NewStatusUpdateEvent(t, t.Status.State, t.Status.Message)

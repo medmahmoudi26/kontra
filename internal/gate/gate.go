@@ -382,7 +382,7 @@ func (r *Replica) assemble() error {
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
 	// A node's session that registers wakes the tasks waiting for that node to reconnect (relay.md §6.4, D344): the
 	// signal carries ids only, and each workflow checks the session itself; a signal lost here costs the task its
-	// next periodic check, seconds.
+	// next periodic check, a minute at most.
 	r.tunnels.OnRegistered(r.signalReconnected)
 	// Anonymous sessions (spec/tunnel.md §6, D277): opened by the admission, their limits checked where work is
 	// created, their tenants ended and purged by every replica's sweeps. A gate without tunnel.anonymous opens none,
@@ -629,9 +629,10 @@ func (r *Replica) assemble() error {
 
 // signalReconnected sends kontra.reconnected to every task waiting for the node of a session that has just become a
 // candidate (D344): the open tasks whose latest tunnel attempt, on the session's key or a key rotated to it, has a
-// first upstream task id and a recorded session that is no live candidate any more.
+// first upstream task id and a recorded session that is no live candidate any more, and those that ended within
+// task.reattach_grace while their session was gone, whose workflow sends the node forward_cancel (D346).
 func (r *Replica) signalReconnected(ctx context.Context, s *tunnelgate.Session) {
-	tasks, err := r.storeLog.WaitingForKey(ctx, s.TenantID, s.KeyID, s.ID)
+	tasks, err := r.storeLog.WaitingForKey(ctx, s.TenantID, s.KeyID, s.ID, r.cfg.Task.ReattachGrace.D())
 	if err != nil {
 		r.log.Warn("the tasks waiting for a reconnecting node were not read; their periodic check finds the session",
 			"tunnel_session", s.ID.String(), "error", err)

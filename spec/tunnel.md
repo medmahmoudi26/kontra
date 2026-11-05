@@ -806,8 +806,8 @@ tasks it was serving and holds no task state: the gate waits for it. A task whos
 upstream task id waits `task.reattach_grace` (15 minutes by default) for a session of the same key, or of a key it
 was rotated to (§12), and resumes on it; its caller is told it waits ([`relay.md`](relay.md) §6.4, D340). The gate
 never dials the node. `kontra connect` prints that it lost the gate and is reconnecting with the next wait, each
-failed attempt with the next wait, and when it is back after how long (D349); the services of the welcome only when
-they changed.
+failed attempt with the next wait, and when it is back after how long (D349), a wait under a second in milliseconds
+("at once" for none); the services of the welcome only when they changed.
 
 Front proxies must not cut the tunnel on reload: the Caddy example sets `stream_close_delay`; on Kubernetes the
 gate sits behind an L4 load balancer (TLS at the gate) or a Gateway API route with WebSocket timeouts of at least

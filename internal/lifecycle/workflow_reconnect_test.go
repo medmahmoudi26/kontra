@@ -73,9 +73,9 @@ func TestReconnectWaitThenResume(t *testing.T) {
 			t.Fatalf("reattach_session %+v", r)
 		}
 	}
-	// The wait looked at once, then about every 10 s until the signal.
-	if n := len(s.reattaches); n < 10 || n > 16 {
-		t.Fatalf("reattach_session %d times over 2 minutes, want one at once and one about every 10 s", n)
+	// The wait looked at once, every 10 s for a minute, then after 20 s and 40 s, then at the signal (recheckAfter).
+	if n := len(s.reattaches); n != 10 {
+		t.Fatalf("reattach_session %d times over 2 minutes, want 10: at once, every 10 s for a minute, at 80 s, 120 s and the signal", n)
 	}
 	if len(s.terminals) != 0 {
 		t.Fatalf("terminal writes %+v", s.terminals)
@@ -83,7 +83,7 @@ func TestReconnectWaitThenResume(t *testing.T) {
 }
 
 // A node that redialed before the loss reached the workflow: the first look finds it, nothing is announced, and the
-// attempt resumes at once.
+// attempt resumes after D42's first backoff (1 s).
 func TestReconnectAlreadyBack(t *testing.T) {
 	w := tunnelWorld(t)
 	w.dispatchFn = lostThenDone(w, 1)
@@ -94,6 +94,9 @@ func TestReconnectAlreadyBack(t *testing.T) {
 	s := w.snapshot()
 	if len(s.waits) != 0 || len(s.reattaches) != 1 || len(s.dispatches) != 2 || s.dispatches[1].queue != QueueTunnel("r2") {
 		t.Fatalf("waits %+v reattaches %+v dispatches %d", s.waits, s.reattaches, len(s.dispatches))
+	}
+	if d := s.dispatches[1].at.Sub(s.reattachAt[0]); d != time.Second {
+		t.Fatalf("resumed %v after finding the session, want 1 s", d)
 	}
 }
 
@@ -116,7 +119,12 @@ func TestReconnectWaitGivesUp(t *testing.T) {
 		s.terminals[0].EndAttempt != string(store.OutcomeTunnelLost) || !strings.Contains(s.terminals[0].Text, "did not reconnect within 2 minutes") {
 		t.Fatalf("terminal writes %+v", s.terminals)
 	}
-	last := s.reattachAt[len(s.reattachAt)-1]
+	var last time.Time // the wait's last look (Bind); the late cancel's looks follow (D346)
+	for i, r := range s.reattaches {
+		if r.Bind {
+			last = s.reattachAt[i]
+		}
+	}
 	if d := last.Sub(s.waits[0].Since); d < 2*time.Minute || d > 2*time.Minute+time.Second {
 		t.Fatalf("gave up %v after the wait began, want 2 minutes", d)
 	}
@@ -239,8 +247,36 @@ func TestReconnectTwice(t *testing.T) {
 	}
 }
 
-// A node that keeps disconnecting: the 11th wait is not entered, and the task fails tunnel_lost saying so.
+// A node that keeps disconnecting: each wait finds no session at its first look, so it is announced; the 11th wait is
+// not entered, and the task fails tunnel_lost saying so.
 func TestReconnectLimit(t *testing.T) {
+	w := tunnelWorld(t)
+	w.dispatchFn = lostThenDone(w, 100)
+	w.reattachFn = func(ReattachInput) ReattachResult {
+		w.mu.Lock()
+		n := len(w.reattaches)
+		w.mu.Unlock()
+		if n%2 == 1 { // the first look of each wait finds nothing, the second finds the node
+			return ReattachResult{}
+		}
+		return ReattachResult{Queue: QueueTunnel("r2"), SessionID: sessionB, ReplicaID: "r2"}
+	}
+	env := w.env()
+	start(env, newUpdates(), input(2))
+	done(t, env)
+	s := w.snapshot()
+	if len(s.dispatches) != MaxReconnects+1 || len(s.waits) != MaxReconnects {
+		t.Fatalf("dispatches %d waits %d, want the first and %d resumes after as many waits", len(s.dispatches), len(s.waits), MaxReconnects)
+	}
+	if len(s.terminals) != 1 || s.terminals[0].Reason != string(store.ReasonTunnelLost) || !strings.Contains(s.terminals[0].Text, "disconnected 10 times") {
+		t.Fatalf("terminal writes %+v", s.terminals)
+	}
+}
+
+// A session of the node that is up every time it is looked for while every dispatch on it is cut (a stale tunnels row,
+// a stream that keeps resetting): no wait is announced or counted, the resumes back off as D42's (1 s, 2 s, 4 s …,
+// 30 s at most) and stop at MaxResumes, saying the connection was cut, not that the node disconnected.
+func TestReconnectImmediateResumesBackOff(t *testing.T) {
 	w := tunnelWorld(t)
 	w.dispatchFn = lostThenDone(w, 100)
 	w.reattachFn = back(w, t0)
@@ -248,11 +284,96 @@ func TestReconnectLimit(t *testing.T) {
 	start(env, newUpdates(), input(2))
 	done(t, env)
 	s := w.snapshot()
-	if len(s.dispatches) != MaxReconnects+1 {
-		t.Fatalf("dispatches %d, want the first and %d resumes", len(s.dispatches), MaxReconnects)
+	if len(s.dispatches) != MaxResumes+1 || len(s.waits) != 0 {
+		t.Fatalf("dispatches %d waits %d, want the first and %d resumes, no wait", len(s.dispatches), len(s.waits), MaxResumes)
 	}
-	if len(s.terminals) != 1 || s.terminals[0].Reason != string(store.ReasonTunnelLost) || !strings.Contains(s.terminals[0].Text, "disconnected 10 times") {
+	var want time.Duration
+	for i := 1; i <= MaxResumes; i++ {
+		want += min(time.Second<<(i-1), maxResumeBackoff)
+	}
+	if d := s.dispatches[len(s.dispatches)-1].at.Sub(s.dispatches[0].at); d < want {
+		t.Fatalf("the last resume %v after the first dispatch, want at least %v of backoff", d, want)
+	}
+	if len(s.terminals) != 1 || s.terminals[0].Reason != string(store.ReasonTunnelLost) || !strings.Contains(s.terminals[0].Text, "cut 10 times") {
 		t.Fatalf("terminal writes %+v", s.terminals)
+	}
+}
+
+// A long wait backs its re-checks off (a minute apart after the first minutes), and once the run's history is past
+// reconnectHistoryBudget events it re-checks every 10 minutes, so a 24-hour grace stays far below Temporal's history
+// limit (spec §14.1).
+func TestReconnectRecheckBacksOff(t *testing.T) {
+	w := tunnelWorld(t)
+	w.deadline = t0.Add(72 * time.Hour)
+	w.dispatchFn = lostThenDone(w, 1)
+	env := w.env()
+	in := input(2)
+	g := int64(24 * 3600)
+	in.ReattachGraceSeconds = &g
+	env.RegisterDelayedCallback(func() { env.SetCurrentHistoryLength(reconnectHistoryBudget + 1) }, 12*time.Hour)
+	start(env, newUpdates(), in)
+	done(t, env)
+	s := w.snapshot()
+	if len(s.terminals) != 1 || !strings.Contains(s.terminals[0].Text, "did not reconnect within 24 hours") {
+		t.Fatalf("terminal writes %+v", s.terminals)
+	}
+	// 12 hours at a minute apart, then 12 hours at 10 minutes apart (and the late cancel's looks after the give-up).
+	var wait int
+	for _, at := range s.reattachAt {
+		if !at.After(s.waits[0].Since.Add(24 * time.Hour)) {
+			wait++
+		}
+	}
+	if wait > 12*60+12*6+10 {
+		t.Fatalf("%d looks in a 24-hour wait, want about %d", wait, 12*60+12*6)
+	}
+	for i := 1; i < len(s.reattachAt); i++ {
+		at, gap := s.reattachAt[i], s.reattachAt[i].Sub(s.reattachAt[i-1])
+		switch since := at.Sub(s.waits[0].Since); {
+		case since > 3*time.Minute && since < 12*time.Hour && gap != reconnectRecheckMax:
+			t.Fatalf("look %d at %v: %v after the previous one, want %v", i, since, gap, reconnectRecheckMax)
+		case since > 12*time.Hour+11*time.Minute && since < 24*time.Hour && gap != reconnectRecheckSlow:
+			t.Fatalf("look %d at %v: %v after the previous one, want %v past the history budget", i, since, gap, reconnectRecheckSlow)
+		}
+	}
+}
+
+// The deadline or the grace ends a wait: the upstream task still runs on the node, so the node is sent forward_cancel
+// if it comes back within the grace (D346), on its new session's replica's control queue; nothing is resumed.
+func TestReconnectEndedWaitTellsTheNode(t *testing.T) {
+	for name, tc := range map[string]struct {
+		deadline time.Time
+		backAt   time.Duration
+		reason   store.FailureReason
+	}{
+		"timeout": {deadline: t0.Add(5 * time.Minute), backAt: 8 * time.Minute, reason: store.ReasonTimeout},
+		"gave up": {backAt: 20 * time.Minute, reason: store.ReasonTunnelLost},
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := tunnelWorld(t)
+			w.deadline = tc.deadline
+			w.dispatchFn = lostThenDone(w, 1)
+			w.forwardFn = func(context.Context, int, string) (ForwardCancelResult, error) {
+				return ForwardCancelResult{Outcome: CancelCanceled}, nil
+			}
+			w.reattachFn = back(w, t0.Add(tc.backAt))
+			env := w.env()
+			start(env, newUpdates(), input(2))
+			done(t, env)
+			s := w.snapshot()
+			if len(s.terminals) != 1 || s.terminals[0].Reason != string(tc.reason) || len(s.dispatches) != 1 {
+				t.Fatalf("terminals %+v dispatches %d", s.terminals, len(s.dispatches))
+			}
+			var late []AttemptRef
+			for i, q := range s.forwards {
+				if q == QueueCtl("r2") {
+					late = append(late, s.forwardRefs[i])
+				}
+			}
+			if len(late) != 1 || late[0].Session != sessionB {
+				t.Fatalf("forward_cancel %v %+v, want one on kontra-ctl-r2 naming session B", s.forwards, s.forwardRefs)
+			}
+		})
 	}
 }
 
@@ -277,7 +398,7 @@ func TestReconnectKeyRevokedDuringTheWait(t *testing.T) {
 			if len(s.terminals) != 1 || s.terminals[0].Reason != string(store.ReasonTunnelLost) || !strings.Contains(s.terminals[0].Text, text) {
 				t.Fatalf("terminal writes %+v", s.terminals)
 			}
-			if last := s.reattachAt[len(s.reattachAt)-1]; last.Sub(revokedAt) > reconnectRecheck {
+			if last := s.reattachAt[len(s.reattachAt)-1]; last.Sub(revokedAt) > reconnectRecheckMax {
 				t.Fatalf("gave up at %v, the key was revoked at %v", last, revokedAt)
 			}
 		})

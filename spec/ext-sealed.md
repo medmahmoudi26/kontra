@@ -218,7 +218,9 @@ whose verified card — or, for MCP, whose `initialize` result — carries the e
    single text part of a terminal status message the gate wrote (it carries `metadata["kontra.failure"]`, or names
    an upstream terminal state that came without a message, [`relay.md`](relay.md) §6.3–§6.4), which it hands to
    the local client with `metadata["kontra.sealed"] = false`. Any other unsealed part is dropped, and the client
-   receives `kontra.failure: sealed_rejected`. An MCP `CreateTaskResult` is taken only for a sealed call that asked
+   receives `kontra.failure: sealed_rejected`. The gate therefore writes no text in any other status of a sealed
+   service's task: a reconnect wait's `working` status there has no message, only `metadata["kontra.reconnect"]`
+   ([`relay.md`](relay.md) §6.4, D342), which reaches the local client as it is. An MCP `CreateTaskResult` is taken only for a sealed call that asked
    for a task, and only with nothing beside `task` and `_meta` (a stock client ignores `task` and reads `content` as
    the tool's result, D244). On a sealed session a result that answers no request the node tracks is refused on a
    `GET` stream, and on any stream once the node no longer holds the session (D241). What only the gate can have

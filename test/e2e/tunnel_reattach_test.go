@@ -73,7 +73,13 @@ func TestTunnelReattach(t *testing.T) {
 		if err := n.Restart(ctx, h); err != nil {
 			t.Fatal(err)
 		}
-		readUntil(t, ctx, s, reconnectState("resumed"))
+		// The resumed status comes before the chunks the agent made while the node was away (D341): none of them is
+		// read under the waiting message.
+		for _, ev := range readUntil(t, ctx, s, reconnectState("resumed")) {
+			if ev.Kind == "artifact" {
+				t.Fatalf("an artifact reached the buyer under the waiting status, before the resumed one: %s", ev.Data)
+			}
+		}
 		rest, err := s.ReadAll(ctx)
 		if err != nil || len(rest) == 0 || rest[len(rest)-1].State != a2a.TaskStateCompleted {
 			t.Fatalf("the buyer's stream after the resume: %d events, %v, want it to end completed", len(rest), err)
@@ -176,6 +182,9 @@ func TestTunnelReattach(t *testing.T) {
 		last := rest[len(rest)-1].Event.(*a2a.TaskStatusUpdateEvent)
 		if last.Metadata["kontra.failure"] != "tunnel_lost" || last.Status.Message.Parts[0].Text() != "The agent's node did not reconnect within 10 seconds." {
 			t.Fatalf("the failure: %s", rest[len(rest)-1].Data)
+		}
+		if m, _ := last.Metadata["kontra.reconnect"].(map[string]any); m["state"] != "ended" {
+			t.Fatalf("the failure's kontra.reconnect: %s, want ended (D341)", rest[len(rest)-1].Data)
 		}
 		if gaveUp < 5*time.Second || gaveUp > 25*time.Second {
 			t.Fatalf("gave up %.1f s after the waiting status, want about 10 s", gaveUp.Seconds())

@@ -33,20 +33,31 @@ func (l *lc) canReconnect(ctx workflow.Context) bool {
 	return workflow.GetVersion(ctx, changeReconnect, workflow.DefaultVersion, 1) >= 1 && l.reattachGrace() > 0
 }
 
+// recheckAfter is the wait before a reconnect wait's (or a late cancel's) pass-th look for its node's session, pass
+// counting from 1: reconnectRecheck for the first minute, then doubling to reconnectRecheckMax; reconnectRecheckSlow
+// once the run's history is past reconnectHistoryBudget events (spec §14.1, D344). The history length is the
+// replayed one, so the choice is deterministic.
+func recheckAfter(ctx workflow.Context, pass int) time.Duration {
+	if workflow.GetInfo(ctx).GetCurrentHistoryLength() > reconnectHistoryBudget {
+		return reconnectRecheckSlow
+	}
+	if pass <= reconnectRecheckFast {
+		return reconnectRecheck
+	}
+	return min(reconnectRecheck<<min(pass-reconnectRecheckFast, 8), reconnectRecheckMax)
+}
+
 // reconnect is one reconnect wait of the current attempt (D341..D343). It looks for a session of the attempt's node
-// at once (a node that redialed before the dispatch's loss reached the workflow: nothing is announced), then logs the
-// waiting status and looks again on each kontra.reconnected and every reconnectRecheck, until a session is found
-// (stepResume on its kontra-tunnel-<replica>), none can ever come (the key or binding revoked: failed: tunnel_lost
-// at once), the grace runs out (failed: tunnel_lost, saying so), the deadline passes (failed: timeout) or the
-// task is canceled (canceled at once, D346). The grace never runs past the task's deadline (§6.5).
+// at once: one found then (the node redialed before the dispatch's loss reached the workflow, a gate roll's drain, or
+// a stream reset on a session still up) is a D42 resume, announced to nobody, backed off 1 s, 2 s, 4 s … and capped
+// by MaxResumes, so a session that keeps failing its dispatches cannot spin. Else it logs the waiting status (the
+// wait counts toward MaxReconnects) and looks again on each kontra.reconnected and at recheckAfter, until a session
+// is found (stepResume on its kontra-tunnel-<replica>), none can ever come (the key or binding revoked: failed:
+// tunnel_lost), the grace runs out (failed: tunnel_lost, saying so), the deadline passes (failed: timeout) or the
+// task is canceled (canceled at once, D346). The grace never runs past the task's deadline (§6.5). When the task
+// ends in the wait by its timeout or the grace, the node is sent forward_cancel if it comes back (lateCancel, D346).
 func (l *lc) reconnect(ctx workflow.Context) step {
 	done := step{kind: stepDone}
-	l.reconnects++
-	if l.reconnects > MaxReconnects {
-		l.failLost(ctx, fmt.Sprintf("The agent's node disconnected %d times while running the task; the gate stopped waiting for it.",
-			MaxReconnects))
-		return done
-	}
 	grace := l.reattachGrace()
 	since := workflow.Now(ctx)
 	until := since.Add(grace)
@@ -54,13 +65,15 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 	if !l.deadline.IsZero() && until.After(l.deadline) {
 		until, capped = l.deadline, true
 	}
-	l.logger.Info("the attempt's tunnel session was lost: waiting for the node to reconnect", "attempt", l.n,
-		"wait", l.reconnects, "until", until)
+	l.logger.Info("the attempt's tunnel session was lost: looking for the node's session", "attempt", l.n,
+		"waits", l.reconnects, "until", until)
 	announced := false
-	for l.phase != phaseTerminal && ctx.Err() == nil {
+	for pass := 1; l.phase != phaseTerminal && ctx.Err() == nil; pass++ {
 		switch {
 		case l.timedOut:
 			l.timeout(ctx)
+			// The upstream task runs on: tell the node if it comes back within the grace it had.
+			l.lateCancel(ctx, since.Add(grace))
 			return done
 		case l.cancelPending():
 			l.cancelWaiting(ctx, until)
@@ -83,8 +96,20 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 			return done
 		case r.Queue != "":
 			l.queue, l.session = r.Queue, r.SessionID
-			l.logger.Info("the node reconnected: resuming the attempt", "attempt", l.n, "queue", r.Queue)
-			return step{kind: stepResume}
+			if announced {
+				l.logger.Info("the node reconnected: resuming the attempt", "attempt", l.n, "queue", r.Queue)
+				return step{kind: stepResume}
+			}
+			// A session of the node is up already: a resume as D42's, backed off and capped.
+			l.resumes++
+			if l.resumes > MaxResumes {
+				l.failLost(ctx, fmt.Sprintf("The connection to the agent's node was cut %d times while running the task; the gate stopped re-attaching.",
+					MaxResumes))
+				return done
+			}
+			wait := min(time.Second<<(l.resumes-1), maxResumeBackoff)
+			l.logger.Info("a session of the node is up: resuming the attempt", "attempt", l.n, "queue", r.Queue, "after", wait)
+			return step{kind: stepResume, wait: wait}
 		}
 		left := until.Sub(workflow.Now(ctx))
 		if left <= 0 {
@@ -94,10 +119,20 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 				continue
 			}
 			l.failLost(ctx, "The agent's node did not reconnect within "+HumanDuration(grace)+".")
+			if l.phase == phaseTerminal {
+				l.lateCancel(ctx, workflow.Now(ctx).Add(grace))
+			}
 			return done
 		}
 		if !announced {
+			l.reconnects++
+			if l.reconnects > MaxReconnects {
+				l.failLost(ctx, fmt.Sprintf("The agent's node disconnected %d times while running the task; the gate stopped waiting for it.",
+					MaxReconnects))
+				return done
+			}
 			announced = true
+			l.logger.Info("waiting for the node to reconnect", "attempt", l.n, "wait", l.reconnects, "until", until)
 			var wr ReconnectWaitResult
 			if err := l.call(ctx, ActReconnectWait, &wr, ReconnectWaitInput{TaskID: l.in.TaskID, N: l.n, Since: since, Until: until}); err != nil {
 				l.logger.Warn("reconnect_wait", "error", err)
@@ -110,7 +145,7 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 			}
 			left = until.Sub(workflow.Now(ctx))
 		}
-		_, _ = workflow.AwaitWithTimeout(ctx, max(min(reconnectRecheck, left), time.Millisecond), func() bool {
+		_, _ = workflow.AwaitWithTimeout(ctx, max(min(recheckAfter(ctx, pass), left), time.Millisecond), func() bool {
 			return l.reconnectSig || l.timedOut || l.cancelPending()
 		})
 	}
@@ -157,15 +192,15 @@ func (l *lc) cancelGone(ctx workflow.Context, op *cancelOp, c *call, until time.
 	}
 }
 
-// lateCancel sends forward_cancel, best effort, to the node of a task canceled while its session was gone, if the node
-// comes back before until (D346): on the session reattach_session finds (without binding it), through that session's
-// replica's control queue. The task stays canceled whatever the node answers; the run ends once this is over.
+// lateCancel sends forward_cancel, best effort, to the node of a task that ended while its session was gone (canceled,
+// timed out or given up in a reconnect wait), if the node comes back before until (D346): on the session reattach_session finds (without binding it), through that session's
+// replica's control queue. The task stays as it ended whatever the node answers; the run ends once this is over.
 func (l *lc) lateCancel(ctx workflow.Context, until time.Time) {
 	l.lateCancels++
 	n := l.n
 	workflow.Go(ctx, func(gc workflow.Context) {
 		defer func() { l.lateCancels-- }()
-		for gc.Err() == nil {
+		for pass := 1; gc.Err() == nil; pass++ {
 			l.reconnectSig = false
 			var r ReattachResult
 			if err := workflow.ExecuteActivity(lifecycleCtx(gc), ActReattachSession, ReattachInput{TaskID: l.in.TaskID, N: n}).Get(gc, &r); err != nil {
@@ -186,7 +221,7 @@ func (l *lc) lateCancel(ctx workflow.Context, until time.Time) {
 			if left <= 0 {
 				return
 			}
-			_, _ = workflow.AwaitWithTimeout(gc, min(reconnectRecheck, left), func() bool { return l.reconnectSig })
+			_, _ = workflow.AwaitWithTimeout(gc, min(recheckAfter(gc, pass), left), func() bool { return l.reconnectSig })
 		}
 	})
 }

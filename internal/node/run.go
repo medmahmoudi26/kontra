@@ -150,7 +150,7 @@ func (n *Node) Run(ctx context.Context) error {
 			n.logger.Info("redialing the gate after a wait", "wait", wait.Round(time.Millisecond), "err", err)
 			if !n.lostAt.IsZero() {
 				n.redials++
-				fmt.Fprintf(n.out, "kontra connect: reconnect attempt %d failed; next in %s\n", n.redials, wait.Round(time.Second))
+				fmt.Fprintf(n.out, "kontra connect: reconnect attempt %d failed; next %s\n", n.redials, waitText(wait))
 			}
 			continue
 		}
@@ -199,8 +199,8 @@ func (n *Node) Run(ctx context.Context) error {
 					"wait", wait.Round(time.Millisecond))
 				// The tasks it served wait for this node to come back (relay.md §6.4): say so, briefly.
 				n.lostAt, n.redials = time.Now(), 0
-				fmt.Fprintf(n.out, "kontra connect: lost the gate %s; reconnecting in %s (tasks in flight wait for this node)\n",
-					n.origin, wait.Round(time.Second))
+				fmt.Fprintf(n.out, "kontra connect: lost the gate %s; reconnecting %s (tasks in flight wait for this node)\n",
+					n.origin, waitText(wait))
 				break watch
 			case ev := <-s.events:
 				switch ev {
@@ -826,7 +826,7 @@ func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 	if back {
 		// A reconnect (§13): how long the node was away, and the services only when they changed.
 		fmt.Fprintf(&b, "kontra connect: back after %s (attempt %d); tasks in flight resume\n",
-			time.Since(n.lostAt).Round(time.Second), n.redials+1)
+			durationText(time.Since(n.lostAt)), n.redials+1)
 		n.lostAt, n.redials = time.Time{}, 0
 	}
 	fmt.Fprintf(&b, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
@@ -968,4 +968,21 @@ func (n *Node) maintain(cur *session) bool {
 	}
 	old, ok := id.PendingRotation(n.origin)
 	return ok && cur != nil && !cur.retired.Load() && cur.key == old.Recipient().String()
+}
+
+// waitText is the wait before a redial as the reconnect lines say it (D349): "at once", "in 430ms" under a second
+// (the backoff's full jitter makes those common), else "in 12s".
+func waitText(d time.Duration) string {
+	if d < 10*time.Millisecond {
+		return "at once"
+	}
+	return "in " + durationText(d)
+}
+
+// durationText is d in milliseconds under a second, else in whole seconds.
+func durationText(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }

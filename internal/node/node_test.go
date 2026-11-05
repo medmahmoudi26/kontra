@@ -1771,8 +1771,8 @@ func TestRunSaysItReconnects(t *testing.T) {
 	eventually(t, 15*time.Second, "the node back", func() bool { return strings.Contains(tn.out.String(), "kontra connect: back after") })
 	out := tn.out.String()
 	for _, want := range []string{
-		"kontra connect: lost the gate " + g.url.Scheme + "://" + g.url.Host + "; reconnecting in 0s (tasks in flight wait for this node)\n",
-		"kontra connect: reconnect attempt 1 failed; next in 0s\n",
+		"kontra connect: lost the gate " + g.url.Scheme + "://" + g.url.Host + "; reconnecting at once (tasks in flight wait for this node)\n",
+		"kontra connect: reconnect attempt 1 failed; next at once\n",
 		"(attempt 2); tasks in flight resume\n",
 	} {
 		if !strings.Contains(out, want) {
@@ -1784,5 +1784,13 @@ func TestRunSaysItReconnects(t *testing.T) {
 	}
 	if n := strings.Count(out, "a2a hello  https://gate.example/agents/hello"); n != 1 {
 		t.Fatalf("the unchanged services printed %d times, want once:\n%s", n, out)
+	}
+	if strings.Contains(out, " 0s") {
+		t.Fatalf("a wait or an absence printed as 0s:\n%s", out)
+	}
+	for d, want := range map[time.Duration]string{0: "at once", 430 * time.Millisecond: "in 430ms", 12400 * time.Millisecond: "in 12s"} {
+		if got := waitText(d); got != want {
+			t.Fatalf("waitText(%v) = %q, want %q", d, got, want)
+		}
 	}
 }
