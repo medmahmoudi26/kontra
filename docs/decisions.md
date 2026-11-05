@@ -5898,6 +5898,9 @@ Decision ([`relay.md`](../spec/relay.md) §6.4, §7, §14.2; `internal/lifecycle
   `failed: timeout` ends it. Before a first upstream task id, §6.4's retry rules are unchanged.
 - A follow-up sent to an `input-required` task whose node is gone waits for the node instead of failing (§7's row 2):
   its turn is resumed on the new session and the follow-up sent there per D81.
+- A stream §6.1 refuses because the key's state cannot be read (a stale revocation view and a read Postgres does not
+  answer within 2 s, fail-closed) is a lost session like the others: the task waits, and once the key can be read the
+  session, which was never closed, is a candidate again and the turn resumes on it (`TestTunnelStaleRevocationView`).
 
 ### D341. The buyer is told in band; gate-written statuses end no turn — **decided under the owner's standing instruction, 5 Nov**
 
