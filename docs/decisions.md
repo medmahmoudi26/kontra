@@ -5683,3 +5683,192 @@ Decision (internal/enroll's admission, internal/node; spec/tunnel.md §5):
 Reason: D330's recipe and Cloud's console (kontra-cloud D-M5-220, D-M5-221) must work on the machines that have
 run `kontra login`, which is the CLI's own sign-in.
 
+
+### D332. `status` follows a `hire` task with tools: its history, a cursor and a wait — **decided under the owner's standing instruction, 5 Nov** (feedback from an agent using `/mcp`: task status, history and resubscribe missing)
+
+An agent that used `/mcp` reported that only `hire` and `reply` answer a task's state, and that nothing gives its
+history or resubscribes. §12 already gives `hire` tasks MCP Tasks (`tasks/get`, `tasks/result`, `tasks/list`,
+`tasks/cancel`), but most MCP hosts show their model only tools, so a tools-only agent sees none of it.
+
+Decision (spec/relay.md §12.2, §12.6; internal/gatemcp follow.go):
+
+- **`status {taskId, after?, wait?}`** (`readOnlyHint`) answers the hire result as a plain `hire` answers it (an ended
+  task as `tasks/result` renders it, §12.2), with `contextId` and `service` (D336), and, when `after` is given, the
+  task's `task`, `status`, `artifact` and `message` rows with seq > `after`, each `{seq, kind, state?, role?, text?,
+  data?, files?, artifactId?, name?, at}`, kontra-blob parts presigned for the caller; `metadata` rows are skipped.
+- **Bounds.** 50 rows or about 256 KiB of payload a call (`store.Log.EventsWithin`), `more: true` when cut; `cursor`
+  is the last seq read, else the log's tail. The content repeats `{cursor, events?, more?}` as text for a client that
+  reads only content. With `after`, the hire result is a summary (an ended task's state, its status message's text cut
+  to 2000 characters and how to read an artifact; no `data` or `files`): the events carry the content, so the call is
+  bounded as a whole, not only its events (review: a 20-artifact task paged in 7 calls returned about 4.7 MB each,
+  every page repeating every artifact). Without `after`, the full hire result as before. An `after` beyond the log's
+  tail is read as the tail (review: a cursor of another task made every later row invisible).
+- **Wait.** With `wait` (0 to 25 s) a task that is neither ended nor at `input-required` (only this principal's `reply`
+  moves it, so `status` answers at once instead of blocking 25 s) and has no `task`, `status` or `artifact` row after
+  the cursor (or after the tail) is waited for on the replica's waker until such a row lands
+  (`store.Log.CarriedTail`), cut by D295's 50 s rule. The principal's own `message` row (a reply) and `metadata` rows
+  do not end the wait (review: a wait woken by the reply's own row answered the stale question and told the model to
+  reply again). After the wait the task is read and scoped again (D303), so a service that stopped being served
+  meanwhile is "unknown task". `status {after: 0}` is the history and `status {after: <cursor>, wait: 25}` in a loop is
+  the resubscribe; a running task's text names the cursor the answer returns, not 0 (review: a model that did what the
+  text said read the whole history again on every call, and never waited).
+- **Scoping** is `HireTasks.load`'s (the principal's `buyer_id`, `hired`, the service served to the principal, D303):
+  anything else is one `isError` "unknown task".
+
+Reason: one tool gives a tools-only client what `tasks/get`, `tasks/result` and an A2A resubscribe give the others,
+from the same log, with no state of its own. A client that loses its connection, or restarts, resumes from its cursor:
+the task runs in `TaskLifecycle` and never notices. What this does and does not do for the user's request of 5 Nov
+(a disconnected client is told, given time to reconnect and retried) is in D338.
+
+### D333. `tasks` lists the principal's `hire` tasks, filtered, 1000 rows read at most — **decided under the owner's standing instruction, 5 Nov** (feedback: list tasks, and tasks by context, missing)
+
+Decision (spec/relay.md §12.6; internal/store `ListHiredFiltered`):
+
+- **`tasks {service?, contextId?, state?, cursor?}`** (`readOnlyHint`): the principal's `hire` tasks newest first by
+  `status_at`, as `tasks/list`, 50 a page, through `tasks_hired`; the cursor is the opaque keyset token of
+  `tasks/list`. `state` takes an A2A state (a quoted task matches `TASK_STATE_INPUT_REQUIRED`, its wire state),
+  `active` or `ended`; `service` a ref (one the principal cannot see matches nothing).
+- **Bounded reads.** One request reads at most 1000 index rows (light columns and a match flag), then the full rows of
+  at most 50 matches; one that reaches the bound answers what matched with the cursor at the last row read, as
+  `search` does (D293). No sequential scan. The keyset is always bound, a first page starting above every task
+  (`status_at` infinity, the greatest uuid): with `$2 is null or (status_at, id) < ($2, $3)`, the generic plan
+  Postgres may give the prepared statement after five executions keeps only the buyer as the index condition, and a
+  page after a cursor 1500 rows deep read 2501 index rows (review; `TestTasksDeepCursorUnderAGenericPlan`).
+  `tasks/list`'s `ListHired` had the same predicate and gets the same fix.
+- **Entries** `{taskId, service, contextId, state, statusAt, text}`, `text` the status message's text (a quoted task's
+  approve URL) cut to 200 characters; a task whose service is not served to the principal is left out (D303).
+
+Reason: a filter that Postgres applied while walking the index would read without bound for a buyer with many tasks
+and few matches; the bound keeps each request's cost fixed and the cursor keeps the listing complete.
+
+### D334. `cancel` is `tasks/cancel`'s legacy semantics as a tool — **decided under the owner's standing instruction, 5 Nov** (feedback: cancel missing)
+
+Decision (spec/relay.md §12.6): **`cancel {taskId}`** (`destructiveHint`) sends `kontra.cancel` in MCP mode and awaits
+it, exactly as a legacy `tasks/cancel` (§11.6, D57: `canceled` within 10 s, the upstream receiving §8's
+`CancelTask`; a quoted task canceled as the client's cancel), then answers the task's hire result. The canceled
+task's result is not `isError` here (the cancel did what was asked), unlike `tasks/result`'s. A task that has ended
+is `isError` "the task already ended (<state>)" and nothing is sent; a lifecycle that does not accept the cancel in
+time is `503` with `-32603`, as `tasks/cancel` answers it.
+
+Reason: the awaited legacy form gives the model the outcome in one call; the modern acknowledgement (§12.5) would
+leave it to poll.
+
+### D335. `artifact` reads one artifact in full — **decided under the owner's standing instruction, 5 Nov** (feedback: artifacts returned as resources, but no artifact get)
+
+Decision (spec/relay.md §12.6): **`artifact {taskId, artifactId}`** (`readOnlyHint`) answers one artifact of the task's
+snapshot as the hire result renders an artifact: text parts as text, data parts as JSON text and in `data`, raw parts
+embedded and URL parts linked (kontra-blob parts presigned for the caller at the call, so the links are fresh), in
+`files`; each part bounded as §10.4 bounds it. `structuredContent` is `{taskId, artifactId, name?, description?, text?,
+data?, files?}`; an id the task does not hold is `isError` "unknown artifact". `status`'s events name the ids.
+
+Reason: a hire result folds every artifact into one answer, and its presigned links expire; a model that needs one
+artifact again asks for it by id.
+
+### D336. Continuation: the hire result names `contextId` and `service`; `reply`'s refusals say what to do — **decided under the owner's standing instruction, 5 Nov** (feedback: multi-turn only through reply for input-required)
+
+Decision (spec/relay.md §12.2, §12.6; spec/schema/mcp-tools.json `hireResult`, still strict):
+
+- The hire result gains **`contextId`** and **`service`** (the ref). On `/mcp` a multi-turn conversation is `hire`
+  with `contextId`: a new task in the same context (§4, §7). `hire`'s and `reply`'s descriptions say so.
+- `reply` keeps §7's semantics (a follow-up to `input-required` only), and its refusals now say what to do: a running
+  task "still working: follow it with status {taskId, after: 0, wait: 25}", an ended one "Continue the conversation
+  with hire {service: <ref>, contextId: <id>, message}". A plain `hire` still running names `status` before `GetTask`.
+
+Reason: A2A's follow-up after a task ended is a new task in the context, which `hire` already makes; the model needed
+only the two values and the words to find it.
+
+### D337. `push_set`, `push_list` and `push_delete` on the A2A push config store — **decided under the owner's standing instruction, 5 Nov** (feedback: push notification configs missing)
+
+Decision (spec/relay.md §12.6; internal/gatemcp push.go): the three tools serve the principal's `hire` task (the tools'
+scoping) through `push.ConfigStore`, the A2A methods' own store: §10.1's limits and idempotent save, §10.3's check of
+the URL at set time (a refused URL is `isError` with the refusal, nothing stored), D111 for an ended task, `anonymous`
+refused (never on `/mcp`, D270). `push_set {taskId, url, token?, authentication?: {scheme, credentials?}}` is neither
+read-only nor destructive; `push_list {taskId}` is read-only; `push_delete {taskId, configId}` is destructive. The
+answer is `{taskId, configs: [{configId, url, token, scheme?}]}` (`push_set`'s the config it set, the others the task's
+configs): `token` says whether one is set, and the token and the credentials are never echoed, since a tool result is
+shown to a model and often to a person. `/mcp` delivers nothing: delivery stays the lifecycle's (§10.2).
+
+### D338. `hire`'s `idempotencyKey`: one key, one task, across services and concurrent calls — **decided under the owner's standing instruction, 5 Nov** (feedback: a duplicate hire creates a duplicate task)
+
+Decision (spec/relay.md §12.3 Idempotency, §12.5; migration 0005; internal/store, internal/lifecycle, internal/relay):
+
+- `hire` takes **`idempotencyKey`**, 1 to 128 characters of `[A-Za-z0-9._:-]`. The key's identity is a UUIDv5, in a
+  namespace of its own, of the principal's tenant, `buyer_id`, principal id and the key, each length-prefixed; never
+  sent anywhere. Its A2A `messageId` is a UUIDv5 of that identity and the number of the 24 h period the hire is in
+  (`gatemcp.HireKeyOf`), and a hire looks for the messageIds of its period, the one before and the one after (a
+  replica whose clock is a little ahead). So the task's `first_message_id` names the key, and no column is added. A
+  task created less than 24 h ago is in one of those periods, so it is found; a key reused after the window mints
+  another messageId (review: without the period, the same messageId reached the seller on a new task a day later,
+  which a seller that de-duplicates on messageId would fold into the old one, and which linked a principal's hires).
+- A `hire` of the same principal and key within 24 h answers the task the first one created, in its current state and
+  whatever it is, with §12.3's retry answers; its start is re-issued first as a resend's (§14.5). Never a second task.
+- The same key with other arguments (another `service`, `message` or `contextId`, so another `first_request`, which is
+  the hash of the arguments, the key included) is `isError` "idempotencyKey already used for a different hire", and
+  nothing is created (`lifecycle.ErrHireKeyReused`, an invalid-params error).
+- **Concurrency.** The key is looked up before Admission (`relay.Hirer`) and again in the work queue's transaction that
+  creates the task, under an advisory lock of `(buyer_id, principal, key identity)` (`store.FindHireKeyedLocked`),
+  across services and across a period's end: of eight concurrent hires with one key one task is made (`TestHireIdempotencyKeyIsOneTask`, Postgres and
+  Temporal), and of two with one key on two services one is created and the other refused.
+- **Migration 0005** adds `tasks_hired_by_message (buyer_id, first_message_id) where hired`: `tasks_by_first_message`
+  leads with `(tenant_id, service)`, so the cross-service lookup would otherwise walk the buyer's tasks. Building it
+  locks `tasks` against writes for one scan, as 0003's and 0004's indexes did.
+- **A client that leaves.** A modern `hire` with a key is never cancelled for its client closing its stream (D178's
+  rule does not apply): the key says the client re-issues the request (2026-07-28: a broken stream's request MUST be
+  re-issued), the task runs on durably in `TaskLifecycle`, the re-issued `hire` answers it (its progress, D339, from
+  now, not the task's history), and `status` resumes from the client's cursor (D332). It ends as any task does: by
+  itself, by `cancel`, or at its quote's expiry; a legacy `hire` and an A2A task are not cancelled when their client
+  leaves either. A modern `hire` without a key keeps D178: 2026-07-28 Streamable HTTP has a server treat a closed
+  response stream as the request's cancellation (a MUST), and without a key the client has no way to say it will come
+  back.
+
+Reason: deriving the messageId keeps the resend machinery (`first_message_id`, the advisory lock pattern of §15) and
+needs no new column; the cross-service lookup needs the one index.
+
+What this does for the user's request of 5 Nov ("when a client disconnects, the user must be notified, and given some
+time to reconnect, with auto reconnect trials; Temporal's durability comes in handy here"), recorded so that it is
+not overstated: the request is about the clients whose loss stops a task, the nodes. That part is the tunnel
+re-attach work, D340 to D349 (a task whose node disconnects waits for it, `task.reattach_grace`, 15 minutes by
+default; the buyer is told in band, D341; `kontra connect` retries and says when it lost the gate and when it is
+back, D349), built and recorded apart from these tools. On `/mcp` the hiring client is the user's own agent, so there
+is no one else to notify: the tools make its reconnect complete instead. A keyed `hire` survives its client leaving,
+the re-issued `hire` finds the task, and `status` from the client's cursor gives what happened while it was away;
+`tasks` finds a task whose id the client lost. Retrying is the client's own (the MCP SDKs re-issue a broken
+request); the gate never dials a client.
+
+### D339. What a tools-only client learns: `describe`'s capabilities, MCP progress, the tool descriptions; `call` is not built — **decided under the owner's standing instruction, 5 Nov** (feedback: discovery depth, stream, MCP services)
+
+Decision (spec/relay.md §12.6):
+
+- **`describe` gains `capabilities`**, normalized: for an A2A service from its served card, `{streaming,
+  pushNotifications, inputModes, outputModes, skills: [{id, name, description, tags, examples, inputModes?,
+  outputModes?}], extensions: [{uri, required}], inputSchema?}`, `inputSchema` the input schema extension's
+  `params.schema` (spec/ext-input-schema.md); for an MCP service `{tools?, toolsCached}`, `tools` only when the list
+  is cached (review: before the first drain `tools: 0` read as a service without tools). The full card stays.
+- **Streaming as MCP progress.** A `tools/call` of `hire`, `reply` or `status` with `wait`, whose
+  `params._meta.progressToken` is a string or an integer and whose request accepts `text/event-stream`, is answered on
+  an SSE response stream: `notifications/progress {progressToken, progress, message}` for each `task`, `status` and
+  `artifact` row of the call's span (`message` the status text, else the state, or `artifact <name>`; one the same as
+  the one before is not repeated, so a new task's `task` and first `status` rows say "submitted" once), then the
+  result, with no event ids. The span is a new task's rows, a reply's turn, and for a `hire` answered with an existing
+  task or a `status` with `wait` the rows after the call's start (review: a re-issued keyed hire replayed the whole log
+  as progress). Both eras: MCP 2025-11-25 and 2026-07-28 both let a server send notifications related to
+  a request on that request's response stream, and a modern request's cancellation is still its stream closing.
+  Without a token nothing changes.
+- **Descriptions** are short and tell the loop: search and describe, hire (idempotencyKey for retries, contextId to
+  continue), status with after and wait to follow, reply when it asks, cancel, tasks to find old ones, artifact for one
+  artifact; `/mcp`'s instructions say the same, and that MCP servers are called at the URL `describe` gives.
+- **`call` is not built** (the brief's stop rule). Relaying one `tools/call` to a hosted MCP service through `/mcp`
+  needs, for the legacy upstreams the gate hosts, a session the gate opens and holds for the principal (the relay never
+  translates between eras, §11.12), and an entry into `mcprelay` that takes an authenticated principal instead of a
+  request (its peer hop forwards the client's request), and nothing decides who owns a session the gate holds for a
+  principal (`max_sessions_per_principal`, an anonymous tenant's caps, `per_session` pricing). The proposed design: an
+  in-process `mcprelay` entry taking the authenticated principal and sharing `allow:`, §11.3's policy, the
+  `tasks: required` and sealing refusals, the anonymous call slot, Admission's `call` operation and the `Meter` with
+  `ServeHTTP`; one short-lived legacy session per call (initialize with no client capabilities, the call, `DELETE`)
+  through the existing `initialize`, so Admission's `session` operation, the caps and `per_session` pricing apply; a
+  peer hop carrying the replica's peer credential, never the caller's; D295's 50 s, past it `isError` naming
+  `/mcp/<ref>` with MCP tasks and the exchange closed. D272 ("MCP services are called directly") stands until the
+  owner's review of that design; the pull request that built these tools carries it in full.
+- **The e2e client** is the official MCP Go SDK (`github.com/modelcontextprotocol/go-sdk` v1.8.0, test only), which
+  speaks both eras; adding it raised `golang.org/x/time` from v0.3.0 to v0.15.0 (the edge's and the tunnel's
+  `rate.Limiter`, whose API did not change).

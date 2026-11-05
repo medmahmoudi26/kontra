@@ -151,16 +151,21 @@ func TestToolsListSchemas(t *testing.T) {
 				t.Errorf("%s's inputSchema\n%s\nwant mcp-tools.json's\n%s", name, gotJCS, wantJCS)
 			}
 			// hire and reply declare hireResult as their outputSchema (D324); search and describe declare none.
+			// hire, reply and cancel declare hireResult as their outputSchema (D324, D334), the tools that follow a task
+			// their own (D332..D337); search and describe declare none.
+			outDef := map[string]string{ToolHire: "hireResult", ToolReply: "hireResult", ToolCancel: "hireResult",
+				ToolStatus: "statusResult", ToolTasks: "tasksResult", ToolArtifact: "artifactResult",
+				ToolPushSet: "pushResult", ToolPushList: "pushResult", ToolPushDelete: "pushResult"}[name]
 			out, has := tool["outputSchema"]
-			if wantOut := name == ToolHire || name == ToolReply; has != wantOut {
+			if wantOut := outDef != ""; has != wantOut {
 				t.Errorf("%s: outputSchema present %v, want %v", name, has, wantOut)
 			}
 			if has {
-				want, _ := json.Marshal(inlineRefs(t, file.Defs["hireResult"], file.Defs))
+				want, _ := json.Marshal(inlineRefs(t, file.Defs[outDef], file.Defs))
 				wantJCS, _ := jcs.Transform(want)
 				gotJCS, err := jcs.Transform(out)
 				if err != nil || !bytes.Equal(gotJCS, wantJCS) {
-					t.Errorf("%s's outputSchema\n%s\nwant mcp-tools.json's hireResult\n%s", name, gotJCS, wantJCS)
+					t.Errorf("%s's outputSchema\n%s\nwant mcp-tools.json's %s\n%s", name, gotJCS, outDef, wantJCS)
 				}
 			}
 			var ann map[string]json.RawMessage
@@ -176,7 +181,8 @@ func TestToolsListSchemas(t *testing.T) {
 				t.Errorf("hire's execution = %s", tool["execution"])
 			}
 		}
-		if !reflect.DeepEqual(names, []string{ToolSearch, ToolDescribe, ToolHire, ToolReply}) {
+		if !reflect.DeepEqual(names, []string{ToolSearch, ToolDescribe, ToolHire, ToolReply, ToolStatus, ToolTasks, ToolCancel,
+			ToolArtifact, ToolPushSet, ToolPushList, ToolPushDelete}) {
 			t.Errorf("tools %v", names)
 		}
 	}
@@ -265,7 +271,7 @@ func TestRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	// D324: the text beside data, and the file parts' links; no url, the task having none.
-	if len(r.StructuredContent) != 5 || sc.TaskID != string(task.ID) || sc.State != "TASK_STATE_COMPLETED" || sc.URL != "" ||
+	if len(r.StructuredContent) != 6 || sc.TaskID != string(task.ID) || sc.State != "TASK_STATE_COMPLETED" || sc.URL != "" ||
 		sc.Text != "here\nartifact text" ||
 		!reflect.DeepEqual(sc.Data, []any{map[string]any{"from": "message"}, map[string]any{"n": 1.0}, []any{"x"}}) ||
 		!reflect.DeepEqual(sc.Files, []FileRef{{URI: "kontra:task/019a0000-0000-7000-8000-000000000001/output.txt", Name: "output.txt", MediaType: "text/plain"},
@@ -275,7 +281,7 @@ func TestRender(t *testing.T) {
 
 	// No data parts: no data member; the answer's text in structuredContent too (D324).
 	r = renderOf(t, taskWith(a2a.TaskStateCompleted, agentText("Hello World"), nil), store.StateCompleted)
-	if _, ok := r.StructuredContent["data"]; ok || len(r.StructuredContent) != 3 || r.Content[0].Text != "Hello World" ||
+	if _, ok := r.StructuredContent["data"]; ok || len(r.StructuredContent) != 4 || r.Content[0].Text != "Hello World" ||
 		string(r.StructuredContent["text"]) != `"Hello World"` {
 		t.Errorf("a text-only result: %+v", r)
 	}

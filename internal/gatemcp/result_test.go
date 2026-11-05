@@ -40,7 +40,7 @@ const (
 
 var shapeExpiry = time.Date(2026, 11, 1, 18, 30, 0, 0, time.UTC)
 
-// hireShapes are the CallToolResults hire and reply answer, by shape: what quotedResult, plainAnswer and Render write
+// hireShapes are the CallToolResults hire and reply answer, by shape: what quotedCTR, plainAnswer and Render write
 // for a task in each state.
 func hireShapes(t *testing.T) map[string]json.RawMessage {
 	t.Helper()
@@ -48,7 +48,7 @@ func hireShapes(t *testing.T) map[string]json.RawMessage {
 	id := uuid.MustParse(shapeTask)
 	thread := map[string]any{lifecycle.MetaApproveURL: shapeApprove}
 	row := func(state store.State, task *a2a.Task) *store.TaskRow {
-		return &store.TaskRow{ID: id, Service: "hello", State: state, Snapshot: task}
+		return &store.TaskRow{ID: id, Service: "hello", ContextID: "ctx", State: state, Snapshot: task}
 	}
 	plain := func(r *store.TaskRow) json.RawMessage {
 		t.Helper()
@@ -144,8 +144,9 @@ func TestHireResultShapes(t *testing.T) {
 		"input_required": {state: "TASK_STATE_INPUT_REQUIRED", url: shapeApprove,
 			text: "Which date? (answer with the reply tool, taskId " + shapeTask + ")"},
 		"working": {state: "TASK_STATE_WORKING", url: shapeApprove,
-			text: "The task " + shapeTask + " is still working. Follow it with GetTask at https://gateway.example.com/agents/hello " +
-				"(the same credential), or call reply when it asks a question."},
+			text: "The task " + shapeTask + " is still working. Follow it here with status {taskId: \"" + shapeTask +
+				"\", after: 0, wait: 25}, or with GetTask at https://gateway.example.com/agents/hello (the same credential); " +
+				"call reply when it asks a question."},
 	}
 	if len(shapes) != len(wants) {
 		t.Fatalf("%d shapes, %d expectations", len(shapes), len(wants))
@@ -196,8 +197,9 @@ func TestHireResultShapes(t *testing.T) {
 // that answer, relay.md §16's gate_mcp_hire row and PlainWait's doc, say so, not D272's {taskId, state} (G3's review).
 func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 	h := &Handler{deps: Deps{PublicURL: "https://gateway.example.com/"}}
-	follow := "The task " + shapeTask + " is still working. Follow it with GetTask at https://gateway.example.com/agents/hello " +
-		"(the same credential), or call reply when it asks a question."
+	follow := "The task " + shapeTask + " is still working. Follow it here with status {taskId: \"" + shapeTask +
+		"\", after: 0, wait: 25}, or with GetTask at https://gateway.example.com/agents/hello (the same credential); " +
+		"call reply when it asks a question."
 	for _, c := range []struct {
 		name string
 		meta map[string]any
@@ -206,7 +208,7 @@ func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 		{"quoted, then approved", map[string]any{lifecycle.MetaApproveURL: shapeApprove}, shapeApprove},
 		{"never quoted", nil, ""},
 	} {
-		row := &store.TaskRow{ID: uuid.MustParse(shapeTask), Service: "hello", State: store.StateWorking,
+		row := &store.TaskRow{ID: uuid.MustParse(shapeTask), Service: "hello", ContextID: "ctx", State: store.StateWorking,
 			Snapshot: taskWith(a2a.TaskStateWorking, nil, c.meta)}
 		r, hr := decodeShape(t, c.name, h.plainAnswer(context.Background(), row, auth.Principal{Kind: auth.KindKey, ID: "key:kk_buyer"}))
 		if r.IsError || hr.TaskID != shapeTask || hr.State != "TASK_STATE_WORKING" || hr.Text != follow || hr.URL != c.url ||

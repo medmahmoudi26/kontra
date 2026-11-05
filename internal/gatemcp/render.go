@@ -165,12 +165,12 @@ func render(task *a2a.Task, state store.State) callToolResult {
 		blocks = append([]content{{Type: "text", Text: gate}}, blocks...)
 		texts = append([]string{gate}, texts...)
 	}
-	id := ""
+	id, ctxID := "", ""
 	if task != nil {
-		id = string(task.ID)
+		id, ctxID = string(task.ID), task.ContextID
 	}
 	return callToolResult{Content: blocks, IsError: isError, Meta: meta,
-		StructuredContent: HireResult{TaskID: id, State: string(state.A2A()), URL: threadURL(task),
+		StructuredContent: HireResult{TaskID: id, State: string(state.A2A()), ContextID: ctxID, URL: threadURL(task),
 			Text: strings.Join(texts, "\n"), Data: data, Files: files}}
 }
 

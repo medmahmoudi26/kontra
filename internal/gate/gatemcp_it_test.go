@@ -430,7 +430,7 @@ func TestGateMCPHire(t *testing.T) {
 		slow.Structured.State != "TASK_STATE_WORKING" || !strings.Contains(slow.text(), a.url+"/agents/kinds") {
 		t.Fatalf("a slow hire after %v: %s", took, ans.raw)
 	}
-	if slow.Structured.Text != slow.text() || !strings.Contains(slow.Structured.Text, "Follow it with GetTask at "+a.url+"/agents/kinds") ||
+	if slow.Structured.Text != slow.text() || !strings.Contains(slow.Structured.Text, "with GetTask at "+a.url+"/agents/kinds") ||
 		slow.Structured.URL != "" {
 		t.Errorf("a slow hire's structuredContent is not the hire result of a task still running (D324): %s", ans.raw)
 	}

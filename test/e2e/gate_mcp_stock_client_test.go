@@ -24,8 +24,9 @@ import (
 // structuredContent of an isError result too. The Admission double quotes the service paid; free is allowed; both are
 // hosted by a node. For each client, read from structuredContent alone:
 //
-//   - tools/list gives hire and reply the outputSchema of spec/schema/mcp-tools.json's hireResult, and the client's own
-//     validator accepts every shape of its fixtures (examples/mcp-tools.hireResult.*.json) and refuses bad ones;
+//   - tools/list gives hire, reply and cancel the outputSchema of spec/schema/mcp-tools.json's hireResult (the tools
+//     that follow a task their own), and the client's own validator accepts every shape of its fixtures
+//     (examples/mcp-tools.hireResult.*.json) and refuses bad ones;
 //   - a quoted hire: url and quote.approveUrl are the hook's approveUrl, the task's thread; quote.expiresAt is set;
 //   - a free hire of the seller's artifact kinds: the answer's text, data and file links, and no url; a failing one is
 //     isError with the failure's text; a question is its text with the reply-tool hint, and reply's answer is the
@@ -105,9 +106,20 @@ func TestGateMCPStockClient(t *testing.T) {
 		if len(lines) != 6 || lines[0].Tools == nil {
 			t.Fatalf("%s: %d lines: %+v", c.name, len(lines), lines)
 		}
+		// hire, reply and cancel declare hireResult; the tools that follow a task their own (D332..D337); search and
+		// describe none.
+		outDefs := map[string]string{"hire": "hireResult", "reply": "hireResult", "cancel": "hireResult", "status": "statusResult",
+			"tasks": "tasksResult", "artifact": "artifactResult", "push_set": "pushResult", "push_list": "pushResult",
+			"push_delete": "pushResult"}
 		for _, tool := range lines[0].Tools {
-			want := tool.Name == "hire" || tool.Name == "reply"
-			if got := tool.OutputSchema != nil; got != want || (got && fmt.Sprint(tool.OutputSchema) != fmt.Sprint(schema)) {
+			def, want := outDefs[tool.Name]
+			var wantSchema map[string]any
+			if want {
+				if err := json.Unmarshal(mcpToolsDef(t, def), &wantSchema); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := tool.OutputSchema != nil; got != want || (got && fmt.Sprint(tool.OutputSchema) != fmt.Sprint(wantSchema)) {
 				t.Errorf("%s: tools/list's %s outputSchema %v", c.name, tool.Name, tool.OutputSchema)
 			}
 		}

@@ -22,8 +22,10 @@ MCP servers beside them, over Streamable HTTP or stdio, with end-to-end sealing 
 and since M4:
 
 - serves its own MCP endpoint, `/mcp`: `search`, `describe`, `hire`, `reply` and the MCP Tasks of what was hired, in
-  both MCP eras (2025-11-25 and 2026-07-28), so a stock MCP client hires an A2A agent
-  ([`spec/relay.md`](spec/relay.md) §12);
+  both MCP eras (2025-11-25 and 2026-07-28), so a stock MCP client hires an A2A agent; and, for a client that shows
+  its model only tools, `status` (a task's history, and `{after: <cursor>, wait: 25}` to follow it), `tasks`,
+  `cancel`, `artifact` and `push_set`/`push_list`/`push_delete`, with `idempotencyKey` on `hire` for safe retries and
+  `contextId` to continue a conversation ([`spec/relay.md`](spec/relay.md) §12, §12.6);
 - opens anonymous sessions on a gate that offers them: `kontra connect` with no credential gets a tenant of its own
   for two hours (`anon-` and 16 hex digits), and `--public <name>` lets anyone call that service
   ([`spec/tunnel.md`](spec/tunnel.md) §6);
@@ -90,7 +92,7 @@ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp/an
 #  → read_file, list_directory, …: the filesystem server on this laptop, as any MCP client sees it
 npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http \
   --method tools/call --tool-name hire --tool-arg service=anon-<…>/hello --tool-arg message=hi
-#  → Hello World, hired through the gate's own MCP server (search, describe, hire, reply)
+#  → Hello World, hired through the gate's own MCP server (search, describe, hire, reply, status, tasks, cancel, …)
 curl -s https://gateway.kontra.run/agents/anon-<…>/hello/.well-known/agent-card.json
 #  → the card, for anyone, with no credential: share the URL
 ```
@@ -374,7 +376,7 @@ cmd/kontra/        the CLI: connect, login, seal, publish, version
 cmd/kontra-gate/   the gate: serve, migrate, enroll, health, version
 internal/          relay, tunnel, gatemcp (/mcp), anon, store (Postgres), lifecycle (Temporal), sealing, …
 spec/              tunnel.md, relay.md, ext-escrow.md, ext-sealed.md, ext-input-schema.md, schema/
-migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql (the gate's Postgres schema, embedded in kontra-gate)
+migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mcp_tools.sql (the gate's Postgres schema, embedded in kontra-gate)
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)
 compose.dev.yaml   Temporal + Postgres for working on the gate itself

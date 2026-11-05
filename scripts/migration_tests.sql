@@ -353,4 +353,21 @@ do $$ begin
     raise exception 'FAIL: tasks_mode always was accepted';
 exception when check_violation then null; end $$;
 
+-- 0005 (R §12.3 Idempotency, D338): a hire's idempotencyKey is found through tasks_hired_by_message, across services:
+-- the 20000 tasks above made hire tasks, each with its own first_message_id, analyzed; the lookup of one buyer's
+-- messageId reads the index, never the table.
+update tasks set hired = true, first_message_id = id::text, first_request = sha256(convert_to(id::text, 'UTF8'))
+    where id::text like '01900000-0000-7000-8001-%';
+analyze tasks;
+do $$
+declare plan text;
+begin
+    execute 'explain (format json) select id from kontra.tasks t where t.buyer_id = ''01900000-0000-7000-8002-000000000fff''
+             and t.first_message_id = ''01900000-0000-7000-8001-000000000258'' and t.hired and t.principal = ''node:k1_x''
+             and t.created_at > now() - interval ''1 day'' order by t.created_at desc, t.id desc limit 1' into plan;
+    if plan not like '%"Index Name": "tasks_hired_by_message"%' or plan like '%"Seq Scan"%' then
+        raise exception 'FAIL: a hire''s idempotency key is not found through tasks_hired_by_message: %', plan;
+    end if;
+end $$;
+
 select 'migration behaviour: ok';

@@ -53,7 +53,7 @@ func TestDiscoverResult(t *testing.T) {
 	}
 }
 
-// The modern tools/list (§12.5): the same four tools with the same input schemas, no execution on any (2026-07-28
+// The modern tools/list (§12.5): the same tools with the same input schemas, no execution on any (2026-07-28
 // removed it: the server decides), resultType complete, ttlMs and cacheScope private, one page.
 func TestModernToolsList(t *testing.T) {
 	b, err := ToolsList(mcpwire.EraModern, mcpwire.V20260728)
@@ -70,7 +70,7 @@ func TestModernToolsList(t *testing.T) {
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.ResultType != "complete" || got.TTLMs != 600000 || got.CacheScope != "private" || got.NextCursor != nil || len(got.Tools) != 4 {
+	if got.ResultType != "complete" || got.TTLMs != 600000 || got.CacheScope != "private" || got.NextCursor != nil || len(got.Tools) != len(tools) {
 		t.Fatalf("modern tools/list: %s", b)
 	}
 	legacy, _ := ToolsList(mcpwire.EraLegacy, mcpwire.V20250618)

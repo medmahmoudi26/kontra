@@ -431,11 +431,18 @@ func (c *Catalog) Describe(ctx context.Context, p auth.Principal, ref Ref) (Desc
 	case config.KindA2A:
 		out.Card = s.card
 		out.URLs = []string{c.publicURL + "/agents/" + c.refString(s)}
+		out.Capabilities = cardCapabilities(s.card)
 	case config.KindMCP:
 		out.URLs = []string{c.publicURL + "/mcp/" + c.refString(s)}
 		tools, cached := c.cachedTools(ctx, s, p)
 		out.ToolsCached = &cached
 		out.Tools = tools
+		out.Capabilities = &Capabilities{ToolsCached: &cached}
+		if cached {
+			// A count only from a cached list: before the first drain fills it, 0 would read as a real count.
+			n := len(tools)
+			out.Capabilities.Tools = &n
+		}
 	}
 	return out, nil
 }

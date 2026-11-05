@@ -336,7 +336,7 @@ func TestGateMCPReviewFixes(t *testing.T) {
 	var tl struct {
 		Tools []map[string]json.RawMessage `json:"tools"`
 	}
-	if err := json.Unmarshal(ans.Result, &tl); err != nil || len(tl.Tools) != 4 {
+	if err := json.Unmarshal(ans.Result, &tl); err != nil || len(tl.Tools) != 11 {
 		t.Fatalf("tools/list on a 2025-06-18 session: %s", ans.raw)
 	}
 	for _, tool := range tl.Tools {
