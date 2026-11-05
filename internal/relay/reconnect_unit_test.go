@@ -74,6 +74,12 @@ func TestEndReconnect(t *testing.T) {
 	resumed := &a2a.Task{ID: "t-1", ContextID: "c-1", Metadata: map[string]any{store.MetaReconnect: store.ReconnectResumedMeta(since)}}
 	done := store.TerminalStatus(resumed, a2a.TaskStateCompleted, nil, "")
 	store.EndReconnect(resumed, done)
+	// A re-attach whose upstream task already ended: the resume's own mark stays (the wait ended by resuming).
+	up := markResumed(waiting, []a2a.Event{store.TerminalStatus(waiting, a2a.TaskStateCompleted, nil, "")}, since)[0].(*a2a.TaskStatusUpdateEvent)
+	store.EndReconnect(waiting, up)
+	if m, _ := up.Metadata[store.MetaReconnect].(map[string]any); m["state"] != store.ReconnectResumed {
+		t.Fatalf("the resumed terminal status's kontra.reconnect: %v", up.Metadata)
+	}
 	if working.Metadata != nil || done.Metadata != nil {
 		t.Fatalf("a non-terminal status or a task not waiting was marked: %v %v", working.Metadata, done.Metadata)
 	}

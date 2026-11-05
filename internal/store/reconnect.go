@@ -45,10 +45,13 @@ func ReconnectResumedMeta(at time.Time) map[string]any {
 
 // EndReconnect marks ev, a terminal status about to be logged on prev, with metadata["kontra.reconnect"] =
 // {state: ended, at} when prev's names a wait still on (state waiting), so that a task never ends showing it waits
-// for its node (D341). It changes the event's metadata only (merged into the task's), never its message's.
+// for its node (D341); an event already marked (the resume's {state: resumed}) is left as it is. It changes the event's metadata only (merged into the task's), never its message's.
 func EndReconnect(prev *a2a.Task, ev *a2a.TaskStatusUpdateEvent) {
 	if ev == nil || !ev.Status.State.Terminal() || ReconnectState(prev) != ReconnectWaiting {
 		return
+	}
+	if _, marked := ev.Metadata[MetaReconnect]; marked {
+		return // the re-attach's own mark: the wait ended by resuming (markResumed)
 	}
 	at := time.Now()
 	if ev.Status.Timestamp != nil {
