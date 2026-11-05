@@ -219,10 +219,10 @@ type HireResult struct {
 	// Service is the task's service ref, what a hire that continues the conversation names (D336).
 	Service string      `json:"service,omitempty"`
 	URL     string      `json:"url,omitempty"`
-	Quote  *QuoteTerms `json:"quote,omitempty"`
-	Text   string      `json:"text,omitempty"`
-	Data   []any       `json:"data,omitempty"`
-	Files  []FileRef   `json:"files,omitempty"`
+	Quote   *QuoteTerms `json:"quote,omitempty"`
+	Text    string      `json:"text,omitempty"`
+	Data    []any       `json:"data,omitempty"`
+	Files   []FileRef   `json:"files,omitempty"`
 }
 
 // QuoteTerms are a quoted task's terms as a HireResult shows them: the approve URL and the quote's expiry (RFC 3339,

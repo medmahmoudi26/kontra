@@ -76,6 +76,13 @@ gate table gains the `/mcp` endpoint; §12 adds that an MCP or API-key session n
 quote. Full spec: kontra-cloud#59. Built in M4 as [`relay.md`](../spec/relay.md) §12 in both MCP eras (D269 to D274,
 D288, D289, D293 to D295); the page on which a person accepts a quote is Cloud's, M5.
 
+Since 5 Nov, for an agent whose host shows it only tools: `status` follows a hired task (its history with `after: 0`,
+then `{after: <cursor>, wait: 25}` in a loop, with MCP progress when the call carries a progress token), `tasks` lists
+what it hired, `cancel`, `artifact` and the push tools act on one task, `hire` takes an `idempotencyKey` (one key, one
+task) and continues a conversation with the `contextId` its result gives, and `describe` summarizes a service's
+capabilities (§12.6, D332 to D339). Calling a hosted MCP service's tool through `/mcp` is not built: MCP services are
+called at their own URL ([`CONFLICT-mcp.md`](CONFLICT-mcp.md)).
+
 ## Pricing (decided 25 Oct, in the Cloud repository's console issue; recorded here for the extension specs)
 
 Three price shapes on a listing, matching the three request shapes the gate distinguishes:

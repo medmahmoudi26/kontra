@@ -140,7 +140,7 @@ func (h *Handler) answerOf(ctx context.Context, row *store.TaskRow, p auth.Princ
 // rows or about StatusBytes, more when cut) and the cursor, the last seq read (else the log's tail). With wait, when the
 // task has not ended and its log holds nothing after the cursor asked (or after its tail when after is absent), it
 // first waits on the waker until a row lands or wait elapses, cut by the plain wait's budget (D295); with a
-// progressToken each status and artifact row that lands meanwhile is a notifications/progress (D337).
+// progressToken each status and artifact row that lands meanwhile is a notifications/progress (D339).
 func (h *Handler) status(rq *request, args json.RawMessage) {
 	a, err := parseStatusArgs(args)
 	if err != nil {

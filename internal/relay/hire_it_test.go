@@ -225,3 +225,87 @@ func scalarCount(t *testing.T, r *resendRig, sql string) int64 {
 	}
 	return n
 }
+
+// TestHireIdempotencyKeyIsOneTask (spec §12.3 Idempotency, D338): hires with an idempotencyKey carry the messageId the
+// key mints. Eight of them with one key and the same arguments, sent at once, make one task, and every one answers it;
+// a later one with the same key and other arguments (another resend key) is ErrHireKeyReused, as is one with the same
+// key on another service; and of two hires with one fresh key on two services sent at once, one creates its task and
+// the other is refused: the work queue looks the key up across services under its lock.
+func TestHireIdempotencyKeyIsOneTask(t *testing.T) {
+	r := newResendRig(t, &recordingAdmission{})
+	ctx := context.Background()
+	if _, err := r.log.DB().Exec(ctx, `insert into kontra.services (tenant_id, name, kind, backend, source)
+		values ($1, 'tck2', 'a2a', '{"a2a": {"url": "http://127.0.0.1:1"}}', 'config')`, r.svc.TenantID); err != nil {
+		t.Fatal(err)
+	}
+	other := r.svc
+	other.Name = "tck2"
+	p := principal(buyerA)
+	h := &Hirer{Handlers: r.handlers(r.lc, NewRegistry()), Log: r.log,
+		Starts: func(svc store.ServiceRef) StartReissuer { return lifecycle.NewQueue(svc, r.log, r.lc, r.queues) }}
+	keyed := func(svc store.ServiceRef, mid string, args string) (HireOutcome, error) {
+		msg := hireMessage("book")
+		msg.ID = mid
+		return h.Hire(ctx, HireRequest{Principal: p, Service: svc, Message: msg, FirstRequest: sha256.Sum256([]byte(args)), Keyed: true})
+	}
+	mid := uuid.Must(uuid.NewV7()).String()
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		ids  = map[uuid.UUID]int{}
+		errs []error
+	)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out, err := keyed(r.svc, mid, "same arguments")
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			ids[out.Task.ID]++
+		}()
+	}
+	wg.Wait()
+	if len(errs) > 0 || len(ids) != 1 {
+		t.Fatalf("eight hires with one key: tasks %v, errors %v", ids, errs)
+	}
+	if n := scalarCount(t, r, `select count(*) from kontra.tasks where first_message_id = '`+mid+`'`); n != 1 {
+		t.Fatalf("%d tasks of the key", n)
+	}
+	if _, err := keyed(r.svc, mid, "other arguments"); !errors.Is(err, lifecycle.ErrHireKeyReused) {
+		t.Errorf("the key with other arguments: %v", err)
+	}
+	if _, err := keyed(other, mid, "same arguments"); !errors.Is(err, lifecycle.ErrHireKeyReused) {
+		t.Errorf("the key on another service: %v", err)
+	}
+	if n := scalarCount(t, r, `select count(*) from kontra.tasks where first_message_id = '`+mid+`'`); n != 1 {
+		t.Fatalf("a refused hire created a task: %d tasks of the key", n)
+	}
+
+	fresh := uuid.Must(uuid.NewV7()).String()
+	results := make(chan error, 2)
+	for _, svc := range []store.ServiceRef{r.svc, other} {
+		go func() {
+			_, err := keyed(svc, fresh, "same arguments")
+			results <- err
+		}()
+	}
+	var refused, created int
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			created++
+		case errors.Is(err, lifecycle.ErrHireKeyReused):
+			refused++
+		default:
+			t.Errorf("a hire of the race: %v", err)
+		}
+	}
+	if created != 1 || refused != 1 || scalarCount(t, r, `select count(*) from kontra.tasks where first_message_id = '`+fresh+`'`) != 1 {
+		t.Fatalf("one key on two services at once: %d created, %d refused", created, refused)
+	}
+}

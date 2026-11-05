@@ -1552,16 +1552,25 @@ principal: a request without a credential is `401` (§12.1); through a node, the
 
 ### 12.2 Tools
 
-All four tools declare `annotations.readOnlyHint` and `annotations.destructiveHint`. Their input schemas are
-JSON Schema 2020-12 objects, published in `spec/schema/mcp-tools.json`; `hire` and `reply` also declare as their
-`outputSchema` the hire result, `mcp-tools.json#/$defs/hireResult` (below; D324).
+Every tool declares `annotations.readOnlyHint` and `annotations.destructiveHint`. Their input schemas are JSON Schema
+2020-12 objects, published in `spec/schema/mcp-tools.json`; `hire`, `reply` and `cancel` also declare as their
+`outputSchema` the hire result, `mcp-tools.json#/$defs/hireResult` (below; D324), and `status`, `tasks`, `artifact` and
+the push tools their own, strict (`statusResult`, `tasksResult`, `artifactResult`, `pushResult`; §12.6). The tools after
+`reply` follow, list, cancel and read a `hire` task for a client that shows its model only tools, as most MCP hosts do:
+they serve the same tasks as the MCP Tasks below, with the same scoping, and the MCP Tasks stay as they are (§12.6,
+D332 to D339).
 
 | Tool | Input | Result |
 |---|---|---|
 | `search` | `{query?: string, kind?: "a2a"\|"mcp", price?: string, cursor?: string}` | `structuredContent: {services: [{ref, kind, name, description, available, price?}], nextCursor?}`, plus the same as a text block. `available` = at least one connected session or a direct backend. `price` is the operator's annotation, verbatim. Only services whose `allow:` admits the principal by an entry other than `anonymous` (`key:*` and `oidc:*` included, D301), plus services the operator marks `listed`; services of an anonymous tenant never appear, nor services the operator hides from search (`annotations.search.hidden: true`, D321), for any principal. |
 | `describe` | `{service: string}` | Only for a service `search` would return to the principal were it not hidden (D321), else the unknown-service error. The served card (A2A) or the cached, filtered, annotated `tools/list` (MCP; never an upstream call per request), `sealed`, `available`, and the URLs to call it directly (`{public_url}/agents/…` or `/mcp/…`). |
-| `hire` | `{service: string, message: string \| {parts: Part[]}, contextId?: string}` | Task-augmented (`execution.taskSupport: "optional"`): a `CreateTaskResult`. Plain: a `CallToolResult` whose `structuredContent` is the hire result (below; a quoted task's approve URL and quote in it, and the URL in its text and `_meta`, §12.3). Only `kind: a2a` services: MCP services are called directly at `/mcp/{svc}`. |
-| `reply` | `{taskId: string, message: string \| {parts: Part[]}}` | Sends a follow-up to a task in `input-required` (§7). Answers the task's new state, as a plain `hire` answers it (the hire result in `structuredContent`). |
+| `hire` | `{service: string, message: string \| {parts: Part[]}, contextId?: string, idempotencyKey?: string}` | Task-augmented (`execution.taskSupport: "optional"`): a `CreateTaskResult`. Plain: a `CallToolResult` whose `structuredContent` is the hire result (below; a quoted task's approve URL and quote in it, and the URL in its text and `_meta`, §12.3). Only `kind: a2a` services: MCP services are called directly at `/mcp/{svc}`. |
+| `reply` | `{taskId: string, message: string \| {parts: Part[]}}` | Sends a follow-up to a task in `input-required` (§7). Answers the task's new state, as a plain `hire` answers it (the hire result in `structuredContent`). Refused, nothing sent, for a task that is not asking: a running one's text says to follow it with `status`, an ended one's to continue the conversation with `hire` and its `contextId` (D336). |
+| `status` | `{taskId: string, after?: integer ≥ 0, wait?: integer 0..25}` | The hire result with `contextId` and `service`; with `after`, the task's events after that cursor and the next `cursor`; with `wait`, after waiting for a row (§12.6, D332). Read-only. |
+| `tasks` | `{service?: string, contextId?: string, state?: string, cursor?: string}` | The principal's `hire` tasks, newest first, 50 a page: `{tasks: [{taskId, service, contextId, state, statusAt, text}], nextCursor?}` (§12.6, D333). Read-only. |
+| `cancel` | `{taskId: string}` | `tasks/cancel`'s legacy semantics, awaited; the canceled task's hire result (§12.6, D334). Destructive. |
+| `artifact` | `{taskId: string, artifactId: string}` | One artifact in full: text, data, files with fresh links (§12.6, D335). Read-only. |
+| `push_set`, `push_list`, `push_delete` | `{taskId, url, token?, authentication?: {scheme, credentials?}}`, `{taskId}`, `{taskId, configId}` | The task's A2A push configs (§10.1) as `{taskId, configs: [{configId, url, token: boolean, scheme?}]}`, the token and credentials never shown (§12.6, D337). `push_delete` is destructive, `push_list` read-only. |
 | (MCP Tasks) | `tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel` | §11.6, for tasks created by `hire`. `tasks/result` returns the task's final message and artifacts as MCP content: text parts as `text` (and in `structuredContent.text`), data parts as `text` (JSON) and in `structuredContent.data`, file parts as `resource` blocks (and in `structuredContent.files`). For `hire` tasks this replaces §11.8: every terminal state answers a `CallToolResult`, never a JSON-RPC error; one that ended `failed`, `rejected` or `canceled` has `isError: true`, the final status message as text, and `sh.kontra/failure` or `sh.kontra/canceled` in its `_meta` (and in `tasks/get`'s) as in §11.8; a `rejected` task's `sh.kontra/failure` is `rejected` (D293). |
 
 `hire` creates an ordinary gate task (`protocol = a2a`, dispatched to the A2A service exactly as §6). The
@@ -1620,8 +1629,8 @@ as an unknown one), and `tasks/list` lists them across services, newest first (b
 **Plain calls wait (D272).** A plain `hire` (a legacy call without `params.task`, or a modern request that does not
 declare the tasks extension) and every `reply` wait up to 25 s for the task to end, to reach `input-required` or to be
 `quoted`, and answer what it then is: an ended task as `tasks/result` renders it (above); `input-required` as §12.4's
-reply-tool text; `quoted` at once, without waiting (§12.3); a task still running with a text naming the A2A URL that
-follows it (`GetTask` with the same credential). The wait is cut so that the answer is written within 50 s of the
+reply-tool text; `quoted` at once, without waiting (§12.3); a task still running with a text naming the `status` call that follows
+it (`{taskId, after: 0, wait: 25}`, §12.6) and the A2A URL that does too (`GetTask` with the same credential). The wait is cut so that the answer is written within 50 s of the
 request's arrival, at least 1 s (D295): Admission (up to 30 s) and the task's start come first, and the MCP SDKs time
 a request out after 60 s, which on a modern `hire` cancels its task (§12.5).
 
@@ -1631,6 +1640,8 @@ a request out after 60 s, which on a modern `hire` cancels its task (§12.5).
 declare). A client may show its model and its user nothing but `structuredContent`, so it holds what a person needs:
 
 - `taskId`, and `state`, the A2A state, always;
+- `contextId`, the task's A2A context, and `service`, its ref: what a `hire` that continues the conversation names
+  (§12.6, D336);
 - `url`, the task's thread on the operator's page: its approve URL (`kontra.approve.url`, §13.2), byte for byte the
   URL §12.3's elicitation carries, whenever the task has one, which it keeps after it leaves `quoted`. A task that
   Admission allowed without a quote has none: the URL is the operator's, and the gate never builds it (D188);
@@ -1650,7 +1661,7 @@ structured result also be text): they carry the text, the data as JSON and the f
 task's text names its thread URL, its task id and the quote's expiry; the thread URL of a task that is no longer quoted
 is in `structuredContent` only.
 
-**Metering (D289).** `search`, `describe`, `hire`, `reply` and the MCP Tasks of `/mcp` write no `calls` rows: `/mcp`
+**Metering (D289).** The tools and the MCP Tasks of `/mcp` write no `calls` rows: `/mcp`
 is not a service (§11.4 meters a service's plain calls), and a `hire` is accounted as the A2A task it creates, whose
 row and events are the record.
 
@@ -1688,6 +1699,16 @@ row and events are the record.
      (task-augmented: the `cancelled` task). A retry of a task still `quoted` re-issues its start first, as an A2A
      resend does (§14.5), so a task whose first `hire` lost its start gets the workflow the approval reaches. Any other
      `hire` is a new task.
+   - **Idempotency (D338).** A `hire` with `idempotencyKey` (1 to 128 characters of `[A-Za-z0-9._:-]`) mints its
+     `messageId` from the key: UUIDv5, in a namespace of its own, of the principal's tenant, `buyer_id`, principal and
+     the key. A `hire` of the same principal and key within 24 h answers the task the first one created, in its
+     current state and whatever it is, with the answers of the retries above (quoted: the same `-32042` or the approve
+     URL; otherwise the result of §12.2), its start re-issued first as a resend's (§14.5); never a second task. The same
+     key with other arguments (another `service`, `message` or `contextId`: another `first_request`) is a
+     `CallToolResult` with `isError` "idempotencyKey already used for a different hire", and nothing is created. The
+     key is looked up across services (`tasks_hired_by_message`, migration 0005) and again in the transaction that
+     creates the task, under an advisory lock of `(buyer_id, principal, messageId)`, so two `hire`s with one key
+     arriving together make one task. A modern `hire` with a key is never cancelled for its client leaving (§12.5).
 3. The URL is the operator's (Cloud: the thread, `https://app.kontra.sh/#/t/<taskId>`, D188). It carries no
    credential, and the page that serves it must check that the person who opens it owns the principal that
    called `hire` (MCP elicitation, URL mode, safety rules). Accept: the hold, then `submitted`. Decline or
@@ -1734,7 +1755,10 @@ The gate answers both eras itself (D269):
   HTTP, "Cancellation"): a task that request created and that is not `quoted` is sent `kontra.cancel` in MCP mode
   (D178's rule; canceled within 10 s, D57). A `quoted` task is left as it is: it runs nothing until a person approves
   it and ends when its quote expires, and the client's re-issued `hire` answers it (§12.3 Retries; D295). A task
-  that a retry found again is never cancelled for a retry's client leaving. §11.12's `tasks/get`,
+  that a retry found again is never cancelled for a retry's client leaving, nor is the task of a `hire` with an
+  `idempotencyKey` (D338): the key says the client re-issues the request (2026-07-28: a broken stream's request MUST be
+  re-issued), the task runs on durably meanwhile, the re-issued `hire` answers it, and `status` resumes from the
+  client's cursor (§12.6). §11.12's `tasks/get`,
   `tasks/update` and `tasks/cancel` serve `hire` tasks, presented as §12.2 and §12.4 say; `tasks/result` and
   `tasks/list` are `-32601` on a modern request (`404`, as for any method `/mcp` does not serve).
 - **A `hire` task to a modern reader (D295).** `tasks/get` is §11.12's table with `resultType: "complete"`, `ttlMs`
@@ -1762,6 +1786,74 @@ The gate answers both eras itself (D269):
   before it closes its Temporal client.
 - No virtual session is opened and Admission's `session` operation is not consulted: `per_session` prices a
   service's sessions (§11.12), and `/mcp` is not a service. Each `hire` is an Admission with operation `task`.
+
+### 12.6 Following a `hire` task with tools
+
+Most MCP hosts give their model tools and nothing else, so a client that sees only tools could hire but not follow,
+list, cancel or continue what it hired (D332). These tools serve the same `hire` tasks as the MCP Tasks of §12.2, in
+both eras, with the same scoping: a `hire` task of the principal's `buyer_id` whose service this replica serves to the
+principal (D303). Another buyer's task, an unhired one, an unknown id and one whose service is no longer served are
+one answer, a `CallToolResult` with `isError` and the text `unknown task`. They read Postgres on any replica and wait
+on the replica's waker, as `tasks/result` does; none writes a `calls` row.
+
+- **`status` (D332).** The hire result as a plain `hire` answers it (§12.2: an ended task as `tasks/result` renders
+  it, a question as §12.4's reply-tool text, a quoted task with its approve URL, a running one with the text naming
+  `status`), plus, when `after` is given, `events`: the task's `task`, `status`, `artifact` and `message` rows with
+  seq > `after`, in seq order, each `{seq, kind, state?, role?, text?, data?, files?, artifactId?, name?, at}` (the state
+  a task or status row sets, the role of its message, the text, data values and file links of its parts, kontra-blob
+  parts as presigned links for the caller, §10.4; a raw part's `kontra:task/…` name, whose bytes `artifact` gives),
+  `metadata` rows skipped. One call reads at most 50 rows or about 256 KiB of their payloads; `more` is true when it
+  was cut. `cursor` is the last seq read, else (without `after`) the log's tail; the content carries `{cursor,
+  events?, more?}` as a text block too, for a client that reads only content. With `wait` > 0, a task that has not
+  ended and whose log holds nothing after `after` (or after its tail when `after` is absent) is first waited for, on
+  the waker, until a row lands or `wait` elapses, cut by D295's rule (the answer within 50 s of the request). So
+  `status {after: 0}` is the history and `status {after: <cursor>, wait: 25}` in a loop is the resubscribe: a client
+  that lost its connection, or restarted, resumes from its cursor, and the task never noticed (it runs in
+  `TaskLifecycle`, §14).
+- **`tasks` (D333).** The principal's `hire` tasks, newest first by `status_at` as `tasks/list`, 50 a page, through
+  `tasks_hired`; `nextCursor` is an opaque keyset position that grants nothing. One request reads at most 1000 rows
+  (as `search`, D293): one that reaches the bound answers what matched, fewer than 50 or none, with `nextCursor` at
+  the last row read. `service` filters by ref (one the principal cannot see matches nothing), `contextId` by context,
+  `state` by A2A state (a quoted task is `TASK_STATE_INPUT_REQUIRED` on the wire, §5.1), `active` (not ended) or
+  `ended`. An entry is `{taskId, service, contextId, state, statusAt, text}`, `text` the status message's text (a
+  quoted task's: its approve URL) cut to 200 characters. A task whose service is not served to the principal is left
+  out, so a page may hold fewer than 50.
+- **`cancel` (D334).** Exactly `tasks/cancel`'s legacy semantics (§11.6, D57): `kontra.cancel` in MCP mode, the task
+  `canceled` within 10 s, the upstream receiving §8's `CancelTask`; a quoted task is canceled as the client's cancel
+  (§13.2). Awaited, then the task's hire result, which is not `isError`: the cancel did what was asked. A task that
+  has ended is `isError` "the task already ended (<state>)" and nothing is sent; a lifecycle that does not accept the
+  cancel in time is `503` with `-32603`.
+- **`artifact` (D335).** One artifact of the task's snapshot, in full, as the hire result renders it: text parts as
+  text, data parts as JSON text and in `data`, a raw part as an embedded resource and a URL part (a kontra-blob part
+  presigned for the caller now) as a `resource_link`, both in `files`; each part bounded as §10.4 bounds it.
+  `structuredContent` is `{taskId, artifactId, name?, description?, text?, data?, files?}`. An id the task does not
+  hold is `isError` "unknown artifact".
+- **Continuation (D336).** The hire result carries `contextId` and `service`. On `/mcp` a multi-turn conversation is
+  `hire` with `contextId` (§4, §7: a new task in the same context); `reply` answers a question (§7). `hire`'s and
+  `reply`'s descriptions say so, and `reply`'s refusals say what to do instead.
+- **Push (D337).** `push_set`, `push_list` and `push_delete` are the A2A push config methods' store and rules for the
+  task: §10.1's limits and idempotent save (a config without an id is keyed by URL and token), §10.3's check of the URL
+  at set time (a refused URL is `isError` with the refusal, and nothing is stored), D111 for a task that has ended.
+  The answer is `{taskId, configs: [{configId, url, token, scheme?}]}`: `push_set`'s the config it set, the others
+  the task's configs; `token` says whether one is set, and neither the token nor the credentials are ever shown. The
+  `/mcp` request delivers nothing itself: delivery stays the lifecycle's (§10.2).
+- **Progress (D339).** A `tools/call` of `hire`, `reply` or `status` with `wait` whose `params._meta.progressToken` is
+  a string or an integer, and whose request accepts `text/event-stream`, is answered on an SSE response stream: one
+  `notifications/progress {progressToken, progress, message}` for each `task`, `status` and `artifact` row that lands
+  while the call waits (`progress` from 1, increasing; `message` the status message's text, else the state, or
+  `artifact <name>`), then the result, with no event ids (§12.3). Both eras carry it: MCP 2025-11-25 and 2026-07-28
+  let a server send notifications related to a request on that request's response stream, progress among them.
+  Without a progress token nothing changes.
+- **`describe` (D339).** `describe` adds `capabilities`, normalized: for an A2A service from its served card,
+  `{streaming, pushNotifications, inputModes, outputModes, skills: [{id, name, description, tags, examples,
+  inputModes?, outputModes?}], extensions: [{uri, required}], inputSchema?}`, `inputSchema` the `params.schema` of the
+  card's `https://kontra.sh/ext/input-schema/v1` entry ([`ext-input-schema.md`](ext-input-schema.md): the `hire`
+  message then carries `{parts: [{data: {…}}]}`); for an MCP service `{tools, toolsCached}`, the number of tools
+  `describe` shows. The full card stays beside it.
+- **MCP services.** They are called directly at `/mcp/<ref>` (D272). A `call` tool that relays one `tools/call` through
+  `/mcp` was not built: the relay never translates between eras and a legacy upstream needs a session the gate would
+  hold on the principal's behalf, which nothing decides yet (D339,
+  [`CONFLICT-mcp.md`](../docs/CONFLICT-mcp.md)).
 
 ## 13. Hook points
 
@@ -2134,6 +2226,7 @@ met, are D297.
 | `gate_mcp_reply` | §12.4 (D272, D274), with a seller that asks one question: a legacy client that declared form elicitation sees `input_required` and one `elicitation/create` with the `reply` schema on `tasks/result`, whose `accept` reaches the same upstream task, and `decline` leaves the task waiting; a client without it sees `working`, the question, `(answer with the reply tool, taskId <id>)` and `sh.kontra/input-required`, and `reply` answers the new state; `reply` to a task that is not `input-required` is `isError` and forwards nothing |
 | `gate_mcp_modern` | §12.5 (D269, D274, D295): a 2026-07-28 client gets the gate's `server/discover`; a `hire` declaring the tasks extension is answered in line within 2 s or with `CreateTaskResult`; a client that closes its stream during the wait gets no answer and its task is `canceled` within 10 s, a quoted one stays `quoted` and the re-issued `hire` answers it; a quoted one is `working` with the URL and no `-32042`; a question is `input_required` with one gate-keyed `inputRequests` entry that `tasks/update` answers once; a `tasks/update` on a quoted task, and one with a key that is not an outstanding gate key, is ignored (an empty result, nothing reaches the seller, a quoted task stays `quoted`); `tasks/result` and `tasks/list` are `-32601`; a legacy request without a session is `400` with `-32000`; the answers are the same from either replica |
 | `gate_mcp_oauth` | §12.1 (D276, D296), against an in-repository authorization server: a request without a credential to `/mcp`, to an existing `/mcp/{svc}` and to an unknown one is `401` with `resource_metadata` naming that route's RFC 9728 document, whose `resource` is the route's canonical URI, while a service whose `allow:` admits `anonymous` serves it; a token for `/mcp` is accepted there (`via = mcp` on its tasks and sessions) and is `401` with `error="invalid_token"` on `/mcp/{svc}` and `401` on the A2A routes; an expired token, another issuer, an HMAC or `none` algorithm and a bad signature are `401`; a rotated key is fetched once (its `kid`'s refetch comes at most once a minute after the last fetch); an API key is still accepted |
+| `gate_mcp_tools` | §12.6 (D332 to D339), with the official MCP Go SDK as the client, against a local gate with an enrolled node hosting an example A2A seller and `examples/mcp/everything`: `tools/list` gives every tool its schemas; `describe` gives the seller's `capabilities` and the MCP service's tool count; `hire` with an `idempotencyKey` twice is one task, and the key with another message is `isError`; `status {after: 0}` is the task's history and `status {after: <cursor>, wait: 25}` follows it to its end, with `notifications/progress` when the call carries a progress token; `tasks` lists it, by context and state; `artifact` gives one artifact in full; `push_set` refuses a loopback URL and stores a public one, `push_list` and `push_delete` show and remove it; `cancel` cancels a running task and refuses an ended one; `reply` to an ended task names `hire` with its `contextId`, and that `hire` is a new task in the same context |
 | `tck_jsonrpc`, `tck_rest`, `tck_behind_caddy` | §2, §3, §9 against the pinned TCK, expected failures and expected skips in `test/tck/expected-failures.txt`, each with its reason, per variant and binding and enforced both ways (an unlisted skip of the run's binding fails the run), each test's prerequisite tasks new ones (fresh TCK message ids per test, so cancel, subscribe and history run through the gate; D291); run by `make tck` (D279): `tck_jsonrpc` and `tck_rest` on the direct and the tunnel backend, bare, and `tck_behind_caddy` on the direct backend behind `examples/front/caddy`; nightly also with an API key (`VARIANT=auth`) |
 | tunnel and sealing tests | [`tunnel.md`](tunnel.md) §16, [`ext-sealed.md`](ext-sealed.md) §9 |
 

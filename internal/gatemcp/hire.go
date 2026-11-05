@@ -467,11 +467,11 @@ type answerWriter struct {
 	sse bool
 	s   *mcprelay.GateStream
 	// progress, when the request's params._meta carries a progressToken and it accepts text/event-stream, is what the
-	// wait has told the client of (D337); nil otherwise.
+	// wait has told the client of (D339); nil otherwise.
 	progress *progress
 }
 
-// progress is a request's MCP progress (D337): its token, the last progress value sent, and the last seq of the task's
+// progress is a request's MCP progress (D339): its token, the last progress value sent, and the last seq of the task's
 // log the wait has read.
 type progress struct {
 	token json.RawMessage
@@ -513,7 +513,7 @@ func progressToken(m *mcpwire.Message) (json.RawMessage, bool) {
 }
 
 // notifyProgress writes, on the request's event stream, one notifications/progress for each status and artifact row of
-// the task's log after the last one the wait read (D337): progress increasing from 1, message the status message's
+// the task's log after the last one the wait read (D339): progress increasing from 1, message the status message's
 // text (else the state it sets) or "artifact <name>". Nothing without a progressToken.
 func (h *Handler) notifyProgress(rq *request, aw *answerWriter, id uuid.UUID) {
 	pr := aw.progress
