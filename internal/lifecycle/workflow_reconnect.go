@@ -43,8 +43,8 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 	done := step{kind: stepDone}
 	l.reconnects++
 	if l.reconnects > MaxReconnects {
-		l.fail(ctx, store.ReasonTunnelLost, fmt.Sprintf("The agent's node disconnected %d times while running the task; the gate stopped waiting for it.",
-			MaxReconnects), string(store.OutcomeTunnelLost))
+		l.failLost(ctx, fmt.Sprintf("The agent's node disconnected %d times while running the task; the gate stopped waiting for it.",
+			MaxReconnects))
 		return done
 	}
 	grace := l.reattachGrace()
@@ -79,7 +79,7 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 			}
 			return done
 		case r.Gone != "":
-			l.fail(ctx, store.ReasonTunnelLost, goneText(r.Gone), string(store.OutcomeTunnelLost))
+			l.failLost(ctx, goneText(r.Gone))
 			return done
 		case r.Queue != "":
 			l.queue, l.session = r.Queue, r.SessionID
@@ -93,8 +93,7 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 				_ = workflow.Await(ctx, func() bool { return l.timedOut || l.cancelPending() })
 				continue
 			}
-			l.fail(ctx, store.ReasonTunnelLost, "The agent's node did not reconnect within "+HumanDuration(grace)+".",
-				string(store.OutcomeTunnelLost))
+			l.failLost(ctx, "The agent's node did not reconnect within "+HumanDuration(grace)+".")
 			return done
 		}
 		if !announced {
@@ -116,6 +115,13 @@ func (l *lc) reconnect(ctx workflow.Context) step {
 		})
 	}
 	return done
+}
+
+// failLost writes failed: tunnel_lost with text and ends the attempt tunnel_lost, even when the turn was a follow-up to
+// an input-required task (its session is gone, D149, §7 row 2).
+func (l *lc) failLost(ctx workflow.Context, text string) {
+	l.writeTerminal(ctx, WriteTerminalInput{State: string(store.StateFailed), Reason: string(store.ReasonTunnelLost), Text: text,
+		EndAttempt: string(store.OutcomeTunnelLost), EndAttemptAsIs: true})
 }
 
 // goneText is the failed status's text when no session of the node can serve the task again.

@@ -524,12 +524,12 @@ func TestDispatchThroughTheTunnel(t *testing.T) {
 	if at := settledAttemptOf(t, e, ks.ID, 1); at.outcome != "tunnel_lost" {
 		t.Fatalf("attempt %+v", at)
 	}
-	// The cancel of a task on that session: nothing can be forwarded; it fails tunnel_lost.
+	// The cancel of a task on that session: nothing can be forwarded; it is canceled at once (D346).
 	got, err := c.CancelTask(ctx, &a2a.CancelTaskRequest{ID: gone.ID})
-	if err != nil || got.Status.State != a2a.TaskStateFailed || got.Metadata["kontra.failure"] != "tunnel_lost" {
+	if err != nil || got.Status.State != a2a.TaskStateCanceled || got.Metadata["kontra.canceled"] != "client" {
 		t.Fatalf("cancel with the session gone: %+v %v", got, err)
 	}
-	if st, failure := taskState(t, e, gone.ID); st != "failed" || failure != "tunnel_lost" {
+	if st, failure := taskState(t, e, gone.ID); st != "canceled" || failure != "" {
 		t.Fatalf("the canceled task is %s/%s", st, failure)
 	}
 	if after := len(n1.exchanges()); after != before {
