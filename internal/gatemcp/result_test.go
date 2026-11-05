@@ -40,7 +40,7 @@ const (
 
 var shapeExpiry = time.Date(2026, 11, 1, 18, 30, 0, 0, time.UTC)
 
-// hireShapes are the CallToolResults hire and reply answer, by shape: what quotedResult, plainAnswer and Render write
+// hireShapes are the CallToolResults hire and reply answer, by shape: what quotedCTR, plainAnswer and Render write
 // for a task in each state.
 func hireShapes(t *testing.T) map[string]json.RawMessage {
 	t.Helper()

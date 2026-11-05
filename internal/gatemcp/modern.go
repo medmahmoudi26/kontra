@@ -185,7 +185,7 @@ func (h *Handler) answerModernHire(rq *request, out HireOutcome, svc store.Servi
 	}
 	if !augmented {
 		if row.State == store.StateQuoted {
-			rq.result(quotedResult(row))
+			rq.result(h.plainAnswer(rq.ctx(), row, rq.p))
 			return
 		}
 		if !h.waitAndAnswer(rq, row.ID, 0) {

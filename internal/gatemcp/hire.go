@@ -203,18 +203,12 @@ func (h *Handler) quoted(rq *request, row *store.TaskRow, svc store.ServiceRef, 
 		h.writeCreateTask(rq, row, svc)
 		return
 	}
-	writeResult(rq.w, rq.sid, rq.msg.ID, quotedResult(row))
+	writeResult(rq.w, rq.sid, rq.msg.ID, h.plainAnswer(rq.ctx(), row, rq.p))
 }
 
-// quotedResult is the plain answer for a quoted task (§12.3): the URL, the task id and the quote's expiry as text;
+// quotedCTR is the plain answer for a quoted task (§12.3): the URL, the task id and the quote's expiry as text;
 // structuredContent with the same text, the URL as url and the quote's terms (D324: a client may show nothing but
 // structuredContent); the URL in _meta (D21). The URL is the one the URL elicitation carries.
-func quotedResult(row *store.TaskRow) json.RawMessage {
-	b, _ := json.Marshal(quotedCTR(row))
-	return b
-}
-
-// quotedCTR is quotedResult's CallToolResult.
 func quotedCTR(row *store.TaskRow) callToolResult {
 	u := approveURL(row.Snapshot)
 	expires := ""
