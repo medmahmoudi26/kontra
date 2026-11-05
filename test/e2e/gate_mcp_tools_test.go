@@ -246,7 +246,8 @@ func (c *goSDKClient) run(t *testing.T, ctx context.Context, h *Harness, version
 		for f.calls < 5 {
 			f.calls++
 			r, err := c.tryCall(ctx, "status", map[string]any{"taskId": slowID, "after": cur, "wait": 25}, nil)
-			if err != nil || r.isError {
+			// A canceled task's hire result is isError, as tasks/result renders it (§12.2); its state says so.
+			if err != nil || (r.isError && str(r.structured, "state") != "TASK_STATE_CANCELED") {
 				f.err = fmt.Errorf("status: %+v %v", r, err)
 				break
 			}
@@ -272,7 +273,7 @@ func (c *goSDKClient) run(t *testing.T, ctx context.Context, h *Harness, version
 		}
 	}
 	if f.err != nil || f.state != "TASK_STATE_CANCELED" || !ended || f.calls > 3 {
-		t.Fatalf("following the slow task to its end: %+v", f)
+		t.Fatalf("following the slow task to its end: state %q, %d calls, events %v, error %v", f.state, f.calls, f.events, f.err)
 	}
 
 	// tasks: the completed one by its context.
