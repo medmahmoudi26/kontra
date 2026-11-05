@@ -40,6 +40,9 @@ type HireTasks struct {
 	keepAlive time.Duration // a gate-served stream's comment interval (§2.2)
 	reread    time.Duration // how often a blocked tasks/result reads the log without a wake
 	settle    time.Duration // how long after its acceptance a detached cancel stands for the task's later ones
+	// ref is a task's service ref on this gate, which a rendered hire result names (D336); set by NewHandler, nil
+	// names none.
+	ref func(*store.TaskRow) string
 
 	// The replica's detached work (cancelDetached, hold): the cancels being sent or accepted less than settle ago, by
 	// task (zero: not accepted yet), and how many cancels and modern hires are in flight, which Wait awaits.
@@ -188,7 +191,7 @@ func (t *HireTasks) modernGet(ctx context.Context, row *store.TaskRow, asked int
 			}
 			task = r
 		}
-		res, err := Render(task, row.State)
+		res, err := json.Marshal(t.rendered(task, row))
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +307,7 @@ func (t *HireTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.
 		}
 		task = r
 	}
-	res := render(task, row.State)
+	res := t.rendered(task, row)
 	if res.Meta == nil {
 		res.Meta = map[string]any{}
 	}
@@ -314,6 +317,16 @@ func (t *HireTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.
 		return nil, err
 	}
 	return responseBytes(reqID, "result", b), nil
+}
+
+// rendered is an ended hire task's CallToolResult (render), its hire result naming the task's service (D336).
+func (t *HireTasks) rendered(task *a2a.Task, row *store.TaskRow) callToolResult {
+	res := render(task, row.State)
+	if hr, ok := res.StructuredContent.(HireResult); ok && t.ref != nil {
+		hr.Service = t.ref(row)
+		res.StructuredContent = hr
+	}
+	return res
 }
 
 // List answers a legacy tasks/list: the buyer's hire tasks across services, newest first, gate-minted cursors

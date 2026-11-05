@@ -431,11 +431,14 @@ func (c *Catalog) Describe(ctx context.Context, p auth.Principal, ref Ref) (Desc
 	case config.KindA2A:
 		out.Card = s.card
 		out.URLs = []string{c.publicURL + "/agents/" + c.refString(s)}
+		out.Capabilities = cardCapabilities(s.card)
 	case config.KindMCP:
 		out.URLs = []string{c.publicURL + "/mcp/" + c.refString(s)}
 		tools, cached := c.cachedTools(ctx, s, p)
 		out.ToolsCached = &cached
 		out.Tools = tools
+		n := len(tools)
+		out.Capabilities = &Capabilities{Tools: &n, ToolsCached: &cached}
 	}
 	return out, nil
 }

@@ -14,7 +14,6 @@ import (
 
 	"kontra.sh/kontra/internal/anon"
 	"kontra.sh/kontra/internal/auth"
-	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcprelay"
@@ -116,6 +115,12 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		h.internal(rq, "mint a message id", err)
 		return
 	}
+	keyed := a.IdempotencyKey != ""
+	if keyed {
+		// The key's messageId (D338): the same for every hire of this key, buyer and principal, so the task the first one
+		// created is found by it (store.Log.FindHireKeyed), whatever arguments the later one carries.
+		mid = KeyedMessageID(rq.p, a.IdempotencyKey)
+	}
 	msg := &a2a.Message{ID: mid.String(), Role: a2a.MessageRoleUser, ContextID: a.ContextID, Parts: parts}
 	hctx := rq.ctx()
 	if rq.modern {
@@ -123,9 +128,12 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		hctx, cancel = context.WithTimeout(context.WithoutCancel(hctx), modernHireBound)
 		defer cancel()
 	}
-	out, err := h.deps.Hirer.Hire(hctx, HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key})
+	out, err := h.deps.Hirer.Hire(hctx, HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key, Keyed: keyed})
 	var xe *relay.ExtensionsRequiredError
 	switch {
+	case errors.Is(err, lifecycle.ErrHireKeyReused):
+		rq.result(errorResult("idempotencyKey already used for a different hire; no task was created.", nil))
+		return
 	case errors.Is(err, relay.ErrNotServed):
 		// The registry stopped serving it since the catalog read it (D303).
 		h.toolError(rq, ErrUnknownService)
@@ -145,7 +153,7 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		h.log.Info("hire created a task", "service", ref.String(), "task_id", row.ID, "state", row.State, "principal", rq.p.ID)
 	}
 	if rq.modern {
-		h.answerModernHire(rq, out, svc.ref, augmented)
+		h.answerModernHire(rq, out, svc.ref, augmented, keyed)
 		return
 	}
 	if row.State == store.StateQuoted {
@@ -202,6 +210,12 @@ func (h *Handler) quoted(rq *request, row *store.TaskRow, svc store.ServiceRef, 
 // structuredContent with the same text, the URL as url and the quote's terms (D324: a client may show nothing but
 // structuredContent); the URL in _meta (D21). The URL is the one the URL elicitation carries.
 func quotedResult(row *store.TaskRow) json.RawMessage {
+	b, _ := json.Marshal(quotedCTR(row))
+	return b
+}
+
+// quotedCTR is quotedResult's CallToolResult.
+func quotedCTR(row *store.TaskRow) callToolResult {
 	u := approveURL(row.Snapshot)
 	expires := ""
 	if row.QuoteExpiresAt != nil {
@@ -213,11 +227,11 @@ func quotedResult(row *store.TaskRow) json.RawMessage {
 		text += "; the quote expires at " + expires
 	}
 	text += "). Then call hire again with the same arguments to get its result."
-	res := HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text}
+	res := HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), ContextID: row.ContextID, URL: threadURL(row.Snapshot), Text: text}
 	if res.URL != "" && expires != "" {
 		res.Quote = &QuoteTerms{ApproveURL: res.URL, ExpiresAt: expires}
 	}
-	return textResult(text, res, map[string]any{MetaApproveURL: u})
+	return callToolResult{Content: []content{{Type: "text", Text: text}}, StructuredContent: res, Meta: map[string]any{MetaApproveURL: u}}
 }
 
 // writeCreateTask answers a task-augmented hire with its CreateTaskResult (§11.5 step 2, §12.3).
@@ -260,8 +274,13 @@ func (h *Handler) reply(rq *request, args json.RawMessage) {
 		rq.result(errorResult("The task is waiting for a person to approve its quote at "+u+
 			"; a reply cannot approve it, and nothing was sent.", map[string]any{MetaApproveURL: u}))
 		return
+	case row.State.Terminal():
+		rq.result(errorResult("The task ended ("+string(row.State)+"); nothing was sent. Continue the conversation with hire "+
+			"{service: \""+h.serviceRef(row)+"\", contextId: \""+row.ContextID+"\", message}.", nil))
+		return
 	case row.State != store.StateInputRequired:
-		rq.result(errorResult("The task is "+string(row.State)+" and takes no input now; nothing was sent.", nil))
+		rq.result(errorResult("The task is "+string(row.State)+" and takes no input now; nothing was sent. It is still working: "+
+			"follow it with status {taskId: \""+row.ID.String()+"\", after: 0, wait: 25}.", nil))
 		return
 	}
 	after, err := h.deps.Hirer.Reply(rq.ctx(), rq.p, row, parts)
@@ -348,6 +367,10 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 	keep := time.NewTicker(keepAliveEvery)
 	defer keep.Stop()
 	aw.begin()
+	if aw.progress != nil {
+		// The rows of the turn this wait follows: a new task's from its creation, a reply's after the version it read.
+		aw.progress.seen = after
+	}
 	var row *store.TaskRow
 	for {
 		// The row and the seq of the event its state comes from, in one statement (one snapshot): read apart, a turn's
@@ -364,6 +387,7 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 		if h.deps.afterRead != nil {
 			h.deps.afterRead(row)
 		}
+		h.notifyProgress(rq, aw, id)
 		if turnOver(row, asked, after) {
 			break
 		}
@@ -409,32 +433,14 @@ func turnOver(row *store.TaskRow, asked, after int64) bool {
 }
 
 // plainAnswer is the CallToolResult of a plain hire or reply for the task as row has it (§12.2): its text in content
-// and, with taskId, state and the task's thread URL, in structuredContent (D324).
+// and, with taskId, state, contextId, service and the task's thread URL, in structuredContent (D324, D336). answerOf
+// builds it.
 func (h *Handler) plainAnswer(ctx context.Context, row *store.TaskRow, p auth.Principal) json.RawMessage {
-	switch {
-	case row.State.Terminal():
-		task := row.Snapshot
-		if h.deps.Render != nil {
-			if t, err := h.deps.Render.Task(blob.ForCaller(ctx), task); err == nil {
-				task = t
-			}
-		}
-		b, err := Render(task, row.State)
-		if err != nil {
-			return errorResult("the task's result could not be rendered", nil)
-		}
-		return b
-	case row.State == store.StateQuoted:
-		return quotedResult(row)
-	case row.State == store.StateInputRequired:
-		_, text, _ := Question(row.Snapshot, Reader{Principal: p, Era: mcpwire.EraLegacy})
-		return textResult(text, HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text},
-			map[string]any{MetaInputRequired: true})
+	b, err := json.Marshal(h.answerOf(ctx, row, p))
+	if err != nil {
+		return errorResult("the task's result could not be rendered", nil)
 	}
-	follow := strings.TrimRight(h.deps.PublicURL, "/") + "/agents/" + h.serviceRef(row)
-	text := "The task " + row.ID.String() + " is still " + string(row.State) + ". Follow it with GetTask at " + follow +
-		" (the same credential), or call reply when it asks a question."
-	return textResult(text, HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text}, nil)
+	return b
 }
 
 // serviceRef is the ref of a task's service on this gate (the tenant's slug is not on the row: a single-tenant gate
@@ -460,11 +466,111 @@ type answerWriter struct {
 	rq  *request
 	sse bool
 	s   *mcprelay.GateStream
+	// progress, when the request's params._meta carries a progressToken and it accepts text/event-stream, is what the
+	// wait has told the client of (D337); nil otherwise.
+	progress *progress
+}
+
+// progress is a request's MCP progress (D337): its token, the last progress value sent, and the last seq of the task's
+// log the wait has read.
+type progress struct {
+	token json.RawMessage
+	n     int64
+	seen  int64
 }
 
 func newAnswerWriter(rq *request) *answerWriter {
-	return &answerWriter{rq: rq, sse: strings.Contains(rq.r.Header.Get("Accept"), "text/event-stream"),
+	aw := &answerWriter{rq: rq, sse: strings.Contains(rq.r.Header.Get("Accept"), "text/event-stream"),
 		s: mcprelay.NewGateStream(rq.w, rq.sid)}
+	if tok, ok := progressToken(rq.msg); ok && aw.sse {
+		aw.progress = &progress{token: tok}
+	}
+	return aw
+}
+
+// progressToken is a request's params._meta.progressToken when it is a string or an integer (MCP's ProgressToken).
+func progressToken(m *mcpwire.Message) (json.RawMessage, bool) {
+	if m == nil {
+		return nil, false
+	}
+	meta, ok := mcpwire.Member(m.Params, "_meta")
+	if !ok || firstByte(meta) != '{' {
+		return nil, false
+	}
+	tok, ok := mcpwire.Member(meta, "progressToken")
+	if !ok {
+		return nil, false
+	}
+	switch c := firstByte(tok); {
+	case c == '"':
+		var s string
+		return tok, json.Unmarshal(tok, &s) == nil
+	case c == '-' || (c >= '0' && c <= '9'):
+		var n int64
+		return tok, json.Unmarshal(tok, &n) == nil
+	}
+	return nil, false
+}
+
+// notifyProgress writes, on the request's event stream, one notifications/progress for each status and artifact row of
+// the task's log after the last one the wait read (D337): progress increasing from 1, message the status message's
+// text (else the state it sets) or "artifact <name>". Nothing without a progressToken.
+func (h *Handler) notifyProgress(rq *request, aw *answerWriter, id uuid.UUID) {
+	pr := aw.progress
+	if pr == nil || rq.ctx().Err() != nil {
+		return
+	}
+	evs, _, err := h.deps.Log.EventsWithin(rq.ctx(), id, pr.seen, StatusEvents, StatusBytes)
+	if err != nil {
+		return
+	}
+	for _, ev := range evs {
+		pr.seen = ev.Seq
+		if ev.Kind != store.KindStatus && ev.Kind != store.KindArtifact && ev.Kind != store.KindTask {
+			continue
+		}
+		var sr a2a.StreamResponse
+		if json.Unmarshal(ev.Payload, &sr) != nil {
+			continue
+		}
+		msg := ""
+		switch v := sr.Event.(type) {
+		case *a2a.Task:
+			msg = stateWord(v.Status.State)
+		case *a2a.TaskStatusUpdateEvent:
+			msg = stateWord(v.Status.State)
+			if v.Status.Message != nil {
+				if t, _, _ := partsOf(id, v.Status.Message.Parts, new(int)); t != "" {
+					msg = t
+				}
+			}
+		case *a2a.TaskArtifactUpdateEvent:
+			name := ""
+			if v.Artifact != nil {
+				name = v.Artifact.Name
+				if name == "" {
+					name = string(v.Artifact.ID)
+				}
+			}
+			msg = "artifact " + name
+		default:
+			continue
+		}
+		pr.n++
+		b, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "notifications/progress",
+			"params": map[string]any{"progressToken": pr.token, "progress": pr.n, "message": msg}})
+		if err != nil {
+			continue
+		}
+		if !aw.s.Started() {
+			if aw.s.Start() != nil {
+				return
+			}
+		}
+		if aw.s.Event("", b) != nil {
+			return
+		}
+	}
 }
 
 func (a *answerWriter) begin() {

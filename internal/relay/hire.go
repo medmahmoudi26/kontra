@@ -26,6 +26,9 @@ type HireRequest struct {
 	Service      store.ServiceRef
 	Message      *a2a.Message
 	FirstRequest [32]byte
+	// Keyed is a hire with an idempotencyKey (§12.3 Idempotency, D338): Message.ID is minted from the key, the buyer
+	// and the principal, and a hire of the same key within store.HireKeyWindow answers its task, whatever its state.
+	Keyed bool
 }
 
 // HireOutcome is the task a hire created, or the one an earlier hire of the same key created that it answers
@@ -187,6 +190,9 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 		return HireOutcome{}, err
 	}
 	owner := HireOwner(req.Principal)
+	if req.Keyed {
+		return h.hireKeyed(ctx, req, owner, activated)
+	}
 	prev, err := h.Log.FindHireRetry(ctx, req.Service, owner, req.FirstRequest, h.window())
 	if err != nil {
 		return HireOutcome{}, err
@@ -202,11 +208,45 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 		}
 		return HireOutcome{Task: prev, Existing: true}, nil
 	}
+	return h.create(ctx, req, activated)
+}
+
+// hireKeyed answers a hire with an idempotencyKey (§12.3 Idempotency, D338): the hire task of the same buyer, principal
+// and minted messageId created less than store.HireKeyWindow ago, as it is, its start re-issued first as a resend's is
+// (§14.5: a task whose first hire lost its start gets its workflow; one whose workflow ended refuses it, which is not
+// an error); one of another service or other arguments is lifecycle.ErrHireKeyReused, and nothing is created.
+// Otherwise a new task, which the work queue keys the same way under the key's lock, so two hires with one key arriving
+// together make one task.
+func (h *Hirer) hireKeyed(ctx context.Context, req HireRequest, owner store.Owner, activated []string) (HireOutcome, error) {
+	k, err := h.Log.FindHireKeyed(ctx, owner.BuyerID, owner.Principal, req.Message.ID, time.Now().Add(-store.HireKeyWindow))
+	switch {
+	case err != nil:
+		return HireOutcome{}, err
+	case k == nil:
+		return h.create(ctx, req, activated)
+	case k.Task.TenantID != req.Service.TenantID || k.Task.Service != req.Service.Name || k.FirstRequest != req.FirstRequest:
+		return HireOutcome{}, lifecycle.ErrHireKeyReused
+	}
+	if h.Starts != nil {
+		if err := h.Starts(req.Service).ReissueStart(ctx, k.Task); err != nil {
+			return HireOutcome{}, err
+		}
+	}
+	row, err := h.Log.Load(ctx, k.Task.ID)
+	if err != nil {
+		return HireOutcome{}, err
+	}
+	return HireOutcome{Task: row, Existing: true}, nil
+}
+
+// create makes the hire's task through the service's handler, as an A2A SendMessage would (the work queue answers a
+// retry of the same key that it finds under the key's lock with the earlier task, Existing).
+func (h *Hirer) create(ctx context.Context, req HireRequest, activated []string) (HireOutcome, error) {
 	sh, err := h.Handlers.For(ctx, req.Service)
 	if err != nil {
 		return HireOutcome{}, err
 	}
-	hctx := withHireActivated(lifecycle.WithHire(ctx, lifecycle.Hire{Key: req.FirstRequest, RetryWindow: h.window()}), activated)
+	hctx := withHireActivated(lifecycle.WithHire(ctx, lifecycle.Hire{Key: req.FirstRequest, RetryWindow: h.window(), Keyed: req.Keyed}), activated)
 	start, err := send(hctx, sh, req.Principal, &a2a.SendMessageRequest{Message: req.Message})
 	if err != nil {
 		return HireOutcome{}, err

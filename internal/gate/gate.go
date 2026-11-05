@@ -561,7 +561,7 @@ func (r *Replica) assemble() error {
 			return ok && s.Kind == config.KindA2A && s.Allow.Admits(p)
 		},
 	}
-	if err := r.assembleGateMCP(routes, authn, hirer); err != nil {
+	if err := r.assembleGateMCP(routes, authn, hirer, pushStore); err != nil {
 		return err
 	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))

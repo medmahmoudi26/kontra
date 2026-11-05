@@ -416,7 +416,7 @@ func TestModernGet(t *testing.T) {
 	res, _ := o["result"].(map[string]any)
 	if o["status"] != "completed" || res == nil || res["resultType"] != "complete" || res["isError"] != nil ||
 		!reflect.DeepEqual(res["structuredContent"], map[string]any{"taskId": done.String(), "state": "TASK_STATE_COMPLETED",
-			"text": "booked", "data": []any{map[string]any{"day": "friday"}}}) {
+			"contextId": "ctx", "text": "booked", "data": []any{map[string]any{"day": "friday"}}}) {
 		t.Errorf("a completed task: %v", o)
 	}
 

@@ -1,64 +1,25 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kontra.sh/schema/mcp/tools/v1.json",
-  "title": "Input schemas of the gate's own MCP tools, and the output schema of hire and reply (spec/relay.md §12.2)",
+  "title": "Input schemas of the gate's own MCP tools, and the output schemas of the tools that answer a hire task (spec/relay.md §12.2)",
   "$defs": {
-    "part": {
-      "type": "object",
-      "description": "An A2A 1.0 Part: exactly one of text, raw (base64), url, data; plus optional filename, mediaType, metadata.",
-      "oneOf": [ { "required": ["text"] }, { "required": ["raw"] }, { "required": ["url"] }, { "required": ["data"] } ],
-      "properties": {
-        "text": { "type": "string" }, "raw": { "type": "string", "contentEncoding": "base64" },
-        "url": { "type": "string", "format": "uri" }, "data": { "not": { "type": "null" } },
-        "filename": { "type": "string" }, "mediaType": { "type": "string" }, "metadata": { "type": "object" }
-      }
-    },
-    "message": {
-      "oneOf": [
-        { "type": "string", "minLength": 1 },
-        { "type": "object", "required": ["parts"], "additionalProperties": false,
-          "properties": { "parts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/part" } } } }
-      ]
-    },
-    "search": {
-      "type": "object", "additionalProperties": false,
-      "properties": { "query": { "type": "string", "maxLength": 256 }, "kind": { "enum": ["a2a", "mcp"] },
-                      "price": { "type": "string", "maxLength": 32 }, "cursor": { "type": "string" } }
-    },
-    "describe": {
-      "type": "object", "required": ["service"], "additionalProperties": false,
-      "properties": { "service": { "type": "string", "pattern": "^([a-z0-9-]+/)?[a-z0-9-]+$" } }
-    },
-    "hire": {
-      "type": "object", "required": ["service", "message"], "additionalProperties": false,
-      "properties": { "service": { "type": "string", "pattern": "^([a-z0-9-]+/)?[a-z0-9-]+$" },
-                      "message": { "$ref": "#/$defs/message" }, "contextId": { "type": "string", "maxLength": 256 } }
-    },
-    "reply": {
-      "type": "object", "required": ["taskId", "message"], "additionalProperties": false,
-      "properties": { "taskId": { "type": "string", "format": "uuid" }, "message": { "$ref": "#/$defs/message" } }
-    },
-    "hireResult": {
-      "type": "object",
-      "description": "A hire task as hire and reply answer it: taskId and state always; url, the task's page on the operator's site, whenever the task has one; quote while a person must approve it there; text, the agent's answer or question or what the gate says of the task; data and files from the agent's parts.",
-      "required": ["taskId", "state"], "additionalProperties": false,
-      "properties": {
-        "taskId": { "type": "string", "format": "uuid" },
-        "state": { "enum": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED",
-                            "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"] },
-        "url": { "type": "string", "pattern": "^https://" },
-        "quote": {
-          "type": "object", "required": ["approveUrl", "expiresAt"], "additionalProperties": false,
-          "properties": { "approveUrl": { "type": "string", "pattern": "^https://" }, "expiresAt": { "type": "string", "format": "date-time" } }
-        },
-        "text": { "type": "string" },
-        "data": { "type": "array", "minItems": 1 },
-        "files": {
-          "type": "array", "minItems": 1,
-          "items": { "type": "object", "required": ["uri"], "additionalProperties": false,
-                     "properties": { "uri": { "type": "string" }, "name": { "type": "string" }, "mediaType": { "type": "string" } } }
-        }
-      }
-    }
+    "part": {"type": "object", "description": "An A2A 1.0 Part: exactly one of text, raw (base64), url, data; plus optional filename, mediaType, metadata.", "oneOf": [{"required": ["text"]}, {"required": ["raw"]}, {"required": ["url"]}, {"required": ["data"]}], "properties": {"text": {"type": "string"}, "raw": {"type": "string", "contentEncoding": "base64"}, "url": {"type": "string", "format": "uri"}, "data": {"not": {"type": "null"}}, "filename": {"type": "string"}, "mediaType": {"type": "string"}, "metadata": {"type": "object"}}},
+    "message": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "object", "required": ["parts"], "additionalProperties": false, "properties": {"parts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/part"}}}}]},
+    "search": {"type": "object", "additionalProperties": false, "properties": {"query": {"type": "string", "maxLength": 256}, "kind": {"enum": ["a2a", "mcp"]}, "price": {"type": "string", "maxLength": 32}, "cursor": {"type": "string"}}},
+    "describe": {"type": "object", "required": ["service"], "additionalProperties": false, "properties": {"service": {"type": "string", "pattern": "^([a-z0-9-]+/)?[a-z0-9-]+$"}}},
+    "hire": {"type": "object", "required": ["service", "message"], "additionalProperties": false, "properties": {"service": {"type": "string", "pattern": "^([a-z0-9-]+/)?[a-z0-9-]+$"}, "message": {"$ref": "#/$defs/message"}, "contextId": {"type": "string", "maxLength": 256}, "idempotencyKey": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$"}}},
+    "reply": {"type": "object", "required": ["taskId", "message"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "message": {"$ref": "#/$defs/message"}}},
+    "hireResult": {"type": "object", "description": "A hire task as hire, reply, status and cancel answer it: taskId and state always; contextId and service, which a hire that continues the conversation names; url, the task's page on the operator's site, whenever the task has one; quote while a person must approve it there; text, the agent's answer or question or what the gate says of the task; data and files from the agent's parts.", "required": ["taskId", "state"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "state": {"enum": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"]}, "contextId": {"type": "string"}, "service": {"type": "string"}, "url": {"type": "string", "pattern": "^https://"}, "quote": {"type": "object", "required": ["approveUrl", "expiresAt"], "additionalProperties": false, "properties": {"approveUrl": {"type": "string", "pattern": "^https://"}, "expiresAt": {"type": "string", "format": "date-time"}}}, "text": {"type": "string"}, "data": {"type": "array", "minItems": 1}, "files": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["uri"], "additionalProperties": false, "properties": {"uri": {"type": "string"}, "name": {"type": "string"}, "mediaType": {"type": "string"}}}}}},
+    "status": {"type": "object", "required": ["taskId"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "after": {"type": "integer", "minimum": 0}, "wait": {"type": "integer", "minimum": 0, "maximum": 25}}},
+    "tasks": {"type": "object", "additionalProperties": false, "properties": {"service": {"type": "string", "pattern": "^([a-z0-9-]+/)?[a-z0-9-]+$"}, "contextId": {"type": "string", "maxLength": 256}, "state": {"enum": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED", "active", "ended"]}, "cursor": {"type": "string"}}},
+    "cancel": {"type": "object", "required": ["taskId"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}}},
+    "artifact": {"type": "object", "required": ["taskId", "artifactId"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "artifactId": {"type": "string", "minLength": 1, "maxLength": 256}}},
+    "push_set": {"type": "object", "required": ["taskId", "url"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "url": {"type": "string", "format": "uri"}, "token": {"type": "string"}, "authentication": {"type": "object", "required": ["scheme"], "additionalProperties": false, "properties": {"scheme": {"type": "string", "minLength": 1}, "credentials": {"type": "string"}}}}},
+    "push_list": {"type": "object", "required": ["taskId"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}}},
+    "push_delete": {"type": "object", "required": ["taskId", "configId"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "configId": {"type": "string", "minLength": 1}}},
+    "statusResult": {"type": "object", "description": "A hire task as status answers it: the hire result, and when after was given the task's events after it (more when the answer was cut) and the cursor to ask from next.", "required": ["taskId", "state", "cursor"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "state": {"enum": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"]}, "contextId": {"type": "string"}, "service": {"type": "string"}, "url": {"type": "string", "pattern": "^https://"}, "quote": {"type": "object", "required": ["approveUrl", "expiresAt"], "additionalProperties": false, "properties": {"approveUrl": {"type": "string", "pattern": "^https://"}, "expiresAt": {"type": "string", "format": "date-time"}}}, "text": {"type": "string"}, "data": {"type": "array", "minItems": 1}, "files": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["uri"], "additionalProperties": false, "properties": {"uri": {"type": "string"}, "name": {"type": "string"}, "mediaType": {"type": "string"}}}}, "events": {"type": "array", "items": {"type": "object", "required": ["seq", "kind", "at"], "additionalProperties": false, "properties": {"seq": {"type": "integer", "minimum": 1}, "kind": {"enum": ["task", "status", "artifact", "message"]}, "state": {"enum": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"]}, "role": {"enum": ["user", "agent"]}, "text": {"type": "string"}, "data": {"type": "array", "minItems": 1}, "files": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["uri"], "additionalProperties": false, "properties": {"uri": {"type": "string"}, "name": {"type": "string"}, "mediaType": {"type": "string"}}}}, "artifactId": {"type": "string"}, "name": {"type": "string"}, "at": {"type": "string", "format": "date-time"}}}}, "cursor": {"type": "integer", "minimum": 0}, "more": {"type": "boolean"}}},
+    "tasksResult": {"type": "object", "required": ["tasks"], "additionalProperties": false, "properties": {"tasks": {"type": "array", "items": {"type": "object", "required": ["taskId", "service", "contextId", "state", "statusAt"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "service": {"type": "string"}, "contextId": {"type": "string"}, "state": {"enum": ["TASK_STATE_SUBMITTED", "TASK_STATE_WORKING", "TASK_STATE_INPUT_REQUIRED", "TASK_STATE_AUTH_REQUIRED", "TASK_STATE_COMPLETED", "TASK_STATE_FAILED", "TASK_STATE_CANCELED", "TASK_STATE_REJECTED"]}, "statusAt": {"type": "string", "format": "date-time"}, "text": {"type": "string", "maxLength": 200}}}}, "nextCursor": {"type": "string"}}},
+    "artifactResult": {"type": "object", "required": ["taskId", "artifactId"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "artifactId": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"}, "text": {"type": "string"}, "data": {"type": "array", "minItems": 1}, "files": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["uri"], "additionalProperties": false, "properties": {"uri": {"type": "string"}, "name": {"type": "string"}, "mediaType": {"type": "string"}}}}}},
+    "pushResult": {"type": "object", "required": ["taskId", "configs"], "additionalProperties": false, "properties": {"taskId": {"type": "string", "format": "uuid"}, "configs": {"type": "array", "items": {"type": "object", "required": ["configId", "url", "token"], "additionalProperties": false, "properties": {"configId": {"type": "string"}, "url": {"type": "string"}, "token": {"type": "boolean"}, "scheme": {"type": "string"}}}}}}
   }
 }

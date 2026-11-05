@@ -17,9 +17,10 @@ import (
 // services table and the MCP relay's tools cache (describe's background drain through the relay's own sessions), the
 // hirer over the A2A services' handlers (a hire task is an ordinary A2A task, created by the service's interceptors
 // and work queue; assemble builds the hirer), the MCP Tasks of hire tasks (the lifecycle client's MCP-mode cancel),
-// the URL elicitations, and /mcp's legacy sessions (mcp_sessions rows with service NULL). It runs after
+// the URL elicitations, /mcp's legacy sessions (mcp_sessions rows with service NULL), and the A2A push configs its push
+// tools set (D337). It runs after
 // assembleMCP, whose handler and tools cache it uses.
-func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator, hirer *relay.Hirer) error {
+func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator, hirer *relay.Hirer, pushes gatemcp.PushConfigs) error {
 	cfg := r.cfg
 	multi := cfg.Tenancy == config.TenancyMulti
 	catalog := gatemcp.NewCatalog(gatemcp.CatalogConfig{
@@ -38,7 +39,7 @@ func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator
 		PublicURL: cfg.PublicURL, Multi: multi, Auth: authn, Sessions: mcprelay.NewSessions(r.pool), Catalog: catalog,
 		Hirer: hirer, Tasks: tasks, Elicitations: gatemcp.NewElicitations(r.storeLog, r.listener, r.log), Log: r.storeLog,
 		Waker: r.listener, Render: r.render, Served: r.servedService, AllowedOrigins: cfg.MCP.AllowedOrigins, Logger: r.log,
-		PlainWait: r.opts.plainWait,
+		PlainWait: r.opts.plainWait, Push: pushes,
 	})
 	if err != nil {
 		return err

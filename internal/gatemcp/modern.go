@@ -22,7 +22,7 @@ import (
 const ModernInlineWait = 2 * time.Second
 
 // ModernListTTL is the ttlMs of the gate's server/discover result and of its modern tools/list (2026-07-28
-// CacheableResult): §11.12's bound on a relayed list. The four tools change only with the gate's version.
+// CacheableResult): §11.12's bound on a relayed list. The tools change only with the gate's version.
 const ModernListTTL = 10 * time.Minute
 
 // modernHireBound bounds a modern hire's creation, which runs on a context the client cannot cancel: a client that
@@ -41,7 +41,7 @@ const (
 // classification (rule 2: its Mcp-Session-Id and Last-Event-ID are never read): CheckModern's refusals first (a
 // response 400 -32600, a notification 202, a missing _meta field 400 -32602, a version, Mcp-Method or Mcp-Name that
 // does not match the body 400 -32020, D176); then server/discover answered by the gate, the modern tools/list, the
-// four tools (a hire declaring the tasks extension is answered as §11.12 step 4), tasks/get, tasks/update and
+// tools (a hire declaring the tasks extension is answered as §11.12 step 4), tasks/get, tasks/update and
 // tasks/cancel over hire tasks (-32021 without the extension, D176), tasks/result and tasks/list -32601 (the
 // extension removes them), and any other method 404 with -32601 (2026-07-28 Streamable HTTP: a method the server
 // does not implement), subscriptions/listen included (D295).
@@ -111,8 +111,11 @@ func serverInfo() map[string]any {
 }
 
 // instructions is what /mcp tells a model about itself (initialize, server/discover).
-const instructions = "Find agents with search, read one with describe, and hire it with hire; answer a hired task's " +
-	"question with reply. A priced task waits for a person to approve its quote at the URL hire gives."
+const instructions = "Find agents with search, read one with describe, and hire it with hire (pass an idempotencyKey to " +
+	"retry safely). Follow a running task with status {taskId, after: <cursor>, wait: 25} until it ends; answer its question " +
+	"with reply; stop it with cancel. Continue a conversation with hire and the contextId of a result. List your tasks with " +
+	"tasks; read one artifact in full with artifact. MCP servers are called directly at the URL describe gives. A priced " +
+	"task waits for a person to approve its quote at the URL hire gives."
 
 // modernTasks serves a modern tasks/get, tasks/update or tasks/cancel over the principal's hire tasks (§12.5, §11.12
 // "The client side"), from Postgres on any replica: a request that does not declare the tasks extension is 400 with
@@ -165,13 +168,17 @@ func (h *Handler) modernTasks(rq *request) {
 // task is not cancelled when its client leaves; it ends on its own when its quote expires, and the re-issued hire
 // gets it with its approve URL. Recorded as D295, and §12.5 now says so; §11.12 step 4 stands for /mcp/{svc}, whose
 // MCP tasks have no retry.
-func (h *Handler) answerModernHire(rq *request, out HireOutcome, svc store.ServiceRef, augmented bool) {
+//
+// A hire with an idempotencyKey is never cancelled for its client leaving (D338): the key says the client re-issues it
+// (2026-07-28: a broken stream's request MUST be re-issued), and its re-issued hire answers the same task, which ran
+// on durably meanwhile; the client follows it with status from its cursor. It ends as any task does, or with cancel.
+func (h *Handler) answerModernHire(rq *request, out HireOutcome, svc store.ServiceRef, augmented, keyed bool) {
 	row := out.Task
 	cancelIfLeft := func(why string) bool {
 		if rq.ctx().Err() == nil {
 			return false
 		}
-		if !out.Existing && row.State != store.StateQuoted && !row.State.Terminal() {
+		if !out.Existing && !keyed && row.State != store.StateQuoted && !row.State.Terminal() {
 			h.deps.Tasks.cancelDetached(row.ID, why)
 		}
 		return true

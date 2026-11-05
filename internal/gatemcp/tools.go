@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
@@ -17,16 +18,25 @@ import (
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/jcs"
 	"kontra.sh/kontra/internal/mcpwire"
+	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/strictjson"
 )
 
-// The four tools (spec §12.2). Their input schemas are spec/schema/mcp-tools.json's $defs; every tool declares
-// annotations.readOnlyHint and annotations.destructiveHint.
+// The tools (spec §12.2): search, describe, hire and reply, and the tools that follow, list, cancel and continue a
+// hire task for a client that sees only tools (D332..D339). Their input schemas are spec/schema/mcp-tools.json's
+// $defs; every tool declares annotations.readOnlyHint and annotations.destructiveHint.
 const (
-	ToolSearch   = "search"
-	ToolDescribe = "describe"
-	ToolHire     = "hire"
-	ToolReply    = "reply"
+	ToolSearch     = "search"
+	ToolDescribe   = "describe"
+	ToolHire       = "hire"
+	ToolReply      = "reply"
+	ToolStatus     = "status"
+	ToolTasks      = "tasks"
+	ToolCancel     = "cancel"
+	ToolArtifact   = "artifact"
+	ToolPushSet    = "push_set"
+	ToolPushList   = "push_list"
+	ToolPushDelete = "push_delete"
 )
 
 // Ref names a service in search results and in describe's and hire's arguments: <name> on a single-tenant gate,
@@ -101,6 +111,80 @@ type DescribeResult struct {
 	Sealed      bool              `json:"sealed"`
 	Available   bool              `json:"available"`
 	URLs        []string          `json:"urls"` // {public_url}/agents/… or {public_url}/mcp/…
+	// Capabilities is what the service can do, normalized (D339): from the served card for A2A, the tool count for MCP.
+	Capabilities *Capabilities `json:"capabilities,omitempty"`
+}
+
+// Capabilities is describe's normalized summary of a service (D339). For A2A, from the served card: streaming and
+// pushNotifications (capabilities), the default input and output modes, the skills, the extensions with whether each is
+// required, and inputSchema, params.schema of the card's https://kontra.sh/ext/input-schema/v1 entry (the hire message
+// then carries {parts: [{data: {...}}]}, spec/ext-input-schema.md). For MCP, the number of tools describe shows and
+// whether the list was cached.
+type Capabilities struct {
+	Streaming         *bool             `json:"streaming,omitempty"`
+	PushNotifications *bool             `json:"pushNotifications,omitempty"`
+	InputModes        []string          `json:"inputModes,omitempty"`
+	OutputModes       []string          `json:"outputModes,omitempty"`
+	Skills            []SkillSummary    `json:"skills,omitempty"`
+	Extensions        []ExtensionInCard `json:"extensions,omitempty"`
+	InputSchema       json.RawMessage   `json:"inputSchema,omitempty"`
+	Tools             *int              `json:"tools,omitempty"`
+	ToolsCached       *bool             `json:"toolsCached,omitempty"`
+}
+
+// SkillSummary is one skill of a served card as describe's capabilities show it.
+type SkillSummary struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Examples    []string `json:"examples,omitempty"`
+	InputModes  []string `json:"inputModes,omitempty"`
+	OutputModes []string `json:"outputModes,omitempty"`
+}
+
+// ExtensionInCard is one extension of a served card: its URI and whether a request must activate it (§2.4).
+type ExtensionInCard struct {
+	URI      string `json:"uri"`
+	Required bool   `json:"required"`
+}
+
+// InputSchemaURI is the input schema extension (spec/ext-input-schema.md).
+const InputSchemaURI = "https://kontra.sh/ext/input-schema/v1"
+
+// cardCapabilities reads a served A2A card's capabilities (D339); nil when the card is none or not an object.
+func cardCapabilities(card json.RawMessage) *Capabilities {
+	if len(card) == 0 {
+		return nil
+	}
+	var c struct {
+		Capabilities struct {
+			Streaming         *bool `json:"streaming"`
+			PushNotifications *bool `json:"pushNotifications"`
+			Extensions        []struct {
+				URI      string `json:"uri"`
+				Required bool   `json:"required"`
+				Params   struct {
+					Schema json.RawMessage `json:"schema"`
+				} `json:"params"`
+			} `json:"extensions"`
+		} `json:"capabilities"`
+		DefaultInputModes  []string       `json:"defaultInputModes"`
+		DefaultOutputModes []string       `json:"defaultOutputModes"`
+		Skills             []SkillSummary `json:"skills"`
+	}
+	if json.Unmarshal(card, &c) != nil {
+		return nil
+	}
+	out := &Capabilities{Streaming: c.Capabilities.Streaming, PushNotifications: c.Capabilities.PushNotifications,
+		InputModes: c.DefaultInputModes, OutputModes: c.DefaultOutputModes, Skills: c.Skills}
+	for _, x := range c.Capabilities.Extensions {
+		out.Extensions = append(out.Extensions, ExtensionInCard{URI: x.URI, Required: x.Required})
+		if x.URI == InputSchemaURI && firstByte(x.Params.Schema) == '{' && out.InputSchema == nil {
+			out.InputSchema = x.Params.Schema
+		}
+	}
+	return out
 }
 
 // HireArgs are hire's arguments: Message is a string or {parts: [Part]} (mcp-tools.json#/$defs/message).
@@ -108,6 +192,9 @@ type HireArgs struct {
 	Service   string          `json:"service"`
 	Message   json.RawMessage `json:"message"`
 	ContextID string          `json:"contextId,omitempty"`
+	// IdempotencyKey, 1..128 characters of [A-Za-z0-9._:-]: a hire with the same key, of the same buyer and principal,
+	// within 24 h answers the task the first one created (§12.3 Idempotency, D338).
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
 
 // ReplyArgs are reply's arguments.
@@ -125,9 +212,13 @@ type ReplyArgs struct {
 // data, the values of the rendered data parts in order, message first, then each artifact's; files, the file parts'
 // links. The hire and reply tools declare it as their outputSchema (schemaHireResult).
 type HireResult struct {
-	TaskID string      `json:"taskId"`
-	State  string      `json:"state"`
-	URL    string      `json:"url,omitempty"`
+	TaskID string `json:"taskId"`
+	State  string `json:"state"`
+	// ContextID is the task's A2A context: a hire with it continues the conversation as a new task (§4, §7, D336).
+	ContextID string `json:"contextId,omitempty"`
+	// Service is the task's service ref, what a hire that continues the conversation names (D336).
+	Service string      `json:"service,omitempty"`
+	URL     string      `json:"url,omitempty"`
 	Quote  *QuoteTerms `json:"quote,omitempty"`
 	Text   string      `json:"text,omitempty"`
 	Data   []any       `json:"data,omitempty"`
@@ -165,28 +256,93 @@ const (
 		`"properties":{"service":{"type":"string","pattern":"^([a-z0-9-]+/)?[a-z0-9-]+$"}}}`
 	schemaHire = `{"type":"object","required":["service","message"],"additionalProperties":false,` +
 		`"properties":{"service":{"type":"string","pattern":"^([a-z0-9-]+/)?[a-z0-9-]+$"},"message":` + schemaMessage +
-		`,"contextId":{"type":"string","maxLength":256}}}`
+		`,"contextId":{"type":"string","maxLength":256},` +
+		`"idempotencyKey":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._:-]+$"}}}`
 	schemaReply = `{"type":"object","required":["taskId","message"],"additionalProperties":false,` +
 		`"properties":{"taskId":{"type":"string","format":"uuid"},"message":` + schemaMessage + `}}`
+	schemaTaskID = `{"type":"string","format":"uuid"}`
+	schemaStatus = `{"type":"object","required":["taskId"],"additionalProperties":false,"properties":{"taskId":` + schemaTaskID +
+		`,"after":{"type":"integer","minimum":0},"wait":{"type":"integer","minimum":0,"maximum":25}}}`
+	schemaTasks = `{"type":"object","additionalProperties":false,"properties":{` +
+		`"service":{"type":"string","pattern":"^([a-z0-9-]+/)?[a-z0-9-]+$"},"contextId":{"type":"string","maxLength":256},` +
+		`"state":{"enum":["TASK_STATE_SUBMITTED","TASK_STATE_WORKING","TASK_STATE_INPUT_REQUIRED","TASK_STATE_AUTH_REQUIRED",` +
+		`"TASK_STATE_COMPLETED","TASK_STATE_FAILED","TASK_STATE_CANCELED","TASK_STATE_REJECTED","active","ended"]},` +
+		`"cursor":{"type":"string"}}}`
+	schemaCancel   = `{"type":"object","required":["taskId"],"additionalProperties":false,"properties":{"taskId":` + schemaTaskID + `}}`
+	schemaArtifact = `{"type":"object","required":["taskId","artifactId"],"additionalProperties":false,"properties":{"taskId":` +
+		schemaTaskID + `,"artifactId":{"type":"string","minLength":1,"maxLength":256}}}`
+	schemaPushSet = `{"type":"object","required":["taskId","url"],"additionalProperties":false,"properties":{"taskId":` +
+		schemaTaskID + `,"url":{"type":"string","format":"uri"},"token":{"type":"string"},` +
+		`"authentication":{"type":"object","required":["scheme"],"additionalProperties":false,` +
+		`"properties":{"scheme":{"type":"string","minLength":1},"credentials":{"type":"string"}}}}}`
+	schemaPushList   = schemaCancel
+	schemaPushDelete = `{"type":"object","required":["taskId","configId"],"additionalProperties":false,"properties":{"taskId":` +
+		schemaTaskID + `,"configId":{"type":"string","minLength":1}}}`
 )
 
 // schemaHireResult is the outputSchema of hire and reply: mcp-tools.json#/$defs/hireResult, HireResult's shape, strict
 // (a stock client validates structuredContent against it). It uses only keywords JSON Schema draft-07 and 2020-12
 // read alike and names no $schema, since a client's validator may default to either (D324).
-const schemaHireResult = `{"type":"object","description":"A hire task as hire and reply answer it: taskId and state always; ` +
+const schemaHireResult = `{"type":"object","description":"A hire task as hire, reply, status and cancel answer it: taskId and ` +
+	`state always; contextId and service, which a hire that continues the conversation names; ` +
 	`url, the task's page on the operator's site, whenever the task has one; quote while a person must approve it there; ` +
 	`text, the agent's answer or question or what the gate says of the task; data and files from the agent's parts.",` +
 	`"required":["taskId","state"],"additionalProperties":false,"properties":{` +
 	`"taskId":{"type":"string","format":"uuid"},` +
-	`"state":{"enum":["TASK_STATE_SUBMITTED","TASK_STATE_WORKING","TASK_STATE_INPUT_REQUIRED","TASK_STATE_AUTH_REQUIRED",` +
-	`"TASK_STATE_COMPLETED","TASK_STATE_FAILED","TASK_STATE_CANCELED","TASK_STATE_REJECTED"]},` +
+	`"state":` + schemaState + `,` +
+	`"contextId":{"type":"string"},"service":{"type":"string"},` +
 	`"url":{"type":"string","pattern":"^https://"},` +
 	`"quote":{"type":"object","required":["approveUrl","expiresAt"],"additionalProperties":false,` +
 	`"properties":{"approveUrl":{"type":"string","pattern":"^https://"},"expiresAt":{"type":"string","format":"date-time"}}},` +
 	`"text":{"type":"string"},` +
 	`"data":{"type":"array","minItems":1},` +
-	`"files":{"type":"array","minItems":1,"items":{"type":"object","required":["uri"],"additionalProperties":false,` +
-	`"properties":{"uri":{"type":"string"},"name":{"type":"string"},"mediaType":{"type":"string"}}}}}}`
+	`"files":` + schemaFiles + `}}`
+
+// schemaState is an A2A task state (mcp-tools.json#/$defs/state) and schemaFiles a result's file links
+// (mcp-tools.json#/$defs/files).
+const (
+	schemaState = `{"enum":["TASK_STATE_SUBMITTED","TASK_STATE_WORKING","TASK_STATE_INPUT_REQUIRED","TASK_STATE_AUTH_REQUIRED",` +
+		`"TASK_STATE_COMPLETED","TASK_STATE_FAILED","TASK_STATE_CANCELED","TASK_STATE_REJECTED"]}`
+	schemaFiles = `{"type":"array","minItems":1,"items":{"type":"object","required":["uri"],"additionalProperties":false,` +
+		`"properties":{"uri":{"type":"string"},"name":{"type":"string"},"mediaType":{"type":"string"}}}}`
+)
+
+// The output schemas of the tools that follow a hire task (D332..D337), strict, as hireResult is (D324).
+const (
+	// schemaEvent is one row of a task's log as status renders it (mcp-tools.json#/$defs/event).
+	schemaEvent = `{"type":"object","required":["seq","kind","at"],"additionalProperties":false,"properties":{` +
+		`"seq":{"type":"integer","minimum":1},"kind":{"enum":["task","status","artifact","message"]},"state":` + schemaState + `,` +
+		`"role":{"enum":["user","agent"]},"text":{"type":"string"},"data":{"type":"array","minItems":1},"files":` + schemaFiles + `,` +
+		`"artifactId":{"type":"string"},"name":{"type":"string"},"at":{"type":"string","format":"date-time"}}}`
+	// schemaStatusResult is status's structuredContent: the hire result, and the log after the cursor asked
+	// (mcp-tools.json#/$defs/statusResult).
+	schemaStatusResult = `{"type":"object","description":"A hire task as status answers it: the hire result, and when after was ` +
+		`given the task's events after it (more when the answer was cut) and the cursor to ask from next.",` +
+		`"required":["taskId","state","cursor"],"additionalProperties":false,"properties":{` +
+		`"taskId":{"type":"string","format":"uuid"},"state":` + schemaState + `,"contextId":{"type":"string"},"service":{"type":"string"},` +
+		`"url":{"type":"string","pattern":"^https://"},` +
+		`"quote":{"type":"object","required":["approveUrl","expiresAt"],"additionalProperties":false,` +
+		`"properties":{"approveUrl":{"type":"string","pattern":"^https://"},"expiresAt":{"type":"string","format":"date-time"}}},` +
+		`"text":{"type":"string"},"data":{"type":"array","minItems":1},"files":` + schemaFiles + `,` +
+		`"events":{"type":"array","items":` + schemaEvent + `},"cursor":{"type":"integer","minimum":0},"more":{"type":"boolean"}}}`
+	// schemaTasksResult is tasks's structuredContent (mcp-tools.json#/$defs/tasksResult).
+	schemaTasksResult = `{"type":"object","required":["tasks"],"additionalProperties":false,"properties":{` +
+		`"tasks":{"type":"array","items":{"type":"object","required":["taskId","service","contextId","state","statusAt"],` +
+		`"additionalProperties":false,"properties":{"taskId":{"type":"string","format":"uuid"},"service":{"type":"string"},` +
+		`"contextId":{"type":"string"},"state":` + schemaState + `,"statusAt":{"type":"string","format":"date-time"},` +
+		`"text":{"type":"string","maxLength":200}}}},"nextCursor":{"type":"string"}}}`
+	// schemaArtifactResult is artifact's structuredContent (mcp-tools.json#/$defs/artifactResult).
+	schemaArtifactResult = `{"type":"object","required":["taskId","artifactId"],"additionalProperties":false,"properties":{` +
+		`"taskId":{"type":"string","format":"uuid"},"artifactId":{"type":"string"},"name":{"type":"string"},` +
+		`"description":{"type":"string"},"text":{"type":"string"},"data":{"type":"array","minItems":1},"files":` + schemaFiles + `}}`
+	// schemaPushConfig is one push config as the push tools show it, its secrets left out
+	// (mcp-tools.json#/$defs/pushConfig).
+	schemaPushConfig = `{"type":"object","required":["configId","url","token"],"additionalProperties":false,"properties":{` +
+		`"configId":{"type":"string"},"url":{"type":"string"},"token":{"type":"boolean"},"scheme":{"type":"string"}}}`
+	// schemaPushResult is push_set's, push_list's and push_delete's structuredContent (mcp-tools.json#/$defs/pushResult).
+	schemaPushResult = `{"type":"object","required":["taskId","configs"],"additionalProperties":false,"properties":{` +
+		`"taskId":{"type":"string","format":"uuid"},"configs":{"type":"array","items":` + schemaPushConfig + `}}}`
+)
 
 // tool is one entry of tools/list.
 type tool struct {
@@ -210,27 +366,65 @@ type toolExecution struct {
 	TaskSupport string `json:"taskSupport"`
 }
 
-// tools are the four tools, in the order tools/list gives them.
+// tools are the tools, in the order tools/list gives them. Their descriptions are short and tell a model the loop
+// (D339): search and describe, hire (idempotencyKey for retries), status with after and wait to follow, reply when it
+// asks, cancel, tasks to find old ones, artifact for one artifact.
 var tools = []tool{
 	{Name: ToolSearch, Title: "Search services",
 		Description: "Find the agents and MCP servers this gate serves that you may call. Returns refs for describe and hire.",
 		InputSchema: json.RawMessage(schemaSearch),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolDescribe, Title: "Describe a service",
-		Description: "Show a service's agent card (A2A) or its tools (MCP), whether it is sealed and available, and the URLs to call it directly.",
+		Description: "Show a service's capabilities (skills, input and output modes, its input schema when it has one) and agent card (A2A) " +
+			"or its tools (MCP), whether it is sealed and available, and the URLs to call it directly.",
 		InputSchema: json.RawMessage(schemaDescribe),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolHire, Title: "Hire an agent",
-		Description: "Send a message to an A2A agent as a new task, and answer its result. A priced task asks a person to approve its quote first, at the URL given.",
+		Description: "Send a message to an A2A agent as a new task and answer its result, or its state after 25 s. " +
+			"Pass idempotencyKey to retry safely: the same key answers the same task. To continue a conversation, hire again " +
+			"with the contextId and service of an earlier result. Follow a running task with status. A priced task asks a " +
+			"person to approve its quote first, at the URL given.",
 		InputSchema: json.RawMessage(schemaHire), OutputSchema: json.RawMessage(schemaHireResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
 	{Name: ToolReply, Title: "Reply to a task",
-		Description: "Answer the question a hired task asks (input required), and answer its new state.",
+		Description: "Answer the question a hired task asks (state input required), and answer its new state. " +
+			"After the task ended, continue the conversation with hire and its contextId instead.",
 		InputSchema: json.RawMessage(schemaReply), OutputSchema: json.RawMessage(schemaHireResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
+	{Name: ToolStatus, Title: "Follow a task",
+		Description: "A hired task's state and result. With after (0 for the whole history) it also returns the task's events " +
+			"after that cursor; with wait (seconds, up to 25) it waits for something new first. Loop status {taskId, after: " +
+			"cursor, wait: 25} to follow a task until it ends or asks a question.",
+		InputSchema: json.RawMessage(schemaStatus), OutputSchema: json.RawMessage(schemaStatusResult),
+		Annotations: toolAnnotations{ReadOnlyHint: true}},
+	{Name: ToolTasks, Title: "List your tasks",
+		Description: "List the tasks you hired, newest first, optionally of one service, one contextId, or a state " +
+			"(an A2A state, active or ended). Pass nextCursor back as cursor for the next page.",
+		InputSchema: json.RawMessage(schemaTasks), OutputSchema: json.RawMessage(schemaTasksResult),
+		Annotations: toolAnnotations{ReadOnlyHint: true}},
+	{Name: ToolCancel, Title: "Cancel a task",
+		Description: "Cancel a hired task that has not ended, and answer it once canceled.",
+		InputSchema: json.RawMessage(schemaCancel), OutputSchema: json.RawMessage(schemaHireResult),
+		Annotations: toolAnnotations{DestructiveHint: true, IdempotentHint: true}},
+	{Name: ToolArtifact, Title: "Read an artifact",
+		Description: "One artifact of a hired task, in full: its text, data and files (fresh links). Artifact ids are in status events.",
+		InputSchema: json.RawMessage(schemaArtifact), OutputSchema: json.RawMessage(schemaArtifactResult),
+		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
+	{Name: ToolPushSet, Title: "Set a push webhook",
+		Description: "Have the gate POST a hired task's updates to an https URL you own (A2A push notifications), with an optional token.",
+		InputSchema: json.RawMessage(schemaPushSet), OutputSchema: json.RawMessage(schemaPushResult),
+		Annotations: toolAnnotations{IdempotentHint: true, OpenWorldHint: true}},
+	{Name: ToolPushList, Title: "List push webhooks",
+		Description: "The push webhooks set on a hired task.",
+		InputSchema: json.RawMessage(schemaPushList), OutputSchema: json.RawMessage(schemaPushResult),
+		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
+	{Name: ToolPushDelete, Title: "Delete a push webhook",
+		Description: "Stop and remove one push webhook of a hired task.",
+		InputSchema: json.RawMessage(schemaPushDelete), OutputSchema: json.RawMessage(schemaPushResult),
+		Annotations: toolAnnotations{DestructiveHint: true, IdempotentHint: true}},
 }
 
-// ToolsList is the tools/list result for a request of era: the four tools with their input schemas; hire
+// ToolsList is the tools/list result for a request of era: the tools with their input schemas; hire
 // declares execution.taskSupport "optional" in the legacy list of a 2025-11-25 session only (§12.5). The modern list
 // (2026-07-28 removed Tool.execution: the server decides, D159) is one page with resultType "complete", ttlMs
 // ModernListTTL and cacheScope "private" (§12.5; 2026-07-28 CacheableResult, as §11.12 writes a relayed list).
@@ -368,7 +562,7 @@ func parseDescribeArgs(args json.RawMessage) (DescribeArgs, error) {
 
 // parseHireArgs reads hire's arguments and builds the message's parts.
 func parseHireArgs(args json.RawMessage) (HireArgs, a2a.ContentParts, error) {
-	m, err := members(args, "service", "message", "contextId")
+	m, err := members(args, "service", "message", "contextId", "idempotencyKey")
 	if err != nil {
 		return HireArgs{}, nil, err
 	}
@@ -379,6 +573,13 @@ func parseHireArgs(args json.RawMessage) (HireArgs, a2a.ContentParts, error) {
 	if a.ContextID, _, err = stringArg(m, "contextId", 256); err != nil {
 		return a, nil, err
 	}
+	var keyed bool
+	if a.IdempotencyKey, keyed, err = stringArg(m, "idempotencyKey", 128); err != nil {
+		return a, nil, err
+	}
+	if keyed && !idempotencyKeyRE.MatchString(a.IdempotencyKey) {
+		return a, nil, badArgs("idempotencyKey must be 1 to 128 characters of A-Z, a-z, 0-9, '.', '_', ':' and '-'")
+	}
 	raw, ok := m["message"]
 	if !ok {
 		return a, nil, badArgs("message is required")
@@ -386,6 +587,223 @@ func parseHireArgs(args json.RawMessage) (HireArgs, a2a.ContentParts, error) {
 	a.Message = raw
 	parts, err := ParseMessage(raw)
 	return a, parts, err
+}
+
+var idempotencyKeyRE = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+// taskIDArg reads the required taskId argument: a task id as the gate writes it (a lowercase UUID).
+func taskIDArg(m map[string]json.RawMessage) (uuid.UUID, error) {
+	s, ok, err := stringArg(m, "taskId", 0)
+	switch {
+	case err != nil:
+		return uuid.Nil, err
+	case !ok:
+		return uuid.Nil, badArgs("taskId is required")
+	}
+	id, err := uuid.Parse(s)
+	if err != nil || len(s) != 36 {
+		return uuid.Nil, badArgs("taskId is not a task id")
+	}
+	return id, nil
+}
+
+// intArg reads an optional integer argument within [lo, hi] (hi < 0: unbounded); a JSON number with a fraction or an
+// exponent is not one.
+func intArg(m map[string]json.RawMessage, key string, lo, hi int64) (int64, bool, error) {
+	raw, ok := m[key]
+	if !ok {
+		return 0, false, nil
+	}
+	t := bytes.TrimSpace(raw)
+	var n int64
+	if len(t) == 0 || bytes.ContainsAny(t, ".eE") || json.Unmarshal(t, &n) != nil {
+		return 0, true, badArgs("%s must be an integer", key)
+	}
+	if n < lo || (hi >= 0 && n > hi) {
+		if hi >= 0 {
+			return 0, true, badArgs("%s must be between %d and %d", key, lo, hi)
+		}
+		return 0, true, badArgs("%s must be at least %d", key, lo)
+	}
+	return n, true, nil
+}
+
+// StatusArgs are status's arguments: After is -1 when absent.
+type StatusArgs struct {
+	TaskID uuid.UUID
+	After  int64
+	Wait   time.Duration
+}
+
+func parseStatusArgs(args json.RawMessage) (StatusArgs, error) {
+	m, err := members(args, "taskId", "after", "wait")
+	if err != nil {
+		return StatusArgs{}, err
+	}
+	a := StatusArgs{After: -1}
+	if a.TaskID, err = taskIDArg(m); err != nil {
+		return a, err
+	}
+	if n, ok, err := intArg(m, "after", 0, -1); err != nil {
+		return a, err
+	} else if ok {
+		a.After = n
+	}
+	w, _, err := intArg(m, "wait", 0, int64(PlainWait/time.Second))
+	if err != nil {
+		return a, err
+	}
+	a.Wait = time.Duration(w) * time.Second
+	return a, nil
+}
+
+// TasksArgs are the tasks tool's arguments.
+type TasksArgs struct {
+	Service   string
+	ContextID string
+	State     string // an A2A state, "active", "ended", or "" (any)
+	Cursor    string
+}
+
+func parseTasksArgs(args json.RawMessage) (TasksArgs, error) {
+	m, err := members(args, "service", "contextId", "state", "cursor")
+	if err != nil {
+		return TasksArgs{}, err
+	}
+	var a TasksArgs
+	if _, ok := m["service"]; ok {
+		if a.Service, err = serviceArg(m); err != nil {
+			return a, err
+		}
+	}
+	if a.ContextID, _, err = stringArg(m, "contextId", 256); err != nil {
+		return a, err
+	}
+	var has bool
+	if a.State, has, err = stringArg(m, "state", 0); err != nil {
+		return a, err
+	}
+	if has && statesOf(a.State) == nil {
+		return a, badArgs("state must be an A2A task state (TASK_STATE_…), active or ended")
+	}
+	if a.Cursor, _, err = stringArg(m, "cursor", 0); err != nil {
+		return a, err
+	}
+	return a, nil
+}
+
+// statesOf is the tasks rows' states the tasks tool's state argument selects: every state whose A2A state it is (a
+// quoted task is input-required on the wire, §5.1), the states that have not ended (active) or have (ended); nil for
+// anything else.
+func statesOf(s string) []store.State {
+	all := []store.State{store.StateQuoted, store.StateSubmitted, store.StateWorking, store.StateAuthRequired,
+		store.StateInputRequired, store.StateCompleted, store.StateFailed, store.StateCanceled, store.StateRejected}
+	var out []store.State
+	for _, st := range all {
+		switch {
+		case s == "active" && !st.Terminal(), s == "ended" && st.Terminal(), string(st.A2A()) == s:
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// ArtifactArgs are the artifact tool's arguments.
+type ArtifactArgs struct {
+	TaskID     uuid.UUID
+	ArtifactID string
+}
+
+func parseArtifactArgs(args json.RawMessage) (ArtifactArgs, error) {
+	m, err := members(args, "taskId", "artifactId")
+	if err != nil {
+		return ArtifactArgs{}, err
+	}
+	var a ArtifactArgs
+	if a.TaskID, err = taskIDArg(m); err != nil {
+		return a, err
+	}
+	var ok bool
+	if a.ArtifactID, ok, err = stringArg(m, "artifactId", 256); err != nil {
+		return a, err
+	}
+	if !ok || a.ArtifactID == "" {
+		return a, badArgs("artifactId is required")
+	}
+	return a, nil
+}
+
+// parseTaskOnly reads the arguments of cancel and push_list: {taskId}.
+func parseTaskOnly(args json.RawMessage) (uuid.UUID, error) {
+	m, err := members(args, "taskId")
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return taskIDArg(m)
+}
+
+// PushSetArgs are push_set's arguments, as the A2A push config they set (§10.1).
+type PushSetArgs struct {
+	TaskID uuid.UUID
+	Config a2a.PushConfig
+}
+
+func parsePushSetArgs(args json.RawMessage) (PushSetArgs, error) {
+	m, err := members(args, "taskId", "url", "token", "authentication")
+	if err != nil {
+		return PushSetArgs{}, err
+	}
+	var a PushSetArgs
+	if a.TaskID, err = taskIDArg(m); err != nil {
+		return a, err
+	}
+	u, ok, err := stringArg(m, "url", 0)
+	switch {
+	case err != nil:
+		return a, err
+	case !ok || u == "":
+		return a, badArgs("url is required")
+	}
+	a.Config.URL = u
+	if a.Config.Token, _, err = stringArg(m, "token", 0); err != nil {
+		return a, err
+	}
+	if raw, ok := m["authentication"]; ok {
+		am, err := members(raw, "scheme", "credentials")
+		if err != nil || firstByte(raw) != '{' {
+			return a, badArgs("authentication must be {scheme, credentials?}")
+		}
+		scheme, ok, err := stringArg(am, "scheme", 0)
+		if err != nil || !ok || scheme == "" {
+			return a, badArgs("authentication.scheme is required")
+		}
+		creds, _, err := stringArg(am, "credentials", 0)
+		if err != nil {
+			return a, badArgs("authentication.credentials must be a string")
+		}
+		a.Config.Auth = &a2a.PushAuthInfo{Scheme: scheme, Credentials: creds}
+	}
+	return a, nil
+}
+
+// parsePushDeleteArgs reads push_delete's arguments.
+func parsePushDeleteArgs(args json.RawMessage) (uuid.UUID, string, error) {
+	m, err := members(args, "taskId", "configId")
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	id, err := taskIDArg(m)
+	if err != nil {
+		return id, "", err
+	}
+	c, ok, err := stringArg(m, "configId", 0)
+	switch {
+	case err != nil:
+		return id, "", err
+	case !ok || c == "":
+		return id, "", badArgs("configId is required")
+	}
+	return id, c, nil
 }
 
 // parseReplyArgs reads reply's arguments and builds the message's parts.

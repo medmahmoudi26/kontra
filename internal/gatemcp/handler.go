@@ -1,5 +1,7 @@
-// Package gatemcp is the gate's own MCP server at {public_url}/mcp (spec/relay.md §12): four tools (search,
-// describe, hire, reply) and the MCP Tasks of the tasks hire creates, in both MCP eras (§12.5, D24, D269).
+// Package gatemcp is the gate's own MCP server at {public_url}/mcp (spec/relay.md §12): the tools search, describe,
+// hire and reply, the tools that follow, list, cancel and read a hire task for a client that sees only tools (status,
+// tasks, cancel, artifact, push_set, push_list, push_delete; D332..D339), and the MCP Tasks of the tasks hire creates,
+// in both MCP eras (§12.5, D24, D269).
 //
 // It is not a tunnelled service and has no upstream. §11.1's transport rules apply (one message per POST, strict
 // decoding with internal/mcpwire, Origin, versions) and §11.12's classification of a request's era (rules 1–5):
@@ -75,6 +77,7 @@ type Deps struct {
 	Waker          store.TaskWaker     // the replica's LISTEN connection: plain waits, tasks/result, GET streams
 	Render         *blob.Renderer      // kontra-blob: parts as presigned GETs in what /mcp answers; nil renders none
 	Served         Served              // the replica's registry: reply's task is the reader's only while served to it (D303)
+	Push           PushConfigs         // the A2A push configs (§10.1) the push tools set; nil: they answer that push is off
 	AllowedOrigins []string            // mcp.allowed_origins (§11.1)
 	Logger         *slog.Logger
 	// PlainWait is how long a plain hire and a reply wait (PlainWait when zero; tests shorten it).
@@ -116,7 +119,9 @@ func NewHandler(deps Deps) (*Handler, error) {
 	if deps.now == nil {
 		deps.now = time.Now
 	}
-	return &Handler{deps: deps, log: deps.Logger.With("component", "gate-mcp")}, nil
+	h := &Handler{deps: deps, log: deps.Logger.With("component", "gate-mcp")}
+	deps.Tasks.ref = h.serviceRef
+	return h, nil
 }
 
 // Register mounts POST /mcp as a JSON-RPC route (the edge's 413 and 429 carry a JSON-RPC error) and GET and DELETE
@@ -183,7 +188,7 @@ func (rq *request) reader() Reader {
 // ServeHTTP classifies the request's era (§11.12 rules 1–5) and serves it, in the order of spec §2.1 and §11.1: the
 // credential (401; a principal that may not hire, 403), the one-message rule and strict decoding (400), Origin (403),
 // the era; then initialize,
-// tools/list, tools/call of the four tools, the legacy tasks/* (§11.6 over hire tasks), the client's responses to
+// tools/list, tools/call of the tools, the legacy tasks/* (§11.6 over hire tasks), the client's responses to
 // gate requests, the GET stream of a legacy session and its DELETE; a modern request is the 2026-07-28 surface's.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rq := &request{w: w, r: r, start: h.now()}
@@ -419,7 +424,7 @@ func (h *Handler) session(rq *request) {
 	}
 }
 
-// toolsCall serves tools/call of the four tools; any other name is -32602 "Unknown tool: <name>" (§11.3's answer).
+// toolsCall serves tools/call of the tools (§12.2); any other name is -32602 "Unknown tool: <name>" (§11.3's answer).
 // A task-augmented call (params.task, 2025-11-25 sessions) is hire's only: the other tools are -32601, as for a
 // tool whose execution.taskSupport is absent (§11.5 step 0). A modern request has no per-request opt-in: a hire
 // whose request declares the tasks extension may become a task, the gate deciding (§11.12, D159, D269), and every
@@ -434,7 +439,8 @@ func (h *Handler) toolsCall(rq *request) {
 		augmented = name == ToolHire && mcpwire.DeclaresTasks(m.Params)
 	}
 	switch name {
-	case ToolSearch, ToolDescribe, ToolHire, ToolReply:
+	case ToolSearch, ToolDescribe, ToolHire, ToolReply, ToolStatus, ToolTasks, ToolCancel, ToolArtifact,
+		ToolPushSet, ToolPushList, ToolPushDelete:
 	default:
 		writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeInvalidParams, "Unknown tool: "+name, nil)
 		return
@@ -452,6 +458,16 @@ func (h *Handler) toolsCall(rq *request) {
 		h.hire(rq, args, augmented)
 	case ToolReply:
 		h.reply(rq, args)
+	case ToolStatus:
+		h.status(rq, args)
+	case ToolTasks:
+		h.tasksTool(rq, args)
+	case ToolCancel:
+		h.cancelTool(rq, args)
+	case ToolArtifact:
+		h.artifactTool(rq, args)
+	case ToolPushSet, ToolPushList, ToolPushDelete:
+		h.pushTool(rq, name, args)
 	}
 }
 
