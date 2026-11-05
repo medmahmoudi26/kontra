@@ -661,8 +661,8 @@ func ReconnectText(wait time.Duration) string {
 	return "The agent's node disconnected. Waiting up to " + HumanDuration(wait) + " for it to reconnect."
 }
 
-// HumanDuration writes d for a person: whole hours or minutes in words, else seconds ("15 minutes", "1 hour",
-// "90 seconds").
+// HumanDuration writes d for a person: whole hours in words, minutes (rounded from 2 minutes on), else seconds
+// ("15 minutes", "1 hour", "7 minutes" for 7m23s, "90 seconds").
 func HumanDuration(d time.Duration) string {
 	plural := func(n int64, unit string) string {
 		if n == 1 {
@@ -674,6 +674,8 @@ func HumanDuration(d time.Duration) string {
 	switch {
 	case d >= time.Hour && d%time.Hour == 0:
 		return plural(int64(d/time.Hour), "hour")
+	case d >= 2*time.Minute:
+		return plural(int64((d+30*time.Second)/time.Minute), "minute")
 	case d >= time.Minute && d%time.Minute == 0:
 		return plural(int64(d/time.Minute), "minute")
 	}
