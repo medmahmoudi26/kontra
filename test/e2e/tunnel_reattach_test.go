@@ -96,10 +96,17 @@ func TestTunnelReattach(t *testing.T) {
 			t.Fatal(err)
 		}
 		killed = time.Now()
-		onB, _, err := n.WaitSession(ctx, h, Reregister)
-		if err != nil {
-			t.Fatal(err)
-		}
+		var onB string
+		eventually(t, Reregister, "the node's session on B", func() bool {
+			sessions, err := h.Sessions(ctx, n.KeyID)
+			for id, r := range sessions {
+				if r == b.ReplicaID {
+					onB = id
+				}
+			}
+			return err == nil && onB != ""
+		})
+		t.Logf("the node redialed B %.1f s after A's SIGKILL", time.Since(killed).Seconds())
 		rest, err = s.ReadAll(ctx)
 		if err != nil || len(rest) == 0 || rest[len(rest)-1].State != a2a.TaskStateCompleted {
 			t.Fatalf("the buyer's stream after A's kill: %d events, %v, want it to end completed", len(rest), err)

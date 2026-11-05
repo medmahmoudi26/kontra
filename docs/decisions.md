@@ -6008,11 +6008,12 @@ Decision (relay.md §8's row "exists, session gone"; `cancelGone`, `lateCancel`)
 
 ### D347. MCP tasks keep `tunnel_lost` — **decided under the owner's standing instruction, 5 Nov**
 
-A gate-owned MCP task (protocol `mcp`, §11.5) lives in an upstream MCP session that the node opened for its tunnel
-session: the node stops a stdio service's child when the tunnel session closes, and the gate closes the pinned
-`mcp_sessions` row `tunnel_lost` (§11.2, §11.10). A new tunnel session reaches a new MCP session where the task does
-not exist, so there is nothing to re-attach to; such a task fails `tunnel_lost` as before (`canReconnect`). A `hire`
-task of `/mcp` is an A2A task and waits like any other.
+A gate-owned MCP task (protocol `mcp`, §11.5) is bound to the pinned MCP session it was created on: the gate closes
+that `mcp_sessions` row `tunnel_lost` when its tunnel session goes (§11.2), the dispatch follows the upstream task
+through that upstream session (`attempts.upstream_session`, §11.12), and for a stdio service the node stops the
+child process that held the task when the tunnel session closes (§11.10). A new tunnel session has no such MCP
+session to resume on, and re-opening one is §11.2's business, not a lifecycle's; such a task fails `tunnel_lost` as
+before (`canReconnect`). A `hire` task of `/mcp` is an A2A task and waits like any other.
 
 ### D348. The change is versioned and replay-tested; a gate roll fails no tunnel task — **decided under the owner's standing instruction, 5 Nov**
 

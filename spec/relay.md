@@ -713,8 +713,9 @@ where §6.5's `failed: timeout` ends it; a task enters it at most 10 times (D343
   saying so (D342). The 11th wait: `failed: tunnel_lost`, saying how often the node disconnected.
 - **A cancel during the wait** writes `canceled` at once (nothing can be forwarded, §8); if the node comes back within
   the grace, it is sent `forward_cancel` on its new session, best effort, and the task is not resumed (D346).
-- **MCP tasks** (protocol `mcp`, §11.5) keep `failed: tunnel_lost`: their upstream task lives in an MCP session the
-  node ends with its tunnel session (§11.2, §11.10), so there is nothing to re-attach to (D347).
+- **MCP tasks** (protocol `mcp`, §11.5) keep `failed: tunnel_lost`: they are bound to the pinned MCP session
+  they were created on, which the gate closes `tunnel_lost` with its tunnel session (§11.2, §11.10, §11.12), so there
+  is nothing to re-attach to (D347).
 
 **Follow-up delivery (D81).** A follow-up turn's dispatch writes `work_items.delivered_at` when the upstream
 first answers its `SendMessage` or `SendStreamingMessage` (a `Task`, a `Message` or the first stream event),
