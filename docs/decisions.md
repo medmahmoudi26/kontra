@@ -6016,8 +6016,8 @@ Decision (`store.WaitingForKey`, `gate.signalReconnected`, `tunnelgate.Registry.
   signal costs a minute at most. Relay.md §14.1 records the event budget: about 230 events per wait at the default
   grace, under 20,000 for 10 waits of the longest grace, so v4 still needs no continue-as-new.
 - **A query, not a column.** It starts from the open tasks (`tasks_open`, a partial index on `terminal_at is null`)
-  and reads each one's latest attempt by its primary key, so it needs no index of its own and no migration 0005, which
-  would also have to be run by Cloud before its gate image. The signal is a hint: each workflow checks the session
+  and reads each one's latest attempt by its primary key, so it needs no index of its own and no migration (the 0005 of
+  D338 is the `/mcp` tools' index; one here would also have to be run by Cloud before its gate image). The signal is a hint: each workflow checks the session
   itself (`reattach_session`), a task that is not waiting ignores it, and a signal lost (a replica dying between the
   commit and the send, more than 1,000 tasks) costs the task its next periodic look, a minute at most. A task at
   `input-required` whose recorded session is gone is signalled at each registration of its node too; each signal adds
