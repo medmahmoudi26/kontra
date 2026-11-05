@@ -501,6 +501,32 @@ func TestGateMCPModernClientLeaves(t *testing.T) {
 		eventually(t, 10*time.Second, "the seller received CancelTask", func() bool { return kinds.count("CancelTask") >= i+1 })
 	}
 
+	// A hire with an idempotencyKey whose client left is not cancelled (D338): the re-issued hire, with the same key,
+	// answers the same task, still running; cancel ends it.
+	keyed := newModernClient(t, a.url, key, `{}`)
+	kargs := `{"service":"kinds","message":"slow","idempotencyKey":"leave-keyed"}`
+	kid := leave(keyed, kargs, 700*time.Millisecond)
+	time.Sleep(3 * time.Second)
+	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, kid); st != "working" {
+		t.Fatalf("the keyed task of a client that left is %s", st)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_, reissued, err := keyed.post(ctx, "tools/call", "hire", keyed.body("tools/call", `"name":"hire","arguments":`+kargs), nil)
+	cancel()
+	if err == nil {
+		t.Fatalf("the re-issued keyed hire answered before its wait: %s", reissued.raw)
+	}
+	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where id::text <> $1 and first_message_id =
+		(select first_message_id from kontra.tasks where id::text = $1)`, kid); n != 0 {
+		t.Fatalf("the re-issued keyed hire made %d more tasks", n)
+	}
+	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, kid); st != "working" {
+		t.Fatalf("the keyed task after its re-issued hire left too: %s", st)
+	}
+	if _, ans := keyed.call("cancel", `{"taskId":"`+kid+`"}`); !strings.Contains(string(ans.raw), "TASK_STATE_CANCELED") {
+		t.Fatalf("cancel of the keyed task: %s", ans.raw)
+	}
+
 	// A quoted one, whose client left while Admission decided, is left quoted, and the re-issued hire answers it.
 	hook.set(func(h *hookServer) { h.raw = "" })
 	delay.Store(int64(time.Second))
@@ -519,8 +545,8 @@ func TestGateMCPModernClientLeaves(t *testing.T) {
 	if q := ans.task(t); q.TaskID != id || q.Status != "working" || q.Meta["sh.kontra/approve-url"] != "https://app.kontra.sh/#/t/"+id {
 		t.Errorf("the re-issued hire: %s", ans.raw)
 	}
-	if hook.count() != 3 {
-		t.Errorf("Admission asked %d times, want 3 (the re-issue is a retry)", hook.count())
+	if hook.count() != 4 {
+		t.Errorf("Admission asked %d times, want 4 (the keyed hire's and the quoted hire's re-issues are retries)", hook.count())
 	}
 }
 
