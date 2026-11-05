@@ -437,8 +437,12 @@ func (c *Catalog) Describe(ctx context.Context, p auth.Principal, ref Ref) (Desc
 		tools, cached := c.cachedTools(ctx, s, p)
 		out.ToolsCached = &cached
 		out.Tools = tools
-		n := len(tools)
-		out.Capabilities = &Capabilities{Tools: &n, ToolsCached: &cached}
+		out.Capabilities = &Capabilities{ToolsCached: &cached}
+		if cached {
+			// A count only from a cached list: before the first drain fills it, 0 would read as a real count.
+			n := len(tools)
+			out.Capabilities.Tools = &n
+		}
 	}
 	return out, nil
 }

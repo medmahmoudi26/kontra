@@ -115,11 +115,14 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		h.internal(rq, "mint a message id", err)
 		return
 	}
+	var hk *store.HireKey
 	keyed := a.IdempotencyKey != ""
 	if keyed {
-		// The key's messageId (D338): the same for every hire of this key, buyer and principal, so the task the first one
-		// created is found by it (store.Log.FindHireKeyed), whatever arguments the later one carries.
-		mid = KeyedMessageID(rq.p, a.IdempotencyKey)
+		// The key's messageIds (D338): the same for every hire of this key, buyer and principal in one period, so the task
+		// the first one created is found by them (store.Log.FindHireKeyed), whatever arguments the later one carries.
+		k := HireKeyOf(rq.p, a.IdempotencyKey, h.now())
+		hk = &k
+		mid = uuid.MustParse(k.MessageIDs[0])
 	}
 	msg := &a2a.Message{ID: mid.String(), Role: a2a.MessageRoleUser, ContextID: a.ContextID, Parts: parts}
 	hctx := rq.ctx()
@@ -128,7 +131,7 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		hctx, cancel = context.WithTimeout(context.WithoutCancel(hctx), modernHireBound)
 		defer cancel()
 	}
-	out, err := h.deps.Hirer.Hire(hctx, HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key, Keyed: keyed})
+	out, err := h.deps.Hirer.Hire(hctx, HireRequest{Principal: rq.p, Service: svc.ref, Message: msg, FirstRequest: key, Keyed: hk})
 	var xe *relay.ExtensionsRequiredError
 	switch {
 	case errors.Is(err, lifecycle.ErrHireKeyReused):
@@ -164,7 +167,16 @@ func (h *Handler) hire(rq *request, args json.RawMessage, augmented bool) {
 		h.writeCreateTask(rq, row, svc.ref)
 		return
 	}
-	h.waitAndAnswer(rq, row.ID, 0)
+	h.waitAndAnswerFrom(rq, row.ID, 0, seenFrom(out))
+}
+
+// seenFrom is where a hire's progress notifications start (D339): a task it created from its creation, an existing
+// one (a retry, a re-issued keyed hire) from the log's tail.
+func seenFrom(out HireOutcome) int64 {
+	if out.Existing {
+		return -1
+	}
+	return 0
 }
 
 // quoted answers a hire whose task is quoted (§12.3 step 2): a session that declared elicitation.url gets -32042
@@ -350,8 +362,26 @@ func (h *Handler) refused(rq *request, what string, err error) {
 // event stream with keep-alives while it waits. It reports whether the answer was written: false when the client left
 // first (its request context ended), which a modern hire reads as the request's cancellation (answerModernHire).
 func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
+	return h.waitAndAnswerFrom(rq, id, after, after)
+}
+
+// waitAndAnswerFrom is waitAndAnswer, its progress notifications (D339) for the rows after seq seen: after for a new
+// task (0) or a reply's turn; the log's tail when seen is negative, for a hire answered with an existing task (a retry,
+// a keyed hire re-issued after its client reconnects), whose earlier rows are history, not progress.
+func (h *Handler) waitAndAnswerFrom(rq *request, id uuid.UUID, after, seen int64) bool {
 	aw := newAnswerWriter(rq)
 	ctx := rq.ctx()
+	if aw.progress != nil && seen < 0 {
+		tail, err := h.deps.Log.Tail(ctx, id)
+		if err != nil {
+			if ctx.Err() != nil {
+				return false
+			}
+			aw.internal(h, "read the task's log", err)
+			return true
+		}
+		seen = tail
+	}
 	wake, stop := h.deps.Waker.WaitTask(ctx, id)
 	defer stop()
 	deadline := time.NewTimer(h.plainWait(rq))
@@ -362,8 +392,9 @@ func (h *Handler) waitAndAnswer(rq *request, id uuid.UUID, after int64) bool {
 	defer keep.Stop()
 	aw.begin()
 	if aw.progress != nil {
-		// The rows of the turn this wait follows: a new task's from its creation, a reply's after the version it read.
-		aw.progress.seen = after
+		// The rows of the turn this wait follows: a new task's from its creation, a reply's after the version it read, an
+		// existing task's from now.
+		aw.progress.seen = seen
 	}
 	var row *store.TaskRow
 	for {
@@ -471,6 +502,7 @@ type progress struct {
 	token json.RawMessage
 	n     int64
 	seen  int64
+	last  string // the message of the last notification sent
 }
 
 func newAnswerWriter(rq *request) *answerWriter {
@@ -550,6 +582,11 @@ func (h *Handler) notifyProgress(rq *request, aw *answerWriter, id uuid.UUID) {
 		default:
 			continue
 		}
+		if msg == pr.last {
+			// The creation row and the first status row both say submitted: one notification says it.
+			continue
+		}
+		pr.last = msg
 		pr.n++
 		b, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "notifications/progress",
 			"params": map[string]any{"progressToken": pr.token, "progress": pr.n, "message": msg}})

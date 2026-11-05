@@ -89,6 +89,9 @@ type Deps struct {
 	// afterRead, when set, runs after each read of a plain wait (tests: an event committed between the wait's read and
 	// its decision).
 	afterRead func(*store.TaskRow)
+	// rereadEvery, when set, is how often status's wait reads the log again without a wake (a second when zero; a test
+	// that proves the waker wakes the wait lengthens it).
+	rereadEvery time.Duration
 }
 
 // Handler serves POST, GET and DELETE on /mcp after the edge and the credential check.

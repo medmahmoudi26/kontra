@@ -26,9 +26,10 @@ type HireRequest struct {
 	Service      store.ServiceRef
 	Message      *a2a.Message
 	FirstRequest [32]byte
-	// Keyed is a hire with an idempotencyKey (§12.3 Idempotency, D338): Message.ID is minted from the key, the buyer
-	// and the principal, and a hire of the same key within store.HireKeyWindow answers its task, whatever its state.
-	Keyed bool
+	// Keyed, for a hire with an idempotencyKey (§12.3 Idempotency, D338), is how the key finds its task: Message.ID is
+	// Keyed.MessageIDs[0], minted from the key, the buyer, the principal and the period, and a hire of the same key
+	// within store.HireKeyWindow answers its task, whatever its state.
+	Keyed *store.HireKey
 }
 
 // HireOutcome is the task a hire created, or the one an earlier hire of the same key created that it answers
@@ -190,7 +191,7 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 		return HireOutcome{}, err
 	}
 	owner := HireOwner(req.Principal)
-	if req.Keyed {
+	if req.Keyed != nil {
 		return h.hireKeyed(ctx, req, owner, activated)
 	}
 	prev, err := h.Log.FindHireRetry(ctx, req.Service, owner, req.FirstRequest, h.window())
@@ -218,7 +219,7 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 // Otherwise a new task, which the work queue keys the same way under the key's lock, so two hires with one key arriving
 // together make one task.
 func (h *Hirer) hireKeyed(ctx context.Context, req HireRequest, owner store.Owner, activated []string) (HireOutcome, error) {
-	k, err := h.Log.FindHireKeyed(ctx, owner.BuyerID, owner.Principal, req.Message.ID, time.Now().Add(-store.HireKeyWindow))
+	k, err := h.Log.FindHireKeyed(ctx, owner.BuyerID, owner.Principal, *req.Keyed, time.Now().Add(-store.HireKeyWindow))
 	switch {
 	case err != nil:
 		return HireOutcome{}, err

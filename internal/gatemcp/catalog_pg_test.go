@@ -212,6 +212,10 @@ func TestCatalogSingleTenant(t *testing.T) {
 	if err != nil || d.ToolsCached == nil || *d.ToolsCached || d.Tools != nil || d.URLs[0] != "https://gate.example/mcp/web" {
 		t.Fatalf("describe web, cold: %+v %v", d, err)
 	}
+	// A cold cache has no count: 0 would read as a service without tools (D339).
+	if d.Capabilities == nil || d.Capabilities.Tools != nil || d.Capabilities.ToolsCached == nil || *d.Capabilities.ToolsCached {
+		t.Errorf("describe web, cold: capabilities %+v", d.Capabilities)
+	}
 	if _, err := c.Describe(ctx, p, Ref{Name: "web"}); err != nil || warm.n.Load() != 1 {
 		t.Fatalf("a second describe within 10 minutes started %d drains, want 1 (%v)", warm.n.Load(), err)
 	}
@@ -228,7 +232,7 @@ func TestCatalogSingleTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, err = c.Describe(ctx, p, Ref{Name: "web"})
-	if err != nil || d.ToolsCached == nil || !*d.ToolsCached || len(d.Tools) != 1 {
+	if err != nil || d.ToolsCached == nil || !*d.ToolsCached || len(d.Tools) != 1 || d.Capabilities.Tools == nil || *d.Capabilities.Tools != 1 {
 		t.Fatalf("describe web, warm: %+v %v", d, err)
 	}
 	if got := string(d.Tools[0]); got != `{"name":"fetch","inputSchema":{"type":"object"},"_meta":{"sh.kontra/price":"1 EUR"}}` {

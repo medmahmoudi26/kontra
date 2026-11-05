@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // The tasks of the gate's own /mcp (spec/relay.md §12; M4 WP-04). hire creates an ordinary A2A gate task through
@@ -128,21 +129,31 @@ func (s scanAlso) Scan(dest ...any) error { return s.Row.Scan(append(dest, s.als
 // HiredPageSize is the most tasks one page of a buyer's hire tasks holds (§12.2's tasks/list).
 const HiredPageSize = 50
 
+// hiredKeyset is the keyset position a page of a buyer's hire tasks starts after: the cursor's, else one above every
+// task (status_at infinity, the greatest uuid). Always bound, never null: under the generic plan Postgres may switch a
+// prepared statement to after five executions, a "$2 is null or (status_at, id) < ($2, $3)" predicate cannot be an
+// index condition, so a deep cursor would read every row above it (D333's bound on the rows one request reads).
+func hiredKeyset(cursor string) (pgtype.Timestamptz, uuid.UUID, error) {
+	if cursor == "" {
+		return pgtype.Timestamptz{InfinityModifier: pgtype.Infinity, Valid: true}, uuid.Max, nil
+	}
+	t, id, err := DecodePageToken(cursor)
+	if err != nil {
+		return pgtype.Timestamptz{}, uuid.Nil, ErrBadCursor
+	}
+	return pgtype.Timestamptz{Time: t, Valid: true}, id, nil
+}
+
 // ListHired returns one page of the buyer's hire tasks across services, newest first by status_at (then id; the
 // tasks_hired index), after cursor ("" for the first page; a ListTasks page token, EncodePageToken), and the next
 // page's cursor ("" when it is the last). A cursor the gate did not mint is ErrBadCursor.
 func (l *Log) ListHired(ctx context.Context, buyer uuid.UUID, cursor string) ([]*TaskRow, string, error) {
-	var at, after any
-	if cursor != "" {
-		t, id, err := DecodePageToken(cursor)
-		if err != nil {
-			return nil, "", ErrBadCursor
-		}
-		at, after = t, id
+	at, after, err := hiredKeyset(cursor)
+	if err != nil {
+		return nil, "", err
 	}
 	rows, err := l.db.Query(ctx, `select `+taskCols+` from kontra.tasks t
-		where t.buyer_id = $1 and t.hired
-		  and ($2::timestamptz is null or (t.status_at, t.id) < ($2::timestamptz, $3::uuid))
+		where t.buyer_id = $1 and t.hired and (t.status_at, t.id) < ($2::timestamptz, $3::uuid)
 		order by t.status_at desc, t.id desc limit $4`, buyer, at, after, HiredPageSize+1)
 	if err != nil {
 		return nil, "", fmt.Errorf("store: list hire tasks: %w", err)
@@ -245,6 +256,18 @@ func (l *Log) ClaimElicitationComplete(ctx context.Context, taskID uuid.UUID, se
 // a hire with the same key, of the same buyer and principal, created less than this ago.
 const HireKeyWindow = 24 * time.Hour
 
+// HireKey is how a hire's idempotencyKey finds the task it created (relay.md §12.3 Idempotency, D338). Lock is the
+// key's identity, the same in every period: what the advisory lock of a keyed hire is taken on, so two hires with
+// one key serialize even across a period's end. MessageIDs are the A2A messageIds the key mints in the current period
+// of HireKeyWindow, in the one before and in the one after (another replica's clock a little ahead); the first is the
+// new hire's. A task created less than HireKeyWindow ago was created in one of those periods, so it is found; a task
+// of an earlier period carries another messageId, and one of a period's messageId is never older than the window, so a
+// key reused after the window never gives a seller one messageId on two tasks.
+type HireKey struct {
+	Lock       string
+	MessageIDs []string
+}
+
 // KeyedHire is a hire task an idempotencyKey names (FindHireKeyed): the task, and the resend key its first hire had
 // (tasks.first_request), which a hire with the same key and other arguments does not match.
 type KeyedHire struct {
@@ -252,28 +275,28 @@ type KeyedHire struct {
 	FirstRequest [32]byte
 }
 
-// FindHireKeyed returns the hire task of buyer and principal whose first_message_id is messageID (the messageId a hire
-// with an idempotencyKey mints from it, relay.md §12.3) and that was created after since, whatever its service; nil
-// when none. It reads the index tasks_hired_by_message (0005).
-func (l *Log) FindHireKeyed(ctx context.Context, buyer uuid.UUID, principal, messageID string, since time.Time) (*KeyedHire, error) {
-	return l.findHireKeyed(ctx, l.db, buyer, principal, messageID, since)
+// FindHireKeyed returns the hire task of buyer and principal whose first_message_id is one of k's MessageIDs (the
+// messageIds a hire with an idempotencyKey mints from it, relay.md §12.3) and that was created after since, whatever
+// its service; nil when none. It reads the index tasks_hired_by_message (0005).
+func (l *Log) FindHireKeyed(ctx context.Context, buyer uuid.UUID, principal string, k HireKey, since time.Time) (*KeyedHire, error) {
+	return l.findHireKeyed(ctx, l.db, buyer, principal, k.MessageIDs, since)
 }
 
 // FindHireKeyedLocked is FindHireKeyed inside tx, the transaction that creates the task, after taking the
-// transaction-scoped advisory lock of (buyer, principal, messageID): of two hires with one key arriving together,
-// whatever their services, the second waits until the first's transaction ends and then finds its task, so one key is
-// never two tasks.
-func (l *Log) FindHireKeyedLocked(ctx context.Context, tx pgx.Tx, buyer uuid.UUID, principal, messageID string, since time.Time) (*KeyedHire, error) {
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, hireKeyLockKey(buyer, principal, messageID)); err != nil {
+// transaction-scoped advisory lock of (buyer, principal, k.Lock): of two hires with one key arriving together,
+// whatever their services and periods, the second waits until the first's transaction ends and then finds its task,
+// so one key is never two tasks.
+func (l *Log) FindHireKeyedLocked(ctx context.Context, tx pgx.Tx, buyer uuid.UUID, principal string, k HireKey, since time.Time) (*KeyedHire, error) {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock($1)`, hireKeyLockKey(buyer, principal, k.Lock)); err != nil {
 		return nil, fmt.Errorf("store: lock the hire's idempotency key: %w", err)
 	}
-	return l.findHireKeyed(ctx, tx, buyer, principal, messageID, since)
+	return l.findHireKeyed(ctx, tx, buyer, principal, k.MessageIDs, since)
 }
 
 // hireKeyLockKey is the advisory lock key of a hire's idempotency key, under a prefix of its own.
-func hireKeyLockKey(buyer uuid.UUID, principal, messageID string) int64 {
+func hireKeyLockKey(buyer uuid.UUID, principal, lock string) int64 {
 	h := sha256.New()
-	for _, part := range []string{"kontra.hire.key", buyer.String(), principal, messageID} {
+	for _, part := range []string{"kontra.hire.key", buyer.String(), principal, lock} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}
@@ -282,11 +305,11 @@ func hireKeyLockKey(buyer uuid.UUID, principal, messageID string) int64 {
 	return int64(binary.BigEndian.Uint64(sum[:8]))
 }
 
-func (l *Log) findHireKeyed(ctx context.Context, q querier, buyer uuid.UUID, principal, messageID string, since time.Time) (*KeyedHire, error) {
+func (l *Log) findHireKeyed(ctx context.Context, q querier, buyer uuid.UUID, principal string, messageIDs []string, since time.Time) (*KeyedHire, error) {
 	var fr []byte
 	r, err := scanTask(scanAlso{q.QueryRow(ctx, `select `+taskCols+`, coalesce(t.first_request, ''::bytea) from kontra.tasks t
-		where t.buyer_id = $1 and t.first_message_id = $2 and t.hired and t.principal = $3 and t.created_at > $4
-		order by t.created_at desc, t.id desc limit 1`, buyer, messageID, principal, since), []any{&fr}})
+		where t.buyer_id = $1 and t.first_message_id = any($2::text[]) and t.hired and t.principal = $3 and t.created_at > $4
+		order by t.created_at desc, t.id desc limit 1`, buyer, messageIDs, principal, since), []any{&fr}})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -317,13 +340,9 @@ const HiredReadBound = 1000
 // bound answers what matched, fewer than HiredPageSize or none, with the cursor at the last row it read. A cursor the
 // gate did not mint is ErrBadCursor.
 func (l *Log) ListHiredFiltered(ctx context.Context, buyer uuid.UUID, f HiredFilter, cursor string) ([]*TaskRow, string, error) {
-	var at, after any
-	if cursor != "" {
-		t, id, err := DecodePageToken(cursor)
-		if err != nil {
-			return nil, "", ErrBadCursor
-		}
-		at, after = t, id
+	at, after, err := hiredKeyset(cursor)
+	if err != nil {
+		return nil, "", err
 	}
 	states := make([]string, 0, len(f.States))
 	for _, s := range f.States {
@@ -344,8 +363,7 @@ func (l *Log) ListHiredFiltered(ctx context.Context, buyer uuid.UUID, f HiredFil
 			and ($7::text is null or t.context_id = $7)
 			and (cardinality($8::text[]) = 0 or t.state = any($8::text[]))
 		from kontra.tasks t
-		where t.buyer_id = $1 and t.hired
-		  and ($2::timestamptz is null or (t.status_at, t.id) < ($2::timestamptz, $3::uuid))
+		where t.buyer_id = $1 and t.hired and (t.status_at, t.id) < ($2::timestamptz, $3::uuid)
 		order by t.status_at desc, t.id desc limit $4`, buyer, at, after, HiredReadBound, svc, f.TenantID, ctxID, states)
 	if err != nil {
 		return nil, "", fmt.Errorf("store: list hire tasks: %w", err)

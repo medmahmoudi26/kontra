@@ -9,7 +9,10 @@ import (
 	"log/slog"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/lifecycle"
+	"kontra.sh/kontra/internal/pgtest"
 	"kontra.sh/kontra/internal/push"
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
@@ -118,8 +122,10 @@ func TestStatusTool(t *testing.T) {
 	for _, modern := range []bool{false, true} {
 		r, a := call(t, h, e.buyer, modern, ToolStatus, map[string]any{"taskId": id.String(), "after": 0})
 		sr := structured[StatusResult](t, r)
+		// With after, the result is a summary: the events carry the artifacts (D332), so a page repeats none of them.
 		if a.Error != nil || r.IsError || sr.State != "TASK_STATE_COMPLETED" || sr.ContextID != "ctx" || sr.Service != "hello" ||
-			sr.Text != "booked\nreceipt text" || sr.Cursor != last || sr.More {
+			!strings.HasPrefix(sr.Text, "The task ended completed.\nbooked\nIts artifacts are in the events") || sr.Data != nil ||
+			sr.Cursor != last || sr.More || len(r.Content) != 2 || strings.Contains(r.Content[0].Text, "receipt text") {
 			t.Fatalf("modern %v: status after 0: %s", modern, a.body)
 		}
 		var kinds []string
@@ -142,8 +148,13 @@ func TestStatusTool(t *testing.T) {
 			t.Errorf("status after the cursor: %+v", sr)
 		}
 		r, _ = call(t, h, e.buyer, modern, ToolStatus, map[string]any{"taskId": id.String()})
-		if sr := structured[StatusResult](t, r); sr.Events != nil || sr.Cursor != last {
-			t.Errorf("status without after: %+v", sr)
+		if sr := structured[StatusResult](t, r); sr.Events != nil || sr.Cursor != last || sr.Text != "booked\nreceipt text" || len(sr.Data) != 1 {
+			t.Errorf("status without after (the whole hire result): %+v", sr)
+		}
+		// An after beyond the tail is read as the tail: the cursor never skips a row that lands later.
+		r, _ = call(t, h, e.buyer, modern, ToolStatus, map[string]any{"taskId": id.String(), "after": last + 1000})
+		if sr := structured[StatusResult](t, r); len(sr.Events) != 0 || sr.Cursor != last {
+			t.Errorf("status after a seq beyond the tail: %+v", sr)
 		}
 	}
 
@@ -196,45 +207,131 @@ func TestStatusBounds(t *testing.T) {
 	}
 }
 
-// status with wait (D332): nothing after the cursor, it waits until a row lands and answers it; a call whose task has
-// ended does not wait; with a progressToken and an event stream accepted, the rows that land are
-// notifications/progress before the result (D339).
-func TestStatusWaitsAndStreamsProgress(t *testing.T) {
+// chanWaker is a waker the test fires: every wait that subscribed is woken by wake.
+type chanWaker struct {
+	mu  sync.Mutex
+	chs []chan struct{}
+}
+
+func (w *chanWaker) WaitTask(context.Context, uuid.UUID) (<-chan struct{}, func()) {
+	ch := make(chan struct{}, 1)
+	w.mu.Lock()
+	w.chs = append(w.chs, ch)
+	w.mu.Unlock()
+	return ch, func() {}
+}
+
+func (w *chanWaker) wake() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, ch := range w.chs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// later runs f after d, in its own goroutine.
+func later(d time.Duration, f func()) {
+	go func() {
+		time.Sleep(d)
+		f()
+	}()
+}
+
+// status with wait (D332), its waits woken only by the waker (the reread is an hour): nothing after the cursor, it
+// waits until a status row lands and answers it, its running text naming the cursor it returns; the principal's own
+// message row (a reply) does not end the wait, the status row after it does; a task at input-required, or ended, does
+// not wait; a wait that nothing ends answers at its end; a task whose service stops being served during the wait is
+// "unknown task" when the wait ends (D303).
+func TestStatusWaits(t *testing.T) {
 	e := newModernEnv(t)
-	h := toolsHandler(e, nil)
+	served := &servedMap{m: map[string]ServedService{"hello": {Kind: config.KindA2A, Allow: allowOf(t, "key:*")}}}
+	h := toolsHandler(e, served)
+	wk := &chanWaker{}
+	h.deps.Waker, h.deps.rereadEvery = wk, time.Hour
 	id := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 0, true)
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		e.event(id, store.KindStatus, &a2a.TaskStatusUpdateEvent{TaskID: a2a.TaskID(id.String()), ContextID: "ctx",
-			Status: a2a.TaskStatus{State: a2a.TaskStateWorking, Message: agentText("halfway")}})
-	}()
+	status := func(text string) func() {
+		return func() {
+			e.event(id, store.KindStatus, &a2a.TaskStatusUpdateEvent{TaskID: a2a.TaskID(id.String()), ContextID: "ctx",
+				Status: a2a.TaskStatus{State: a2a.TaskStateWorking, Message: agentText(text)}})
+			wk.wake()
+		}
+	}
+	for _, modern := range []bool{false, true} {
+		cursor := func() int64 {
+			var n int64
+			if err := e.pool.QueryRow(context.Background(), `select version from kontra.tasks where id = $1`, id).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}()
+		later(300*time.Millisecond, status("halfway"))
+		start := time.Now()
+		r, a := call(t, h, e.buyer, modern, ToolStatus, map[string]any{"taskId": id.String(), "after": cursor, "wait": 10})
+		sr := structured[StatusResult](t, r)
+		if took := time.Since(start); took > 5*time.Second || len(sr.Events) != 1 || sr.Events[0].Text != "halfway" || sr.Cursor != cursor+1 {
+			t.Fatalf("modern %v, after %v: %s", modern, took, a.body)
+		}
+		if want := fmt.Sprintf("after: %d, wait: 25}", sr.Cursor); !strings.Contains(sr.Text, want) {
+			t.Errorf("modern %v: the running text does not name the cursor (%s): %s", modern, want, sr.Text)
+		}
+
+		// The principal's reply lands as a message row first: the wait goes on until the agent's status row.
+		cursor = sr.Cursor
+		later(300*time.Millisecond, func() {
+			e.event(id, store.KindMessage, &a2a.Message{ID: "u" + fmt.Sprint(modern), Role: a2a.MessageRoleUser,
+				Parts: a2a.ContentParts{a2a.NewTextPart("sat")}})
+			e.event(id, store.KindMetadata, nil)
+			wk.wake()
+			time.Sleep(400 * time.Millisecond)
+			status("on it")()
+		})
+		start = time.Now()
+		r, a = call(t, h, e.buyer, modern, ToolStatus, map[string]any{"taskId": id.String(), "after": cursor, "wait": 10})
+		sr = structured[StatusResult](t, r)
+		if took := time.Since(start); took < 600*time.Millisecond || len(sr.Events) != 2 || sr.Events[0].Kind != "message" ||
+			sr.Events[1].Text != "on it" {
+			t.Fatalf("modern %v: a wait across the principal's own message row, after %v: %s", modern, took, a.body)
+		}
+
+		// A wait that nothing ends answers at its end, with nothing new.
+		start = time.Now()
+		r, _ = call(t, h, e.buyer, modern, ToolStatus, map[string]any{"taskId": id.String(), "after": sr.Cursor, "wait": 1})
+		if got := structured[StatusResult](t, r); time.Since(start) < 900*time.Millisecond || len(got.Events) != 0 || got.Cursor != sr.Cursor {
+			t.Fatalf("modern %v: an empty wait: %+v after %v", modern, got, time.Since(start))
+		}
+	}
+
+	// A task at input-required moves only when this principal replies: status answers at once.
+	asking := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 0, true)
 	start := time.Now()
-	r, a := call(t, h, e.buyer, false, ToolStatus, map[string]any{"taskId": id.String(), "after": 1, "wait": 10})
-	sr := structured[StatusResult](t, r)
-	if took := time.Since(start); took > 5*time.Second || len(sr.Events) != 1 || sr.Events[0].Text != "halfway" || sr.Cursor != 2 {
-		t.Fatalf("after %v: %s", took, a.body)
+	r, a := call(t, h, e.buyer, true, ToolStatus, map[string]any{"taskId": asking.String(), "after": 1, "wait": 10})
+	if took := time.Since(start); took > 2*time.Second || structured[StatusResult](t, r).State != "TASK_STATE_INPUT_REQUIRED" {
+		t.Fatalf("an input-required task waited %v: %s", took, a.body)
 	}
 
-	// A wait that nothing ends answers at its end, with nothing new.
-	start = time.Now()
-	r, _ = call(t, h, e.buyer, true, ToolStatus, map[string]any{"taskId": id.String(), "after": 2, "wait": 1})
-	if sr := structured[StatusResult](t, r); time.Since(start) < 900*time.Millisecond || len(sr.Events) != 0 || sr.Cursor != 2 {
-		t.Fatalf("an empty wait: %+v after %v", sr, time.Since(start))
+	// The service stops being served during the wait: the answer is "unknown task", not the row that landed.
+	r, _ = call(t, h, e.buyer, false, ToolStatus, map[string]any{"taskId": id.String()})
+	tail := structured[StatusResult](t, r).Cursor
+	landed := make(chan struct{})
+	later(300*time.Millisecond, func() {
+		defer close(landed)
+		served.set("hello", nil)
+		status("secret progress")()
+	})
+	r, a = call(t, h, e.buyer, false, ToolStatus, map[string]any{"taskId": id.String(), "after": tail, "wait": 10})
+	<-landed
+	if !r.IsError || textOf(r) != UnknownTask || strings.Contains(a.body, "secret progress") {
+		t.Fatalf("a service no longer served after the wait: %s", a.body)
 	}
+}
 
-	// Progress: the request's _meta.progressToken and Accept: text/event-stream.
-	go func() {
-		time.Sleep(300 * time.Millisecond)
-		e.event(id, store.KindArtifact, &a2a.TaskArtifactUpdateEvent{TaskID: a2a.TaskID(id.String()), ContextID: "ctx",
-			Artifact: &a2a.Artifact{ID: "a1", Name: "draft", Parts: a2a.ContentParts{a2a.NewTextPart("x")}}})
-	}()
-	rq, w := modernRequest(t, "tools/call", map[string]any{"name": ToolStatus,
-		"arguments": map[string]any{"taskId": id.String(), "after": 2, "wait": 10},
-		"_meta": map[string]any{"progressToken": "tok-1", "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-			"io.modelcontextprotocol/clientCapabilities": map[string]any{}}}, nil)
-	rq.r.Header.Set("Accept", "application/json, text/event-stream")
-	rq.p, rq.modern, rq.start = e.buyer, true, time.Now()
-	h.toolsCall(rq)
+// progressStream is the JSON-RPC messages of an event stream answer, failing on an event id (/mcp's response streams
+// carry none).
+func progressStream(t *testing.T, w *httptest.ResponseRecorder) []map[string]any {
+	t.Helper()
 	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("content type %q: %s", ct, w.Body)
 	}
@@ -253,12 +350,89 @@ func TestStatusWaitsAndStreamsProgress(t *testing.T) {
 			msgs = append(msgs, m)
 		}
 	}
-	if len(msgs) != 2 || msgs[0]["method"] != "notifications/progress" || msgs[1]["result"] == nil {
-		t.Fatalf("the stream: %s", w.Body)
+	return msgs
+}
+
+// progressCall is a tools/call of tool with args by p through h, in either era, with _meta.progressToken tok and an
+// event stream accepted.
+func progressCall(t *testing.T, h *Handler, p auth.Principal, modern bool, tool string, args map[string]any, tok string) *httptest.ResponseRecorder {
+	t.Helper()
+	rq, w := modernRequest(t, "tools/call", map[string]any{"name": tool, "arguments": args,
+		"_meta": map[string]any{"progressToken": tok, "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+			"io.modelcontextprotocol/clientCapabilities": map[string]any{}}}, nil)
+	rq.r.Header.Set("Accept", "application/json, text/event-stream")
+	rq.p, rq.modern, rq.start = p, modern, time.Now()
+	h.toolsCall(rq)
+	return w
+}
+
+// status with wait and a progressToken (D339), in both eras: the status and artifact rows after the cursor are
+// notifications/progress, then the result, on one event stream without event ids.
+func TestStatusStreamsProgress(t *testing.T) {
+	e := newModernEnv(t)
+	h := toolsHandler(e, nil)
+	wk := &chanWaker{}
+	h.deps.Waker = wk
+	id := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 0, true)
+	for i, modern := range []bool{false, true} {
+		cursor := int64(1 + i)
+		later(300*time.Millisecond, func() {
+			e.event(id, store.KindArtifact, &a2a.TaskArtifactUpdateEvent{TaskID: a2a.TaskID(id.String()), ContextID: "ctx",
+				Artifact: &a2a.Artifact{ID: "a1", Name: "draft", Parts: a2a.ContentParts{a2a.NewTextPart("x")}}})
+			wk.wake()
+		})
+		w := progressCall(t, h, e.buyer, modern, ToolStatus, map[string]any{"taskId": id.String(), "after": cursor, "wait": 10}, "tok-1")
+		msgs := progressStream(t, w)
+		if len(msgs) != 2 || msgs[0]["method"] != "notifications/progress" || msgs[1]["result"] == nil {
+			t.Fatalf("modern %v: the stream: %s", modern, w.Body)
+		}
+		params := msgs[0]["params"].(map[string]any)
+		if params["progressToken"] != "tok-1" || params["progress"] != 1.0 || params["message"] != "artifact draft" {
+			t.Errorf("modern %v: the progress notification: %v", modern, params)
+		}
 	}
-	params := msgs[0]["params"].(map[string]any)
-	if params["progressToken"] != "tok-1" || params["progress"] != 1.0 || params["message"] != "artifact draft" {
-		t.Errorf("the progress notification: %v", params)
+}
+
+// existingHirer answers every hire with an existing task (a retry, a keyed hire re-issued).
+type existingHirer struct {
+	replyRecorder
+	row *store.TaskRow
+}
+
+func (x *existingHirer) Hire(context.Context, HireRequest) (HireOutcome, error) {
+	return HireOutcome{Task: x.row, Existing: true}, nil
+}
+
+// A hire answered with an existing task (a keyed hire re-issued after its client reconnects) sends progress for the
+// rows that land from now, not the task's history (D339).
+func TestHireOfAnExistingTaskSendsNoHistoryAsProgress(t *testing.T) {
+	e := newModernEnv(t)
+	h := toolsHandler(e, nil)
+	id := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 0, true)
+	for _, text := range []string{"step one", "step two"} {
+		e.event(id, store.KindStatus, &a2a.TaskStatusUpdateEvent{TaskID: a2a.TaskID(id.String()), ContextID: "ctx",
+			Status: a2a.TaskStatus{State: a2a.TaskStateWorking, Message: agentText(text)}})
+	}
+	if _, err := e.pool.Exec(context.Background(), `update kontra.tasks set state = 'completed', terminal_at = now() where id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.NewLog(e.pool).Load(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.deps.Hirer = &existingHirer{row: row}
+	for _, modern := range []bool{false, true} {
+		w := progressCall(t, h, e.buyer, modern, ToolHire, map[string]any{"service": "hello", "message": "book it",
+			"idempotencyKey": "k1"}, "tok-h")
+		msgs := progressStream(t, w)
+		if len(msgs) == 0 || msgs[len(msgs)-1]["result"] == nil || !strings.Contains(w.Body.String(), "TASK_STATE_COMPLETED") {
+			t.Fatalf("modern %v: the hire's answer: %s", modern, w.Body)
+		}
+		for _, m := range msgs {
+			if m["method"] == "notifications/progress" {
+				t.Errorf("modern %v: the task's history sent as progress: %v", modern, m["params"])
+			}
+		}
 	}
 }
 
@@ -344,6 +518,67 @@ func TestTasksBoundsTheRowsOneRequestReads(t *testing.T) {
 	r, _ = call(t, h, e.buyer, false, ToolTasks, map[string]any{"state": "ended", "cursor": first.NextCursor})
 	if next := structured[TasksResult](t, r); len(next.Tasks) != 1 || next.Tasks[0].TaskID != old.String() || next.NextCursor != "" {
 		t.Fatalf("the next read: %+v", next)
+	}
+}
+
+// The tasks tool's bound holds under the generic plan Postgres may give its prepared statement after five executions
+// (D333): a page after a deep cursor reads about HiredReadBound rows, not the cursor's depth more. With a
+// "$2 is null or (status_at, id) < ($2, $3)" predicate the generic plan's index condition is the buyer alone and the
+// keyset a filter, so the read below cost the 1500 rows above the cursor too.
+func TestTasksDeepCursorUnderAGenericPlan(t *testing.T) {
+	e := newModernEnv(t)
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id,
+			state, version, snapshot, status_at, submitted_at, hired)
+		select gen_random_uuid(), $1, 'hello', 'a2a', $2, 'key:kk_buyer', 'api_key', 'ctx', 'working', 1, '{"id":"x"}',
+			now() - i * interval '1 second', now(), true
+		from generate_series(1, 2600) i`, e.team, e.buyer.BuyerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.pool.Exec(ctx, `analyze kontra.tasks`); err != nil {
+		t.Fatal(err)
+	}
+	var (
+		at time.Time
+		id uuid.UUID
+	)
+	if err := e.pool.QueryRow(ctx, `select status_at, id from kontra.tasks where buyer_id = $1 and hired
+		order by status_at desc, id desc offset 1500 limit 1`, e.buyer.BuyerID).Scan(&at, &id); err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(e.pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := u.Query()
+	q.Set("pool_max_conns", "1")
+	q.Set("plan_cache_mode", "force_generic_plan")
+	u.RawQuery = q.Encode()
+	pool := pgtest.Pool(t, u.String())
+	log := store.NewLog(pool)
+	read := func() int64 {
+		t.Helper()
+		var n int64
+		if _, err := pool.Exec(ctx, `select pg_stat_force_next_flush()`); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `select coalesce(sum(idx_tup_read), 0)::bigint + coalesce(max(seq_tup_read), 0)
+			from pg_stat_user_indexes i join pg_stat_user_tables s using (relid) where s.schemaname = 'kontra' and s.relname = 'tasks'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	cursor := store.EncodePageToken(at, id)
+	f := store.HiredFilter{States: []store.State{store.StateCompleted}}
+	for i := range 7 {
+		before := read()
+		rows, next, err := log.ListHiredFiltered(ctx, e.buyer.BuyerID, f, cursor)
+		if err != nil || len(rows) != 0 || next == "" {
+			t.Fatalf("read %d: %d rows, next %q, %v", i, len(rows), next, err)
+		}
+		if n := read() - before; n > store.HiredReadBound+100 {
+			t.Fatalf("read %d after a cursor 1500 rows deep read %d rows, more than the bound %d", i, n, store.HiredReadBound)
+		}
 	}
 }
 
@@ -483,15 +718,29 @@ func TestReplyRefusalsSayWhatToDo(t *testing.T) {
 }
 
 // hire with an idempotencyKey (D338) as the handler answers it: the key's messageId is the same for the principal's
-// every hire of it and differs for another key or principal; a key the Hirer finds used for other arguments is isError
-// and creates nothing; a malformed key breaks the input schema.
+// every hire of it within one period and differs for another key or principal; the next period's hire looks for the
+// period before's messageId too, and the period after that mints a messageId neither of the first's (a key reused a
+// day later is another task with another messageId, which no seller can link to the first); the key's lock is the
+// same in every period; a key the Hirer finds used for other arguments is isError and creates nothing; a malformed key
+// breaks the input schema.
 func TestHireIdempotencyKeyArguments(t *testing.T) {
 	team := uuid.Must(uuid.NewV7())
 	p := keyPrincipal(team, "default", "kk_a")
 	q := keyPrincipal(team, "default", "kk_b")
-	if KeyedMessageID(p, "k1") != KeyedMessageID(p, "k1") || KeyedMessageID(p, "k1") == KeyedMessageID(p, "k2") ||
-		KeyedMessageID(p, "k1") == KeyedMessageID(q, "k1") {
-		t.Fatal("KeyedMessageID")
+	now := time.Date(2026, 11, 5, 23, 59, 0, 0, time.UTC)
+	k := HireKeyOf(p, "k1", now)
+	if len(k.MessageIDs) != 3 || HireKeyOf(p, "k1", now.Add(-time.Hour)).MessageIDs[0] != k.MessageIDs[0] ||
+		HireKeyOf(p, "k2", now).MessageIDs[0] == k.MessageIDs[0] || HireKeyOf(q, "k1", now).MessageIDs[0] == k.MessageIDs[0] {
+		t.Fatalf("one period's messageIds: %+v", k)
+	}
+	next := HireKeyOf(p, "k1", now.Add(2*time.Minute))
+	if next.MessageIDs[1] != k.MessageIDs[0] || k.MessageIDs[2] != next.MessageIDs[0] || next.MessageIDs[0] == k.MessageIDs[0] ||
+		next.Lock != k.Lock {
+		t.Errorf("the next period does not find the period before's task, or locks another key: %+v, %+v", next, k)
+	}
+	day := HireKeyOf(p, "k1", now.Add(25*time.Hour))
+	if slices.Contains(day.MessageIDs, k.MessageIDs[0]) || day.Lock != k.Lock {
+		t.Errorf("a key reused after the window mints the first hire's messageId again: %+v, %+v", day, k)
 	}
 	for _, bad := range []string{"", "has space", strings.Repeat("x", 129), "é"} {
 		if _, _, err := parseHireArgs(json.RawMessage(`{"service":"hello","message":"hi","idempotencyKey":` + fmt.Sprintf("%q", bad) + `}`)); err == nil {

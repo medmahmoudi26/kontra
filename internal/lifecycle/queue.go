@@ -289,7 +289,8 @@ var errResent = errors.New("lifecycle: an identical request created the task mea
 type Hire struct {
 	Key         [32]byte
 	RetryWindow time.Duration
-	Keyed       bool
+	// Keyed, for a hire with an idempotencyKey, is how the key finds its task: the hire's messageId is Keyed.MessageIDs[0].
+	Keyed *store.HireKey
 }
 
 // ErrHireKeyReused refuses a hire whose idempotencyKey an earlier hire of the same buyer and principal used, within
@@ -314,8 +315,8 @@ func HireFrom(ctx context.Context) (Hire, bool) {
 func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, hire Hire, hired bool, owner store.Owner, messageID string,
 	hash [32]byte, since time.Time) (*store.TaskRow, error) {
 	switch {
-	case hired && hire.Keyed:
-		return q.findKeyed(ctx, tx, hire, owner, messageID)
+	case hired && hire.Keyed != nil:
+		return q.findKeyed(ctx, tx, hire, owner)
 	case hired && tx == nil:
 		return q.log.FindHireRetry(ctx, q.svc, owner, hire.Key, hire.RetryWindow)
 	case hired:
@@ -327,18 +328,18 @@ func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, hire Hire, hired bool
 }
 
 // findKeyed is the earlier task a keyed hire repeats (Hire.Keyed): the hire task of the owner's buyer and principal
-// whose first_message_id is messageID, created less than store.HireKeyWindow ago (with tx, under the key's lock); one
-// of another service, or of another resend key (other arguments), is ErrHireKeyReused.
-func (q *Queue) findKeyed(ctx context.Context, tx pgx.Tx, hire Hire, owner store.Owner, messageID string) (*store.TaskRow, error) {
+// whose first_message_id is one of the key's messageIds, created less than store.HireKeyWindow ago (with tx, under the
+// key's lock); one of another service, or of another resend key (other arguments), is ErrHireKeyReused.
+func (q *Queue) findKeyed(ctx context.Context, tx pgx.Tx, hire Hire, owner store.Owner) (*store.TaskRow, error) {
 	since := q.now().Add(-store.HireKeyWindow)
 	var (
 		k   *store.KeyedHire
 		err error
 	)
 	if tx == nil {
-		k, err = q.log.FindHireKeyed(ctx, owner.BuyerID, owner.Principal, messageID, since)
+		k, err = q.log.FindHireKeyed(ctx, owner.BuyerID, owner.Principal, *hire.Keyed, since)
 	} else {
-		k, err = q.log.FindHireKeyedLocked(ctx, tx, owner.BuyerID, owner.Principal, messageID, since)
+		k, err = q.log.FindHireKeyedLocked(ctx, tx, owner.BuyerID, owner.Principal, *hire.Keyed, since)
 	}
 	switch {
 	case err != nil:

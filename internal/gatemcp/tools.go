@@ -392,9 +392,10 @@ var tools = []tool{
 		InputSchema: json.RawMessage(schemaReply), OutputSchema: json.RawMessage(schemaHireResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
 	{Name: ToolStatus, Title: "Follow a task",
-		Description: "A hired task's state and result. With after (0 for the whole history) it also returns the task's events " +
-			"after that cursor; with wait (seconds, up to 25) it waits for something new first. Loop status {taskId, after: " +
-			"cursor, wait: 25} to follow a task until it ends or asks a question.",
+		Description: "A hired task's state and result. With after (0 for the whole history) it returns the task's events " +
+			"after that cursor and the result in short (read an artifact in full with artifact); with wait (seconds, up to 25) " +
+			"it first waits for something new. Loop status {taskId, after: cursor, wait: 25} to follow a task until it ends " +
+			"or asks a question.",
 		InputSchema: json.RawMessage(schemaStatus), OutputSchema: json.RawMessage(schemaStatusResult),
 		Annotations: toolAnnotations{ReadOnlyHint: true}},
 	{Name: ToolTasks, Title: "List your tasks",

@@ -103,6 +103,13 @@ func (h *Handler) loadTool(rq *request, id uuid.UUID) (*store.TaskRow, error) {
 // URL; a task still running with the text saying how to follow it. Its structuredContent is the hire result, with the
 // task's contextId and service ref (D336).
 func (h *Handler) answerOf(ctx context.Context, row *store.TaskRow, p auth.Principal) callToolResult {
+	return h.answerFrom(ctx, row, p, 0)
+}
+
+// answerFrom is answerOf, a running task's text naming follow as the after of the status call that follows it: 0 in a
+// hire's or a reply's answer (the task's whole story), the cursor status returns in status's own answer (D332), so that
+// a model that does what the text says reads from where it is and waits instead of reading the history again.
+func (h *Handler) answerFrom(ctx context.Context, row *store.TaskRow, p auth.Principal, follow int64) callToolResult {
 	var res callToolResult
 	switch {
 	case row.State.Terminal():
@@ -121,9 +128,9 @@ func (h *Handler) answerOf(ctx context.Context, row *store.TaskRow, p auth.Princ
 			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text},
 			Meta:              map[string]any{MetaInputRequired: true}}
 	default:
-		follow := strings.TrimRight(h.deps.PublicURL, "/") + "/agents/" + h.serviceRef(row)
+		a2aURL := strings.TrimRight(h.deps.PublicURL, "/") + "/agents/" + h.serviceRef(row)
 		text := "The task " + row.ID.String() + " is still " + string(row.State) + ". Follow it here with status " +
-			"{taskId: \"" + row.ID.String() + "\", after: 0, wait: 25}, or with GetTask at " + follow +
+			"{taskId: \"" + row.ID.String() + "\", after: " + strconv.FormatInt(follow, 10) + ", wait: 25}, or with GetTask at " + a2aURL +
 			" (the same credential); call reply when it asks a question."
 		res = callToolResult{Content: []content{{Type: "text", Text: text}},
 			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text}}
@@ -137,10 +144,16 @@ func (h *Handler) answerOf(ctx context.Context, row *store.TaskRow, p auth.Princ
 
 // status answers the status tool (§12.2, D332): the hire result of the principal's hire task, its contextId and
 // service, and when after is given its task, status, artifact and message rows with seq > after (at most StatusEvents
-// rows or about StatusBytes, more when cut) and the cursor, the last seq read (else the log's tail). With wait, when the
-// task has not ended and its log holds nothing after the cursor asked (or after its tail when after is absent), it
-// first waits on the waker until a row lands or wait elapses, cut by the plain wait's budget (D295); with a
-// progressToken each status and artifact row that lands meanwhile is a notifications/progress (D339).
+// rows or about StatusBytes, more when cut) and the cursor, the last seq read (else the log's tail). An after beyond
+// the log's tail (another task's cursor, a mistyped number) is read as the tail, so the cursor answered never skips a
+// row that lands later. With after, the hire result is its summary (statusSummary): the events carry the content, so
+// paging a long history does not repeat every artifact on every page. With wait, when the task has neither ended nor
+// asked a question (only this principal's reply moves a task at input-required), and its log holds no task, status or
+// artifact row after the cursor asked (or after its tail when after is absent), it first waits on the waker until
+// such a row lands or wait elapses, cut by the plain wait's budget (D295); a message or metadata row (the principal's
+// own reply, a metadata patch) does not end the wait. The task is then read again and scoped again (D303: its service
+// may have stopped being served to the principal meanwhile); with a progressToken each status and artifact row after
+// the cursor is a notifications/progress before the result (D339).
 func (h *Handler) status(rq *request, args json.RawMessage) {
 	a, err := parseStatusArgs(args)
 	if err != nil {
@@ -157,15 +170,21 @@ func (h *Handler) status(rq *request, args json.RawMessage) {
 		return
 	}
 	ctx := rq.ctx()
-	base := a.After
+	tail, err := h.deps.Log.Tail(ctx, row.ID)
+	if err != nil {
+		h.internal(rq, "read the task's log", err)
+		return
+	}
+	after := a.After
+	if after > tail {
+		after = tail
+	}
+	base := after
 	if base < 0 {
-		if base, err = h.deps.Log.Tail(ctx, row.ID); err != nil {
-			h.internal(rq, "read the task's log", err)
-			return
-		}
+		base = tail
 	}
 	aw := newAnswerWriter(rq)
-	if a.Wait > 0 && !row.State.Terminal() {
+	if a.Wait > 0 && !row.State.Terminal() && row.State != store.StateInputRequired {
 		wait := min(a.Wait, h.plainWait(rq))
 		if !h.awaitRow(rq, aw, row.ID, base, wait) {
 			return
@@ -174,16 +193,23 @@ func (h *Handler) status(rq *request, args json.RawMessage) {
 			aw.internal(h, "read the task", err)
 			return
 		}
+		if !admitsTask(ctx, h.deps.Served, rq.p, row) {
+			aw.result(errorResult(UnknownTask, nil))
+			return
+		}
+		if aw.progress != nil {
+			aw.progress.seen = base
+			h.notifyProgress(rq, aw, row.ID)
+		}
 	}
-	res := h.answerOf(ctx, row, rq.p)
-	sr := StatusResult{HireResult: res.StructuredContent.(HireResult)}
-	if a.After >= 0 {
-		evs, more, err := h.deps.Log.EventsWithin(ctx, row.ID, a.After, StatusEvents, StatusBytes)
+	sr := StatusResult{}
+	if after >= 0 {
+		evs, more, err := h.deps.Log.EventsWithin(ctx, row.ID, after, StatusEvents, StatusBytes)
 		if err != nil {
 			aw.internal(h, "read the task's log", err)
 			return
 		}
-		sr.Cursor, sr.More = a.After, more
+		sr.Cursor, sr.More = after, more
 		for _, ev := range evs {
 			sr.Cursor = ev.Seq
 			if te, ok := h.taskEvent(ctx, row, ev); ok {
@@ -194,16 +220,21 @@ func (h *Handler) status(rq *request, args json.RawMessage) {
 		aw.internal(h, "read the task's log", err)
 		return
 	}
+	res := h.answerFrom(ctx, row, rq.p, sr.Cursor)
+	if after >= 0 {
+		res = statusSummary(row, res)
+	}
+	sr.HireResult = res.StructuredContent.(HireResult)
 	res.StructuredContent = sr
 	// A client that reads only content gets the cursor and the events as a text block of their own.
-	tail := map[string]any{"cursor": sr.Cursor}
-	if a.After >= 0 {
-		tail["events"] = sr.Events
+	tailBlock := map[string]any{"cursor": sr.Cursor}
+	if after >= 0 {
+		tailBlock["events"] = sr.Events
 		if sr.More {
-			tail["more"] = true
+			tailBlock["more"] = true
 		}
 	}
-	b, _ := json.Marshal(tail)
+	b, _ := json.Marshal(tailBlock)
 	res.Content = append(res.Content, content{Type: "text", Text: string(b)})
 	out, err := json.Marshal(res)
 	if err != nil {
@@ -213,26 +244,46 @@ func (h *Handler) status(rq *request, args json.RawMessage) {
 	aw.result(out)
 }
 
-// awaitRow waits up to wait for a row of the task's log with seq > base (status's wait): on the waker, reading the
-// log's tail at each wake and every second, writing keep-alives and, with a progressToken, notifications/progress. It
-// reports false when the client left or the answer was written (an error).
+// SummaryTextMax bounds the text of status's summary of an ended task (D332).
+const SummaryTextMax = 2000
+
+// statusSummary is the hire result status answers when after is given (D332): an ended task's answer without its
+// artifacts' content (the events carry it, the artifact tool gives one in full), its text the status message's (at
+// most SummaryTextMax characters) and how to read the artifacts; any other answer is short already and stays as it is.
+// isError and _meta are kept.
+func statusSummary(row *store.TaskRow, res callToolResult) callToolResult {
+	if !row.State.Terminal() {
+		return res
+	}
+	hr, _ := res.StructuredContent.(HireResult)
+	text := "The task ended " + string(row.State) + "."
+	if st := truncateRunes(statusText(row.Snapshot), SummaryTextMax); st != "" {
+		text += "\n" + st
+	}
+	if row.Snapshot != nil && len(row.Snapshot.Artifacts) > 0 {
+		text += "\nIts artifacts are in the events; read one in full with artifact {taskId: \"" + row.ID.String() +
+			"\", artifactId}."
+	}
+	hr.Text, hr.Data, hr.Files = text, nil, nil
+	return callToolResult{Content: []content{{Type: "text", Text: text}}, StructuredContent: hr, IsError: res.IsError, Meta: res.Meta}
+}
+
+// awaitRow waits up to wait for a task, status or artifact row of the task's log with seq > base (status's wait): on
+// the waker, reading the log's carried tail at each wake and every second, writing keep-alives. It reports false when
+// the client left or the answer was written (an error).
 func (h *Handler) awaitRow(rq *request, aw *answerWriter, id uuid.UUID, base int64, wait time.Duration) bool {
 	ctx := rq.ctx()
 	wake, stop := h.deps.Waker.WaitTask(ctx, id)
 	defer stop()
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
-	reread := time.NewTicker(time.Second)
+	reread := time.NewTicker(h.rereadEvery())
 	defer reread.Stop()
 	keep := time.NewTicker(keepAliveEvery)
 	defer keep.Stop()
 	aw.begin()
-	pr := aw.progress
-	if pr != nil {
-		pr.seen = base
-	}
 	for {
-		tail, err := h.deps.Log.Tail(ctx, id)
+		tail, err := h.deps.Log.CarriedTail(ctx, id)
 		if err != nil {
 			if ctx.Err() != nil {
 				return false
@@ -241,7 +292,6 @@ func (h *Handler) awaitRow(rq *request, aw *answerWriter, id uuid.UUID, base int
 			return false
 		}
 		if tail > base {
-			h.notifyProgress(rq, aw, id)
 			return ctx.Err() == nil
 		}
 		select {
@@ -255,6 +305,15 @@ func (h *Handler) awaitRow(rq *request, aw *answerWriter, id uuid.UUID, base int
 			aw.keepAlive()
 		}
 	}
+}
+
+// rereadEvery is how often a wait reads the log again without a wake: a second, or Deps.rereadEvery (a test that
+// proves the waker wakes a wait).
+func (h *Handler) rereadEvery() time.Duration {
+	if h.deps.rereadEvery > 0 {
+		return h.deps.rereadEvery
+	}
+	return time.Second
 }
 
 // taskEvent renders one row of row's log for status (D332), its kontra-blob parts as presigned links for the caller
@@ -570,10 +629,9 @@ func stateWord(ts a2a.TaskState) string {
 // keyedNS is the namespace of the messageIds a hire's idempotencyKey mints (D338).
 var keyedNS = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://kontra.sh/ns/v1/hire-idempotency-key"))
 
-// KeyedMessageID is the A2A messageId a hire with idempotencyKey key mints for p (D338): a UUIDv5 of the principal's
-// tenant, buyer and id and the key, each length-prefixed, the same for every hire of that key by that principal, so that
-// the task the first one created is found by its first_message_id (store.Log.FindHireKeyed).
-func KeyedMessageID(p auth.Principal, key string) uuid.UUID {
+// keyIdentity is a hire's idempotencyKey key as p's (D338): a UUIDv5 of the principal's tenant, buyer and id and the
+// key, each length-prefixed. It names the key in every period (store.HireKey.Lock) and is never sent anywhere.
+func keyIdentity(p auth.Principal, key string) uuid.UUID {
 	var b strings.Builder
 	for _, part := range []string{tenantOf(p).String(), p.BuyerID.String(), p.ID, key} {
 		b.WriteString(strconv.Itoa(len(part)))
@@ -582,4 +640,17 @@ func KeyedMessageID(p auth.Principal, key string) uuid.UUID {
 		b.WriteByte(',')
 	}
 	return uuid.NewSHA1(keyedNS, []byte(b.String()))
+}
+
+// HireKeyOf is how a hire with idempotencyKey key by p at now finds its task (D338, store.HireKey): the key's
+// identity, and the A2A messageIds it mints in now's period of store.HireKeyWindow (the hire's own), in the period
+// before and in the period after (a replica whose clock is a little ahead may have created the task in it), each a
+// UUIDv5 of the identity and the period's number. Within the window a re-issued hire finds the task the first one
+// created; after it the key mints another messageId, so a seller never sees one messageId on two tasks, nor links two
+// of a principal's hires days apart by a reused key.
+func HireKeyOf(p auth.Principal, key string, now time.Time) store.HireKey {
+	id := keyIdentity(p, key)
+	period := now.UTC().UnixNano() / int64(store.HireKeyWindow)
+	mint := func(n int64) string { return uuid.NewSHA1(id, []byte("period:"+strconv.FormatInt(n, 10))).String() }
+	return store.HireKey{Lock: id.String(), MessageIDs: []string{mint(period), mint(period - 1), mint(period + 1)}}
 }

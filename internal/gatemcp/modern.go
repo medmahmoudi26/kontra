@@ -188,7 +188,7 @@ func (h *Handler) answerModernHire(rq *request, out HireOutcome, svc store.Servi
 			rq.result(h.plainAnswer(rq.ctx(), row, rq.p))
 			return
 		}
-		if !h.waitAndAnswer(rq, row.ID, 0) {
+		if !h.waitAndAnswerFrom(rq, row.ID, 0, seenFrom(out)) {
 			if r, err := h.deps.Log.Load(context.WithoutCancel(rq.ctx()), row.ID); err == nil {
 				row = r
 			}

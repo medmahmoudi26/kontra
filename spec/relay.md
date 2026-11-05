@@ -1630,7 +1630,7 @@ as an unknown one), and `tasks/list` lists them across services, newest first (b
 declare the tasks extension) and every `reply` wait up to 25 s for the task to end, to reach `input-required` or to be
 `quoted`, and answer what it then is: an ended task as `tasks/result` renders it (above); `input-required` as §12.4's
 reply-tool text; `quoted` at once, without waiting (§12.3); a task still running with a text naming the `status` call that follows
-it (`{taskId, after: 0, wait: 25}`, §12.6) and the A2A URL that does too (`GetTask` with the same credential). The wait is cut so that the answer is written within 50 s of the
+it (`{taskId, after: 0, wait: 25}`; `status`'s own answer names the cursor it returns, §12.6) and the A2A URL that does too (`GetTask` with the same credential). The wait is cut so that the answer is written within 50 s of the
 request's arrival, at least 1 s (D295): Admission (up to 30 s) and the task's start come first, and the MCP SDKs time
 a request out after 60 s, which on a modern `hire` cancels its task (§12.5).
 
@@ -1796,23 +1796,32 @@ principal (D303). Another buyer's task, an unhired one, an unknown id and one wh
 one answer, a `CallToolResult` with `isError` and the text `unknown task`. They read Postgres on any replica and wait
 on the replica's waker, as `tasks/result` does; none writes a `calls` row.
 
-- **`status` (D332).** The hire result as a plain `hire` answers it (§12.2: an ended task as `tasks/result` renders
-  it, a question as §12.4's reply-tool text, a quoted task with its approve URL, a running one with the text naming
-  `status`), plus, when `after` is given, `events`: the task's `task`, `status`, `artifact` and `message` rows with
+- **`status` (D332).** Without `after`, the hire result as a plain `hire` answers it (§12.2: an ended task as
+  `tasks/result` renders it, a question as §12.4's reply-tool text, a quoted task with its approve URL, a running one
+  with the text naming `status` and the cursor to follow it from). With `after`, the hire result is a summary, so that
+  paging a long history does not repeat every artifact on every page: an ended task's `text` is "The task ended
+  <state>.", its status message's text (at most 2000 characters) and, when it has artifacts, how to read one with
+  `artifact`, without `data` or `files` and with one text block; any other state's answer is short already and is as
+  above. With `after`, the answer also carries `events`: the task's `task`, `status`, `artifact` and `message` rows with
   seq > `after`, in seq order, each `{seq, kind, state?, role?, text?, data?, files?, artifactId?, name?, at}` (the state
   a task or status row sets, the role of its message, the text, data values and file links of its parts, kontra-blob
   parts as presigned links for the caller, §10.4; a raw part's `kontra:task/…` name, whose bytes `artifact` gives),
   `metadata` rows skipped. One call reads at most 50 rows or about 256 KiB of their payloads; `more` is true when it
-  was cut. `cursor` is the last seq read, else (without `after`) the log's tail; the content carries `{cursor,
-  events?, more?}` as a text block too, for a client that reads only content. With `wait` > 0, a task that has not
-  ended and whose log holds nothing after `after` (or after its tail when `after` is absent) is first waited for, on
-  the waker, until a row lands or `wait` elapses, cut by D295's rule (the answer within 50 s of the request). So
-  `status {after: 0}` is the history and `status {after: <cursor>, wait: 25}` in a loop is the resubscribe: a client
-  that lost its connection, or restarted, resumes from its cursor, and the task never noticed (it runs in
-  `TaskLifecycle`, §14).
+  was cut. `cursor` is the last seq read, else the log's tail; an `after` beyond the tail (another task's cursor, a
+  mistyped number) is read as the tail, so a cursor never skips a row that lands later. The content carries `{cursor,
+  events?, more?}` as a text block too, for a client that reads only content. With `wait` > 0, a task that has
+  neither ended nor asked a question (at `input-required` only this principal's `reply` moves it, so `status` answers
+  at once) and whose log holds no `task`, `status` or `artifact` row after `after` (or after its tail when `after` is
+  absent) is first waited for, on the waker, until such a row lands or `wait` elapses, cut by D295's rule (the answer
+  within 50 s of the request); a `message` row (the principal's own reply) or a `metadata` row does not end the wait.
+  The task is then read and scoped again: a service that stopped being served to the principal during the wait is
+  `unknown task`. So `status {after: 0}` is the history and `status {after: <cursor>, wait: 25}` in a loop is the
+  resubscribe: a client that lost its connection, or restarted, resumes from its cursor, and the task never noticed
+  (it runs in `TaskLifecycle`, §14).
 - **`tasks` (D333).** The principal's `hire` tasks, newest first by `status_at` as `tasks/list`, 50 a page, through
-  `tasks_hired`; `nextCursor` is an opaque keyset position that grants nothing. One request reads at most 1000 rows
-  (as `search`, D293): one that reaches the bound answers what matched, fewer than 50 or none, with `nextCursor` at
+  `tasks_hired`; `nextCursor` is an opaque keyset position that grants nothing, and the keyset is always the index
+  condition (a first page starts above every task, never at a null that a generic plan could not use). One request
+  reads at most 1000 rows (as `search`, D293): one that reaches the bound answers what matched, fewer than 50 or none, with `nextCursor` at
   the last row read. `service` filters by ref (one the principal cannot see matches nothing), `contextId` by context,
   `state` by A2A state (a quoted task is `TASK_STATE_INPUT_REQUIRED` on the wire, §5.1), `active` (not ended) or
   `ended`. An entry is `{taskId, service, contextId, state, statusAt, text}`, `text` the status message's text (a
@@ -1839,21 +1848,24 @@ on the replica's waker, as `tasks/result` does; none writes a `calls` row.
   `/mcp` request delivers nothing itself: delivery stays the lifecycle's (§10.2).
 - **Progress (D339).** A `tools/call` of `hire`, `reply` or `status` with `wait` whose `params._meta.progressToken` is
   a string or an integer, and whose request accepts `text/event-stream`, is answered on an SSE response stream: one
-  `notifications/progress {progressToken, progress, message}` for each `task`, `status` and `artifact` row that lands
-  while the call waits (`progress` from 1, increasing; `message` the status message's text, else the state, or
-  `artifact <name>`), then the result, with no event ids (§12.3). Both eras carry it: MCP 2025-11-25 and 2026-07-28
+  `notifications/progress {progressToken, progress, message}` for each `task`, `status` and `artifact` row of the
+  call's span (`progress` from 1, increasing; `message` the status message's text, else the state, or `artifact
+  <name>`; a message the same as the one before is not sent again), then the result, with no event ids (§12.3). The
+  span is a new task's rows from its creation, a reply's turn's from the version it read, and, for a `hire` answered
+  with an existing task (a retry, a re-issued keyed hire) or a `status` with `wait`, the rows after the call's start
+  (its tail, or its cursor): rows already in the log when the call came are history, which `status` gives as events. Both eras carry it: MCP 2025-11-25 and 2026-07-28
   let a server send notifications related to a request on that request's response stream, progress among them.
   Without a progress token nothing changes.
 - **`describe` (D339).** `describe` adds `capabilities`, normalized: for an A2A service from its served card,
   `{streaming, pushNotifications, inputModes, outputModes, skills: [{id, name, description, tags, examples,
   inputModes?, outputModes?}], extensions: [{uri, required}], inputSchema?}`, `inputSchema` the `params.schema` of the
   card's `https://kontra.sh/ext/input-schema/v1` entry ([`ext-input-schema.md`](ext-input-schema.md): the `hire`
-  message then carries `{parts: [{data: {…}}]}`); for an MCP service `{tools, toolsCached}`, the number of tools
-  `describe` shows. The full card stays beside it.
+  message then carries `{parts: [{data: {…}}]}`); for an MCP service `{tools?, toolsCached}`, `tools` the number of
+  tools `describe` shows, present only when the list is cached (before the first drain a count of 0 would read as a
+  service without tools). The full card stays beside it.
 - **MCP services.** They are called directly at `/mcp/<ref>` (D272). A `call` tool that relays one `tools/call` through
   `/mcp` was not built: the relay never translates between eras and a legacy upstream needs a session the gate would
-  hold on the principal's behalf, which nothing decides yet (D339,
-  [`CONFLICT-mcp.md`](../docs/CONFLICT-mcp.md)).
+  hold on the principal's behalf, which nothing decides yet (D339).
 
 ## 13. Hook points
 
@@ -2226,7 +2238,7 @@ met, are D297.
 | `gate_mcp_reply` | §12.4 (D272, D274), with a seller that asks one question: a legacy client that declared form elicitation sees `input_required` and one `elicitation/create` with the `reply` schema on `tasks/result`, whose `accept` reaches the same upstream task, and `decline` leaves the task waiting; a client without it sees `working`, the question, `(answer with the reply tool, taskId <id>)` and `sh.kontra/input-required`, and `reply` answers the new state; `reply` to a task that is not `input-required` is `isError` and forwards nothing |
 | `gate_mcp_modern` | §12.5 (D269, D274, D295): a 2026-07-28 client gets the gate's `server/discover`; a `hire` declaring the tasks extension is answered in line within 2 s or with `CreateTaskResult`; a client that closes its stream during the wait gets no answer and its task is `canceled` within 10 s, a quoted one stays `quoted` and the re-issued `hire` answers it; a quoted one is `working` with the URL and no `-32042`; a question is `input_required` with one gate-keyed `inputRequests` entry that `tasks/update` answers once; a `tasks/update` on a quoted task, and one with a key that is not an outstanding gate key, is ignored (an empty result, nothing reaches the seller, a quoted task stays `quoted`); `tasks/result` and `tasks/list` are `-32601`; a legacy request without a session is `400` with `-32000`; the answers are the same from either replica |
 | `gate_mcp_oauth` | §12.1 (D276, D296), against an in-repository authorization server: a request without a credential to `/mcp`, to an existing `/mcp/{svc}` and to an unknown one is `401` with `resource_metadata` naming that route's RFC 9728 document, whose `resource` is the route's canonical URI, while a service whose `allow:` admits `anonymous` serves it; a token for `/mcp` is accepted there (`via = mcp` on its tasks and sessions) and is `401` with `error="invalid_token"` on `/mcp/{svc}` and `401` on the A2A routes; an expired token, another issuer, an HMAC or `none` algorithm and a bad signature are `401`; a rotated key is fetched once (its `kid`'s refetch comes at most once a minute after the last fetch); an API key is still accepted |
-| `gate_mcp_tools` | §12.6 (D332 to D339), with the official MCP Go SDK as the client, against a local gate with an enrolled node hosting an example A2A seller and `examples/mcp/everything`: `tools/list` gives every tool its schemas; `describe` gives the seller's `capabilities` and the MCP service's tool count; `hire` with an `idempotencyKey` twice is one task, and the key with another message is `isError`; `status {after: 0}` is the task's history and `status {after: <cursor>, wait: 25}` follows it to its end, with `notifications/progress` when the call carries a progress token; `tasks` lists it, by context and state; `artifact` gives one artifact in full; `push_set` refuses a loopback URL and stores a public one, `push_list` and `push_delete` show and remove it; `cancel` cancels a running task and refuses an ended one; `reply` to an ended task names `hire` with its `contextId`, and that `hire` is a new task in the same context |
+| `gate_mcp_tools` | §12.6 (D332 to D339), with the official MCP Go SDK as the client, against a local gate with an enrolled node hosting an example A2A seller and `examples/mcp/everything`: `tools/list` gives every tool its schemas; `describe` gives the seller's `capabilities` and the MCP service's tool count; `hire` with an `idempotencyKey` twice is one task, and the key with another message is `isError`; `status {after: 0}` is the task's history and `status {after: <cursor>, wait: 25}` in a loop follows a slow task to its end, with `notifications/progress` when the call carries a progress token; `tasks` lists it, by context and state; `artifact` gives one artifact in full; `push_set` refuses a loopback URL and stores a public one, `push_list` and `push_delete` show and remove it; `cancel` cancels a running task and refuses an ended one; `reply` to an ended task names `hire` with its `contextId`, and that `hire` is a new task in the same context |
 | `tck_jsonrpc`, `tck_rest`, `tck_behind_caddy` | §2, §3, §9 against the pinned TCK, expected failures and expected skips in `test/tck/expected-failures.txt`, each with its reason, per variant and binding and enforced both ways (an unlisted skip of the run's binding fails the run), each test's prerequisite tasks new ones (fresh TCK message ids per test, so cancel, subscribe and history run through the gate; D291); run by `make tck` (D279): `tck_jsonrpc` and `tck_rest` on the direct and the tunnel backend, bare, and `tck_behind_caddy` on the direct backend behind `examples/front/caddy`; nightly also with an API key (`VARIANT=auth`) |
 | tunnel and sealing tests | [`tunnel.md`](tunnel.md) §16, [`ext-sealed.md`](ext-sealed.md) §9 |
 

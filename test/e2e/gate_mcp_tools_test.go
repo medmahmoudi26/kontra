@@ -3,6 +3,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,10 +26,11 @@ import (
 //   - hire with an idempotencyKey twice is one task; the key with another message is isError and creates nothing;
 //   - status {after: 0} is the task's history (its artifacts' ids among them); artifact gives one of them in full;
 //   - a slow hire with a progress token gets notifications/progress, then the hire result naming status; status {after:
-//     <cursor>, wait} waits and answers nothing new; tasks lists it as active, the completed one by its context;
+//     <cursor>, wait} waits and answers nothing new; status {after: <cursor>, wait: 25} in a loop follows it to its end
+//     while cancel ends it (the hire result, no error); tasks lists both as ended, the completed one by its context;
 //   - push_set refuses a loopback URL and stores a public one (on an ended task: D111, nothing is delivered), push_list
 //     shows it without its token, push_delete removes it;
-//   - cancel ends the slow task (the hire result, no error) and refuses it once ended;
+//   - cancel refuses the slow task once ended;
 //   - reply to an ended task names hire with its contextId, and that hire is a new task in the same context; a question
 //     is answered with reply.
 func TestGateMCPTools(t *testing.T) {
@@ -102,13 +104,22 @@ type toolResult struct {
 
 func (c *goSDKClient) call(t *testing.T, ctx context.Context, name string, args map[string]any, progress any) toolResult {
 	t.Helper()
+	out, err := c.tryCall(ctx, name, args, progress)
+	if err != nil {
+		t.Fatalf("%s %v: %v", name, args, err)
+	}
+	return out
+}
+
+// tryCall is call, its error returned (a goroutine's call).
+func (c *goSDKClient) tryCall(ctx context.Context, name string, args map[string]any, progress any) (toolResult, error) {
 	p := &mcp.CallToolParams{Name: name, Arguments: args}
 	if progress != nil {
 		p.SetProgressToken(progress)
 	}
 	res, err := c.s.CallTool(ctx, p)
 	if err != nil {
-		t.Fatalf("%s %v: %v", name, args, err)
+		return toolResult{}, err
 	}
 	out := toolResult{isError: res.IsError}
 	for _, ct := range res.Content {
@@ -120,7 +131,7 @@ func (c *goSDKClient) call(t *testing.T, ctx context.Context, name string, args 
 		b, _ := json.Marshal(res.StructuredContent)
 		_ = json.Unmarshal(b, &out.structured)
 	}
-	return out
+	return out, nil
 }
 
 func str(m map[string]any, k string) string { s, _ := m[k].(string); return s }
@@ -155,7 +166,9 @@ func (c *goSDKClient) run(t *testing.T, ctx context.Context, h *Harness, version
 		t.Fatalf("describe kinds: %+v", d)
 	}
 	d = c.call(t, ctx, "describe", map[string]any{"service": "everything"}, nil)
-	if caps, _ := d.structured["capabilities"].(map[string]any); d.isError || caps["tools"] == nil || caps["toolsCached"] == nil {
+	// A count only from a cached list (the first describe of a fresh gate starts the drain and has none).
+	if caps, _ := d.structured["capabilities"].(map[string]any); d.isError || caps["toolsCached"] == nil ||
+		(caps["toolsCached"] == true) != (caps["tools"] != nil) || (caps["tools"] != nil && caps["tools"].(float64) < 1) {
 		t.Fatalf("describe everything: %+v", d)
 	}
 
@@ -218,10 +231,54 @@ func (c *goSDKClient) run(t *testing.T, ctx context.Context, h *Harness, version
 		t.Fatalf("status with wait on a quiet task: %+v after %v", st, time.Since(began))
 	}
 
-	// tasks: the slow one active, the completed one by its context.
-	ls := c.call(t, ctx, "tasks", map[string]any{"state": "active"}, nil)
-	if tasks, _ := ls.structured["tasks"].([]any); ls.isError || !containsTask(tasks, slowID) || containsTask(tasks, task) {
-		t.Fatalf("tasks active: %+v", ls)
+	// Follow the slow task to its end: status {after: <cursor>, wait: 25} in a loop, while cancel ends it. Each call
+	// waits until a status row lands (the waker), then answers it with the cursor to ask from next.
+	type followed struct {
+		state  string
+		events []any
+		calls  int
+		err    error
+	}
+	done := make(chan followed, 1)
+	go func() {
+		f := followed{}
+		cur := cursor
+		for f.calls < 5 {
+			f.calls++
+			r, err := c.tryCall(ctx, "status", map[string]any{"taskId": slowID, "after": cur, "wait": 25}, nil)
+			if err != nil || r.isError {
+				f.err = fmt.Errorf("status: %+v %v", r, err)
+				break
+			}
+			ev, _ := r.structured["events"].([]any)
+			f.events = append(f.events, ev...)
+			cur, f.state = r.structured["cursor"], str(r.structured, "state")
+			if f.state == "TASK_STATE_CANCELED" {
+				break
+			}
+		}
+		done <- f
+	}()
+	time.Sleep(time.Second)
+	cn := c.call(t, ctx, "cancel", map[string]any{"taskId": slowID}, nil)
+	if cn.isError || str(cn.structured, "state") != "TASK_STATE_CANCELED" {
+		t.Fatalf("cancel: %+v", cn)
+	}
+	f := <-done
+	ended := false
+	for _, e := range f.events {
+		if ev := e.(map[string]any); str(ev, "kind") == "status" && str(ev, "state") == "TASK_STATE_CANCELED" {
+			ended = true
+		}
+	}
+	if f.err != nil || f.state != "TASK_STATE_CANCELED" || !ended || f.calls > 3 {
+		t.Fatalf("following the slow task to its end: %+v", f)
+	}
+
+	// tasks: the completed one by its context.
+	ls := c.call(t, ctx, "tasks", map[string]any{"state": "ended"}, nil)
+	if tasks, _ := ls.structured["tasks"].([]any); ls.isError || !containsTask(tasks, slowID) || !containsTask(tasks, task) {
+		t.Fatalf("tasks ended: %+v", ls)
 	}
 	ls = c.call(t, ctx, "tasks", map[string]any{"contextId": ctxID}, nil)
 	if tasks, _ := ls.structured["tasks"].([]any); ls.isError || len(tasks) != 1 || !containsTask(tasks, task) {
@@ -247,11 +304,7 @@ func (c *goSDKClient) run(t *testing.T, ctx context.Context, h *Harness, version
 		t.Fatalf("push_delete: %+v", del)
 	}
 
-	// cancel: the slow task canceled, the answer no error; again, refused.
-	cn := c.call(t, ctx, "cancel", map[string]any{"taskId": slowID}, nil)
-	if cn.isError || str(cn.structured, "state") != "TASK_STATE_CANCELED" {
-		t.Fatalf("cancel: %+v", cn)
-	}
+	// cancel again: refused.
 	if cn = c.call(t, ctx, "cancel", map[string]any{"taskId": slowID}, nil); !cn.isError || cn.text != "the task already ended (canceled)" {
 		t.Fatalf("cancel of an ended task: %+v", cn)
 	}

@@ -933,6 +933,18 @@ func (l *Log) Tail(ctx context.Context, taskID uuid.UUID) (int64, error) {
 	return tail, nil
 }
 
+// CarriedTail returns the seq of the task's last task, status or artifact row (the kinds an A2A stream carries,
+// EventKind.Carried), 0 when it has none: what status's wait waits for (relay.md §12.6, D332), which a message row (the
+// principal's own reply) or a metadata row does not move.
+func (l *Log) CarriedTail(ctx context.Context, taskID uuid.UUID) (int64, error) {
+	var tail int64
+	if err := l.db.QueryRow(ctx, `select coalesce(max(seq), 0) from kontra.task_events
+		where task_id = $1 and kind in ('task', 'status', 'artifact')`, taskID).Scan(&tail); err != nil {
+		return 0, fmt.Errorf("store: carried tail of task %s: %w", taskID, err)
+	}
+	return tail, nil
+}
+
 // TerminalSeq returns the seq of the task's terminal row, 0 while it is not terminal. After the terminal
 // row only message and metadata rows are ever written (spec §5.1), so it is the last task, status or
 // artifact row of a terminal task.
