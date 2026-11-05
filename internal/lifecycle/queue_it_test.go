@@ -103,7 +103,7 @@ func (d *fakeDispatch) Dispatch(ctx context.Context, in DispatchInput) (Dispatch
 	}
 	tr := script[k]
 	id, wid := uuid.MustParse(in.TaskID), uuid.MustParse(in.WorkItemID)
-	if err := d.log.ConsumeWorkItem(ctx, wid, id); err != nil && !(errors.Is(err, store.ErrWorkItemConsumed) && in.N > 1) {
+	if err := d.log.ConsumeWorkItem(ctx, wid, id); err != nil && !(errors.Is(err, store.ErrWorkItemConsumed) && (in.N > 1 || in.Resume)) {
 		return DispatchResult{}, err
 	}
 	wi, err := d.log.LoadWorkItem(ctx, wid, id)

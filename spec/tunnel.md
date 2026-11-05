@@ -724,8 +724,8 @@ node's filesystem exposes.
   cli_version, connected_at, last_ping_at)`. It updates `last_ping_at` every 60 s (not per ping) and deletes the
   row when the session closes.
 - **One session per key per gate.** A completed handshake for a key that already has a non-draining session at
-  this gate supersedes it: the gate closes the older session (its dispatches fail `tunnel_lost`, its row is
-  deleted). The older is the earlier handshake, by session id (UUIDv7, minted at the challenge): a registration
+  this gate supersedes it: the gate closes the older session (its dispatches, after their first upstream task id,
+  resume on the newer one, [`relay.md`](relay.md) §6.4; its row is deleted). The older is the earlier handshake, by session id (UUIDv7, minted at the challenge): a registration
   that finds a newer session of its key on a replica that is not draining inserts nothing and closes (D139). The
   replica that supersedes a session another replica holds tells it with `NOTIFY kontra_tunnel, 'session:<id>'` in
   the same transaction; an admission's transaction sends `'enrolled:<key_id>/<tenant_id>/<service>'` on the same
@@ -802,8 +802,12 @@ The node answers nothing on it. Unknown messages are ignored.
 
 **Reconnect.** After any close other than `revoked`, the node redials with the same key, backing off
 exponentially from 1 s to 60 s with full jitter, reset after a session that lived 60 s. It never learns which
-tasks it was serving and holds no task state ([`relay.md`](relay.md) §6.4: a task whose session is lost after its
-first upstream task id fails `tunnel_lost`).
+tasks it was serving and holds no task state: the gate waits for it. A task whose session is lost after its first
+upstream task id waits `task.reattach_grace` (15 minutes by default) for a session of the same key, or of a key it
+was rotated to (§12), and resumes on it; its caller is told it waits ([`relay.md`](relay.md) §6.4, D340). The gate
+never dials the node. `kontra connect` prints that it lost the gate and is reconnecting with the next wait, each
+failed attempt with the next wait, and when it is back after how long (D349), a wait under a second in milliseconds
+("at once" for none); the services of the welcome only when they changed.
 
 Front proxies must not cut the tunnel on reload: the Caddy example sets `stream_close_delay`; on Kubernetes the
 gate sits behind an L4 load balancer (TLS at the gate) or a Gateway API route with WebSocket timeouts of at least
@@ -847,7 +851,7 @@ compressed where a row waits on a clock, in the tests' own configuration.
 
 | Test | Expected |
 |---|---|
-| `tunnel_kill` | §11, §13; [`relay.md`](relay.md) §6.4: SIGKILL the node mid-task; the task fails `tunnel_lost` once an upstream task exists; the node re-registers within 60 s; the next task succeeds |
+| `tunnel_kill` | §11, §13; [`relay.md`](relay.md) §6.4: SIGKILL the node mid-task; with `task.reattach_grace` shorter than the restart, the task fails `tunnel_lost` once an upstream task exists, after the grace; the node re-registers within 60 s; the next task succeeds. Restarted within the grace, the task resumes: [`relay.md`](relay.md) §16's `tunnel_reattach` |
 | `sidecar_not_a_proxy` | §8.2–§8.3: a foreign `Host`, an absolute URL, a `..` or encoded path outside the base (M2: the root base, D123), `CONNECT`, `Upgrade`, and a `url` part pointing at a private address all reach only the configured target or are refused, and the node dials nothing else |
 | `key_scope` | §5, §8.1; [`relay.md`](relay.md) §6.1 |
 | `replica_kill` | §11; [`relay.md`](relay.md) §14.2 |

@@ -131,6 +131,14 @@ func (a *Agent) Start(ctx context.Context) (string, error) {
 		return "", err
 	}
 	a.base = "http://" + l.Addr().String()
+	if err := a.serve(ctx, l); err != nil {
+		return "", err
+	}
+	return a.base, nil
+}
+
+// serve serves the agent on l until ctx ends or Close is called.
+func (a *Agent) serve(ctx context.Context, l net.Listener) error {
 	mux := http.NewServeMux()
 	if a.cfg.Legacy025 {
 		card := fmt.Sprintf(Legacy025Card, a.base+"/")
@@ -154,13 +162,16 @@ func (a *Agent) Start(ctx context.Context) (string, error) {
 			mux.Handle("POST /rpc", a2asrv.NewJSONRPCHandler(a.handler))
 		}
 	}
-	a.srv = &http.Server{Handler: a.record(mux), ReadHeaderTimeout: 10 * time.Second}
-	go func() { _ = a.srv.Serve(l) }()
+	srv := &http.Server{Handler: a.record(mux), ReadHeaderTimeout: 10 * time.Second}
+	a.mu.Lock()
+	a.srv = srv
+	a.mu.Unlock()
+	go func() { _ = srv.Serve(l) }()
 	go func() {
 		<-ctx.Done()
 		a.Close()
 	}()
-	return a.base, nil
+	return nil
 }
 
 // Close stops serving and ends every running task's execution.
@@ -179,6 +190,30 @@ func (a *Agent) Close() {
 			_ = srv.Close()
 		}
 	}
+}
+
+// Restart stops the agent as Close does and serves a new instance at the same URL, with an empty task store: an agent
+// that restarted and lost every task it was running (tunnel_reattach (d): a re-attach then gets TaskNotFound). The
+// counters and the recorded requests are kept.
+func (a *Agent) Restart(ctx context.Context) error {
+	a.Close()
+	a.mu.Lock()
+	a.store = taskstore.NewInMemory(nil)
+	a.handler = a2asrv.NewHandler(a, a2asrv.WithTaskStore(a.store))
+	base := a.base
+	a.mu.Unlock()
+	var l net.Listener
+	var err error
+	for range 50 { // the old listener's port is free once Shutdown returned; retry briefly all the same
+		if l, err = net.Listen("tcp", strings.TrimPrefix(base, "http://")); err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
+		return err
+	}
+	return a.serve(ctx, l)
 }
 
 // URL is the agent's base URL, empty before Start.

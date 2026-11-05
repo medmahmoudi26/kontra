@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/workqueue"
 	"github.com/google/uuid"
@@ -379,6 +380,10 @@ func (r *Replica) assemble() error {
 	// sessions hiring with that key: 401 on their later streams, {"t": "auth_revoked"} (tunnel.md §12).
 	r.revoked.Subscribe(r.tunnels.APIKeyRevoked)
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
+	// A node's session that registers wakes the tasks waiting for that node to reconnect (relay.md §6.4, D344): the
+	// signal carries ids only, and each workflow checks the session itself; a signal lost here costs the task its
+	// next periodic check, a minute at most.
+	r.tunnels.OnRegistered(r.signalReconnected)
 	// Anonymous sessions (spec/tunnel.md §6, D277): opened by the admission, their limits checked where work is
 	// created, their tenants ended and purged by every replica's sweeps. A gate without tunnel.anonymous opens none,
 	// but a multi-tenant one still applies the runtime limits to those opened before the setting was turned off, and
@@ -450,7 +455,8 @@ func (r *Replica) assemble() error {
 	})
 
 	registry := relay.NewRegistry()
-	queueOpts := lifecycle.QueueOptions{Owner: relay.CallerOwner, Push: pushStore, Hooks: snapshot}
+	grace := cfg.Task.ReattachGrace.D()
+	queueOpts := lifecycle.QueueOptions{Owner: relay.CallerOwner, Push: pushStore, Hooks: snapshot, ReattachGrace: &grace}
 	executor := r.opts.executor
 	executor.TaskBytes = cfg.Limits.TaskBytes.Int64()
 	executor.Bucket, executor.Render = r.blobs, r.render
@@ -619,6 +625,27 @@ func (r *Replica) assemble() error {
 	}
 	r.metrics = edge.NewMetrics(cfg.Metrics.Listen, http.HandlerFunc(r.serveMetrics))
 	return nil
+}
+
+// signalReconnected sends kontra.reconnected to every task waiting for the node of a session that has just become a
+// candidate (D344): the open tasks whose latest tunnel attempt, on the session's key or a key rotated to it, has a
+// first upstream task id and a recorded session that is no live candidate any more, and those that ended within
+// task.reattach_grace while their session was gone, whose workflow sends the node forward_cancel (D346).
+func (r *Replica) signalReconnected(ctx context.Context, s *tunnelgate.Session) {
+	tasks, err := r.storeLog.WaitingForKey(ctx, s.TenantID, s.KeyID, s.ID, r.cfg.Task.ReattachGrace.D())
+	if err != nil {
+		r.log.Warn("the tasks waiting for a reconnecting node were not read; their periodic check finds the session",
+			"tunnel_session", s.ID.String(), "error", err)
+		return
+	}
+	for _, id := range tasks {
+		if err := r.lifecycle.SignalReconnected(ctx, a2a.TaskID(id.String())); err != nil {
+			r.log.Warn("kontra.reconnected not sent; the task's periodic check finds the session", "task_id", id.String(), "error", err)
+		}
+	}
+	if len(tasks) > 0 {
+		r.log.Info("a node reconnected: its waiting tasks were signalled", "tunnel_session", s.ID.String(), "key_id", s.KeyID, "tasks", len(tasks))
+	}
 }
 
 // anonTenantLimits reports whether a replica applies the anonymous tenants' runtime limits (spec/tunnel.md §6.2: tasks,

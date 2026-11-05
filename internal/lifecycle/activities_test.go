@@ -670,3 +670,14 @@ func TestWriteTerminalEndAttemptAsIs(t *testing.T) {
 		}
 	}
 }
+
+func TestHumanDuration(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		15 * time.Minute: "15 minutes", time.Hour: "1 hour", 2 * time.Hour: "2 hours", 7*time.Minute + 23*time.Second: "7 minutes",
+		90 * time.Second: "90 seconds", time.Minute: "1 minute", 10 * time.Second: "10 seconds", time.Second: "1 second",
+	} {
+		if got := HumanDuration(d); got != want {
+			t.Errorf("HumanDuration(%v) = %q, want %q", d, got, want)
+		}
+	}
+}

@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1743,5 +1744,53 @@ func TestControlIgnoresUnknown(t *testing.T) {
 	}
 	if !strings.Contains(tn.logs.String(), "hiring API key") || !strings.Contains(tn.logs.String(), "another key was enrolled") {
 		t.Errorf("auth_revoked and enrolled are not logged:\n%s", tn.logs.String())
+	}
+}
+
+// The node says it lost the gate, each failed reconnect attempt with its next wait, and when it is back (tunnel.md §13,
+// D349): one line each, on stdout, and the welcome's service lines only when they changed.
+func TestRunSaysItReconnects(t *testing.T) {
+	g := newTestGate(t, nil)
+	rec := newRecorder(t)
+	tn := mustNode(t, g, testConfig(t, g.url, "", a2aServe("hello", rec.url())))
+	tn.n.backoff = Backoff{rand: func() float64 { return 0 }}
+	tn.run(t)
+	s1 := g.session(t)
+	g.adm.next(t)
+	tn.welcomed(t)
+	var refused atomic.Bool
+	g.adm.set(func(n int, req enroll.Request) (*enroll.Decision, error) {
+		if refused.CompareAndSwap(false, true) {
+			return nil, tunnel.Refuse(tunnel.CodeDraining, "draining")
+		}
+		return admitAll(req), nil
+	})
+	if err := s1.Close("the test closes the session"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 15*time.Second, "the node back", func() bool { return strings.Contains(tn.out.String(), "kontra connect: back after") })
+	out := tn.out.String()
+	for _, want := range []string{
+		"kontra connect: lost the gate " + g.url.Scheme + "://" + g.url.Host + "; reconnecting at once (tasks in flight wait for this node)\n",
+		"kontra connect: reconnect attempt 1 failed; next at once\n",
+		"(attempt 2); tasks in flight resume\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the node's output lacks %q:\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, "kontra connect: connected to"); n != 2 {
+		t.Fatalf("%d welcome lines, want 2:\n%s", n, out)
+	}
+	if n := strings.Count(out, "a2a hello  https://gate.example/agents/hello"); n != 1 {
+		t.Fatalf("the unchanged services printed %d times, want once:\n%s", n, out)
+	}
+	if strings.Contains(out, " 0s") {
+		t.Fatalf("a wait or an absence printed as 0s:\n%s", out)
+	}
+	for d, want := range map[time.Duration]string{0: "at once", 430 * time.Millisecond: "in 430ms", 12400 * time.Millisecond: "in 12s"} {
+		if got := waitText(d); got != want {
+			t.Fatalf("waitText(%v) = %q, want %q", d, got, want)
+		}
 	}
 }

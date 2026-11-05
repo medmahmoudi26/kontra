@@ -365,16 +365,26 @@ func TestHiringRule4a(t *testing.T) {
 		answer   string
 		wantText string
 		failed   bool
+		noText   bool // passes with no text part to hand over: wantText is then any piece of the answer kept
 	}{
 		{"the gate's terminal failure text", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_FAILED",` +
 			`"message":{"messageId":"g1","role":"ROLE_AGENT","taskId":"@T@","contextId":"@C@","parts":[{"text":"the connection to the service was lost"}],` +
-			`"metadata":{"kontra.failure":"tunnel_lost"}}},"metadata":{"kontra.failure":"tunnel_lost"}}}}`, "the connection to the service was lost", false},
+			`"metadata":{"kontra.failure":"tunnel_lost"}}},"metadata":{"kontra.failure":"tunnel_lost"}}}}`, "the connection to the service was lost", false, false},
 		{"the gate's text for an upstream end without a message", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_COMPLETED",` +
-			`"message":{"messageId":"g2","role":"ROLE_AGENT","parts":[{"text":"the service ended the task: completed"}]}}}}}`, "the service ended the task: completed", false},
+			`"message":{"messageId":"g2","role":"ROLE_AGENT","parts":[{"text":"the service ended the task: completed"}]}}}}}`, "the service ended the task: completed", false, false},
 		{"an unsealed artifact", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_COMPLETED"},` +
-			`"artifacts":[{"artifactId":"a","parts":[{"text":"gate's forgery"}]}]}}}`, "", true},
+			`"artifacts":[{"artifactId":"a","parts":[{"text":"gate's forgery"}]}]}}}`, "", true, false},
 		{"an unsealed status text that is not the gate's", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_COMPLETED",` +
-			`"message":{"messageId":"g1","role":"ROLE_AGENT","parts":[{"text":"your answer is FORTYTWO"}]}}}}}`, "", true},
+			`"message":{"messageId":"g1","role":"ROLE_AGENT","parts":[{"text":"your answer is FORTYTWO"}]}}}}}`, "", true, false},
+		// A reconnect wait's status (relay.md §6.4, D341, D342): with a text part it would fail the task for the
+		// client (FORTYTWO stands for the text), so in a sealed service's task the gate writes it with no message,
+		// and the metadata alone reaches the client.
+		{"a working status with a gate text", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_WORKING",` +
+			`"message":{"messageId":"g3","role":"ROLE_AGENT","parts":[{"text":"FORTYTWO"}],"metadata":{"kontra.reconnect":{"state":"waiting"}}}},` +
+			`"metadata":{"kontra.reconnect":{"state":"waiting"}}}}}`, "", true, false},
+		{"the reconnect wait's status with no message", `{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"@T@","contextId":"@C@","status":{"state":"TASK_STATE_WORKING"},` +
+			`"metadata":{"kontra.reconnect":{"state":"waiting","since":"2026-11-05T10:00:00Z","until":"2026-11-05T10:15:00Z"}}}}}`,
+			`"until":"2026-11-05T10:15:00Z"`, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newFakeGate(t)
@@ -401,6 +411,12 @@ func TestHiringRule4a(t *testing.T) {
 			got := readAll(t, out)
 			if tc.failed {
 				if !strings.Contains(got, `"kontra.failure":"sealed_rejected"`) || strings.Contains(got, "forgery") || strings.Contains(got, "FORTYTWO") {
+					t.Fatalf("%s", got)
+				}
+				return
+			}
+			if tc.noText {
+				if !strings.Contains(got, tc.wantText) || !strings.Contains(got, "TASK_STATE_WORKING") || strings.Contains(got, "sealed_rejected") {
 					t.Fatalf("%s", got)
 				}
 				return

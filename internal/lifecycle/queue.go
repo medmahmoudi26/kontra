@@ -52,6 +52,10 @@ type QueueOptions struct {
 	// Caps checks an anonymous tenant's concurrent tasks, as host and as hirer, in the transaction that creates a task
 	// (spec/tunnel.md §6.2; *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
 	Caps TaskCaps
+	// ReattachGrace is task.reattach_grace (spec §6.4, §17; D345), which a new task's workflow starts with: how long a
+	// tunnel attempt whose session is lost after its first upstream task id waits for its node. Nil starts the
+	// workflow without it (DefaultReattachGrace); zero turns the wait off.
+	ReattachGrace *time.Duration
 	// Now is the clock (tests); time.Now when nil.
 	Now func() time.Time
 }
@@ -154,8 +158,17 @@ func (q *Queue) Write(ctx context.Context, p *workqueue.Payload) (a2a.TaskID, er
 func (q *Queue) input(taskID uuid.UUID, quoteExpires *time.Time) Input {
 	return Input{
 		TaskID: taskID.String(), TimeoutSeconds: int64(q.svc.Timeout / time.Second), Retries: q.svc.Retries,
-		Hooks: q.opts.Hooks, QuoteExpiresAt: quoteExpires,
+		Hooks: q.opts.Hooks, QuoteExpiresAt: quoteExpires, ReattachGraceSeconds: graceSeconds(q.opts.ReattachGrace),
 	}
+}
+
+// graceSeconds is Input.ReattachGraceSeconds for a configured grace (nil: not set).
+func graceSeconds(d *time.Duration) *int64 {
+	if d == nil {
+		return nil
+	}
+	s := int64(max(*d, 0) / time.Second)
+	return &s
 }
 
 func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.Owner) (a2a.TaskID, error) {

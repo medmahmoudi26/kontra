@@ -164,6 +164,9 @@ func (c *Config) validateListeners(v *validator) {
 	if c.DrainTimeout <= 0 {
 		v.add("drain_timeout: must be positive")
 	}
+	if g := c.Task.ReattachGrace.D(); g < time.Second || g > MaxReattachGrace {
+		v.add("task.reattach_grace %s: want 1s to %s", g, MaxReattachGrace)
+	}
 	switch c.Tenancy {
 	case TenancySingle, TenancyMulti:
 	default:

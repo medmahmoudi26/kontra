@@ -13,8 +13,9 @@ import (
 // TestTunnelKill is tunnel_kill (spec/tunnel.md §11, §13, §16; relay.md §6.4; PRD §14's M2 gate): a node
 // N hosts `slow` (20 chunks 500 ms apart) and `delayed` (its first event 5 s late) through the Front, on
 // replica A. Task 1 streams from `slow`; once its first upstream task id is recorded and two chunks are
-// logged, N is SIGKILLed. The task fails tunnel_lost at once (no retry after the first upstream id), on its
-// one attempt, and the seller saw its message once. N's tunnels row is gone within 5 s. N is restarted with
+// logged, N is SIGKILLed. The task waits task.reattach_grace (3 s here, shorter than N's restart; the wait that N's
+// return ends is tunnel_reattach's) and fails tunnel_lost (no retry after the first upstream id), on its one attempt,
+// and the seller saw its message once. N's tunnels row is gone within 5 s. N is restarted with
 // the same HOME and its original --enroll flag (M2 plan audit, gap 1: the token its first welcome confirmed
 // is not sent again), and its key has a new session within 60 s; task 2 completes on it. Then the variant
 // before the first upstream id (retries 3): N is SIGKILLed while the `delayed` seller holds the first event
@@ -26,7 +27,8 @@ func TestTunnelKill(t *testing.T) {
 		Services: map[string]slowagent.Config{
 			"delayed": {Chunks: 4, Interval: 250 * time.Millisecond, Streaming: true, FirstEventDelay: 5 * time.Second},
 		},
-		Tunnel: map[string]TunnelService{"slow": {}, "delayed": {Retries: retries(3)}},
+		Tunnel:        map[string]TunnelService{"slow": {}, "delayed": {Retries: retries(3)}},
+		ReattachGrace: 3 * time.Second,
 	})
 	ctx := ctxFor(t, 8*time.Minute)
 	slow, delayed := h.Upstream, h.Upstreams["delayed"]
@@ -68,7 +70,8 @@ func TestTunnelKill(t *testing.T) {
 	gone := waitRowGone(t, ctx, h, first, 5*time.Second, "N was SIGKILLed")
 	t.Logf("N SIGKILLed; its tunnels row was deleted %.1f s later", gone.Seconds())
 
-	// Task 1 fails tunnel_lost: its upstream task existed (spec §6.4: no retry after the first upstream id).
+	// Task 1 fails tunnel_lost once the grace has passed: its upstream task existed (spec §6.4: no retry after the first
+	// upstream id), and its node did not come back in time.
 	state, failure, as := endedAs(t, ctx, h, task1, HeartbeatTimeout)
 	if state != "failed" || failure != "tunnel_lost" {
 		t.Fatalf("task 1 ended %s (kontra.failure %q), want failed: tunnel_lost", state, failure)

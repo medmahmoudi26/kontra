@@ -355,11 +355,13 @@ The welcome binds `translate` and keeps `search` and `fetch`; later starts need 
 that declares a service the key is not bound to, with nothing in it that enrolls it, is refused `service_denied` and
 serves nothing at all: `kontra connect` then logs how to add that service ([`spec/tunnel.md`](spec/tunnel.md) §5).
 
-The restart is not seamless. Tasks the node is running when it stops fail `tunnel_lost`, which is not retried once
-the agent has the task ([`spec/relay.md`](spec/relay.md) §6.4); the agents themselves keep running. A task that
-arrives while the node is away is retried `no_session` after 1 s, then 2 s (`task.retries`, default 2), and fails if
-the node is not back by then. To leave the running node alone, start a second `kontra connect` with an identity key
-of its own, enrolled for the new service only:
+The restart is a short pause. Tasks the node is running when it stops wait for it: their callers see a status saying
+the node disconnected, and when the node is back (the same key) within `task.reattach_grace` (15 minutes by default)
+the tasks resume on its new session; the agents themselves keep running meanwhile. A task the node does not come back
+for in time fails `tunnel_lost` ([`spec/relay.md`](spec/relay.md) §6.4). A task that arrives while the node is away is
+retried `no_session` after 1 s, then 2 s (`task.retries`, default 2), and fails if the node is not back by then. To
+leave the running node alone, start a second `kontra connect` with an identity key of its own, enrolled for the new
+service only:
 
 ```sh
 HOME=~/.kontra-translate kontra connect --gate https://gateway.kontra.sh --name laptop-translate --listen off \

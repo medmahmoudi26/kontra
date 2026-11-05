@@ -24,10 +24,11 @@ const gateLogStaleView = "node revocations: re-read failed"
 // An 'ask' task waits at input-required on node N's session on replica A. The test then takes
 // kontra.tunnel_keys in access exclusive mode, in a transaction it holds open, so that no statement reading
 // the table returns: A's re-reads fail (A logs it, and its view is stale from then on) and so would the
-// stream's read. The follow-up, sent through B, is answered after the read's 2 s and within 10 s: failed:
-// tunnel_lost on the task's one attempt, ended tunnel_lost, and the seller never receives it (no stream
-// opened). Once the lock is released, a new task completes on the same session: a refused stream does not
-// close the session.
+// stream's read. The follow-up, sent through B, opens no stream while the key cannot be read: the seller
+// never receives it, and the refused stream is a lost session, so the task waits for its node (spec §6.4's
+// reconnect wait, D340) at input-required, its attempt open, nothing logged. Once the lock is released, the
+// node's session (never closed: a refused stream does not close it) is a candidate again, the turn resumes on
+// it and the follow-up reaches the seller once and completes the task; a new task completes on the same session.
 //
 // The handoff proposed pausing all of A's Postgres (Options.PostgresProxy, Blackhole). With every statement
 // of A waiting, though, the follow-up's dispatch stops at its own first read of the task (relay.Dispatcher's
@@ -68,32 +69,57 @@ func TestTunnelStaleRevocationView(t *testing.T) {
 	})
 	t.Logf("A's re-read failed %.1f s after the lock", time.Since(locked).Seconds())
 
-	// The follow-up's stream is refused within seconds, and fails the task tunnel_lost.
+	// The follow-up's stream is refused (the key's read is bounded by 2 s), and the task waits for its node.
+	req := newMessage("while the key cannot be read")
+	req.Message.TaskID, req.Message.ContextID = waiting.ID, waiting.ContextID
+	type answer struct {
+		res a2a.SendMessageResult
+		err error
+	}
+	answered := make(chan answer, 1)
 	sent := time.Now()
-	msg, lost := followUp(t, ctx, h, b, "", waiting, "while the key cannot be read")
-	took := time.Since(sent)
-	if lost.Status.State != a2a.TaskStateFailed || lost.Metadata["kontra.failure"] != "tunnel_lost" {
-		t.Fatalf("the follow-up while A's view is stale and the key unreadable: %s %v, want failed: tunnel_lost", lost.Status.State, lost.Metadata)
+	go func() {
+		res, err := h.BuyerA().Client(t, b, "").SendMessage(ctx, req)
+		answered <- answer{res, err}
+	}()
+	time.Sleep(8 * time.Second)
+	if requestWith(h.Upstream, req.Message.ID) != nil {
+		t.Fatal("the follow-up reached the seller while the key could not be read: a stream was opened")
 	}
-	switch {
-	case took > 10*time.Second:
-		t.Fatalf("the follow-up was answered %.1f s after it was sent, want within 10 s (the key's read is bounded by 2 s)", took.Seconds())
-	case took < 1500*time.Millisecond:
-		t.Fatalf("the follow-up was refused %.1f s after it was sent: at once, not after waiting on the key's read", took.Seconds())
+	if as, err := h.Attempts(ctx, waiting.ID); err != nil || len(as) != 1 || as[0].EndedAt != nil {
+		t.Fatalf("the task's attempts %+v %v while it waits: want its one attempt open", as, err)
 	}
-	t.Logf("the follow-up failed tunnel_lost %.1f s after it was sent", took.Seconds())
-	if requestWith(h.Upstream, msg.ID) != nil {
-		t.Fatal("the follow-up reached the seller: a stream was opened")
-	}
-	// The attempt ends after the failed event that answered the follow-up (Dispatcher.settle; M2 review,
-	// robustness-1).
-	if a := endedAttempt(t, ctx, h, waiting.ID); a.Outcome != "tunnel_lost" || a.TunnelSession != sess {
-		t.Fatalf("the task's attempt %+v: want its one attempt on %s ended tunnel_lost", a, sess)
+	if state, _, err := h.TaskFailure(ctx, waiting.ID); err != nil || state != "input-required" {
+		t.Fatalf("the task while it waits: %s %v, want input-required (its question stays the status)", state, err)
 	}
 	if err := hold.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	checkHistory(t, h, waiting.ID, "e2e_tunnel_stale_revocation_view", tunnelForbidden(h)...)
+	released := time.Now()
+	var got answer
+	select {
+	case got = <-answered:
+	case <-time.After(90 * time.Second):
+		t.Fatal("the follow-up was not answered within 90 s of the lock's release")
+	}
+	if done, ok := got.res.(*a2a.Task); got.err != nil || !ok || done.Status.State != a2a.TaskStateCompleted {
+		t.Fatalf("the follow-up once the key can be read: %#v %v, want the task completed", got.res, got.err)
+	}
+	t.Logf("the follow-up completed %.1f s after it was sent, %.1f s after the lock's release", time.Since(sent).Seconds(),
+		time.Since(released).Seconds())
+	sends := 0
+	for _, r := range h.Upstream.Requests() {
+		if r.MessageID == req.Message.ID {
+			sends++
+		}
+	}
+	if sends != 1 {
+		t.Fatalf("the seller received the follow-up %d times, want once", sends)
+	}
+	if a := endedAttempt(t, ctx, h, waiting.ID); a.Outcome != "completed" || a.TunnelSession != sess {
+		t.Fatalf("the task's attempt %+v: want its one attempt, resumed on %s, completed", a, sess)
+	}
+	checkHistory(t, h, waiting.ID, "e2e_reconnect_stale_revocation_view", tunnelForbidden(h)...)
 
 	// The session was kept: a new task completes on it.
 	res, err := h.BuyerA().Client(t, b, "").SendMessage(ctx, newMessage("once the key can be read"))

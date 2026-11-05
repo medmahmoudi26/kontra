@@ -30,6 +30,8 @@ const (
 	DefaultTaskRetention  = 7 * 24 * time.Hour
 	DefaultSessionIdle    = 3600 // seconds
 	DefaultDrainTimeout   = 10 * time.Minute
+	DefaultReattachGrace  = 15 * time.Minute // task.reattach_grace (spec §6.4, §17; D345)
+	MaxReattachGrace      = 24 * time.Hour
 	DefaultAdmissionWait  = 5 * time.Second
 	MaxAdmissionWait      = 30 * time.Second // hooks.MaxAdmissionTimeout: the MCP relay's bound on a shared session decision
 	DefaultTasksMode      = TasksDurable
@@ -87,6 +89,7 @@ func Defaults() *Config {
 		Tenancy:      TenancySingle,
 		Edge:         Edge{ClientIP: ClientIP{From: ClientIPRemote}},
 		DrainTimeout: Duration(DefaultDrainTimeout),
+		Task:         GateTask{ReattachGrace: Duration(DefaultReattachGrace)},
 	}
 }
 

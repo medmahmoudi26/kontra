@@ -148,6 +148,10 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 			wait = n.backoff.Next()
 			n.logger.Info("redialing the gate after a wait", "wait", wait.Round(time.Millisecond), "err", err)
+			if !n.lostAt.IsZero() {
+				n.redials++
+				fmt.Fprintf(n.out, "kontra connect: reconnect attempt %d failed; next %s\n", n.redials, waitText(wait))
+			}
 			continue
 		}
 
@@ -193,6 +197,10 @@ func (n *Node) Run(ctx context.Context) error {
 				wait = n.backoff.Next()
 				s.log.Info("tunnel session closed: redialing after a wait", "lived", lived.Round(time.Second),
 					"wait", wait.Round(time.Millisecond))
+				// The tasks it served wait for this node to come back (relay.md §6.4): say so, briefly.
+				n.lostAt, n.redials = time.Now(), 0
+				fmt.Fprintf(n.out, "kontra connect: lost the gate %s; reconnecting %s (tasks in flight wait for this node)\n",
+					n.origin, waitText(wait))
 				break watch
 			case ev := <-s.events:
 				switch ev {
@@ -803,17 +811,29 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 	p := tunnel.Printable
 	var b strings.Builder
-	fmt.Fprintf(&b, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
+	var svc strings.Builder
 	if len(w.Services) == 0 {
-		fmt.Fprintln(&b, "  no service is served on this session")
+		fmt.Fprintln(&svc, "  no service is served on this session")
 	}
 	for _, s := range w.Services {
 		note := ""
 		if w.Anonymous != nil && slices.Contains(n.cfg.Public, s.Name) {
 			note = "  (public: anyone may call it)"
 		}
-		fmt.Fprintf(&b, "  %s %s  %s%s\n", p(s.Kind), p(s.Name), p(s.URL), note)
+		fmt.Fprintf(&svc, "  %s %s  %s%s\n", p(s.Kind), p(s.Name), p(s.URL), note)
 	}
+	back := !n.lostAt.IsZero()
+	if back {
+		// A reconnect (§13): how long the node was away, and the services only when they changed.
+		fmt.Fprintf(&b, "kontra connect: back after %s (attempt %d); tasks in flight resume\n",
+			durationText(time.Since(n.lostAt)), n.redials+1)
+		n.lostAt, n.redials = time.Time{}, 0
+	}
+	fmt.Fprintf(&b, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
+	if !back || svc.String() != n.lastWelcome || w.Anonymous != nil {
+		b.WriteString(svc.String())
+	}
+	n.lastWelcome = svc.String()
 	if a := w.Anonymous; a != nil {
 		// §6.1: an anonymous session's URLs end with it.
 		fmt.Fprintf(&b, "  anonymous session: it ends at %s (in %s); its URLs then answer 404 (kontra login keeps the services)\n",
@@ -948,4 +968,21 @@ func (n *Node) maintain(cur *session) bool {
 	}
 	old, ok := id.PendingRotation(n.origin)
 	return ok && cur != nil && !cur.retired.Load() && cur.key == old.Recipient().String()
+}
+
+// waitText is the wait before a redial as the reconnect lines say it (D349): "at once", "in 430ms" under a second
+// (the backoff's full jitter makes those common), else "in 12s".
+func waitText(d time.Duration) string {
+	if d < 10*time.Millisecond {
+		return "at once"
+	}
+	return "in " + durationText(d)
+}
+
+// durationText is d in milliseconds under a second, else in whole seconds.
+func durationText(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
 }

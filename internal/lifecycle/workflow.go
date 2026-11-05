@@ -91,6 +91,28 @@ const (
 	// 10 s whatever the upstream answers, the upstream sent §8's CancelTask through forward_cancel. Before it, no
 	// Update carried a mode, and every A2A task's cancel followed §8's table, as it still does without one.
 	changeHireMCPCancel = "hire-mcp-cancel"
+	// changeReconnect: a tunnel attempt of an A2A task whose session is lost after its first upstream task id (the
+	// dispatch's tunnel_lost, a heartbeat or schedule-to-start timeout of its replica) waits for its node to reconnect
+	// instead of failing tunnel_lost (relay.md §6.4, D340..D349): reconnect_wait logs the waiting status,
+	// reattach_session looks for a session of the same node (a kontra.reconnected signal, or a re-check every
+	// reconnectRecheck), and a resume dispatch re-attaches on it; the wait lasts task.reattach_grace and never past
+	// the deadline, at most MaxReconnects times. A cancel during the wait, or of a task whose sticky session is gone
+	// (§8's row "exists, session gone"), writes canceled at once instead of failed: tunnel_lost, and sends
+	// forward_cancel if the node comes back within the grace. Before it, those tasks failed tunnel_lost.
+	changeReconnect = "tunnel-reconnect"
+)
+
+// A reconnect wait (and a late cancel's look for the node) reads Postgres for a session of its node besides the
+// kontra.reconnected signal (D344): every reconnectRecheck for its first minute, then backing off to every
+// reconnectRecheckMax, so a lost signal costs at most a minute, never the task. Each re-check costs about 11 history
+// events; once the run's history is past reconnectHistoryBudget events it re-checks every reconnectRecheckSlow, so
+// that no grace (at most 24 h) and no number of waits brings a run near Temporal's history limit (spec §14.1).
+const (
+	reconnectRecheck       = 10 * time.Second
+	reconnectRecheckFast   = 6 // re-checks at reconnectRecheck before the backoff
+	reconnectRecheckMax    = time.Minute
+	reconnectRecheckSlow   = 10 * time.Minute
+	reconnectHistoryBudget = 10_000
 )
 
 // mcpCancelWait is how long an MCP task's cancel waits for abort or forward_cancel before it writes canceled (spec
@@ -204,6 +226,10 @@ type lc struct {
 	closed         bool
 
 	inputSeq int64 // the last kontra.input_response seq (MCP, spec §11.5 step 5): workflow state only
+
+	reconnects   int  // reconnect waits entered in this run (MaxReconnects, D343)
+	reconnectSig bool // a kontra.reconnected arrived since the wait last looked
+	lateCancels  int  // forward_cancels waiting for the node of a task canceled during a reconnect wait (D346)
 
 	pushes       map[string]bool // configs whose push_webhook this run started
 	pushPending  int
@@ -524,6 +550,12 @@ func (l *lc) signals(ctx workflow.Context) {
 		var s InputResponseSignal
 		c.Receive(ctx, &s)
 		l.inputSeq = max(l.inputSeq, s.Seq)
+	})
+	sel.AddReceive(workflow.GetSignalChannel(ctx, SignalReconnected), func(c workflow.ReceiveChannel, _ bool) {
+		// A session of the attempt's node registered (D344): the wait looks at once; it is ignored otherwise.
+		var s ReconnectedSignal
+		c.Receive(ctx, &s)
+		l.reconnectSig = true
 	})
 	sel.AddReceive(ctx.Done(), func(workflow.ReceiveChannel, bool) { stop = true })
 	for !stop {
@@ -1020,6 +1052,9 @@ func (l *lc) lostWith(ctx workflow.Context, st AttemptState, hint store.FailureR
 	tunnel := st.Backend == string(store.BackendTunnel) || l.backend == string(store.BackendTunnel)
 	if st.FirstUpstreamIDAt != nil {
 		if tunnel {
+			if l.canReconnect(ctx) {
+				return l.reconnect(ctx)
+			}
 			l.fail(ctx, store.ReasonTunnelLost, "", string(store.OutcomeTunnelLost))
 			return step{kind: stepDone}
 		}
@@ -1071,6 +1106,9 @@ func (l *lc) notStarted(ctx workflow.Context, c *call) step {
 		return l.lostWith(ctx, st, "")
 	}
 	switch {
+	case tunnel && l.canReconnect(ctx):
+		// No replica polled the session's queue: the replica holding it is gone (D343).
+		return l.reconnect(ctx)
 	case tunnel:
 		l.fail(ctx, store.ReasonTunnelLost, "", string(store.OutcomeTunnelLost))
 		return step{kind: stepDone}
@@ -1531,6 +1569,12 @@ func notGone(r ForwardCancelResult, err error) error {
 // row 2), the running dispatch, if any, is stopped (the terminal rule already refuses its appends), and the
 // caller gets the task as it is after that.
 func (l *lc) cancelSessionGone(ctx workflow.Context, op *cancelOp, c *call) {
+	if l.in.Protocol != ProtocolMCP && workflow.GetVersion(ctx, changeReconnect, workflow.DefaultVersion, 1) >= 1 {
+		// Nothing to forward: the task is canceled at once, and the node is sent the cancel if it comes back (D346).
+		l.logger.Info("cancel: the tunnel attempt's session is gone; the task is canceled", "attempt", l.n)
+		l.cancelGone(ctx, op, c, workflow.Now(ctx).Add(l.reattachGrace()))
+		return
+	}
 	l.logger.Info("cancel: the tunnel attempt's session is gone; the task fails tunnel_lost", "attempt", l.n)
 	tr := l.writeTerminal(ctx, WriteTerminalInput{State: string(store.StateFailed), Reason: string(store.ReasonTunnelLost),
 		EndAttempt: string(store.OutcomeTunnelLost), EndAttemptAsIs: true})
@@ -1571,7 +1615,7 @@ func (l *lc) ended(ctx workflow.Context) {
 	l.windowDecided = true
 	_ = workflow.Await(ctx, func() bool {
 		return l.pushPending == 0 && l.listing == 0 && l.hooksPending == 0 && len(l.held) == 0 && !l.applying &&
-			workflow.AllHandlersFinished(ctx)
+			l.lateCancels == 0 && workflow.AllHandlersFinished(ctx)
 	})
 }
 

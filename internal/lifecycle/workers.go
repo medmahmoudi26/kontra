@@ -119,6 +119,7 @@ func NewWorkers(c client.Client, cfg WorkerConfig, acts Activities) (*Workers, e
 		ActPrepare: la.Prepare, ActAttemptState: la.AttemptState, ActListPushConfigs: la.ListPushConfigs,
 		ActWriteTerminal: la.WriteTerminal, ActApplyMetadata: la.ApplyMetadata, ActTaskRef: la.TaskRef,
 		ActSubmit: la.Submit, ActAppendReviewMessage: la.AppendReviewMessage,
+		ActReconnectWait: la.ReconnectWait, ActReattachSession: la.ReattachSession,
 	} {
 		w.lifecycle.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
 	}

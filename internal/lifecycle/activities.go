@@ -655,3 +655,101 @@ func (a *LifecycleActivities) AppendReviewMessage(ctx context.Context, in Review
 	}
 	return seq, nil
 }
+
+// ReconnectText is the gate's waiting status text (D341): one sentence the buyer reads in band.
+func ReconnectText(wait time.Duration) string {
+	return "The agent's node disconnected. Waiting up to " + HumanDuration(wait) + " for it to reconnect."
+}
+
+// HumanDuration writes d for a person: whole hours in words, minutes (rounded from 2 minutes on), else seconds
+// ("15 minutes", "1 hour", "7 minutes" for 7m23s, "90 seconds").
+func HumanDuration(d time.Duration) string {
+	plural := func(n int64, unit string) string {
+		if n == 1 {
+			return "1 " + unit
+		}
+		return fmt.Sprintf("%d %ss", n, unit)
+	}
+	d = d.Round(time.Second)
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return plural(int64(d/time.Hour), "hour")
+	case d >= 2*time.Minute:
+		return plural(int64((d+30*time.Second)/time.Minute), "minute")
+	case d >= time.Minute && d%time.Minute == 0:
+		return plural(int64(d/time.Minute), "minute")
+	}
+	return plural(int64(d/time.Second), "second")
+}
+
+// ReconnectWait logs the waiting status of attempt N's reconnect wait (relay.md §6.4, D341): working, the gate's text,
+// metadata["kontra.reconnect"] = {state: waiting, since, until}; nothing for a task at input-required or
+// auth-required, whose status stays the question. Idempotent (store.LogReconnectWait), so it is retried like every
+// kontra-lifecycle activity.
+func (a *LifecycleActivities) ReconnectWait(ctx context.Context, in ReconnectWaitInput) (ReconnectWaitResult, error) {
+	id, err := parseTask(in.TaskID)
+	if err != nil {
+		return ReconnectWaitResult{}, err
+	}
+	w, err := a.Log.LogReconnectWait(ctx, id, in.Since, in.Until, ReconnectText(in.Until.Sub(in.Since)))
+	if err != nil {
+		return ReconnectWaitResult{}, taskGone(err)
+	}
+	a.logger().Info("the task waits for its node to reconnect", "task_id", id.String(), "attempt", in.N,
+		"until", in.Until.UTC().Format(time.RFC3339), "status_logged", w.Logged, "state", w.State)
+	return ReconnectWaitResult{Logged: w.Logged}, nil
+}
+
+// ReattachSession looks for a session attempt N may resume on (relay.md §6.4, D342): a connected session of the
+// attempt's node key (attempts.key_id), or of a key it was rotated to, passing §6.1's checks for the task's service
+// (key not revoked nor past a rotation's overlap, binding not revoked, a live replica that is not draining). Never
+// another node's session: another node runs another agent instance. With Bind it records the session on the attempt
+// (tunnel_session, key_id, replica_id) and answers its kontra-tunnel-<replica>, where the resume dispatch writes its
+// own fence. Gone says why none can ever come: the key and the keys it was rotated to all revoked, the binding to the
+// service revoked, or (with Bind) the attempt ended meanwhile.
+func (a *LifecycleActivities) ReattachSession(ctx context.Context, in ReattachInput) (ReattachResult, error) {
+	id, err := parseTask(in.TaskID)
+	if err != nil {
+		return ReattachResult{}, err
+	}
+	row, err := a.Log.Load(ctx, id)
+	if err != nil {
+		return ReattachResult{}, taskGone(err)
+	}
+	att, err := a.Log.GetAttempt(ctx, id, in.N)
+	if errors.Is(err, store.ErrAttemptNotFound) {
+		return ReattachResult{Gone: ReattachAttemptEnded}, nil
+	}
+	if err != nil {
+		return ReattachResult{}, err
+	}
+	if att.Backend != store.BackendTunnel {
+		return ReattachResult{Gone: ReattachAttemptEnded}, nil
+	}
+	if in.Bind && att.EndedAt != nil {
+		return ReattachResult{Gone: ReattachAttemptEnded}, nil
+	}
+	c, gone, err := a.Log.FindReattachSession(ctx, row.TenantID, row.Service, att.KeyID)
+	switch {
+	case err != nil:
+		return ReattachResult{}, err
+	case gone != "":
+		a.logger().Info("no session of the task's node can serve it again", "task_id", id.String(), "attempt", in.N,
+			"key_id", att.KeyID, "gone", string(gone))
+		return ReattachResult{Gone: string(gone)}, nil
+	case c == nil:
+		return ReattachResult{}, nil
+	}
+	if in.Bind {
+		err := a.Log.RebindAttempt(ctx, id, in.N, c.SessionID, c.KeyID, c.ReplicaID)
+		if errors.Is(err, store.ErrAttemptNotOpen) || errors.Is(err, store.ErrAttemptNotFound) {
+			return ReattachResult{Gone: ReattachAttemptEnded}, nil
+		}
+		if err != nil {
+			return ReattachResult{}, err
+		}
+		a.logger().Info("the task's node is back: resuming on its session", "task_id", id.String(), "attempt", in.N,
+			"tunnel_session", c.SessionID.String(), "replica", c.ReplicaID, "key_id", c.KeyID)
+	}
+	return ReattachResult{Queue: QueueTunnel(c.ReplicaID), SessionID: c.SessionID.String(), ReplicaID: c.ReplicaID}, nil
+}
