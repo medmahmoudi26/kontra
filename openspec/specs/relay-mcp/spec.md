@@ -546,9 +546,9 @@ gate-owned task. A `subscriptions/listen` asking for `notifications.taskIds` wit
 ### Requirement: Modern Gate-Owned Tasks
 A modern `tools/call` declaring the tasks extension, on a `durable` or `required` service whose upstream declared it,
 SHALL become a gate-owned task (Admission operation `task`); any other is a plain call, which `required` refuses
-(`-32021` or `-32601`). Unless `quoted`, the gate SHALL wait up to 2 s and answer in line,
-else with `CreateTaskResult` (`pollIntervalMs: 1000`), only after the task row commits. (`spec/relay.md` §11.12
-Gate-owned tasks; D159, D322; `mcp_modern_task`)
+(`-32021` or `-32601`). The gate SHALL wait up to 2 s and answer in line, else with `CreateTaskResult`
+(`pollIntervalMs: 1000`), only after the task row commits; an MCP task is never quoted (`spec/relay.md` §11.12;
+D159, D322, D350; `mcp_modern_task`).
 
 #### Scenario: Fast task answered in line
 - **WHEN** a modern task-declaring call's upstream completes within 2 s

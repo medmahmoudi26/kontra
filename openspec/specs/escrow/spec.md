@@ -140,18 +140,25 @@ task-augmented call is asked as `task`. (`spec/relay.md` §13.1, §11.12; D284, 
 - **THEN** the client is refused and no `mcp_sessions` row is written
 
 ### Requirement: Quotes Only For Gate-Owned Tasks
-A `quote` decision SHALL be valid only for operation `task` on a gate-owned task (an A2A task, a `hire`, or an MCP task
-of a `durable` or `required` service). For `session`, `call` or a passthrough task-augmented call it MUST be treated as
-a deny with `-32603` `priced tasks need tasks: durable`. (`spec/relay.md` §13.1; `internal/hooks/remote.go:233-236`,
-`internal/mcprelay/legacy.go:930-931`)
+A `quote` decision SHALL be valid only for operation `task` on a gate-owned A2A task or a `hire`. For an MCP task,
+`session`, `call` or a passthrough task-augmented call the gate MUST treat it as a deny with `-32603` `MCP services
+are not priced`, whatever the hook's quote holds, and forward nothing. (`spec/relay.md` §13.1; D350)
 
 #### Scenario: Quote on a plain call
 - **WHEN** the hook answers `quote` for operation `call`
-- **THEN** the client receives `-32603` `priced tasks need tasks: durable` and nothing is forwarded
+- **THEN** the client receives `-32603` `MCP services are not priced` and nothing is forwarded
 
 #### Scenario: Quote on a passthrough task
 - **WHEN** the hook answers `quote` for a task-augmented call on a `passthrough` service
-- **THEN** the client receives `-32603` `priced tasks need tasks: durable` and nothing is forwarded
+- **THEN** the client receives `-32603` `MCP services are not priced` and nothing is forwarded
+
+#### Scenario: Quote on a durable MCP task
+- **WHEN** the hook answers `quote` for operation `task` with `protocol: mcp` on a `durable` or `required` service
+- **THEN** the client receives `-32603` `MCP services are not priced`, no task is created and the upstream receives nothing
+
+#### Scenario: Quote on an A2A task
+- **WHEN** the hook answers a valid `quote` for an A2A task
+- **THEN** the task is held `quoted` with the approve URL, as before
 
 ### Requirement: Admission Never Moves Money
 Admission SHALL decide only; money MUST move only where a workflow exists, on approval or in the Lifecycle hooks, so
@@ -188,33 +195,6 @@ Update's validator MUST refuse once the task has left `quoted`. (`spec/relay.md`
 #### Scenario: Accepted quote dispatches
 - **WHEN** the operator sends `kontra.approval {accepted: true, metadata: {"kontra.escrow.status": "held"}}`
 - **THEN** the task moves to `submitted` with that metadata and its dispatch begins
-
-### Requirement: Quoted MCP Tasks
-A quoted task of `/mcp/{svc}` SHALL be shown as `working` with the approve URL in `statusMessage` and in
-`_meta["sh.kontra/approve-url"]`; a modern call is not waited on. A declined or expired quote SHALL end the task
-`canceled`, its `tasks/result` `-32603` `task cancelled` with `data["sh.kontra/canceled"]` `declined` or
-`quote_expired`, and its `calls` row `is_error = true`. (`spec/relay.md` §11.5 step 1, §11.8 case 3, §11.12 step 4,
-§13.2; D21)
-
-#### Scenario: Quoted durable MCP call
-- **WHEN** Admission quotes a task-augmented `tools/call` on a `required` service
-- **THEN** the client's `CreateTaskResult` and `tasks/get` show `working` with the approve URL in `statusMessage` and `_meta["sh.kontra/approve-url"]`
-- **AND** the upstream receives nothing until the approval
-
-#### Scenario: Declined MCP quote
-- **WHEN** the operator sends `kontra.approval {accepted: false}` for that task
-- **THEN** `tasks/result` returns `-32603` `task cancelled` with `data["sh.kontra/canceled"] = "declined"`
-
-### Requirement: Escrow On MCP Tasks
-An operator that escrows an MCP service SHALL price it `per_task` with `tasks: required`, so every call is a gate task
-Admission quotes, and SHALL render the escrow state through `mcpMeta` as `_meta["sh.kontra/escrow"] = {status, quote,
-holdId, reviewEndsAt, receipts}`. The gate SHALL render that `mcpMeta` verbatim into `CreateTaskResult`, `tasks/get`
-and `tasks/result`, and MUST NOT build it. (Cloud for the state; `spec/ext-escrow.md` §6; `spec/relay.md` §13.3; D51,
-D322)
-
-#### Scenario: Escrow state on tasks/get
-- **WHEN** a Lifecycle patch sets `mcpMeta {"sh.kontra/escrow": {"status": "held"}}` on an MCP task
-- **THEN** the client's next `tasks/get` carries that object at `_meta["sh.kontra/escrow"]`
 
 ### Requirement: Operator Metadata Rules
 The gate SHALL accept operator-written `metadata` (Admission decisions, `kontra.approval`, `kontra.annotate`,

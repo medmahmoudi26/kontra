@@ -1,22 +1,20 @@
 # listings-and-pricing Specification
 
 ## Purpose
-A listing says how one of a publisher's services is sold: its kind, visibility, MCP policy, sealing and price. It
-is a file that `kontra publish` checks and sends to the operator's control plane (Kontra Cloud), which decides what it
-accepts and writes the gate's `services` row and annotations; the gate itself holds no price. This capability covers
-the listing file, the price models, the price metadata the operator has the gate show on MCP, and the metering of
-MCP calls. `spec/schema/listing.json`, `spec/schema/price.json`, `spec/tunnel.md` §6.4, `spec/ext-escrow.md` §6 and
-`spec/relay.md` §11.4, §13.4 and §13.5 are normative. The sign-in a publish uses belongs to
-`node-enrollment-and-keys`; escrow of `per_task` prices to `escrow`; `/mcp` `search` to `gate-mcp-tools`.
+A listing says how one of a publisher's A2A services is sold: its visibility, sealing and price, `free` or `per_task`.
+It is a file that `kontra publish` checks and sends to the operator's control plane (Kontra Cloud), which decides what
+it accepts and writes the gate's `services` row and annotations; the gate itself holds no price. MCP services are not
+listed or priced (D350). This capability covers the listing file, the price models and the metering of MCP calls.
+`spec/schema/listing.json`, `spec/tunnel.md` §6.4, `spec/ext-escrow.md` §6 and `spec/relay.md` §11.4, §13.4 and §13.5
+are normative. The sign-in a publish uses belongs to `node-enrollment-and-keys`; escrow of `per_task` prices to
+`escrow`; `/mcp` `search` to `gate-mcp-tools`.
 
 ## Known limitations
-- The listing schema prices in USD only (`currency` const `USD`, metered amounts at most 6 decimals), while
-  `spec/schema/price.json` and the examples of `spec/ext-escrow.md` §6 allow any ISO 4217 code (`EUR` in the
-  examples) and 8 decimals (`spec/schema/listing.json:69`, `:83`; `spec/schema/price.json:9-10`).
+- A listing prices in USD only (`currency` const `USD`, at most 2 decimals), while an Admission `quote` may name any
+  ISO 4217 code (`EUR` in the examples of `spec/ext-escrow.md` §1); nothing ties a quote's currency to the listing's
+  (`spec/schema/listing.json`; `spec/ext-escrow.md`).
 - A listing carries no principal `allow:` list: who may call a service is the gate's `services.allow`, which the
   control plane writes, not a listing field (`spec/schema/listing.json`; `migrations/0001_init.sql:39`).
-- That a `per_session` price's `idleTimeoutSeconds` equals the service's `session_idle_s` is checked neither by the
-  CLI nor by the gate; it is the control plane's to enforce (`spec/ext-escrow.md` §6; `internal/publish/listing.go`).
 
 ## Requirements
 
@@ -36,38 +34,31 @@ refuses. (`spec/tunnel.md` §6.4; D323)
 
 ### Requirement: Listing Schema Fixtures
 The CLI's checks and `spec/schema/listing.json` SHALL agree on every fixture: `examples/listing.*.json` accepted and
-`examples/invalid/listing.*.json` refused, except the 64-glob sum of `tools.allow` and `tools.deny`, which the schema
-cannot state and the CLI MUST refuse. (`spec/tunnel.md` §6.4; D323; `TestSchemaFixtures`, `check_specs.py`)
+`examples/invalid/listing.*.json` refused. (`spec/tunnel.md` §6.4; D323, D350; `TestSchemaFixtures`, `check_specs.py`)
 
 #### Scenario: Too many globs
 - **WHEN** a listing's `tools.allow` and `tools.deny` hold 40 globs each
-- **THEN** the schema accepts it and `kontra publish` refuses it for that rule alone
+- **THEN** both the schema and `kontra publish` refuse it, because a listing has no `tools` member
+
+#### Scenario: Fixture sets agree
+- **WHEN** `make check` runs the listing fixtures through both the schema and `kontra publish --dry-run`
+- **THEN** every valid fixture is accepted and every invalid fixture is refused by both
 
 ### Requirement: A2A Listings
-A listing SHALL default to `kind: a2a`, and an A2A listing MUST NOT carry `tools` or `tasks`, which are an MCP
-service's. (`spec/schema/listing.json` `kind`, `allOf[1]`; D323)
+A listing SHALL describe an A2A service and MUST NOT carry `kind`, `tools` or `tasks`; `kontra publish` refuses each as
+an unknown member. (`spec/schema/listing.json`; D323, D350)
+
+#### Scenario: Kind on a listing
+- **WHEN** a listing carries `kind: mcp`
+- **THEN** `kontra publish` refuses it, naming `kind`, and sends nothing
 
 #### Scenario: Tools on an A2A listing
-- **WHEN** a listing without `kind` carries `tools: {deny: ["x"]}`
-- **THEN** the listing is refused (`examples/invalid/listing.tools_on_a2a.json`)
+- **WHEN** a listing carries `tools: {deny: ["x"]}`
+- **THEN** `kontra publish` refuses it, naming `tools`
 
 #### Scenario: Free A2A listing
 - **WHEN** a listing names only `service` and `price: {model: free}`
-- **THEN** it is valid, with `kind: a2a`, `visibility: public`, `sealed: off` and `published: true`
-
-### Requirement: MCP Listings
-A listing MAY set `kind: mcp`, and then MAY carry the MCP service's `tools: {allow, deny}` policy (each list at most
-64 tool globs) and its `tasks` mode (`durable`, `required`, `passthrough` or `off`). A priced MCP listing MUST NOT be
-`passthrough`, because the gate does not observe those calls. (`spec/schema/listing.json` `kind`, `allOf[1..2]`;
-`spec/relay.md` §11.5; D323)
-
-#### Scenario: Priced passthrough refused
-- **WHEN** a `kind: mcp` listing has a price other than `free` and `tasks: passthrough`
-- **THEN** the listing is refused
-
-#### Scenario: MCP listing accepted
-- **WHEN** a `kind: mcp` listing has `price: {model: free}` and `tools: {allow: ["read_*"]}`
-- **THEN** the listing is valid and its body carries `kind`, `tools` and the price
+- **THEN** it is valid, with `visibility: public`, `sealed: off` and `published: true`
 
 ### Requirement: Listing Visibility
 A listing SHALL have a `visibility` of `public` (default: listed and searched), `unlisted` (reachable by its URL,
@@ -134,16 +125,20 @@ carries the listing, and the control plane decides what it accepts. (`spec/relay
 - **THEN** no table holds a price or amount column
 
 ### Requirement: Listing Prices In USD
-A listing's `price` SHALL be an object with a required `model` (`free`, `per_task`, `per_call` or `per_session`) and
-`currency` `USD` (the default); any other currency MUST be refused. (`spec/schema/listing.json` `$defs/price`; D323)
+A listing's `price` SHALL be an object with a required `model` (`free` or `per_task`) and `currency` `USD` (the
+default); any other currency or model MUST be refused. (`spec/schema/listing.json` `$defs/price`; D323, D350)
 
 #### Scenario: Euro listing refused
 - **WHEN** a listing's price has `currency: EUR`
 - **THEN** `kontra publish` refuses it: listings are priced in USD
 
+#### Scenario: Metered model refused
+- **WHEN** a listing's price has `model: per_call` or `model: per_session`
+- **THEN** `kontra publish` refuses it and sends nothing
+
 ### Requirement: Free Price Model
-A `free` price SHALL carry no amount other than `0`, `0.0` or `0.00`, no `reviewWindowSeconds` other than 0, and MUST
-NOT carry `tools`, `freePerMonth` or `capPerMonth`. (`spec/schema/listing.json` `$defs/price`)
+A `free` price SHALL carry no amount other than `0`, `0.0` or `0.00`, and no `reviewWindowSeconds` other than 0.
+(`spec/schema/listing.json` `$defs/price`)
 
 #### Scenario: Free with an amount
 - **WHEN** a listing has `price: {model: free, amount: "1.00"}`
@@ -161,74 +156,6 @@ A `per_task` price SHALL carry an `amount` in USD above 0 with at most 2 decimal
 #### Scenario: Zero task price
 - **WHEN** a `per_task` price has `amount: "0.00"`
 - **THEN** the listing is refused (`examples/invalid/listing.zero_per_task.json`)
-
-### Requirement: Per-Task Price On MCP Services
-A `per_task` price on a `kind: mcp` listing MUST set `tasks: required`, so that every call is a gate task its quote
-covers and no plain call escapes Admission. (`spec/schema/listing.json` `allOf[3]`; `spec/ext-escrow.md` §6;
-`spec/relay.md` §11.5; D322)
-
-#### Scenario: Per-task MCP on durable
-- **WHEN** a `kind: mcp` listing has a `per_task` price and `tasks: durable`
-- **THEN** the listing is refused (`examples/invalid/listing.per_task_mcp_durable.json`)
-
-#### Scenario: Per-task MCP without tasks
-- **WHEN** a `kind: mcp` listing has a `per_task` price and no `tasks`
-- **THEN** the listing is refused (`examples/invalid/listing.per_task_mcp_no_tasks.json`)
-
-### Requirement: Per-Call Price Model
-A `per_call` price SHALL price an MCP service's calls: it MUST be on a `kind: mcp` listing and carry an `amount` in USD
-above 0 with at most 6 decimals, and MAY carry per-tool amounts in `tools` (at most 100, never `*`), `freePerMonth` and
-`capPerMonth`, which no other model may carry. Nothing is held. (`spec/schema/listing.json` `allOf[0]`, `$defs/price`;
-`spec/schema/price.json`; `spec/ext-escrow.md` §6)
-
-#### Scenario: Per-call on an A2A listing
-- **WHEN** a listing without `kind: mcp` has a `per_call` price
-- **THEN** the listing is refused (`examples/invalid/listing.per_call_on_a2a.json`)
-
-#### Scenario: Seven decimals
-- **WHEN** a `per_call` price has `amount: "0.0000001"`
-- **THEN** the listing is refused (`examples/invalid/listing.seven_decimals_per_call.json`)
-
-### Requirement: Per-Session Price Model
-A `per_session` price SHALL price an MCP service's sessions: it MUST be on a `kind: mcp` listing, carry an `amount` in
-USD above 0 with at most 6 decimals and `idleTimeoutSeconds` (1 to 604800), and MUST NOT carry `tools`,
-`freePerMonth` or `capPerMonth`. One billable session is one `mcp_sessions` row, legacy or virtual, from `created_at`
-to `closed_at`. (`spec/schema/listing.json`; `spec/schema/price.json`; `spec/ext-escrow.md` §6; `spec/relay.md` §11.12;
-D160)
-
-#### Scenario: Cap on a session price
-- **WHEN** a `per_session` price carries `capPerMonth`
-- **THEN** the listing is refused (`examples/invalid/listing.cap_per_session.json`)
-
-#### Scenario: Per-session without kind
-- **WHEN** a listing with a `per_session` price names no `kind`
-- **THEN** the listing is refused (`examples/invalid/listing.per_session_kind_absent.json`)
-
-### Requirement: Price Metadata On MCP Tools
-For a `per_call` service, the operator's control plane SHALL write the `spec/schema/price.json` object under
-`sh.kontra/price` in the service's `tool_meta` annotation (`"*"` or a tool's name), and the gate SHALL render it
-verbatim into the `_meta` of each matching `tools/list` entry, legacy and modern, and in `/mcp` `describe`. An
-upstream's own `sh.kontra/price` MUST NOT reach a client. (`spec/ext-escrow.md` §6; `spec/relay.md` §2.5, §11.3,
-§13.4; D27)
-
-#### Scenario: Operator price shown on tools
-- **WHEN** a service's annotations hold `tool_meta: {"*": {"sh.kontra/price": {"model": "per_call", "amount": "0.002", "currency": "USD"}}}`
-- **THEN** every tool in the client's `tools/list` carries that object at `_meta["sh.kontra/price"]`
-
-#### Scenario: Upstream price spoof removed
-- **WHEN** an upstream's `tools/list` entry carries `_meta["sh.kontra/price"]` and the operator wrote none
-- **THEN** the client's entry carries no `sh.kontra/price` (`mcp_meta_spoof`)
-
-### Requirement: Price Metadata On MCP Initialize
-For a `per_session` service, the operator's control plane SHALL write the price object (`model: per_session`,
-`idleTimeoutSeconds` equal to the service's `session_idle_s`) under `sh.kontra/price` in the `initialize_meta`
-annotation, and the gate SHALL merge it into the `_meta` of the `initialize` and `server/discover` results. An
-upstream's own `sh.kontra/price` there MUST NOT reach a client. (`spec/ext-escrow.md` §6; `spec/relay.md` §2.5, §11.2,
-§11.12, §13.4)
-
-#### Scenario: Session price on initialize
-- **WHEN** a service's `initialize_meta` holds `{"sh.kontra/price": {"model": "per_session", "amount": "0.50", "currency": "USD", "idleTimeoutSeconds": 900}}`
-- **THEN** the client's `initialize` result carries it at `_meta["sh.kontra/price"]`
 
 ### Requirement: Calls Rows For MCP Calls
 The gate SHALL write one `calls` row per MCP `tools/call` it relays when the response completes, reading only the tool
@@ -262,16 +189,15 @@ plain call answered by an `InputRequiredResult`. (`spec/relay.md` §11.4, §11.5
 - **WHEN** a gate-owned MCP task ends
 - **THEN** its `calls` row is written with its terminal event and has `task_id` set
 
-### Requirement: Metered Settlement Of MCP Calls
-An operator that meters MCP prices SHALL bill from the gate's `calls` and `mcp_sessions` tables only: a `per_call`
-call is billable when its row has `is_error = false`, a row with `is_error` NULL MUST NEVER be billable, and a
-`per_session` session is one `mcp_sessions` row. Settlement keys on gate state and top-level `isError`, never content;
-nothing is held, the operator invoices. (`spec/ext-escrow.md` §6; `spec/relay.md` §11.4, §11.5, §11.8, §13.5)
+### Requirement: MCP Services Are Not Listed
+The operator's control plane SHALL refuse a listing whose service is an MCP service, and an MCP service SHALL be
+free and reachable only within its tenant or team gate, as an unlisted A2A service is. Hosting it through the tunnel
+is unchanged. (Cloud; D350; kontra#22)
 
-#### Scenario: Passthrough row not billable
-- **WHEN** a `per_call` service's passthrough task-augmented call writes a `calls` row with `is_error` NULL
-- **THEN** the operator does not bill that row
+#### Scenario: Listing for an MCP service
+- **WHEN** a person publishes a listing naming a service the gate hosts as `kind: mcp`
+- **THEN** the control plane refuses it and the service stays unlisted and free
 
-#### Scenario: Failure reported as success
-- **WHEN** a `per_call` service returns failures without a top-level `isError`
-- **THEN** each such row is billable, and the caller's exposure is bounded by `capPerMonth`
+#### Scenario: MCP hosting unaffected
+- **WHEN** a node serves `--serve mcp:files=stdio:…` and a principal of the same tenant calls `/mcp/files`
+- **THEN** the call is relayed as before

@@ -36,8 +36,8 @@
 
 ## 7. Integration
 
-- [ ] 7.1 Run `make check`, the e2e suite and the TCK. Verify all pass, the `mcp_*` e2e tests stay green minus their pricing cases, and hosting an MCP server through the tunnel behaves as before.
-- [ ] 7.2 Remove the input-schema bullet from `relay-a2a`'s Known limitations and the currency and `idleTimeoutSeconds` bullets from `listings-and-pricing`'s that no longer apply (`openspec/specs/*/spec.md`, after sync). Verify `openspec validate --specs --strict` passes.
+- [x] 7.1 Run `make check`, the e2e suite and the TCK. Verify all pass, the `mcp_*` e2e tests stay green minus their pricing cases, and hosting an MCP server through the tunnel behaves as before.
+- [x] 7.2 Remove the input-schema bullet from `relay-a2a`'s Known limitations and the currency and `idleTimeoutSeconds` bullets from `listings-and-pricing`'s that no longer apply (`openspec/specs/*/spec.md`, after sync). Verify `openspec validate --specs --strict` passes.
 
 ## Workflow follow-up
 

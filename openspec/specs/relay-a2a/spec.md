@@ -5,11 +5,10 @@ The gate's A2A relay: how `kontra-gate` accepts A2A 1.0 requests from callers, a
 card per service, keeps each task's state and event log in Postgres, dispatches it to the service through a tunnel
 or a direct backend under the `TaskLifecycle` workflow, and streams, resumes, cancels and pushes it. It ends at the
 tunnel's framing (capability `tunnel`), the MCP relay (`relay-mcp`), the gate's own `/mcp` (`gate-mcp-tools`), the
-operator's hooks (`escrow`) and sealing (`sealing`). `spec/relay.md` §0–10 and §14 are normative, with
-`spec/ext-input-schema.md` for the input schema extension; decisions are cited as Dn from `docs/decisions.md`.
+operator's hooks (`escrow`) and sealing (`sealing`). `spec/relay.md` §0–10 and §14 are normative; decisions are cited as Dn
+from `docs/decisions.md`.
 
 ## Known limitations
-- `kontra connect` does not render or validate against an input schema: `spec/ext-input-schema.md` §2 and PRD §11 say a client on :7777 validates the first message's data part, but nothing under `internal/` reads the extension except `describe` on `/mcp` (`internal/gatemcp/tools.go:153`). See "Input Schema Client Validation".
 - Built-in ACME serves one replica only; several replicas need provided certificates or a front proxy until a shared certificate cache exists (`spec/relay.md` §2.2; D70).
 - Anonymous callers of one tenant share one `buyer_id`, so any of them who holds a task id can read and cancel that task (`spec/relay.md` §2.3; D20).
 
@@ -515,24 +514,3 @@ A sweep on any replica SHALL, once a minute, end tasks in `submitted` or `quoted
 #### Scenario: Lost start
 - **WHEN** a task row exists in `submitted` for over 2 minutes without a workflow
 - **THEN** it ends `failed: lifecycle_unavailable`
-
-### Requirement: Input Schema Card Entry Pass-Through
-The gate SHALL serve a seller's `https://kontra.sh/ext/input-schema/v1` entry in the served card's `capabilities.extensions` unchanged, `params.schema` and `params.mediaType` included, as an extension it does not own (`spec/ext-input-schema.md` §1; `spec/relay.md` §2.6, §3; D14).
-
-#### Scenario: Seller declares an input schema
-- **WHEN** an upstream card carries an input-schema entry with `params.schema`
-- **THEN** the served card carries the same entry, equal under JCS
-
-### Requirement: Input Schema Not Validated By The Gate
-The gate MUST NOT validate a message's data part against a service's input schema: it relays parts it does not interpret, and for a sealed service it cannot read them. Follow-up messages are not covered by the schema (`spec/ext-input-schema.md` §2; D14).
-
-#### Scenario: Data part breaking the schema
-- **WHEN** a caller's first message carries a data part that does not match the service's input schema
-- **THEN** the gate relays it to the agent unchanged
-
-### Requirement: Input Schema Client Validation
-A client that sees an input-schema entry (`kontra connect` on :7777, the Cloud console) SHALL render a form from `schema`, send the first message as one `data` part with the entry's `mediaType` (default `application/json`), optionally followed by text parts, and MUST refuse to send an object that does not validate against the schema, showing the error (`spec/ext-input-schema.md` §2; PRD §11).
-
-#### Scenario: Invalid form input
-- **WHEN** a person fills a form whose object breaks the service's input schema
-- **THEN** the client does not send the message and shows the validation error

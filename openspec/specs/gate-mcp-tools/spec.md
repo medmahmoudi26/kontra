@@ -86,18 +86,18 @@ Every tool SHALL declare `annotations.readOnlyHint` and `annotations.destructive
 - **THEN** no principal's `search` returns it, and `describe` and `hire` still reach it by ref when `allow:` admits the principal
 
 ### Requirement: Search Filtering And Paging
-`search` SHALL match `query` as a case-insensitive substring of the ref, name or description, filter `kind` and `price` by equality (`price` on the `price_model` annotation, `free` meaning none), order by ref, and answer 50 a page with an opaque keyset `nextCursor`. One request MUST read at most 1000 services, answering what it found with `nextCursor` at the last one read (`spec/relay.md` §12.2; D271, D293; test `gate_mcp_search`).
+`search` SHALL match `query` as a case-insensitive substring of the ref, name or description, filter `price` by
+equality on the `price_model` annotation (`free` meaning none), order by ref, and answer 50 a page with an opaque
+keyset `nextCursor`. It SHALL take no `kind` input. One request MUST read at most 1000 services, answering what it
+found with `nextCursor` at the last one read (`spec/relay.md` §12.2; D271, D293, D350; test `gate_mcp_search`).
 
 #### Scenario: Free filter
 - **WHEN** a principal calls `search {price: "free"}`
-- **THEN** only visible services without a `price_model` annotation are returned
+- **THEN** only visible A2A services without a `price_model` annotation are returned
 
-### Requirement: Search Lists MCP Services
-`search` SHALL return MCP services (`kind: "mcp"`) beside A2A agents under the same visibility rules, accept `kind: "mcp"` as a filter, and describe an MCP service by the operator's `search.description` annotation or else the upstream's cached `serverInfo.title` or `name`, with its `price` annotation verbatim (`spec/relay.md` §12.2; `spec/schema/mcp-tools.json#/$defs/search`; D271).
-
-#### Scenario: Filter by MCP kind
-- **WHEN** a principal calls `search {kind: "mcp"}`
-- **THEN** the result holds only the MCP services visible to it, each with `kind: "mcp"`
+#### Scenario: Kind input refused
+- **WHEN** a principal calls `search {kind: "a2a"}`
+- **THEN** the gate answers a tool error (`isError`) naming the unknown argument `kind`, as for any argument the tool does not take
 
 ### Requirement: Describe A Service
 `describe` SHALL answer only for a service `search` would return to the principal were it not hidden, else the unknown-service result. It answers the served card (A2A) or the cached, filtered, annotated `tools/list` (MCP), `sealed`, `available` and the URLs to call it directly, and MUST NOT make an upstream request per call; a cold MCP cache answers `toolsCached: false` and starts at most one drain per service per 10 minutes (`spec/relay.md` §12.2; D271; test `gate_mcp_search`).
@@ -112,13 +112,6 @@ Every tool SHALL declare `annotations.readOnlyHint` and `annotations.destructive
 #### Scenario: Seller skills
 - **WHEN** a principal describes an A2A service whose card has a skill with examples
 - **THEN** `capabilities.skills` lists it with its `examples`
-
-### Requirement: Describe Input Schema Capability
-For an A2A service whose served card carries an `https://kontra.sh/ext/input-schema/v1` entry with an object `params.schema`, `describe` SHALL include the first such schema as `capabilities.inputSchema`, and the `describe` tool's description SHALL say it shows the input schema when the service has one (`spec/relay.md` §12.6; `spec/ext-input-schema.md`; D339).
-
-#### Scenario: Seller with an input schema
-- **WHEN** a principal describes an A2A service whose card declares an input schema
-- **THEN** `capabilities.inputSchema` equals the entry's `params.schema`
 
 ### Requirement: Hire Accepts A2A Services Only
 `hire` SHALL create an ordinary gate task (`protocol = a2a`, marked `tasks.hired`) only for `kind: a2a` services. A ref of an MCP service, of a service whose sealing is required, or of one whose served card requires an extension of the seller's own (or the sealed extension) MUST be answered with a `CallToolResult` `isError` naming the route to use, and no task (`spec/relay.md` §12.2; D272, D294; test `gate_mcp_hire`).
@@ -155,13 +148,6 @@ A ref that is malformed, unknown, disabled, not admitted by the principal's `all
 #### Scenario: Not-admitted ref
 - **WHEN** `hire` names a service whose `allow:` does not admit the principal
 - **THEN** the result is `isError` with the text `unknown service`, as for a service that does not exist
-
-### Requirement: Hire Input Schema Data Part First Message
-For a service whose `describe` shows an `inputSchema`, the documented first message of a `hire` SHALL be `{parts: [{data: {…}}]}`, one data part holding an object of that schema, which the gate MUST relay without validating it against the schema (`spec/relay.md` §12.6; `spec/ext-input-schema.md` §2; `internal/gatemcp/tools.go:117-121`; test `a2ui_passthrough`).
-
-#### Scenario: Booking through an input schema
-- **WHEN** a principal hires the A2UI example seller with `{parts: [{data: <booking>}]}` matching its input schema
-- **THEN** the seller receives the data part and books from it
 
 ### Requirement: Plain Calls Wait
 A plain `hire` (no `params.task`, or a modern request without the tasks extension) and every `reply` SHALL wait up to 25 s for the task to end, reach `input-required` or be `quoted` (a quoted task answered at once); a task still running is answered with text naming the `status` call `{taskId, after: 0, wait: 25}`. The wait MUST be cut so the answer is written within 50 s of the request's arrival (`spec/relay.md` §12.2; D272, D295; test `gate_mcp_hire`).
@@ -346,3 +332,25 @@ A `tools/call` of `hire`, `reply` or `status` with `wait` that carries a string 
 #### Scenario: Hire with a progress token
 - **WHEN** a client calls `hire` with a progress token on a task that streams three statuses
 - **THEN** it receives a progress notification for each new row before the result
+
+### Requirement: Search Returns A2A Agents Only
+`search` SHALL return only `kind: a2a` services, each result still carrying `kind: "a2a"`, and MUST NOT return an MCP
+service whatever its visibility; `describe` SHALL keep answering for an MCP service the principal can reach by ref
+(`spec/relay.md` §12.2; D350; kontra#22).
+
+#### Scenario: MCP service not searched
+- **WHEN** a principal's tenant hosts an MCP service `files` and the principal calls `search {query: "files"}`
+- **THEN** the result does not hold `files`
+
+#### Scenario: MCP service still described
+- **WHEN** the same principal calls `describe` with the ref of `files`
+- **THEN** the gate answers with its tools, as before
+
+### Requirement: First Message Suggestions From Skill Examples
+`describe` SHALL be the way a client learns what to send first: it returns each skill's `examples` from the served
+card, and neither `describe` nor `hire` SHALL document or expect a typed first message. An agent that needs structured
+input asks for it in an `input-required` turn (A2UI or text) (`spec/relay.md` §12.6; D339, D350).
+
+#### Scenario: Suggested prompts
+- **WHEN** a principal describes an A2A service whose card has a skill with `examples: ["a table for two"]`
+- **THEN** `capabilities.skills` lists that skill with its `examples`, and the result carries no `inputSchema`
