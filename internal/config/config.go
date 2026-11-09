@@ -48,7 +48,6 @@ type Config struct {
 	Metrics    Metrics  `yaml:"metrics"`
 
 	Tenancy                  Tenancy  `yaml:"tenancy"`                    // "single" (default) or "multi" (§2.1)
-	CallerMetadata           []string `yaml:"caller_metadata"`            // kontra. keys callers may write (§2.5)
 	OperatorMetadataPrefixes []string `yaml:"operator_metadata_prefixes"` // §13.2
 	Push                     Push     `yaml:"push"`
 	MCP                      MCP      `yaml:"mcp"`

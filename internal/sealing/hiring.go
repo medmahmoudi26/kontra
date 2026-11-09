@@ -77,7 +77,7 @@ type Card struct {
 //     false;
 //  5. hands the local client plaintext parts with their original mediaType.
 //
-// A job's key is deleted when the job is terminal and the task's kontra.keyRetainUntil, if any, has passed; an MCP
+// A job's key is deleted when the job is terminal; an MCP
 // session's when the session closes and every task created in it is done (spec/tunnel.md §2.3).
 type Hiring struct {
 	cfg HiringConfig
@@ -209,8 +209,10 @@ type hireJob struct {
 	ContextID string    `json:"context_id,omitempty"`
 	Session   string    `json:"session,omitempty"`
 	Created   time.Time `json:"created"`
-	DeleteAt  time.Time `json:"delete_at,omitempty"` // the key goes then (terminal + kontra.keyRetainUntil)
-	Closed    bool      `json:"closed,omitempty"`    // an MCP session the client closed
+	// DeleteAt is only read: an earlier release kept a terminal job's key until the task's kontra.keyRetainUntil and
+	// wrote when here. A job file that has it is a terminal job's, and its key goes at the next sweep (D351).
+	DeleteAt time.Time `json:"delete_at,omitempty"`
+	Closed   bool      `json:"closed,omitempty"` // an MCP session the client closed
 	// IdleS is an MCP session's idle bound, the session_idle_s its gate stated at initialize (D224): its key goes once
 	// the session has had no exchange that long and its tasks are done. 0: sessionJobIdle.
 	IdleS int64 `json:"idle_s,omitempty"`
@@ -665,21 +667,6 @@ func (h *Hiring) renameJob(j *hireJob, to string) error {
 	return nil
 }
 
-// endJob deletes a job's key and state now, or records when to (kontra.keyRetainUntil); h.mu is held.
-func (h *Hiring) endJob(j *hireJob, retainUntil time.Time) {
-	now := h.cfg.Now()
-	if retainUntil.After(now) {
-		if !j.DeleteAt.Equal(retainUntil) {
-			j.DeleteAt = retainUntil
-			if err := h.saveJob(j); err != nil {
-				h.log.Warn("sealing: a job's retention was not recorded", "job", j.ID, "err", err)
-			}
-		}
-		return
-	}
-	h.dropJob(j)
-}
-
 func (h *Hiring) dropJob(j *hireJob) {
 	if err := h.cfg.Jobs.Delete(j.ID); err != nil {
 		h.log.Warn("sealing: a per-job key was not deleted", "job", j.ID, "err", err)
@@ -690,8 +677,8 @@ func (h *Hiring) dropJob(j *hireJob) {
 	h.log.Info("sealing: the job ended: its per-job key is deleted", "job", j.ID)
 }
 
-// Sweep deletes the keys whose retention (kontra.keyRetainUntil) has passed, the provisional keys of first messages
-// that never got a gate task (provisionalMaxAge), and the keys of MCP sessions whose tasks are done and that have
+// Sweep deletes the keys of jobs an earlier release recorded as terminal (hireJob.DeleteAt), the provisional keys of
+// first messages that never got a gate task (provisionalMaxAge), and the keys of MCP sessions whose tasks are done and that have
 // been idle for the session_idle_s their gate stated, or sessionJobIdle (the gate closes an idle session on its own,
 // relay.md §11.2, and a client may leave without DELETE; D224).
 func (h *Hiring) Sweep() { h.sweepJobs() }
@@ -759,7 +746,7 @@ func (h *Hiring) sweepJobs() {
 				} else if now.Sub(lj.seen) >= lj.idleBound() && lj.tasksDone() {
 					h.endSession(lj)
 				}
-			case !lj.DeleteAt.IsZero() && !now.Before(lj.DeleteAt), provisional(id) && now.Sub(lj.Created) >= provisionalMaxAge:
+			case !lj.DeleteAt.IsZero(), provisional(id) && now.Sub(lj.Created) >= provisionalMaxAge:
 				h.dropJob(lj)
 			case now.Sub(lj.seen) >= jobCacheIdle: // as the hosting side's
 				delete(h.jobs, id) // read again from its file when an answer names it
@@ -772,7 +759,7 @@ func (h *Hiring) sweepJobs() {
 		}
 		j.ID = id
 		switch {
-		case !j.DeleteAt.IsZero() && !now.Before(j.DeleteAt):
+		case !j.DeleteAt.IsZero():
 			h.dropJob(&j)
 		case provisional(id) && now.Sub(j.Created) >= provisionalMaxAge:
 			h.dropJob(&j)
@@ -1241,7 +1228,7 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 		curTask  string
 		curCtx   string
 		curJob   = job.job
-		terminal = map[string]time.Time{} // jobs ended by this answer -> keyRetainUntil
+		terminal = map[string]bool{} // jobs ended by this answer
 	)
 	refuse := func(r sealed.Reject) {
 		h.log.Debug("sealing: a part of an answer is refused (rule 4)", "reason", string(r))
@@ -1289,7 +1276,7 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 				curJob = nil
 			}
 			if curJob != nil && terminalState(kind, m) {
-				terminal[curJob.ID] = retainUntil(m)
+				terminal[curJob.ID] = true
 			}
 			return nil
 		},
@@ -1325,9 +1312,9 @@ func (h *Hiring) openA2A(job *Job, b []byte) ([]byte, *failure, error) {
 		h.log.Warn("sealing: an answer that is not an A2A 1.0 answer with exact keys is refused (rule 4)")
 		return nil, &failure{reason: sealed.RejectBadHeader, taskID: curTask, context: curCtx}, nil
 	}
-	for id, until := range terminal {
+	for id := range terminal {
 		if j := h.jobs[id]; j != nil {
-			h.endJob(j, until)
+			h.dropJob(j) // a job's key goes once the job is terminal
 		}
 	}
 	if job.job != nil && h.jobs[job.job.ID] != nil {
@@ -1647,20 +1634,6 @@ func terminalState(kind a2awire.Kind, m map[string]json.RawMessage) bool {
 		return true
 	}
 	return false
-}
-
-// retainUntil is the task's metadata["kontra.keyRetainUntil"] (RFC 3339), zero when absent.
-func retainUntil(m map[string]json.RawMessage) time.Time {
-	md, err := strictjson.Members(m["metadata"])
-	if err != nil {
-		return time.Time{}
-	}
-	s, _ := a2awire.String(md, "kontra.keyRetainUntil")
-	t, err := time.Parse(time.RFC3339Nano, s)
-	if err != nil {
-		return time.Time{}
-	}
-	return t
 }
 
 // failedStatus is the status the local client receives for a refused sealed part (rule 4).

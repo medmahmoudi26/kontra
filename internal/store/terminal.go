@@ -5,27 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aevent"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
-// Metadata keys the gate writes on a task it ends (spec §6.4, §13.2).
+// Metadata keys the gate writes on a task it ends (spec §6.4, §8).
 const (
 	MetaFailure  = "kontra.failure"
 	MetaCanceled = "kontra.canceled"
 )
 
-// Values of metadata["kontra.canceled"] (spec §8, §13.2).
-const (
-	CanceledClient       = "client"
-	CanceledDeclined     = "declined"
-	CanceledQuoteExpired = "quote_expired"
-)
+// CanceledClient is metadata["kontra.canceled"] on a task its caller canceled (spec §8). An earlier release also
+// wrote declined and quote_expired (D351 withdrew them); rows that carry them are read as they are.
+const CanceledClient = "client"
 
 // MaxPatchBytes bounds an operator metadata patch (D59: patches cross Temporal history inline, at most
 // 16 KiB).
@@ -47,9 +42,7 @@ var reasonText = map[FailureReason]string{
 }
 
 var canceledText = map[string]string{
-	CanceledClient:       "the task was canceled",
-	CanceledDeclined:     "the quote was declined",
-	CanceledQuoteExpired: "the quote expired",
+	CanceledClient: "the task was canceled",
 }
 
 // stateText is TerminalStatus's text when it is given none.
@@ -91,8 +84,8 @@ func FailedStatus(info a2a.TaskInfoProvider, reason FailureReason, text string) 
 	return TerminalStatus(info, a2a.TaskStateFailed, map[string]any{MetaFailure: string(reason)}, text)
 }
 
-// CanceledStatus is `canceled` with metadata["kontra.canceled"] = canceled (client, declined,
-// quote_expired; none when empty, or when canceled is outside that closed set).
+// CanceledStatus is `canceled` with metadata["kontra.canceled"] = canceled (client; none when empty, or when
+// canceled is outside that closed set).
 func CanceledStatus(info a2a.TaskInfoProvider, canceled, text string) *a2a.TaskStatusUpdateEvent {
 	if _, ok := canceledText[canceled]; !ok {
 		canceled = ""
@@ -116,7 +109,7 @@ type TerminalWrite struct {
 	TaskID   uuid.UUID
 	State    State         // failed or canceled (or completed/rejected relayed from an upstream answer)
 	Reason   FailureReason // for failed: metadata["kontra.failure"]
-	Canceled string        // for canceled: metadata["kontra.canceled"] = client | declined | quote_expired
+	Canceled string        // for canceled: metadata["kontra.canceled"] = client
 	Text     string        // the agent-role status message's one text part; empty: the reason's default
 }
 
@@ -257,119 +250,4 @@ func (l *Log) ApplyPatch(ctx context.Context, taskID uuid.UUID, patch, mcpMeta m
 		last = err
 	}
 	return 0, last
-}
-
-// AppendReviewMessage is the accepted review-window message of kontra.review_message (spec §7, §14.1,
-// D66): in one transaction it consumes the work item (id, taskID), and appends the caller's message from
-// it to the task's history as a `message` row, the after-terminal write the terminal rule allows. It
-// returns the row's seq.
-//
-// It is idempotent for its own item, as a retried activity needs: when an earlier call committed and its
-// answer was lost (a crash or a timeout after COMMIT), the item is consumed and its message is in the log,
-// and the call returns that row's seq again, so the handler still applies the hook's patch and dispute
-// flag (D66: they apply when the append commits). A work item that is missing or another task's is
-// ErrWorkItemNotFound; one consumed without a message of its own (by a dispatch) is ErrWorkItemConsumed;
-// either way nothing is written, and the handler answers accepted: false.
-func (l *Log) AppendReviewMessage(ctx context.Context, taskID, workItemID uuid.UUID) (int64, error) {
-	ctx, cancel := l.writeCtx(ctx)
-	defer cancel()
-	var seq int64
-	err := l.inTx(ctx, func(tx pgx.Tx) error {
-		wp, err := consumeWorkItem(ctx, tx, workItemID, taskID)
-		if errors.Is(err, ErrWorkItemConsumed) {
-			s, ok, ferr := reviewMessageSeq(ctx, tx, workItemID, taskID)
-			if ferr != nil {
-				return ferr
-			}
-			if ok {
-				seq = s
-				return nil
-			}
-		}
-		if err != nil {
-			return err
-		}
-		if wp.Request == nil || wp.Request.Message == nil || wp.Request.Message.Role != a2a.MessageRoleUser {
-			return fmt.Errorf("store: work item %s holds no caller message", workItemID)
-		}
-		msg := wp.Request.Message
-		row, err := l.load(ctx, tx, taskID, " for update")
-		if err != nil {
-			return err
-		}
-		var next *a2a.Task
-		if row.State.Terminal() {
-			next = appendHistory(row.Snapshot, msg)
-		} else if next, err = a2aevent.ApplyShallowUpdate(row.Snapshot, msg); err != nil {
-			return fmt.Errorf("store: review message for task %s: %w", taskID, err)
-		}
-		payload, err := json.Marshal(a2a.StreamResponse{Event: msg})
-		if err != nil {
-			return err
-		}
-		a, err := l.Append(ctx, tx, Write{
-			TaskID: taskID, PrevVersion: row.Version, Kind: KindMessage,
-			Snapshot: next, Payload: payload, AfterTerminalOK: true,
-		})
-		seq = a.Seq
-		return err
-	})
-	if err != nil {
-		return 0, err
-	}
-	return seq, nil
-}
-
-// reviewMessageSeq finds the message row an AppendReviewMessage of the consumed item (id, taskID)
-// committed. The item is consumed in the transaction that appends its message, so that row's created_at is
-// the item's consumed_at (both are the transaction's now()), and the row carries the item's message. ok is
-// false when there is no such row: something else consumed the item.
-func reviewMessageSeq(ctx context.Context, tx pgx.Tx, id, taskID uuid.UUID) (seq int64, ok bool, err error) {
-	var (
-		raw        []byte
-		consumedAt time.Time
-	)
-	err = tx.QueryRow(ctx, `select payload, consumed_at from kontra.work_items
-		where id = $1 and task_id = $2 and consumed_at is not null`, id, taskID).Scan(&raw, &consumedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("store: work item %s: %w", id, err)
-	}
-	wp, err := UnmarshalPayload(raw)
-	if err != nil {
-		return 0, false, err
-	}
-	if wp.Request == nil || wp.Request.Message == nil {
-		return 0, false, nil
-	}
-	rows, err := tx.Query(ctx, `select seq, payload from kontra.task_events
-		where task_id = $1 and kind = 'message' and created_at = $2 order by seq`, taskID, consumedAt)
-	if err != nil {
-		return 0, false, fmt.Errorf("store: review message of work item %s: %w", id, err)
-	}
-	type row struct {
-		seq     int64
-		payload []byte
-	}
-	found, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (row, error) {
-		var x row
-		err := r.Scan(&x.seq, &x.payload)
-		return x, err
-	})
-	if err != nil {
-		return 0, false, fmt.Errorf("store: review message of work item %s: %w", id, err)
-	}
-	for _, f := range found {
-		var logged struct {
-			Message struct {
-				ID string `json:"messageId"`
-			} `json:"message"`
-		}
-		if json.Unmarshal(f.payload, &logged) == nil && logged.Message.ID == wp.Request.Message.ID {
-			return f.seq, true, nil
-		}
-	}
-	return 0, false, nil
 }

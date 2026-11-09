@@ -157,6 +157,11 @@ func (l *Log) DeleteClosedSessions(ctx context.Context, now time.Time, defaultRe
 	return int(tag.RowsAffected()), nil
 }
 
+// stateQuotedLeftover is tasks.state 'quoted', which only a release before D351 wrote (the escrow quote). It is
+// not a State of the vocabulary: the orphan sweep is the one reader left, ending such a row failed:
+// lifecycle_unavailable so it cannot linger (spec §14.5; D351). The tasks.state CHECK drops it in a later migration.
+const stateQuotedLeftover State = "quoted"
+
 // OrphanCandidate is a task the orphan sweep checks for a workflow: its id and creation time, which is also
 // the sweep's keyset cursor.
 type OrphanCandidate struct {
@@ -164,7 +169,8 @@ type OrphanCandidate struct {
 	CreatedAt time.Time
 }
 
-// OrphanCandidates returns up to limit tasks in submitted or quoted created before olderThan, in creation
+// OrphanCandidates returns up to limit tasks in submitted (or quoted, a state only an earlier release wrote: D351
+// keeps the sweep ending such a leftover row) created before olderThan, in creation
 // order after the cursor after (the zero value starts at the oldest) (spec §14.5). The sweep checks each
 // one's workflow and ends those that have none with FailOrphan. A task that waits in submitted for a long
 // time while its workflow runs is a candidate at every pass; the cursor lets a sweep with a per-pass budget
@@ -174,7 +180,7 @@ func (l *Log) OrphanCandidates(ctx context.Context, olderThan time.Time, after O
 		return nil, nil
 	}
 	rows, err := l.db.Query(ctx, `select id, created_at from kontra.tasks
-		 where terminal_at is null and state in ('submitted', 'quoted') and created_at < $1
+		 where terminal_at is null and state in ('submitted', 'quoted') and created_at < $1 -- 'quoted': D351 leftovers
 		   and (created_at, id) > ($2, $3)
 		 order by created_at, id
 		 limit $4`, olderThan, after.CreatedAt, after.ID, limit)
@@ -196,7 +202,7 @@ func (l *Log) OrphanCandidates(ctx context.Context, olderThan time.Time, after O
 // D63), written through the log like every terminal event, and in the same transaction marks the task's
 // push configs failed: no workflow will ever deliver them, and until then they would count toward the
 // buyer's delivering configs for the task's whole retention (spec §10.2). It reports whether it ended the
-// task: a task no longer in submitted or quoted (its workflow started meanwhile and moved it, or another
+// task: a task no longer in submitted or a leftover quoted (its workflow started meanwhile and moved it, or another
 // replica's sweep ended it) is left as it is. A task that does not exist is a2a.ErrTaskNotFound.
 func (l *Log) FailOrphan(ctx context.Context, taskID uuid.UUID) (bool, error) {
 	ctx, cancel := l.writeCtx(ctx)
@@ -208,7 +214,8 @@ func (l *Log) FailOrphan(ctx context.Context, taskID uuid.UUID) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if row.State != StateSubmitted && row.State != StateQuoted {
+		// stateQuotedLeftover is a row an earlier release left quoted (D351): it has no workflow to move it.
+		if row.State != StateSubmitted && row.State != stateQuotedLeftover {
 			return nil
 		}
 		// An MCP task's failure is its MCP status row with its calls row (spec §11.8 case 2).

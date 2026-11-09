@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
-	"github.com/a2aproject/a2a-go/v2/a2aevent"
-	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"go.temporal.io/sdk/temporal"
@@ -56,8 +54,8 @@ type PushConfigLister interface {
 // over the limit or with a key outside the §13.2 rules is dropped, with a metric and an audit row).
 const EventPatchRefused = "lifecycle.patch_refused"
 
-// PatchRefusals counts the operator patches apply_metadata and submit refused and dropped, by the patch's
-// source (a hook's type name, kontra.annotate, kontra.approval) and the refusal's class: the metric of
+// PatchRefusals counts the operator patches apply_metadata refused and dropped, by the patch's
+// source (a hook's type name, kontra.annotate) and the refusal's class: the metric of
 // spec §13.3, kontra_gate_operator_patches_refused_total, so a hook or control plane that keeps sending
 // refused patches raises an alert. Safe for concurrent use; the zero value is ready.
 type PatchRefusals struct {
@@ -114,7 +112,7 @@ type LifecycleActivities struct {
 	// it a tunnel service's prepare fails service_unavailable.
 	Sessions SessionPicker
 	Push     PushConfigLister // nil: no push configs are listed
-	// Rules are the §13.2 key and size rules apply_metadata and submit enforce on every operator patch,
+	// Rules are the §13.1 key and size rules apply_metadata enforces on every operator patch,
 	// and that pick the operator-written keys of a TaskRef.
 	Rules hooks.KeyRules
 	// Refusals counts the refused patches (spec §13.3's metric); nil counts nothing.
@@ -498,88 +496,8 @@ func (a *LifecycleActivities) refusePatch(ctx context.Context, taskID uuid.UUID,
 	return nonRetryable(ErrTypePatchRefused, fmt.Errorf("patch from %s refused: %s", source, class))
 }
 
-// Submit is the approval handler's submitted write (spec §13.2, §14.1): the approval's metadata as one
-// metadata event, then the task's move from quoted to submitted, at which the store fixes tasks.deadline
-// (its task.timeout clock starts, §5.2). It returns the deadline. A retry after a partial write finds the
-// task submitted and returns its deadline (or applies the same metadata patch again, which changes nothing).
-func (a *LifecycleActivities) Submit(ctx context.Context, in SubmitInput) (SubmitResult, error) {
-	id, err := parseTask(in.TaskID)
-	if err != nil {
-		return SubmitResult{}, err
-	}
-	if err := a.Rules.CheckOperatorMaps(in.Metadata, in.MCPMeta); err != nil {
-		return SubmitResult{}, a.refusePatch(ctx, id, "kontra.approval", err)
-	}
-	row, err := a.Log.Load(ctx, id)
-	if err != nil {
-		return SubmitResult{}, taskGone(err)
-	}
-	if row.State == store.StateQuoted && (len(in.Metadata) > 0 || len(in.MCPMeta) > 0) {
-		if _, err := a.Log.ApplyPatch(ctx, id, in.Metadata, in.MCPMeta); err != nil {
-			if errors.Is(err, a2a.ErrInvalidParams) {
-				return SubmitResult{}, a.refusePatch(ctx, id, "kontra.approval", err)
-			}
-			return SubmitResult{}, taskGone(err)
-		}
-	}
-	var last error
-	for range 8 {
-		row, err := a.Log.Load(ctx, id)
-		if err != nil {
-			return SubmitResult{}, taskGone(err)
-		}
-		switch {
-		case row.State.Terminal():
-			return SubmitResult{}, nonRetryable(ErrTypeTaskGone, fmt.Errorf("the task is %s", row.State))
-		case row.State != store.StateQuoted:
-			if row.Deadline == nil {
-				return SubmitResult{}, fmt.Errorf("task %s is %s without a deadline", id, row.State)
-			}
-			return SubmitResult{Deadline: row.Deadline.UTC()}, nil
-		}
-		w, err := submittedWrite(row)
-		if err != nil {
-			return SubmitResult{}, err
-		}
-		w.Timeout = time.Duration(in.TimeoutSeconds) * time.Second
-		ap, err := a.Log.Append(ctx, nil, w)
-		if err == nil {
-			if ap.Deadline == nil {
-				return SubmitResult{}, fmt.Errorf("task %s: the submitted write returned no deadline", id)
-			}
-			return SubmitResult{Deadline: ap.Deadline.UTC()}, nil
-		}
-		if !errors.Is(err, taskstore.ErrConcurrentModification) {
-			return SubmitResult{}, err
-		}
-		last = err
-	}
-	return SubmitResult{}, last
-}
-
-// submittedWrite is a quoted task's move to submitted in its protocol: an A2A status event, or an MCP status row
-// (spec §11.9), whose statusMessage, the approve URL while quoted (D21), it drops.
-func submittedWrite(row *store.TaskRow) (store.Write, error) {
-	if row.Protocol == store.ProtocolMCP {
-		return store.MCPStatusWrite(row, store.StateSubmitted, "", nil)
-	}
-	ev := a2a.NewStatusUpdateEvent(row.Snapshot, a2a.TaskStateSubmitted, nil)
-	next, err := a2aevent.ApplyShallowUpdate(row.Snapshot, ev)
-	if err != nil {
-		return store.Write{}, err
-	}
-	payload, err := json.Marshal(a2a.StreamResponse{Event: ev})
-	if err != nil {
-		return store.Write{}, err
-	}
-	return store.Write{
-		TaskID: row.ID, PrevVersion: row.Version, Kind: store.KindStatus, State: store.StateSubmitted,
-		StatusAt: store.StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
-	}, nil
-}
-
 // TaskRef builds the hooks' TaskRef from Postgres (spec §13.3): ids, the task's state and only the
-// operator-written metadata keys (the operator prefixes and kontra.keyRetainUntil), at most 16 KiB, never
+// operator-written metadata keys (under the operator prefixes), at most 16 KiB, never
 // caller or service metadata.
 func (a *LifecycleActivities) TaskRef(ctx context.Context, taskID string) (hooks.TaskRef, error) {
 	id, err := parseTask(taskID)
@@ -609,7 +527,7 @@ func (a *LifecycleActivities) TaskRef(ctx context.Context, taskID string) (hooks
 func (a *LifecycleActivities) operatorKeys(md map[string]any) map[string]any {
 	var keys []string
 	for k := range md {
-		if k == hooks.KeyRetainUntil || slices.ContainsFunc(a.Rules.OperatorPrefixes, func(p string) bool { return p != "" && strings.HasPrefix(k, p) }) {
+		if slices.ContainsFunc(a.Rules.OperatorPrefixes, func(p string) bool { return p != "" && strings.HasPrefix(k, p) }) {
 			keys = append(keys, k)
 		}
 	}
@@ -628,32 +546,6 @@ func (a *LifecycleActivities) operatorKeys(md map[string]any) map[string]any {
 		return nil
 	}
 	return out
-}
-
-// AppendReviewMessage is kontra.review_message's append (spec §7, §14.1, D66): it consumes the work item
-// and appends its message in one transaction and returns the row's seq, again when retried after an append
-// that committed. A work item that is missing, another task's, or consumed by a dispatch is
-// ErrTypeWorkItemGone: the Update answers accepted: false.
-func (a *LifecycleActivities) AppendReviewMessage(ctx context.Context, in ReviewAppendInput) (int64, error) {
-	id, err := parseTask(in.TaskID)
-	if err != nil {
-		return 0, err
-	}
-	wid, err := uuid.Parse(in.WorkItemID)
-	if err != nil {
-		return 0, nonRetryable(ErrTypeWorkItemGone, fmt.Errorf("work item id %q", in.WorkItemID))
-	}
-	seq, err := a.Log.AppendReviewMessage(ctx, id, wid)
-	switch {
-	case errors.Is(err, store.ErrWorkItemNotFound), errors.Is(err, store.ErrWorkItemConsumed):
-		return 0, nonRetryable(ErrTypeWorkItemGone, fmt.Errorf("work item %s is not available to task %s", wid, id))
-	case errors.Is(err, taskstore.ErrConcurrentModification):
-		// The terminal rule refused it (the task is not in a state that takes it): nothing was written.
-		return 0, nonRetryable(ErrTypeWorkItemGone, fmt.Errorf("task %s refused the review message", id))
-	case err != nil:
-		return 0, taskGone(err)
-	}
-	return seq, nil
 }
 
 // ReconnectText is the gate's waiting status text (D341): one sentence the buyer reads in band.

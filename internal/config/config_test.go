@@ -102,7 +102,6 @@ func TestDefaultsApplied(t *testing.T) {
 		{"temporal.address", c.Temporal.Address, "localhost:7233"},
 		{"temporal.namespace", c.Temporal.Namespace, "kontra"},
 		{"tenancy", c.Tenancy, TenancySingle},
-		{"caller_metadata", c.CallerMetadata, []string{}},
 		{"operator_metadata_prefixes", c.OperatorMetadataPrefixes, []string{}},
 		{"push.allow_private", c.Push.AllowPrivate, false},
 		{"blobs", c.Blobs, ""},
@@ -172,8 +171,7 @@ limits: { body: 1MiB, inflight_per_key: 4, rps_per_ip: 2.5, header_timeout: 3s, 
 temporal: { address: "temporal:7233", namespace: other }
 metrics: { listen: "127.0.0.1:9191" }
 tenancy: multi
-caller_metadata: [kontra.escrow.dispute]
-operator_metadata_prefixes: [kontra.escrow.]
+operator_metadata_prefixes: [kontra.op.]
 push: { allow_private: true }
 drain_timeout: 90s
 services:
@@ -461,7 +459,8 @@ func TestLoadErrors(t *testing.T) {
 		{"decimal size", head + "limits: { body: 4MB }\n", "binary units only"},
 		{"bare duration", head + "drain_timeout: 600\n", "missing unit"},
 		{"bad tenancy", head + "tenancy: shared\n", "want single or multi"},
-		{"caller_metadata outside kontra.", head + "caller_metadata: [acme.x]\n", "is not a kontra. key"},
+		// Escrow is gone (D351): caller_metadata is an unknown key like any other.
+		{"caller_metadata removed (D351)", head + "caller_metadata: [kontra.x]\n", "field caller_metadata not found"},
 		// A service could write keys under a prefix outside kontra. (§2.5 strips only kontra. keys), which
 		// TaskRef.metadata would hand the hooks as the operator's (§13.3).
 		{"operator prefix outside kontra.", head + "operator_metadata_prefixes: [acme.]\n", "is not under kontra."},
@@ -804,16 +803,16 @@ postgres: "postgres://k@db/k?pool_max_conns=7&pool_max_conn_lifetime=1h"
   link:
     kind: a2a
     backend: { tunnel: {} }
-    annotations: { search: { hidden: true, price_model: per_task } }
+    annotations: { search: { hidden: true, rank: 2 } }
 `, nil},
 		{"mcp service whose every call is a task (D322)", minimal + `
-  priced:
+  durable:
     kind: mcp
     backend: { tunnel: {} }
     tasks: required
 `, func(t *testing.T, c *Config) {
-			if c.Services["priced"].Tasks != TasksRequired || !GateOwnsTasks(c.Services["priced"].Tasks) || GateOwnsTasks(TasksPassthrough) {
-				t.Errorf("tasks = %q", c.Services["priced"].Tasks)
+			if c.Services["durable"].Tasks != TasksRequired || !GateOwnsTasks(c.Services["durable"].Tasks) || GateOwnsTasks(TasksPassthrough) {
+				t.Errorf("tasks = %q", c.Services["durable"].Tasks)
 			}
 		}},
 		{"peer hop (M3 WP-04)", minimal + `
@@ -904,8 +903,8 @@ func TestSellerKeysDecodeAsJSON(t *testing.T) {
 	if string(c.Services["hello"].SellerKeys) != `{"url":"https://seller.example.com/.well-known/jwks.json"}` {
 		t.Errorf("seller_keys {url} = %s", c.Services["hello"].SellerKeys)
 	}
-	c = parse(t, minimal+"    annotations: { search: { price: \"1.00 EUR\" }, card_extensions: [ { uri: \"https://x.example.com/ext\", required: false } ], n: 1.5, z: null }\n")
-	want := `{"card_extensions":[{"required":false,"uri":"https://x.example.com/ext"}],"n":1.5,"search":{"price":"1.00 EUR"},"z":null}`
+	c = parse(t, minimal+"    annotations: { search: { label: \"beta\" }, card_extensions: [ { uri: \"https://x.example.com/ext\", required: false } ], n: 1.5, z: null }\n")
+	want := `{"card_extensions":[{"required":false,"uri":"https://x.example.com/ext"}],"n":1.5,"search":{"label":"beta"},"z":null}`
 	if string(c.Services["hello"].Annotations) != want {
 		t.Errorf("annotations = %s\nwant %s", c.Services["hello"].Annotations, want)
 	}

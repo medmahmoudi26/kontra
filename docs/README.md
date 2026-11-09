@@ -13,8 +13,8 @@ the two architecture notes correct it after the prototypes of 21–24 October 20
 
 The specifications in [`../spec/`](../spec/) are written from the three documents above and are later
 than all of them: [`tunnel.md`](../spec/tunnel.md), [`relay.md`](../spec/relay.md),
-[`ext-escrow.md`](../spec/ext-escrow.md), [`ext-sealed.md`](../spec/ext-sealed.md) (the input-schema extension was
-withdrawn, D350), and the schema, one file per milestone
+[`ext-sealed.md`](../spec/ext-sealed.md) (the input-schema extension was withdrawn on 7 Nov, D350, and the escrow
+extension on 9 Nov, D351), and the schema, one file per milestone
 ([`0001_init.sql`](../migrations/0001_init.sql), [`0002_m3.sql`](../migrations/0002_m3.sql),
 [`0003_m4.sql`](../migrations/0003_m4.sql), [`0004_m5.sql`](../migrations/0004_m5.sql)). Where a spec differs from a document, the
 spec wins once the owner has signed it, and the difference is a numbered entry in
@@ -29,11 +29,11 @@ there (M4's, D268 onward under the M4 headings, were numbered after M3's review 
 | §4 Architecture | Topology figure replaced | "One binary" → one module, two binaries |
 | §6 Tunnel | `--to` → repeatable `--serve kind:name=target`; stdio bridge; `tunnel.key` → `identity.key` | — |
 | §8 Sealing | Key table collapses to identity key + per-job key; MCP scope (`arguments`, `content`), both-ends-nodes condition | — |
-| §9 Extensions | MCP mirrors: `_meta["kontra.escrow"]`, sealed as a server capability | — |
+| §9 Extensions | MCP mirrors: `_meta["kontra.escrow"]` (escrow withdrawn, D351), sealed as a server capability | — |
 | §10 Data model | `agents` → `services(kind, …)`; `mcp_sessions`; `tasks.protocol` | Embedded-Temporal paragraph and localhost-only rule removed; anonymous tenants with expiry |
 | §11 CLI | `kontra tunnel` + `kontra proxy` → `kontra connect`; `--console` on it | Two tables: `kontra` (connect, console, login, seal, publish) and `kontra-gate` (serve, enroll, migrate); `kontra dev` deleted |
 | §12 Security | Tests `mcp_session_cross_node`, `mcp_tool_denied`, `mcp_task_resume` | Anonymous-session abuse controls, test `anon_limits` |
-| §13 OSS vs Cloud | MCP hosting in both; listings gain `kind`; escrow only on task-shaped MCP calls | Cloud gains anonymous and free tiers; OSS gains Helm/compose team gate |
+| §13 OSS vs Cloud | MCP hosting in both; listings gain `kind`; escrow only on task-shaped MCP calls (MCP listings withdrawn, D350; escrow, D351) | Cloud gains anonymous and free tiers; OSS gains Helm/compose team gate |
 | §14 Milestones | — | M4 → anonymous sessions + team-gate compose (built: D268; the compose came with M3, D168) |
 | §15 Acceptance | README demo gains a stdio MCP server through the gate | Demo loses its gate terminal; add "team gate from compose on a clean VPS" (the demo runs against the staging gate `gateway.kontra.run` until M5, with go install and a2a-cli's real syntax: D280, D298) |
 
@@ -59,22 +59,17 @@ failed there on a defect of `compose.yaml` (two services build one image tag) an
 merge commit, the published laptop run at `4831e40`, and an anonymous tenant's purge observed on staging (2 Nov): M4 is
 fully gated.
 
-## Hiring from another agent (decided 25 Oct)
+## Hiring from another agent (decided 25 Oct; amended 9 Nov)
 
 The gate serves its own MCP endpoint, `https://gateway.kontra.sh/mcp`, as a first-party remote MCP
-server: `search`, `describe`, `hire` (task-augmented), `reply`, plus MCP Tasks. An MCP client's
-session is the agent's and can never approve money. `hire` creates the task in a pre-hold state
-`quoted`, posts the quote card into the task's thread, and answers with a URL-mode elicitation
-(MCP 2025-11-25; for other clients the URL in the tool result's text and `structuredContent`, D324)
-whose URL is the thread itself, `app.kontra.sh/#/t/<taskId>` (D188). The person accepts the quote there; the hold follows. Decline or quote
-expiry cancels with nothing held. Thread SSE and the client's `tasks/get` / `tasks/result` read the
-same `task_events`, so the task can be followed and answered from either side. A2A-native buyer
-agents get the same thread URL in `input-required` metadata (`kontra.approve.url`).
+server: `search`, `describe`, `hire` (task-augmented), `reply`, plus MCP Tasks. `hire` creates an ordinary gate task
+once Admission allows it, and answers it in the tool result's text and `structuredContent` (D324). Thread SSE and the
+client's `tasks/get` / `tasks/result` read the same `task_events`, so the task can be followed and answered from
+either side. Built in M4 as [`relay.md`](../spec/relay.md) §12 in both MCP eras (D269 to D274, D289, D293 to D295).
 
-PRD deltas: §7 gains the `quoted` state before `submitted`; §9 names `kontra.approve.url`; §11's
-gate table gains the `/mcp` endpoint; §12 adds that an MCP or API-key session never approves a
-quote. Full spec: kontra-cloud#59. Built in M4 as [`relay.md`](../spec/relay.md) §12 in both MCP eras (D269 to D274,
-D288, D289, D293 to D295); the page on which a person accepts a quote is Cloud's, M5.
+Until 9 Nov a paid `hire` waited in a `quoted` state for a person to accept its quote on the operator's page, reached
+by a URL elicitation (kontra-cloud#59, D188); that flow is withdrawn with escrow (D351), and the hire result has no
+`url` or `quote`.
 
 Since 5 Nov, for an agent whose host shows it only tools: `status` follows a hired task (its history with `after: 0`,
 then `{after: <cursor>, wait: 25}` in a loop, with MCP progress when the call carries a progress token), `tasks` lists
@@ -83,16 +78,19 @@ task) and continues a conversation with the `contextId` its result gives, and `d
 capabilities (§12.6, D332 to D339). Calling a hosted MCP service's tool through `/mcp` is not built: MCP services are
 called at their own URL (D339).
 
-## Pricing (decided 25 Oct, in the Cloud repository's console issue; recorded here for the extension specs)
+## Payments: AP2 (decided 9 Nov, D351)
 
-Two price shapes on a listing, which lists an A2A agent:
+Kontra runs no payment. A listing has no price, and the gate holds, computes and settles no amount. An agent author
+that wants to be paid configures AP2 v0.2.0 ([github.com/google-agentic-commerce/ap2](https://github.com/google-agentic-commerce/ap2)):
+the agent declares `https://github.com/google-agentic-commerce/ap2/v1` in its card, plays the AP2 roles it chooses
+(Merchant, Shopping Agent) and works with parties of its choice for the others (Credential Provider, Merchant Payment
+Processor, Trusted Surface). Checkout and Payment Mandates travel as data parts, SD-JWT verifiable credentials; the
+gate relays them untouched, sealed or not, and keys on the URI only ([`relay.md`](../spec/relay.md) §2.6). AP2 is
+hired over A2A, not through `/mcp` `hire` (D328). `examples/sellers/ap2-merchant` is a merchant to start from.
 
-- `free`.
-- `per_task` — A2A tasks (a `hire` of `/mcp` among them). Quote held at admission, released after the review
-  window, refunded on dispute or failure. The escrow extension.
-
-The metered MCP shapes (`per_call`, `per_session`) and MCP listings decided on 25 Oct were withdrawn on 7 Nov
-(D350): an MCP service is hosted, free and private to its tenant or team gate, and not listed.
+Before that, a listing had a price: `free`, or `per_task` with a quote held in escrow and released after a review
+window (decided 25 Oct in the Cloud repository's console issue). The metered MCP shapes were withdrawn on 7 Nov
+(D350) and escrow with `per_task` on 9 Nov (D351).
 
 Open: whether the gate should fabricate task-augmented calls over a plain upstream so every tool
 call is durable (default: no, mirror the upstream); session affinity on tunnel loss (default: 404,

@@ -10,14 +10,12 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 
-	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/store"
 )
 
-// _meta keys of /mcp's answers (spec §5.1, §11.8, §12.2, §12.4; D21, D58).
+// _meta keys of /mcp's answers (spec §5.1, §11.8, §12.2, §12.4; D58).
 const (
-	MetaApproveURL    = mcpwire.KontraPrefix + "approve-url"
 	MetaFailure       = mcpwire.KontraPrefix + "failure"
 	MetaCanceled      = mcpwire.KontraPrefix + "canceled"
 	MetaInputRequired = mcpwire.KontraPrefix + "input-required"
@@ -170,7 +168,7 @@ func render(task *a2a.Task, state store.State) callToolResult {
 		id, ctxID = string(task.ID), task.ContextID
 	}
 	return callToolResult{Content: blocks, IsError: isError, Meta: meta,
-		StructuredContent: HireResult{TaskID: id, State: string(state.A2A()), ContextID: ctxID, URL: threadURL(task),
+		StructuredContent: HireResult{TaskID: id, State: string(state.A2A()), ContextID: ctxID,
 			Text: strings.Join(texts, "\n"), Data: data, Files: files}}
 }
 
@@ -195,16 +193,9 @@ func failureOf(state store.State, md map[string]any) string {
 	return reason
 }
 
-// canceledText says why a task was canceled (relay §13.2: a declined quote, an expired one, the client's cancel).
-func canceledText(why string) string {
-	switch why {
-	case store.CanceledDeclined:
-		return "the quote was declined: the task was canceled and nothing was charged"
-	case store.CanceledQuoteExpired:
-		return "the quote expired before it was approved: the task was canceled and nothing was charged"
-	}
-	return "the task was canceled"
-}
+// canceledText says why a task was canceled: the client's cancel is the one reason left (relay §8; D351 withdrew
+// the escrow ones, and a row an earlier release ended with them reads as this too).
+func canceledText(string) string { return "the task was canceled" }
 
 // partURI names a file part's embedded resource: the task and the part's file name, or its place.
 func partURI(task *a2a.Task, p *a2a.Part, n int) string {
@@ -271,30 +262,11 @@ func Question(task *a2a.Task, rd Reader) (inputRequired bool, statusMessage stri
 	return false, text + " " + hint, nil
 }
 
-// approveURL is a quoted task's approve URL (metadata kontra.approve.url, §13.2), "" when none.
-func approveURL(task *a2a.Task) string {
-	if task == nil {
-		return ""
-	}
-	u, _ := task.Metadata[lifecycle.MetaApproveURL].(string)
-	return u
-}
-
-// threadURL is a HireResult's url: the task's approve URL, its thread on the operator's page (§12.3 step 3, D188),
-// which a task keeps after it leaves quoted; "" for a task that was never quoted (the gate never builds the
-// operator's URL) and for one that is not https:// (hooks.CheckQuote admits no other, and the outputSchema says so).
-func threadURL(task *a2a.Task) string {
-	if u := approveURL(task); strings.HasPrefix(u, "https://") {
-		return u
-	}
-	return ""
-}
-
 // mcpTime is an MCP timestamp: ISO 8601 in UTC, to the millisecond.
 func mcpTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 // ttlOf is a task's ttl in milliseconds (§11.6): retention_until − created_at once terminal; before, an upper bound:
-// the deadline (a quoted task's: its quote's expiry plus the task timeout) plus the retention.
+// the deadline plus the retention.
 func ttlOf(row *store.TaskRow, svc store.ServiceRef) int64 {
 	var end time.Time
 	switch {
@@ -302,8 +274,6 @@ func ttlOf(row *store.TaskRow, svc store.ServiceRef) int64 {
 		end = *row.RetentionUntil
 	case row.Deadline != nil:
 		end = row.Deadline.Add(svc.Retention)
-	case row.QuoteExpiresAt != nil:
-		end = row.QuoteExpiresAt.Add(svc.Timeout + svc.Retention)
 	default:
 		end = row.CreatedAt.Add(svc.Timeout + svc.Retention)
 	}
@@ -318,8 +288,7 @@ type taskView struct {
 	meta          map[string]any
 }
 
-// view presents a hire task to rd (§5.1, §12.4): quoted is working with the approve URL as statusMessage and in
-// _meta (D21); input-required is input_required for a text-only question when rd declared form elicitation, else
+// view presents a hire task to rd (§5.1, §12.4): input-required is input_required for a text-only question when rd declared form elicitation, else
 // working with the reply-tool text and _meta sh.kontra/input-required (D58); failed has sh.kontra/failure (§11.8),
 // rejected sh.kontra/failure "rejected" (FailureRejected), canceled sh.kontra/canceled; the statusMessage is otherwise
 // the text of the status message.
@@ -331,10 +300,6 @@ func view(row *store.TaskRow, rd Reader) taskView {
 		md = t.Metadata
 	}
 	switch row.State {
-	case store.StateQuoted:
-		u := approveURL(t)
-		v.statusMessage = u
-		v.meta = map[string]any{MetaApproveURL: u}
 	case store.StateInputRequired:
 		ir, text, _ := Question(t, rd)
 		v.statusMessage = text

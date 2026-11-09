@@ -74,7 +74,6 @@ type Outcome string
 const (
 	Allow Outcome = "allow"
 	Deny  Outcome = "deny"
-	Quote Outcome = "quote" // creates the task quoted; never in open source's built-in Admission
 )
 
 // Refusal is a denial's error.
@@ -95,23 +94,16 @@ const (
 // OperatorCode reports whether code is one of the operator's refusal codes.
 func OperatorCode(code int) bool { return code >= OperatorCodeMin && code <= OperatorCodeMax }
 
-// QuoteTerms is a quote decision's approval URL and expiry.
-type QuoteTerms struct {
-	ApproveURL string `json:"approveUrl"`
-	ExpiresAt  string `json:"expiresAt"` // RFC 3339
-}
-
 // Decision is hooks.json#/$defs/decision.
 type Decision struct {
 	Outcome  Outcome        `json:"outcome"`
 	Refusal  *Refusal       `json:"refusal,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 	MCPMeta  map[string]any `json:"mcpMeta,omitempty"`
-	Quote    *QuoteTerms    `json:"quote,omitempty"`
 }
 
-// Admission decides whether a request may create a task, a session or a call, and on what terms. It is
-// consulted after allow: and before any task row exists; it never moves money (D45).
+// Admission decides whether a request may create a task, a session or a call: allow or deny (D351). It
+// is consulted after allow: and before any task row exists.
 type Admission interface {
 	Admit(ctx context.Context, req AdmitRequest) (Decision, error)
 }
@@ -133,7 +125,7 @@ func (BuiltinAdmission) Admit(ctx context.Context, req AdmitRequest) (Decision, 
 // Admitted is what Admission decided for a new task, carried on the request context from the admission
 // interceptor to the work queue's Write (spec §13.1, §15): the pre-minted task id the hook was shown, which
 // Write must use as the task's id so an operator that recorded anything under it finds the task (D45),
-// and the decision (its metadata and mcpMeta apply to the task, a quote creates it quoted).
+// and the decision (its metadata and mcpMeta apply to the task).
 type Admitted struct {
 	TaskID   string
 	Decision Decision
@@ -154,13 +146,8 @@ func AdmittedFrom(ctx context.Context) (Admitted, bool) {
 
 // TaskRef is hooks.json#/$defs/taskRef, built by the activity from Postgres, never carried in history.
 //
-// SPEC-CONFLICT (D115): spec §14 and D59 say that caller content never crosses Temporal history ("the one
-// caller-authored value that crosses history is a review-window message's caller_metadata keys"), while
-// §13.3 and spec/schema/hooks.json put contextId in every TaskRef (the gate context id, the caller's verbatim
-// when it chose one, up to 256 characters), and a hook's input is in history; so does a review message's
-// messageId (§13.3's OnReviewMessage args, §14.1's kontra.review_message). Both are kept as the hook
-// contract names them: replacing them (a hash) would change the contract the operator's hooks are written
-// against. The proposal: D59 lists these two caller-chosen identifiers explicitly.
+// contextId is the one caller-chosen identifier in it (D115): the gate context id, or the caller's verbatim when
+// it chose one, up to 256 characters; a hook's input is in history.
 type TaskRef struct {
 	TaskID    string         `json:"taskId"`
 	TenantID  string         `json:"tenantId"`
@@ -177,36 +164,21 @@ type TaskRef struct {
 
 // Patch is hooks.json#/$defs/patch: applied as one metadata event.
 type Patch struct {
-	Metadata        map[string]any `json:"metadata,omitempty"`
-	MCPMeta         map[string]any `json:"mcpMeta,omitempty"`
-	HoldOpenSeconds int64          `json:"holdOpenSeconds,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+	MCPMeta  map[string]any `json:"mcpMeta,omitempty"`
 }
 
-// ReviewWindow is hooks.json#/$defs/reviewWindow.
-type ReviewWindow struct {
+// RetiredReviewWindow is what the retired ReviewWindow hook answered. Only a workflow run recorded before D351
+// still schedules that activity (once, after OnTerminal); its answer is read only to end the run.
+type RetiredReviewWindow struct {
 	Open    bool  `json:"open"`
-	Seconds int64 `json:"seconds,omitempty"` // ≤ 604800
+	Seconds int64 `json:"seconds,omitempty"`
 }
 
-// DispatchedArgs, ReviewMessageArgs, ReviewMessageResult and ReviewClosedArgs are the other hook payloads.
-type (
-	DispatchedArgs struct {
-		Attempt int `json:"attempt"`
-	}
-	ReviewMessageArgs struct {
-		WorkItemID string         `json:"workItemId"`
-		MessageID  string         `json:"messageId"`
-		Metadata   map[string]any `json:"metadata"`
-	}
-	ReviewMessageResult struct {
-		Accept  bool   `json:"accept"`
-		Dispute bool   `json:"dispute"`
-		Patch   *Patch `json:"patch,omitempty"`
-	}
-	ReviewClosedArgs struct {
-		Disputed bool `json:"disputed"`
-	}
-)
+// DispatchedArgs is OnDispatched's argument.
+type DispatchedArgs struct {
+	Attempt int `json:"attempt"`
+}
 
 // BuiltinLifecycle is open source's Lifecycle: no-op activities registered on kontra-lifecycle under
 // the same type names a remote operator serves, so switching changes only the queue (spec §13.3).
@@ -225,17 +197,8 @@ func (BuiltinLifecycle) OnTerminal(ctx context.Context, t TaskRef) (Patch, error
 	return Patch{}, nil
 }
 
-// ReviewWindow answers {open: false}: no review window opens in open source.
-func (BuiltinLifecycle) ReviewWindow(ctx context.Context, t TaskRef) (ReviewWindow, error) {
-	return ReviewWindow{Open: false}, nil
-}
-
-// OnReviewMessage refuses: no window opens in open source, so a message offered anyway is not accepted.
-func (BuiltinLifecycle) OnReviewMessage(ctx context.Context, t TaskRef, args ReviewMessageArgs) (ReviewMessageResult, error) {
-	return ReviewMessageResult{Accept: false}, nil
-}
-
-// OnReviewClosed returns an empty patch.
-func (BuiltinLifecycle) OnReviewClosed(ctx context.Context, t TaskRef, args ReviewClosedArgs) (Patch, error) {
-	return Patch{}, nil
+// ReviewWindow answers {open: false}. It stays registered only so that runs recorded before D351, which schedule
+// it after OnTerminal, replay and complete; no new run calls it.
+func (BuiltinLifecycle) ReviewWindow(ctx context.Context, t TaskRef) (RetiredReviewWindow, error) {
+	return RetiredReviewWindow{Open: false}, nil
 }

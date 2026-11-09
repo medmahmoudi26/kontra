@@ -90,7 +90,7 @@ func (e *pgEnv) mcpTask(t *testing.T, lc *Client) uuid.UUID {
 	svc := store.ServiceRef{TenantID: e.svc.TenantID, Tenant: e.svc.Tenant, Name: "research", Kind: "mcp",
 		Timeout: time.Hour, Retries: 2, Retention: 7 * 24 * time.Hour}
 	id := uuid.Must(uuid.NewV7())
-	nt, err := store.NewMCPTask(id, svc, buyer, store.StateSubmitted, nil, "", nil, nil)
+	nt, err := store.NewMCPTask(id, svc, buyer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,10 +181,8 @@ func TestMCPCancelWithinTenSeconds(t *testing.T) {
 	}
 }
 
-// The lifecycle activities on an MCP task (spec §13.2, §13.3; "hooks get MCP TaskRefs"): task_ref names protocol mcp
-// and kind mcp with the operator's keys only (never the projection's mcpMeta); an approval's submit writes an MCP
-// status row, which drops the approve URL from the statusMessage and keeps the approval's mcpMeta; apply_metadata
-// keeps a patch's mcpMeta.
+// The lifecycle activities on an MCP task (spec §13.3; "hooks get MCP TaskRefs"): task_ref names protocol mcp and
+// kind mcp with the operator's keys only (never the projection's mcpMeta); apply_metadata keeps a patch's mcpMeta.
 func TestMCPTaskActivities(t *testing.T) {
 	e := newPGEnv(t)
 	ctx := context.Background()
@@ -192,9 +190,8 @@ func TestMCPTaskActivities(t *testing.T) {
 		values ($1, 'research', 'mcp', '{"mcp": {"url": "http://127.0.0.1:1"}}', 'config', 3600, 2, 'durable')`, e.svc.TenantID)
 	svc := store.ServiceRef{TenantID: e.svc.TenantID, Tenant: e.svc.Tenant, Name: "research", Kind: "mcp"}
 	id := uuid.Must(uuid.NewV7())
-	exp := time.Now().Add(time.Hour)
-	nt, err := store.NewMCPTask(id, svc, buyer, store.StateQuoted, &exp, "https://pay.example/q/1",
-		map[string]any{"kontra.escrow.hold": "h-1", "caller.key": "x"}, map[string]any{"sh.kontra/note": "1 USD"})
+	nt, err := store.NewMCPTask(id, svc, buyer,
+		map[string]any{"kontra.op.hold": "h-1", "caller.key": "x"}, map[string]any{"sh.kontra/note": "1 USD"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,35 +202,20 @@ func TestMCPTaskActivities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.Protocol != "mcp" || ref.Kind != "mcp" || ref.State != "quoted" || ref.ContextID != id.String() ||
-		len(ref.Metadata) != 1 || ref.Metadata["kontra.escrow.hold"] != "h-1" {
+	if ref.Protocol != "mcp" || ref.Kind != "mcp" || ref.State != "submitted" || ref.ContextID != id.String() ||
+		len(ref.Metadata) != 1 || ref.Metadata["kontra.op.hold"] != "h-1" {
 		t.Fatalf("task_ref of an MCP task: %+v", ref)
 	}
-	r, err := e.acts.Submit(ctx, SubmitInput{TaskID: id.String(), TimeoutSeconds: 3600,
-		Metadata: map[string]any{"kontra.escrow.approved": true}, MCPMeta: map[string]any{"sh.kontra/escrow": "held"}})
-	if err != nil || r.Deadline.IsZero() {
-		t.Fatalf("submit: %+v %v", r, err)
+	if _, err := e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Source: "test",
+		Patch: hooksPatch(map[string]any{"kontra.op.note": "n"}, map[string]any{"sh.kontra/op": "released"})}); err != nil {
+		t.Fatal(err)
 	}
 	row, err := e.log.Load(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.State != store.StateSubmitted || store.MCPStatusText(row.Snapshot) != "" || store.MCPMeta(row.Snapshot)["sh.kontra/escrow"] != "held" ||
-		store.MCPMeta(row.Snapshot)["sh.kontra/note"] != "1 USD" || row.Snapshot.Metadata["kontra.escrow.approved"] != true {
-		t.Fatalf("after submit: %s %+v", row.State, row.Snapshot)
-	}
-	var payload string
-	if err := e.pool.QueryRow(ctx, `select payload::text from kontra.task_events where task_id = $1 and seq = $2`, id, row.Version).Scan(&payload); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(payload, `"status":"submitted"`) || strings.Contains(payload, "TASK_STATE") {
-		t.Fatalf("the submitted row is not an MCP status: %s", payload)
-	}
-	if _, err := e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Source: "test",
-		Patch: hooksPatch(map[string]any{"kontra.escrow.note": "n"}, map[string]any{"sh.kontra/escrow": "released"})}); err != nil {
-		t.Fatal(err)
-	}
-	if row, _ = e.log.Load(ctx, id); store.MCPMeta(row.Snapshot)["sh.kontra/escrow"] != "released" || row.Snapshot.Metadata["kontra.escrow.note"] != "n" {
+	if store.MCPMeta(row.Snapshot)["sh.kontra/op"] != "released" || store.MCPMeta(row.Snapshot)["sh.kontra/note"] != "1 USD" ||
+		row.Snapshot.Metadata["kontra.op.note"] != "n" {
 		t.Fatalf("after apply_metadata: %+v", row.Snapshot.Metadata)
 	}
 }

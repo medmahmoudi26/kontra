@@ -1,8 +1,10 @@
 package e2e
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -16,17 +18,17 @@ import (
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
 )
 
-// gate_mcp_hire (spec/relay.md §16; §12.2, §12.3 step 1; D272, D289, D293, D294, D300). Single tenant. A legacy /mcp
-// session with an API key on replica A; the sellers hosted by a node whose tunnel is on replica B: the TCK seller
-// (examples/sellers/tck, a stock seller that completes at once) and the in-test seller (the TCK seller's artifact
-// kinds, a slow exec, a failing exec). Asserted, clause by clause:
+// gate_mcp_hire (spec/relay.md §16; §12.2, §12.3 step 1, §13.1; D272, D275, D289, D293, D294, D300). Single tenant.
+// A legacy /mcp session with an API key on replica A; the operator's Admission is the e2e double; the sellers hosted by a
+// node whose tunnel is on replica B: the TCK seller (examples/sellers/tck, a stock seller that completes at once) and
+// the in-test seller (the TCK seller's artifact kinds, a slow exec, a failing exec). Asserted, clause by clause:
 //
 //   - a plain hire that ends within the wait answers the rendered outcome and structuredContent exactly {taskId, state,
 //     contextId, service, text} (no data without data parts; the text the content's, D324), the task being an ordinary A2A task marked
 //     hired;
 //   - a plain hire still running after the 25 s wait answers the hire result of a task still running: structuredContent
-//     exactly {taskId, state: working, contextId, service, text}, the text the content's, which names the A2A URL that follows it (no url:
-//     the task was not quoted; D324);
+//     exactly {taskId, state: working, contextId, service, text}, the text the content's, which names the A2A URL that
+//     follows it (D324);
 //   - a task-augmented hire answers CreateTaskResult; tasks/result (on B) renders text parts as text, data parts as JSON
 //     text and in structuredContent.data, a raw file part as an embedded resource and a URL part as a resource_link;
 //     structuredContent is {taskId, state, text, data, files};
@@ -40,21 +42,30 @@ import (
 //     null data part are isError with no task row (the operator's required card_extensions entry beside the seller's
 //     is not named: a hire activates it for the buyer, D300); a ref whose only required extension is the operator's
 //     is hired, and its seller receives no A2A-Extensions;
+//   - the operator's Admission server (the e2e double, which allows) down, or answering a decision hooks.json does not
+//     define (outcome quote, D351's D1; a body that is not JSON): hire is -32603 admission unavailable (HTTP 503), and
+//     no task row is written; with the server up again a hire is admitted;
 //   - /mcp's tools write no calls rows, and every task hire created is marked hired (the A2A task is the only one not);
 //   - a request without a credential is 401 (Bearer) and opens no session; an API key with only enroll: scopes is 403.
 func TestGateMCPHire(t *testing.T) {
-	const escrow, own = "https://kontra.sh/ext/escrow/v1", "https://seller.example.com/ext/own"
+	const operatorExt, own = "https://operator.example.com/ext/terms/v1", "https://seller.example.com/ext/own"
 	seller, esc, paid := StartSeller(t), StartSellerCaps(t, `{"streaming":true,"extensions":[{"uri":"`+own+`","required":true}]}`), StartSeller(t)
+	adm, err := StartAdmission()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = adm.Close() })
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	web := httptest.NewServer(up)
 	t.Cleanup(web.Close)
-	operatorEscrow := `    annotations: { card_extensions: [ { uri: "` + escrow + `", required: true } ] }` + "\n"
+	operatorEntry := `    annotations: { card_extensions: [ { uri: "` + operatorExt + `", required: true } ] }` + "\n"
 	h := start(t, Options{
 		Tunnel:      map[string]TunnelService{"tck": {}, "kinds": {}, "vault": {Sealed: "true"}},
-		Direct:      map[string]string{"escrowed": esc.URL, "paid": paid.URL},
+		Direct:      map[string]string{"ownext": esc.URL, "paid": paid.URL},
 		MCP:         map[string]MCPService{"web": {URL: web.URL + "/mcp"}},
-		ServiceYAML: map[string]string{"escrowed": operatorEscrow, "paid": operatorEscrow},
+		ServiceYAML: map[string]string{"ownext": operatorEntry, "paid": operatorEntry},
+		Admission:   adm,
 	})
 	ctx := ctxFor(t, 10*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
@@ -107,7 +118,7 @@ func TestGateMCPHire(t *testing.T) {
 	}
 
 	// A plain hire of a slow exec: after the 25 s wait, the hire result of a task still running, its text (the content's)
-	// naming the A2A URL that follows it, and no url, the task not having been quoted (D324).
+	// naming the A2A URL that follows it (D324).
 	began := time.Now()
 	r = Tool(t, s.Tool("hire", `{"service":"kinds","message":"slow"}`))
 	took := time.Since(began)
@@ -263,12 +274,12 @@ func TestGateMCPHire(t *testing.T) {
 	for _, c := range []struct{ args, want string }{
 		{`{"service":"web","message":"hi"}`, h.Front.URL + "/mcp/web"},
 		{`{"service":"vault","message":"hi"}`, h.Front.URL + "/agents/vault"},
-		{`{"service":"escrowed","message":"hi"}`, own},
+		{`{"service":"ownext","message":"hi"}`, own},
 		{`{"service":"kinds","message":{"parts":[{"data":null}]}}`, "data must not be null"},
 	} {
 		tr := Tool(t, s.Tool("hire", c.args))
-		if !tr.IsError || !strings.Contains(tr.Text(), c.want) || strings.Contains(tr.Text(), escrow) {
-			t.Errorf("hire %s: %+v, want isError naming %q (and not the operator's %s)", c.args, tr, c.want, escrow)
+		if !tr.IsError || !strings.Contains(tr.Text(), c.want) || strings.Contains(tr.Text(), operatorExt) {
+			t.Errorf("hire %s: %+v, want isError naming %q (and not the operator's %s)", c.args, tr, c.want, operatorExt)
 		}
 	}
 	if n := taskCount(t, h); n != before {
@@ -277,10 +288,13 @@ func TestGateMCPHire(t *testing.T) {
 	if esc.Messages() != 0 {
 		t.Errorf("the seller behind the required extension received %d messages", esc.Messages())
 	}
-	// The operator's required entry alone: the hire activates it for the buyer (built-in Admission allows), and the
-	// seller gets the message without it (D300).
+	// The operator's required entry alone: the hire activates it for the buyer (the Admission double allows, and is
+	// asked with it in extensions), and the seller gets the message without it (D300).
 	if pr := Tool(t, s.Tool("hire", `{"service":"paid","message":"hi"}`)); pr.IsError || pr.TaskID() == "" {
-		t.Errorf("hire of a service the operator's escrow entry requires: %+v", pr)
+		t.Errorf("hire of a service the operator's entry requires: %+v", pr)
+	}
+	if reqs := adm.Requests(); len(reqs) == 0 || reqs[len(reqs)-1].Service != "paid" || !slices.Contains(reqs[len(reqs)-1].Extensions, operatorExt) {
+		t.Errorf("Admission's request for the hire of paid: %+v, want extensions naming %s", reqs, operatorExt)
 	}
 	if paid.Messages() != 1 || len(paid.Activations()) != 0 {
 		t.Errorf("the seller behind the operator's entry received %d messages and A2A-Extensions %q", paid.Messages(), paid.Activations())
@@ -298,6 +312,57 @@ func TestGateMCPHire(t *testing.T) {
 	if n := count(t, h, `select count(*) from kontra.mcp_sessions where service is null`); n != 2 {
 		t.Errorf("/mcp sessions: %d rows, want 2 (buyer A's and B's)", n)
 	}
+	// The Admission server down, or answering a decision hooks.json does not define: -32603 admission unavailable (503),
+	// no task row (§13.1: fail closed). A quote is no outcome since D351.
+	before = taskCount(t, h)
+	unavailable := func(what string) {
+		t.Helper()
+		r := s.Tool("hire", `{"service":"tck","message":"tck-complete-task refused"}`)
+		if a := Answer(t, r); r.Status != http.StatusServiceUnavailable || a.Error == nil || a.Error.Code != -32603 ||
+			a.Error.Message != "admission unavailable" {
+			t.Errorf("hire with %s: %d %s, want -32603 admission unavailable (503)", what, r.Status, r.Text())
+		}
+	}
+	adm.Set(`{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/x","expiresAt":"2099-01-01T00:00:00Z"}}`)
+	unavailable("a quote, an outcome hooks.json no longer has")
+	adm.Set(`not json`)
+	unavailable("a body that is not JSON")
+	adm.Set("")
+	adm.Down()
+	unavailable("the Admission server down")
+	if n := taskCount(t, h); n != before {
+		t.Errorf("the refused hires wrote %d task rows", n-before)
+	}
+	if err := adm.Up(); err != nil {
+		t.Fatal(err)
+	}
+	if r := Tool(t, s.Tool("hire", `{"service":"tck","message":"tck-complete-task again"}`)); r.IsError || r.TaskID() == "" {
+		t.Errorf("hire with the Admission server up again: %+v", r)
+	}
+
 	// The plain slow hire's task is still working: cancel it so the seller is left with nothing.
 	_ = s.Rpc("tasks/cancel", `{"taskId":"`+slowPlain+`"}`)
+}
+
+// a2aSend posts a JSON-RPC SendMessage of msg to the A2A route u with key, activating the extension ext when not "",
+// and returns the status and the body.
+func a2aSend(t *testing.T, ctx context.Context, u, key, ext string, msg *a2a.Message) (int, string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": map[string]any{"message": msg}})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("A2A-Version", "1.0")
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	if ext != "" {
+		req.Header.Set("A2A-Extensions", ext)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }

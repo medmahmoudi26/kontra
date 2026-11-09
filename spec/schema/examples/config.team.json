@@ -23,8 +23,7 @@
       "backend": { "a2a": { "url": "https://triage.internal:9000/agents/triage", "allow_private": true } },
       "allow": ["org:acme"],
       "task": { "timeout": "30m", "retries": 0, "retention": "14d" },
-      "listed": false,
-      "annotations": { "search": { "price": "1.00 EUR" } }
+      "listed": false
     },
     "fs": {
       "kind": "mcp",

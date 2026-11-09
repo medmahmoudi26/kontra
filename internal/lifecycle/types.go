@@ -13,9 +13,6 @@ type Input struct {
 	TimeoutSeconds int64         `json:"timeoutSeconds"`
 	Retries        int           `json:"retries"`
 	Hooks          HooksSnapshot `json:"hooks"`
-	// QuoteExpiresAt is set for a task created quoted (spec §13.2): the workflow waits for kontra.approval
-	// until then. Nil for a task created submitted.
-	QuoteExpiresAt *time.Time `json:"quoteExpiresAt,omitempty"`
 	// Protocol is tasks.protocol: ProtocolMCP for a gate-owned MCP task, whose kontra.cancel follows spec §11.6
 	// (D57); empty for an A2A task, as every input recorded before M3 is.
 	Protocol string `json:"protocol,omitempty"`
@@ -31,8 +28,8 @@ const ProtocolMCP = "mcp"
 // HooksSnapshot is the hook configuration in force when the task started (spec §13.3, D46).
 type HooksSnapshot struct {
 	LifecycleQueue string `json:"lifecycleQueue"` // QueueLifecycle when built in
-	// OperatorPrefixes are operator_metadata_prefixes (spec §13.2): the kontra.approval and kontra.annotate
-	// validators refuse metadata keys outside them (and kontra.keyRetainUntil) without reading config.
+	// OperatorPrefixes are operator_metadata_prefixes (spec §13.1): the kontra.annotate validator refuses
+	// metadata keys outside them without reading config.
 	OperatorPrefixes []string `json:"operatorPrefixes,omitempty"`
 }
 
@@ -69,27 +66,6 @@ type (
 	CancelResult struct {
 		Outcome       CancelOutcome  `json:"outcome"`
 		UpstreamError *UpstreamError `json:"upstreamError,omitempty"`
-	}
-	// ApprovalUpdate is kontra.approval (spec §13.2). M5 in practice; built in M1 for completeness.
-	ApprovalUpdate struct {
-		Accepted bool           `json:"accepted"`
-		Metadata map[string]any `json:"metadata,omitempty"`
-		MCPMeta  map[string]any `json:"mcpMeta,omitempty"`
-	}
-	// ApprovalResult is kontra.approval's result.
-	ApprovalResult struct {
-		State string `json:"state"`
-	}
-	// ReviewMessageUpdate is kontra.review_message; its UpdateID is the work item id.
-	ReviewMessageUpdate struct {
-		WorkItemID string         `json:"workItemId"`
-		MessageID  string         `json:"messageId"`
-		Metadata   map[string]any `json:"metadata,omitempty"` // caller_metadata keys only, ≤ 16 KiB (D59)
-	}
-	// ReviewMessageResult is kontra.review_message's result.
-	ReviewMessageResult struct {
-		Accepted bool   `json:"accepted"`
-		Seq      *int64 `json:"seq,omitempty"`
 	}
 	// AnnotateUpdate is kontra.annotate.
 	AnnotateUpdate struct {
@@ -256,28 +232,11 @@ type (
 		State string `json:"state"`
 	}
 	// ApplyMetadataInput is apply_metadata's input: the patch itself, ≤ 16 KiB (D59). Source names who
-	// wrote it (a hook, kontra.annotate, kontra.approval) for the audit row of a refused patch.
+	// wrote it (a hook, kontra.annotate) for the audit row of a refused patch.
 	ApplyMetadataInput struct {
 		TaskID string      `json:"taskId"`
 		Patch  hooks.Patch `json:"patch"`
 		Source string      `json:"source,omitempty"`
-	}
-	// SubmitInput is submit's input: the approval handler's submitted write (spec §13.2, §14.1). The
-	// approval's metadata crosses history as an operator patch (D59).
-	SubmitInput struct {
-		TaskID         string         `json:"taskId"`
-		Metadata       map[string]any `json:"metadata,omitempty"`
-		MCPMeta        map[string]any `json:"mcpMeta,omitempty"` // an MCP task keeps it (spec §13.2, §13.3)
-		TimeoutSeconds int64          `json:"timeoutSeconds"`
-	}
-	// SubmitResult is submit's result: tasks.deadline, fixed by the store at the transition (spec §5.2).
-	SubmitResult struct {
-		Deadline time.Time `json:"deadline"`
-	}
-	// ReviewAppendInput is append_review_message's input (spec §14.1, D66).
-	ReviewAppendInput struct {
-		TaskID     string `json:"taskId"`
-		WorkItemID string `json:"workItemId"`
 	}
 	// ReconnectWaitInput is reconnect_wait's input (D341): the wait of attempt N began at Since and ends at Until.
 	ReconnectWaitInput struct {

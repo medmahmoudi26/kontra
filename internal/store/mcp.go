@@ -51,7 +51,7 @@ const MetaMCPMeta = "kontra.mcpMeta"
 // MCPPollInterval is the pollInterval the gate gives its MCP tasks (spec §11.5 step 2), in milliseconds.
 const MCPPollInterval = 1000
 
-// MCPStatus is a state as an MCP 2025-11-25 Task.status shows it (spec §5.1): quoted, submitted, working and
+// MCPStatus is a state as an MCP 2025-11-25 Task.status shows it (spec §5.1): submitted, working and
 // auth-required are working, input-required input_required, rejected failed, canceled cancelled.
 func (s State) MCPStatus() string {
 	switch s {
@@ -255,39 +255,31 @@ func mergeMCPMeta(task *a2a.Task, mcpMeta map[string]any) *a2a.Task {
 // MCPNow is the time the gate stamps an MCP status with: UTC, to the millisecond (as the A2A writers do).
 func MCPNow() time.Time { return time.Now().UTC().Truncate(time.Millisecond) }
 
-// NewMCPTask is a gate-owned MCP task as the relay creates it (spec §11.5 step 2, §13.2): id and context id the
-// task id, submitted (or quoted, with the approve URL as its statusMessage and in its mcpMeta under
-// sh.kontra/approve-url, D21), the Admission decision's metadata and mcpMeta, and the task row's MCP payload.
-func NewMCPTask(id uuid.UUID, svc ServiceRef, owner Owner, state State, quoteExpires *time.Time, approveURL string,
-	meta, mcpMeta map[string]any) (NewTask, error) {
+// NewMCPTask is a gate-owned MCP task as the relay creates it (spec §11.5 step 2): id and context id the task id,
+// submitted, the Admission decision's metadata and mcpMeta, and the task row's MCP payload.
+func NewMCPTask(id uuid.UUID, svc ServiceRef, owner Owner, meta, mcpMeta map[string]any) (NewTask, error) {
 	md := maps.Clone(meta)
-	if len(mcpMeta) > 0 || approveURL != "" {
-		mm := maps.Clone(mcpMeta)
-		if mm == nil {
-			mm = map[string]any{}
-		}
-		if approveURL != "" {
-			mm["sh.kontra/approve-url"] = approveURL
-		}
+	if len(mcpMeta) > 0 {
 		if md == nil {
 			md = map[string]any{}
 		}
-		md[MetaMCPMeta] = mm
+		md[MetaMCPMeta] = maps.Clone(mcpMeta)
 	}
+	const state = StateSubmitted
 	at := MCPNow()
-	snap := mcpApply(nil, id.String(), 1, state, approveURL, at, md)
+	snap := mcpApply(nil, id.String(), 1, state, "", at, md)
 	var task rawObject
 	if err := task.value("taskId", id.String()); err != nil {
 		return NewTask{}, err
 	}
-	if err := task.statusMembers(state, approveURL, at, md); err != nil {
+	if err := task.statusMembers(state, "", at, md); err != nil {
 		return NewTask{}, err
 	}
 	var row rawObject
 	row.raw("task", task.bytes())
 	return NewTask{
 		ID: id, Service: svc, Protocol: ProtocolMCP, Owner: owner, ContextID: id.String(), State: state,
-		Snapshot: snap, QuoteExpiresAt: quoteExpires, Payload: row.bytes(),
+		Snapshot: snap, Payload: row.bytes(),
 	}, nil
 }
 

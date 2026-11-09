@@ -154,10 +154,8 @@ func (e *modernEnv) task(buyer uuid.UUID, state store.State, task *a2a.Task, sta
 	ctx := context.Background()
 	version := 1 + statuses
 	_, err = e.pool.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id,
-			state, version, snapshot, status_at, quote_expires_at, submitted_at, terminal_at, hired)
-		values ($1, $2, 'hello', 'a2a', $3, 'key:kk_buyer', 'api_key', 'ctx', $4, $5, $6::json, now(),
-			case when $4 = 'quoted' then now() + interval '10 minutes' end,
-			case when $4 <> 'quoted' then now() end,
+			state, version, snapshot, status_at, submitted_at, terminal_at, hired)
+		values ($1, $2, 'hello', 'a2a', $3, 'key:kk_buyer', 'api_key', 'ctx', $4, $5, $6::json, now(), now(),
 			case when $4 in ('completed', 'failed', 'canceled', 'rejected') then now() end, $7)`,
 		id, e.team, buyer, string(state), version, string(snap), hired)
 	if err != nil {
@@ -225,7 +223,7 @@ func serve(t *testing.T, h *Handler, p auth.Principal, method string, params map
 
 // A modern tasks/update (§12.4, §12.5, D274; the corrections' WP-05 rule): the one answerable key is the gate id of
 // the question outstanding now, as the reader's own request sees it in tasks/get; its accept {reply} is the §7
-// follow-up, once. A quoted task (D38, D45), a task asking nothing, an earlier turn's key, another task's key, a
+// follow-up, once. A task asking nothing, an earlier turn's key, another task's key, a
 // malformed key, a decline, an accept without a string reply, a question the reader did not declare form elicitation
 // for, and a question that is not text only are all acknowledged and forward nothing. Another buyer's task is
 // -32602, as an unknown one; inputResponses that is not an object is -32602. The outstanding key's answer that the A2A
@@ -235,8 +233,6 @@ func TestModernUpdate(t *testing.T) {
 	e := newModernEnv(t)
 	form := Reader{Principal: e.buyer, Era: mcpwire.EraModern, FormElicitation: true}
 	noForm := Reader{Principal: e.buyer, Era: mcpwire.EraModern}
-	quoted := e.task(e.buyer.BuyerID, store.StateQuoted,
-		taskWith(a2a.TaskStateInputRequired, nil, map[string]any{lifecycle.MetaApproveURL: "https://app.kontra.sh/#/t/q"}), 1, true)
 	asking := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
 	dataQ := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired,
 		&a2a.Message{ID: "m", Role: a2a.MessageRoleAgent, Parts: a2a.ContentParts{a2a.NewDataPart(map[string]any{"pick": "date"})}}, nil), 2, true)
@@ -249,10 +245,6 @@ func TestModernUpdate(t *testing.T) {
 		task uuid.UUID
 		resp string
 	}{
-		{"the quoted event's key", form, quoted, `{"` + key(quoted, 2) + `":` + accept("I accept") + `}`},
-		{"the quoted task's first key", form, quoted, `{"` + key(quoted, 1) + `":` + accept("yes") + `}`},
-		{"an accept with no content on a quoted task", form, quoted, `{"` + key(quoted, 2) + `":{"action":"accept"}}`},
-		{"another task's key on a quoted task", form, quoted, `{"` + key(asking, 3) + `":` + accept("x") + `}`},
 		{"an earlier turn's key", form, asking, `{"` + key(asking, 2) + `":` + accept("friday") + `}`},
 		{"another task's key", form, asking, `{"` + key(dataQ, 3) + `":` + accept("friday") + `}`},
 		{"a malformed key", form, asking, `{"k.` + asking.String() + `.03":` + accept("friday") + `,"x":` + accept("friday") + `}`},
@@ -275,8 +267,8 @@ func TestModernUpdate(t *testing.T) {
 	if got := e.hirer.replies(); len(got) != 0 {
 		t.Fatalf("ignored answers were sent: %v", got)
 	}
-	if e.state(quoted) != "quoted" || e.state(asking) != "input-required" {
-		t.Fatalf("after the ignored answers: quoted %s, asking %s", e.state(quoted), e.state(asking))
+	if e.state(asking) != "input-required" {
+		t.Fatalf("after the ignored answers: asking %s", e.state(asking))
 	}
 
 	// Another buyer's task, an unknown one, a non-object inputResponses.
@@ -318,8 +310,8 @@ func TestModernUpdate(t *testing.T) {
 		{"the gate's own failure", errors.New("pgx: connection refused"), 503, -32603, "the gate could not serve the request"},
 		{"an A2A internal error", a2a.NewError(a2a.ErrInternalError, "the request produced no task"), 200, -32603, "the request produced no task"},
 		{"the anonymous storage limit", a2a.NewError(a2a.ErrInvalidParams, "anonymous storage limit"), 200, -32602, "anonymous storage limit"},
-		{"a required extension", &relay.ExtensionsRequiredError{URIs: []string{"https://kontra.sh/ext/escrow/v1"}}, 200, -32008,
-			"https://kontra.sh/ext/escrow/v1"},
+		{"a required extension", &relay.ExtensionsRequiredError{URIs: []string{"https://kontra.sh/ext/example/v1"}}, 200, -32008,
+			"https://kontra.sh/ext/example/v1"},
 		{"an anonymous tenant's limit", lifecycle.RateLimited(), 429, -32600, "rate limited"},
 	} {
 		e.hirer.err = tc.err
@@ -359,7 +351,7 @@ func TestModernUpdate(t *testing.T) {
 }
 
 // A modern tasks/get of a hire task (§12.5, §11.12's table, D274): resultType complete, ttlMs and pollIntervalMs (not
-// 2025-11-25's ttl and pollInterval); quoted is working with the approve URL in statusMessage and _meta; a text-only
+// 2025-11-25's ttl and pollInterval); a text-only
 // question is input_required with exactly one inputRequests entry, a form elicitation/create keyed by the gate id of
 // the event that asked, for a reader whose request declared form elicitation, and working with the reply-tool text
 // otherwise; an ended task carries its rendered CallToolResult (resultType complete) as result, failed as completed
@@ -387,13 +379,6 @@ func TestModernGet(t *testing.T) {
 			t.Errorf("tasks/get %s: %s", id, res)
 		}
 		return o
-	}
-
-	quoted := e.task(e.buyer.BuyerID, store.StateQuoted,
-		taskWith(a2a.TaskStateInputRequired, nil, map[string]any{lifecycle.MetaApproveURL: "https://app.kontra.sh/#/t/q"}), 1, true)
-	if o := get(form, quoted); o["status"] != "working" || o["statusMessage"] != "https://app.kontra.sh/#/t/q" ||
-		!reflect.DeepEqual(o["_meta"], map[string]any{MetaApproveURL: "https://app.kontra.sh/#/t/q"}) || o["inputRequests"] != nil {
-		t.Errorf("a quoted task: %v", o)
 	}
 
 	asking := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 4, true)
@@ -440,17 +425,16 @@ func TestModernGet(t *testing.T) {
 }
 
 // A modern tasks/cancel (§12.5, §11.12's table): acknowledged at once, resultType complete, kontra.cancel in MCP mode
-// sent detached on a task that is not terminal (a quoted one included: a cancel declines nothing it was not asked
-// to), nothing on a terminal one; another buyer's is -32602.
+// sent detached on a task that is not terminal (a submitted one included), nothing on a terminal one; another buyer's is -32602.
 func TestModernCancel(t *testing.T) {
 	e := newModernEnv(t)
 	block := make(chan struct{})
 	e.cancel.set(block, nil)
 	rd := Reader{Principal: e.buyer, Era: mcpwire.EraModern}
 	working := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
-	quoted := e.task(e.buyer.BuyerID, store.StateQuoted, taskWith(a2a.TaskStateInputRequired, nil, map[string]any{lifecycle.MetaApproveURL: "https://x.example/q"}), 1, true)
+	submitted := e.task(e.buyer.BuyerID, store.StateSubmitted, taskWith(a2a.TaskStateSubmitted, nil, nil), 1, true)
 	done := e.task(e.buyer.BuyerID, store.StateCompleted, taskWith(a2a.TaskStateCompleted, agentText("ok"), nil), 1, true)
-	for _, id := range []uuid.UUID{working, quoted, done} {
+	for _, id := range []uuid.UUID{working, submitted, done} {
 		began := time.Now()
 		res, rpcErr, err := e.tasks.Cancel(context.Background(), rd, id)
 		// The lifecycle's cancel blocks until the end of this loop (AcceptWait at most): the answer does not wait for it.
@@ -465,8 +449,8 @@ func TestModernCancel(t *testing.T) {
 	}
 	time.Sleep(100 * time.Millisecond)
 	got := e.cancel.calls()
-	if len(got) != 2 || !(got[0] == working.String() && got[1] == quoted.String() || got[1] == working.String() && got[0] == quoted.String()) {
-		t.Errorf("kontra.cancel sent for %v; want the working and the quoted task, not the completed one", got)
+	if len(got) != 2 || !(got[0] == working.String() && got[1] == submitted.String() || got[1] == working.String() && got[0] == submitted.String()) {
+		t.Errorf("kontra.cancel sent for %v; want the working and the submitted task, not the completed one", got)
 	}
 	other := Reader{Principal: keyPrincipal(e.team, "default", "kk_other"), Era: mcpwire.EraModern}
 	if _, rpcErr, err := e.tasks.Cancel(context.Background(), other, working); err != nil || rpcErr == nil || rpcErr.Code != -32602 {

@@ -20,15 +20,17 @@ messages, not of a task's own methods (§2.4; D318); the derived buyer ids writt
 reads use (§2.3, §13.5; D319); a search-hidden service (§12.2, §13.4; D321); and MCP `tasks: required` (§11.5,
 §11.12, §13.1; D322). After M5's gate G3 it was amended again: the hire result carries in `structuredContent` what a
 person needs, the thread URL and the answer included (§12.2, §12.3; D324), and an operator's refusal codes reach the
-caller (§13.1; D325).
+caller (§13.1; D325). Revision 10 (9 Nov, the owner's decision) withdraws escrow: no quote, approval, review
+window or price; Admission is `allow` or `deny`, and payment is the agent author's AP2, relayed untouched (§2.6;
+D351).
 Normative. The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 This document specifies how the gate relays A2A tasks and MCP requests between a caller and a service:
 principals, the served card, identifiers and contexts, the task state machine and the event log, dispatch,
 retries, `input-required`, cancel, timeouts, streaming and resume, push, large parts, the MCP session and
 task mappings, the gate's own MCP endpoint, the hook points an operator fills, and the `TaskLifecycle`
-workflow. The tunnel that carries dispatch to a node is [`tunnel.md`](tunnel.md); the two extensions
-are [`ext-escrow.md`](ext-escrow.md) and [`ext-sealed.md`](ext-sealed.md). Departures from the PRD and the architecture notes are
+workflow. The tunnel that carries dispatch to a node is [`tunnel.md`](tunnel.md); the extension Kontra owns is
+[`ext-sealed.md`](ext-sealed.md) (the escrow extension is withdrawn, D351). Departures from the PRD and the architecture notes are
 numbered in [`../docs/decisions.md`](../docs/decisions.md) and cited here as **D*n***.
 
 ## 0. Pins
@@ -277,12 +279,12 @@ refused credential's `401` (D86) and a body that strict decoding refuses (`400`,
 ### 2.5 Kontra's own keys are the gate's
 
 Kontra's metadata keys (A2A `kontra.*`) and `_meta` keys (MCP `sh.kontra/*`) state facts only the gate or
-the operator may assert: approve URLs, escrow state, failure reasons, prices, sealing recipients. So:
+the operator may assert: failure reasons, sealing recipients, operator metadata. So:
 
 - **From callers**, the gate removes every `kontra.`-prefixed key from message, part and request metadata
   before anything is logged or forwarded, except `kontra.sealed` and `kontra.sealed.replyTo` (sealing,
-  [`ext-sealed.md`](ext-sealed.md)) and the keys the operator lists in `caller_metadata` (Cloud lists
-  `kontra.escrow.dispute`, which its hook reads, §13.3). On MCP it removes every `sh.kontra/`-prefixed key from
+  [`ext-sealed.md`](ext-sealed.md)); no configuration adds a caller key (`caller_metadata`, whose only use was
+  escrow's dispute, is withdrawn and refused by the configuration, D351). On MCP it removes every `sh.kontra/`-prefixed key from
   the `params._meta` of requests and notifications and the `result._meta` of responses, except the sealed
   envelope below.
 - **From services**, the gate removes every `kontra.`-prefixed key from the metadata of every upstream `Task`,
@@ -301,17 +303,18 @@ the operator may assert: approve URLs, escrow state, failure reasons, prices, se
   node checks the answer, [`ext-sealed.md`](ext-sealed.md) §5 rule 4b, D200), and there only when its value is
   exactly `{"v": 1, "envelope": "<base64>"}`. Every other `sh.kontra/` key in those objects, and
   `sh.kontra/sealed` anywhere else or on any other service, is removed as above.
-- Then it writes its own (sealed capability, approve URL, failure reason, a reconnect wait's `kontra.reconnect`
+- Then it writes its own (sealed capability, failure reason, a reconnect wait's `kontra.reconnect`
   (§6.4), an `initialize` result's
   `sh.kontra/session_idle_s`, §11.2) and the operator's (§13.4). An operator key replaces a same-named key; it is
   never merged with it, except `sh.kontra/session_idle_s`, which is the gate's and replaces the operator's (D224).
 
-The gate itself names no escrow key: the escrow keys belong to the operator and its extension spec (D51).
+The gate names no operator key: the operator's keys are its own, under its prefixes (§13.1; D51, D113).
 
-### 2.6 Extensions the gate does not own: A2UI
+### 2.6 Extensions the gate does not own: A2UI and AP2
 
 An extension whose URI neither the gate nor the operator asserts (§3) — a seller's own, the withdrawn
-`https://kontra.sh/ext/input-schema/v1` (D350), A2UI (`https://a2ui.org/a2a-extension/a2ui/v0.9.1`, `…/v1.0`) — passes
+`https://kontra.sh/ext/input-schema/v1` (D350) and escrow `https://kontra.sh/ext/escrow/v1` (D351), A2UI
+(`https://a2ui.org/a2a-extension/a2ui/v0.9.1`, `…/v1.0`), AP2 (`https://github.com/google-agentic-commerce/ap2/v1`) — passes
 through as A2A carries it; the gate interprets none of it (D14, D326). A first message is plain A2A: a seller suggests
 one with its card's `skills[].examples`, and asks for structured input in an `input-required` turn (D350). For A2UI, whose agents send a user interface as
 A2UI messages in data parts marked `metadata.mimeType: "application/a2ui+json"` and whose clients answer with an
@@ -352,6 +355,30 @@ A2UI messages in data parts marked `metadata.mimeType: "application/a2ui+json"` 
 [`examples/sellers/a2ui`](../examples/sellers/a2ui/README.md) is an A2UI seller (A2A 1.0, the basic catalog, a booking
 form on a surface of each task's own, in the A2UI version the client reads, deleted when the task ends: D329), and
 `a2ui_passthrough` (§16) runs it through two replicas.
+
+**AP2 (D351).** Kontra runs no payment: a seller that wants to be paid configures AP2 v0.2.0 (Agent Payments
+Protocol, [github.com/google-agentic-commerce/ap2](https://github.com/google-agentic-commerce/ap2), released 28 Apr
+2026) itself. AP2 defines a Checkout Mandate and a Payment Mandate as SD-JWT verifiable credentials, versioned by
+their `vct`, between five roles (Shopping Agent, Credential Provider, Merchant, Merchant Payment Processor, Trusted
+Surface), and leaves their carriage over A2A to the commerce protocol. The author chooses the roles its agent plays
+and the parties that play the others; the gate is none of them. It relays AP2 as above:
+
+- **Card and activation.** The seller's entry for `https://github.com/google-agentic-commerce/ap2/v1` is served as
+  written, `required` and `params` (its roles) included, and an activation is echoed and sent upstream as for A2UI. A
+  message that omits it while the served card marks it `required` is `-32008` before any task row (§2.4).
+- **Parts.** Checkouts, mandates and receipts travel as data parts and are relayed with their `metadata`, equal
+  under JCS, in both directions, through the tunnel, in the log, on resubscribe and in `GetTask`. On a sealed service
+  they are sealed like any part, so the gate never sees a mandate.
+- **The URI only.** The gate keys on nothing but the URI: AP2's own samples name their data parts differently, and
+  differently between versions, so this spec lists no data-part key and the gate reads none. It requires, verifies,
+  signs, stores apart from the task log and indexes nothing of AP2's, and Admission sees only `extensions` (§13.1).
+- **Not over `/mcp`.** `hire` cannot send a data part with metadata nor activate an optional extension (D328): a
+  seller whose card requires AP2 is refused with its A2A URL and the URI to activate (§12.2, D294). A shopper hires it
+  over A2A.
+
+`examples/sellers/ap2-merchant` is an AP2 v0.2.0 merchant (a checkout JWT it
+signs, a Checkout Mandate checked against it, a receipt; it takes no payment), and `ap2_passthrough` (§16) runs it
+through a tunnel, plain and sealed.
 
 ## 3. The served A2A card
 
@@ -484,7 +511,6 @@ enforces its own modes (D14).
 
 | `tasks.state` | A2A wire (`TaskState`) | MCP wire (`Task.status`) | Class |
 |---|---|---|---|
-| `quoted` | `TASK_STATE_INPUT_REQUIRED` with `metadata["kontra.approve.url"]` (README, 25 Oct) | `working`, with the approve URL in `statusMessage` and `_meta["sh.kontra/approve-url"]` (D21) | pre-hold; only an Admission that returns a quote creates it (§13.2) |
 | `submitted` | `TASK_STATE_SUBMITTED` | `working` | active |
 | `working` | `TASK_STATE_WORKING` | `working` | active |
 | `auth-required` | `TASK_STATE_AUTH_REQUIRED` | `working` (statusMessage says what the agent waits for) | active: not a turn boundary (D54) |
@@ -494,14 +520,16 @@ enforces its own modes (D14).
 | `canceled` | `TASK_STATE_CANCELED` | `cancelled` | terminal |
 | `rejected` | `TASK_STATE_REJECTED` | `failed` | terminal |
 
+An earlier release also had `quoted`, a task waiting for a person's approval of a quote; it is withdrawn with escrow
+(D351), and the only rule that still names it is §14.5's sweep of a leftover row.
+
 `tasks.protocol` (`a2a` | `mcp`) is the protocol dispatch speaks upstream. A task is rendered in the
 vocabulary of the endpoint that reads it: an A2A route, an MCP route, or the gate's own `/mcp` (a task
 created by `hire` is an A2A task followed over MCP, §12).
 
-**After a terminal event** a task's state, status and artifacts never change again; its history grows only
-by an accepted review-window message (§7), and its metadata only by `metadata` rows (operator patches: hook
-results, annotations). Every other write to a terminal task —
-status, artifact, result, input — is refused by the store; that is the rule that drops late upstream events
+**After a terminal event** a task's state, status, artifacts and history never change again, and its metadata
+only by `metadata` rows (operator patches: hook results, annotations). Every other write to a terminal task —
+status, artifact, message, result, input — is refused by the store; that is the rule that drops late upstream events
 after a cancel (§8).
 
 ### 5.2 One transaction per event
@@ -517,7 +545,7 @@ task is one transaction:
           terminal_at     = CASE WHEN $state IN (<terminal>) AND terminal_at IS NULL THEN now() ELSE terminal_at END,
           retention_until = CASE WHEN $state IN (<terminal>) AND retention_until IS NULL THEN now() + $retention ELSE retention_until END
     WHERE id = $id AND version = $prev
-      AND (state NOT IN (<terminal>) OR ($kind IN ('metadata', 'message') AND $state = state AND $after_terminal_ok))
+      AND (state NOT IN (<terminal>) OR ($kind = 'metadata' AND $state = state AND $after_terminal_ok))
    RETURNING version, deadline
    ```
    Zero rows (the version moved, or the write is refused by the terminal rule) is
@@ -527,8 +555,7 @@ task is one transaction:
    in-memory store treats 0 as "skip the check", and the gate's store never writes unchecked. `status_at` is
    the logged `status.timestamp` truncated to microseconds, which `ListTasks` orders by (spec §3.1.4); no
    index names `updated_at`, so artifact-only updates stay cheap (D49). `$after_terminal_ok` is set only by
-   the two writers allowed after a terminal event: `apply_metadata` and the accepted review-window message
-   (§5.1). `deadline` is written only here, at the transition into `submitted`, and returned to whoever wrote it
+   the one writer allowed after a terminal event, `apply_metadata` (§5.1). `deadline` is written only here, at the transition into `submitted`, and returned to whoever wrote it
    (the workflow sets its timeout timer to that stored value, §14.1).
 2. `INSERT INTO task_events (task_id, seq, kind, payload, payload_ref) VALUES ($id, <the returned version>, …)`.
 3. `SELECT pg_notify('kontra_task_events', '<task_id>:<seq>')`.
@@ -541,7 +568,7 @@ context detached from the request's cancellation (`context.WithoutCancel`, D8), 
 lost because the request that caused it ended.
 
 `task_events.kind` is one of `task` (the creation snapshot), `status`, `artifact`, `message` (a caller
-message appended to history: a follow-up or a review-window message), `metadata` (a metadata-only change),
+message appended to history: a follow-up), `metadata` (a metadata-only change),
 and for MCP tasks `input_request`, `input_response` and `result` (§11.5). `payload` is the A2A
 `StreamResponse` for that event with gate ids (for `metadata`, `{"metadata": {…}}`), or the MCP equivalent.
 `snapshot` and `payload` are `json`, not `jsonb`, so a NUL character or a duplicate key in relayed content is
@@ -562,8 +589,7 @@ credentials or request headers. The work queue's payload is not in Temporal: it 
 ### 5.4 Retention
 
 Every terminal task, with its `task_events`, `attempts`, `work_items`, `push_configs` and bucket objects, is
-deleted at `retention_until` (`services.<name>.task.retention`, default 7 days after the terminal event; an
-operator's review window and dispute period must fit inside it). A sweep on any replica does it every 10
+deleted at `retention_until` (`services.<name>.task.retention`, default 7 days after the terminal event). A sweep on any replica does it every 10
 minutes. `mcp_sessions` closed for longer than the retention go the same way (a session of the gate's own
 `/mcp`, which names no service, after the default 7 days, D95); `calls` rows are the
 operator's to delete (§13.5). Parts sealed to a key are only as safe as that key ([`tunnel.md`](tunnel.md)
@@ -764,15 +790,15 @@ dispatch runs, which routes `abort` and `forward_cancel` (§14.2).
 happened, and `metadata["kontra.failure"] = "<reason>"` (MCP: §11.8). The reasons are a closed set:
 `no_session`, `tunnel_lost`, `upstream_unreachable`, `upstream_error`, `service_unavailable`, `timeout`,
 `sealed_rejected`, `lifecycle_unavailable` (§14.5). For a sealed service the text is the gate's own, never the
-upstream's message, which may quote the sealed input it refused (D195). A declined or expired quote is not a
-failure: it ends `canceled` with `metadata["kontra.canceled"] = "declined"` or `"quote_expired"` (§13.2).
-Retries never change the gate task id, and a caller sees no event for an attempt that left no upstream task.
+upstream's message, which may quote the sealed input it refused (D195). A canceled task carries
+`metadata["kontra.canceled"] = "client"` (§8); the `declined` and `quote_expired` values of an earlier release are
+withdrawn with escrow (D351). Retries never change the gate task id, and a caller sees no event for an attempt that left no upstream task.
 
 ### 6.5 Timeouts
 
-`task.timeout` (default 1 h; Cloud listings: `taskTimeoutSeconds`) is **wall clock from submission**,
+`task.timeout` (default 1 h; a listing's `taskTimeoutSeconds`, [`tunnel.md`](tunnel.md) §6.4) is **wall clock from submission**,
 regardless of state, including `input-required` and `auth-required` (PRD §7). Submission is the moment the
-task enters `submitted`; a `quoted` task's clock starts when it is accepted. `tasks.deadline` is fixed then
+task enters `submitted`. `tasks.deadline` is fixed then
 (§5.2) and never moved. When it passes, the lifecycle sends `forward_cancel` upstream (if an upstream task
 exists and the session is up) and writes `failed: timeout` without waiting for the upstream's answer.
 
@@ -802,9 +828,7 @@ same. For a sealed service, events are never coalesced, and the polling path log
 | A message with the task's `taskId` | `input-required` | Appends it to history (`message` event), then dispatches it on the **same attempt's session** to the **same upstream task**, with the upstream `taskId`/`contextId` substituted. |
 | same | the sticky session is gone | The follow-up waits for the node: the reconnect wait of §6.4, with no status event (the question stays the status); once the node is back, the turn resumes on its new session and the follow-up is sent there (D81). Its key, and every key it was rotated to, or its binding to the service revoked: `failed: tunnel_lost` (D340, D342). |
 | same | `submitted`, `working` or `auth-required` | `UnsupportedOperationError` (`-32004`): a running task takes no input, and `auth-required` waits for credentials out of band (D54). Not forwarded. |
-| same | `quoted` | `UnsupportedOperationError`: a quote is accepted on the operator's page, not in the protocol (§13.2). |
-| same | `completed`, with a review window open (the operator's `ReviewWindow` hook, §13.3) | The interceptor stores the sanitized message as a work item and sends the `kontra.review_message` Update **first**; inside it the operator's `OnReviewMessage` hook decides (Cloud: a dispute when the metadata carries `kontra.escrow.dispute`). Accepted: the message is appended (`message` event) and the caller gets the task. Refused, `accepted: false` (the hook declined, or the work item is missing or already consumed, §14.1), or the workflow already closed: nothing is logged (the hook's patch and dispute flag apply only when the append commits), the work item is deleted, and the caller gets `UnsupportedOperationError`. Not accepted within 10 s, or accepted but not completed within the 10 s in all: `-32603` (HTTP `503`), and the work item is kept; an accepted handler may still append the message, which the caller sees on its next read (D66). Never forwarded upstream. The gate itself names no escrow key (D51). |
-| same | terminal otherwise | `UnsupportedOperationError` (spec §3.4.1). |
+| same | terminal | `UnsupportedOperationError` (spec §3.4.1). Not forwarded, nothing logged: an ended task takes no message (the review window of an earlier release is withdrawn, D351). |
 | A message with a `contextId` and no `taskId` | — | A new gate task in that context (§4); dispatched to the context's previous session when it is connected, otherwise per §6.1, with the upstream context of §4. |
 | A message whose `taskId` and `contextId` disagree | — | `InvalidParams` (`-32602`). |
 
@@ -830,7 +854,6 @@ that wins completes the Update only once the terminal `canceled` event is in the
 | Task | Upstream task | Gate does | A2A caller gets |
 |---|---|---|---|
 | terminal | — | nothing | `TaskNotCancelableError` (`-32002`, HTTP `400`) |
-| `quoted` | — | `canceled`, `kontra.canceled = "client"`; nothing was held | the `canceled` task |
 | active | none yet | aborts the running dispatch **in process**: `abort(task, attempt)` on the attempt's replica's control queue cancels the dispatch's context through the replica's registry (Temporal's own activity cancellation is requested too, as a backstop, D44). The workflow writes `canceled` only once the dispatch has stopped; if the dispatch had recorded a first upstream task id meanwhile, it sends `forward_cancel` first. The attempt is recorded `aborted` | the `canceled` task |
 | active or `input-required` | exists, session up | `forward_cancel(task, attempt)` sends `CancelTask` upstream **inside the tunnel the node opened** | whatever the upstream answers, with gate ids: a `canceled` task (the upstream's `canceled` status is logged as the terminal event; for an `input-required` task, where no dispatch runs, the workflow writes it with `write_terminal`), or the upstream's error (`TaskNotCancelableError`, `UnsupportedOperationError`) while **the task continues**; an upstream task still running (no error, not `canceled`) is answered with the task as the gate stores it, and the task continues (D107); an answer the node writes itself (`Kontra-Node`) is not delivered either: `TaskNotCancelableError`, and the task continues (D148) |
 | active or `input-required` | exists, session gone | nothing to forward: `forward_cancel` answers `tunnel_lost`, opening no stream, when its replica does not hold the session or the session no longer serves the service, and for a tunnel attempt that, a `forward_cancel` not started within 10 s, or a cancel during a reconnect wait (§6.4, where no `forward_cancel` is tried) makes the workflow write `canceled` at once; a running dispatch is stopped. If the node comes back within `task.reattach_grace`, it is sent `forward_cancel` on its new session, best effort, and the task is not resumed (D148, D346) | the `canceled` task |
@@ -841,15 +864,15 @@ nothing polls that queue. A `forward_cancel` not started within 10 s (schedule-t
 `kontra-direct-ctl`; after an `abort` not started within 10 s, the workflow waits for the dispatch's heartbeat
 timeout, then applies the table above (D79). That wait is for A2A `CancelTask` only: an MCP `tasks/cancel` keeps
 §11.6's rule (at most 10 s, then `canceled`, D57). This is safe while the old dispatch may still be alive: once
-`canceled` is logged, the terminal rule refuses its later appends (after it, only `metadata` rows and a
-review-window message are written, §5.1), and its fence aborts it (D77); `abort` still runs when it can.
+`canceled` is logged, the terminal rule refuses its later appends (after it, only `metadata` rows are written,
+§5.1), and its fence aborts it (D77); `abort` still runs when it can.
 
 Concurrent cancels are coalesced: while one is in flight, another awaits the same result; one after it
 completed starts anew. If the Update does not complete within 60 s the caller gets the stored task as it is.
 
 A cancel that wins writes `canceled` as the last event; any upstream event that arrives later is refused by
-the store's terminal rule (`cancel_forwarded`: no `completed` after `canceled`). Cancel never races money: the
-gate writes `canceled` first and only then calls the operator's `OnTerminal` (§13.3). MCP's own cancel
+the store's terminal rule (`cancel_forwarded`: no `completed` after `canceled`). The terminal event comes before the
+hooks: the gate writes `canceled` first and only then calls the operator's `OnTerminal` (§13.3). MCP's own cancel
 semantics differ (§11.6).
 
 ### 8.1 How the queue carries work
@@ -868,7 +891,7 @@ event log, never from the upstream connection (D2). a2a-go's SSE writer emits ra
 reads `Last-Event-ID`, which is why the gate cannot use it here.
 
 - **Gate-written statuses.** The reconnect wait's status (`working`, `kontra.reconnect`, §6.4) is a status row like
-  any other: carried, and it ends no stream (only a terminal, `input-required` or `quoted` row does), no blocking
+  any other: carried, and it ends no stream (only a terminal or `input-required` row does), no blocking
   `SendMessage` (§15) and no `/mcp` plain wait (§12.2); the re-attach's `resumed` status neither, unless its state
   ends the turn (D341).
 - **What a stream carries.** A2A streams carry only `task`, `status` and `artifact` rows: a task stream is a
@@ -884,24 +907,22 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
   that carries an error).
 - **`SendStreamingMessage`, new task.** Admits and creates the task (as `SendMessage` does), then streams the
   creation snapshot (`id: 1`) and every later carried row. It closes after the first row whose state is
-  terminal, `input-required` or `quoted`.
+  terminal or `input-required`.
 - **`SendStreamingMessage`, follow-up** (to an `input-required` task). The first event is the task snapshot
   at the version V current when the `kontra.message` Update was accepted, sent without an `id:` line; then
   rows with seq > V. The leading snapshot never closes the stream; it closes after the first row with
-  seq > V whose state is terminal, `input-required` or `quoted`.
+  seq > V whose state is terminal or `input-required`.
 - **`SendStreamingMessage`, resend** (no `taskId`, answered with the task it repeats, §15). The snapshot at the
   task's current version without an `id:` line; the stream closes after it if it already ends a turn, and
   otherwise after the first later row that does (D108).
-- **`SendStreamingMessage` to a `completed` task with an open review window.** The interceptor's answer (§7) as
-  one task event without an `id:` line; then the stream closes (D109).
 - **`SubscribeToTask` without `Last-Event-ID`.** Terminal task: `UnsupportedOperationError` (spec §3.1.6; TCK
   `STREAM-SUB-003`). Otherwise the current snapshot as a `Task` event **without** an `id:` line, then every
   carried row with seq greater than the snapshot's version. The stream stays open through `input-required`
   and `auth-required` and closes after the terminal event (TCK `STREAM-SUB-002`).
 - **Resume: `SubscribeToTask` with `Last-Event-ID: K`** (header, on either binding; `K` a seq the gate issued
   for this task). The gate sends the task snapshot **as of seq K** — folded from rows `1..K`: up to the terminal
-  row, a2a-go's `ApplyUpdate` for task, status, artifact and message rows; after it, message rows appended to
-  `history` directly, because `ApplyUpdate` refuses any update to a terminal task (D75); metadata rows always as
+  row, a2a-go's `ApplyUpdate` for task, status, artifact and message rows; after it, message rows (only an
+  earlier release wrote them, D351) appended to `history` directly, because `ApplyUpdate` refuses any update to a terminal task (D75); metadata rows always as
   a top-level merge into `metadata` — as a `Task` event without an `id:` line, then every carried row with
   seq > K, then the live tail.
   Every carried row after K is sent exactly once, in seq order, and the generation order of spec §3.5.2 is
@@ -915,10 +936,8 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
 Non-streaming `SendMessage` returns on the first terminal, `input-required` or `auth-required` state (A2A
 §3.1.1), or at once with `returnImmediately: true` (the `submitted` snapshot), as a2a-go does; a blocking call
 is bounded only by the task's deadline and the caller's own connection (§15). A resend (no `taskId`, answered with
-the task it repeats, §15) whose task stands at `input-required`, `quoted` or `auth-required` is answered at once with
-the task as it stands, since the turn it repeats is over (a `quoted` task is `input-required` on the wire, §5.1, and
-ends a turn as a stream's does, D108); a `quoted` task's start, which may be the lost one, is re-issued first
-(§14.5), so that it waits for `kontra.approval` (D290). A resend of a terminal task is answered with it once the
+the task it repeats, §15) whose task stands at `input-required` or `auth-required` is answered at once with
+the task as it stands, since the turn it repeats is over (D108, D290). A resend of a terminal task is answered with it once the
 work queue re-issued the start, and one of a `submitted` or `working` task, whose start may be the lost one, waits
 for the end of the task's current turn.
 
@@ -934,8 +953,7 @@ URL is checked when it is set (§10.3); a redirecting URL is accepted, and its r
 on each turn neither duplicates rows nor starts a second delivery. At most 10 configs per task and 256
 delivering configs per buyer; beyond that, `InvalidParams`. The `anonymous` principal cannot set push
 configs (§2.3). The upstream's own push configs are never used: the gate is the agent's only client. A
-review-window message's inline config is dropped, neither saved nor stored with its work item, and does not
-refuse the message (D110). A config set on a task that has already ended starts at its terminal row: it is
+config set on a task that has already ended starts at its terminal row: it is
 stored, listed and deletable, receives nothing, and does not count as delivering (D111).
 
 ### 10.2 Delivery
@@ -1204,8 +1222,7 @@ A plain `tools/call` is forwarded on the pinned session. When the response compl
 bytes_out, duration_ms, is_error, at)`. `is_error` is true for a JSON-RPC error or a result whose
 **top-level** `isError` is true. That and the tool name, byte counts and duration are all the gate reads; it
 never parses `arguments`, `content` or `structuredContent`, which may be sealed
-([`ext-sealed.md`](ext-sealed.md)). The table holds no price: it is a usage record, and MCP services are not priced
-(D350).
+([`ext-sealed.md`](ext-sealed.md)). The table holds no price: it is a usage record (D350, D351).
 
 A call whose exchange was answered but whose JSON-RPC response never arrived (a cut stream, a refused event, a
 client that left) is metered `is_error` true; a call that got no answer at all (a §6.1 refusal, an unreachable
@@ -1238,7 +1255,7 @@ upstream call (note 1 §8 and README "Open", default kept).
 plainly by any client that does not augment the call, and Admission sees a plain call only when the gate-wide
 `hooks.admission.operations` lists `call`, which puts every call of every service, free ones included, behind the
 hook. `required` makes every call of one service a gate task, which Admission sees as `task` (§13.1), and so durable
-and resumable; it was added for per-task MCP prices, which are withdrawn, and stays as a hosting mode (D350). A
+and resumable; it was added for per-task MCP prices, which are withdrawn, and stays as a hosting mode (D350, D351). A
 `2025-06-18` session, which has no tasks, can call nothing on it. A gate before migration `0004` does not know the
 mode: it reads it unvalidated and relays the service's plain calls without Admission (unless `call` is in the
 operations). So an operator writes `required`, and lets such a service's sessions through Admission, only once every
@@ -1250,8 +1267,7 @@ replica runs a gate with `0004`, and before an image goes back below it denies t
 0. The gate resolves `params.name` against the service's cached `tools/list` (§11.3). Unknown or denied:
    `-32602` `Unknown tool: <name>`. `execution.taskSupport` absent or `forbidden`: `-32601`. Either way there
    is no Admission and no task.
-1. Admission (§13.1) with operation `task`. Refused: the JSON-RPC error. A quote is a deny (§13.1): an MCP task
-   is never `quoted` (D350).
+1. Admission (§13.1) with operation `task`. Refused: the JSON-RPC error.
 2. The gate creates the gate task (`protocol = mcp`; the request, the client session's hash and the client's
    JSON-RPC request id stored by reference in `work_items`), starts `TaskLifecycle`, and answers at once with
    `CreateTaskResult`: `{"task": {"taskId": <gate task id>, "status": "working", "createdAt",
@@ -1331,14 +1347,14 @@ task-augmented call returned, as MCP requires (`hire` tasks: §12.2):
    JSON-RPC error answered the call): `tasks/get` shows `status: "failed"`,
    `statusMessage` = the reason text and `_meta["sh.kontra/failure"] = "<reason>"`; `tasks/result` returns
    `{"code": -32603, "message": <reason text>, "data": {"sh.kontra/failure": "<reason>"}}`.
-3. `canceled` (by the client, or a declined or expired quote): `tasks/result` returns `{"code": -32603,
-   "message": "task cancelled", "data": {"sh.kontra/canceled": "client" | "declined" | "quote_expired"}}`. A task
+3. `canceled` by the client: `tasks/result` returns `{"code": -32603,
+   "message": "task cancelled", "data": {"sh.kontra/canceled": "client"}}`. A task
    the upstream cancelled itself ends `canceled` too, and its `tasks/result` is `-32603` `task cancelled` without
    `data` (D203).
 
 In cases 2 and 3 the task's `calls` row has `is_error = true`. A 2025-11-25 upstream reports `failed` for a
-result with `isError: true`; the gate logs the result and ends the task `failed`. Cloud's settlement keys on
-the gate state and on the result's top-level `isError`, never on content.
+result with `isError: true`; the gate logs the result and ends the task `failed`. An operator's usage accounting
+keys on the gate state and on the result's top-level `isError`, never on content.
 
 ### 11.9 MCP events in the log
 
@@ -1466,15 +1482,13 @@ not declare it) `-32601`; nothing reaches Admission or the upstream (D322).
 
 1. A `tools/call` whose request declares the extension, on a `durable` service whose upstream declared it in its
    cached `server/discover`, becomes a gate-owned task. Any other is a plain call (§11.4).
-2. An unknown or denied tool is `-32602`, as in §11.3. Then Admission (§13.1) with operation `task`; a `quote`
-   is a deny (§13.1, D350).
+2. An unknown or denied tool is `-32602`, as in §11.3. Then Admission (§13.1) with operation `task`.
 3. The gate creates the gate task (`protocol = mcp`; the work item stores the request with its `_meta`, which
    names the era) and starts `TaskLifecycle`, as in §11.5 steps 1–2.
 4. The gate waits up to 2 s for the task to end. If it ends, the gate answers the call
    with the outcome §11.8 stores (the `CallToolResult`, with `resultType: "complete"`, or the JSON-RPC error),
    and the client never sees a task. Otherwise it answers `CreateTaskResult`: `{"resultType": "task", taskId,
-   status, statusMessage?, createdAt, lastUpdatedAt, ttlMs, "pollIntervalMs": 1000}`; a `quoted` task is
-   `working`, with the approve URL in `statusMessage` and in `_meta["sh.kontra/approve-url"]` (D21). Either
+   status, statusMessage?, createdAt, lastUpdatedAt, ttlMs, "pollIntervalMs": 1000}`. Either
    answer is sent only after the task row is committed, so a `tasks/get` for it resolves. A client that closes
    its response stream before either answer is sent has cancelled the request (2026-07-28 Streamable HTTP,
    "Cancellation") and never learned the task's id: the gate sends the task `kontra.cancel` (§11.6, D57, D178).
@@ -1513,7 +1527,7 @@ D176); a task of another buyer, or an unknown one, is `-32602`, as in §11.6.
 
 | Method | Gate answers |
 |---|---|
-| `tasks/get {taskId}` | `resultType: "complete"` and the task: `taskId`, `status`, `statusMessage?`, `createdAt`, `lastUpdatedAt`, `ttlMs` (§11.6's `ttl`), `pollIntervalMs: 1000`, the operator's `mcpMeta` in `_meta`. `quoted`, `submitted` and `working` are `working`; `input-required` is `input_required`, with `inputRequests` = every `input_request` event without an `input_response`, keyed by gate id. A terminal task is presented by its terminal event, not its gate state: a stored `CallToolResult`, whatever its `isError`, is `completed` with `result`; a stored JSON-RPC error or a failure the gate wrote is `failed` with `error` in §11.8's forms (`sh.kontra/failure` also in `_meta`); `canceled` is `cancelled` |
+| `tasks/get {taskId}` | `resultType: "complete"` and the task: `taskId`, `status`, `statusMessage?`, `createdAt`, `lastUpdatedAt`, `ttlMs` (§11.6's `ttl`), `pollIntervalMs: 1000`, the operator's `mcpMeta` in `_meta`. `submitted` and `working` are `working`; `input-required` is `input_required`, with `inputRequests` = every `input_request` event without an `input_response`, keyed by gate id. A terminal task is presented by its terminal event, not its gate state: a stored `CallToolResult`, whatever its `isError`, is `completed` with `result`; a stored JSON-RPC error or a failure the gate wrote is `failed` with `error` in §11.8's forms (`sh.kontra/failure` also in `_meta`); `canceled` is `cancelled` |
 | `tasks/update {taskId, inputResponses}` | Each key naming an outstanding input request of the task is logged once as an `input_response` event, under §11.5 step 5's rule, and `kontra.input_response {seq}` is signalled; other keys are ignored. Empty result, `resultType: "complete"` |
 | `tasks/cancel {taskId}` | On a task that is not terminal, `kontra.cancel` is sent (§11.6, D57) and not awaited; on a terminal task, nothing. Empty result, `resultType: "complete"` |
 
@@ -1535,7 +1549,7 @@ minute. It pins nothing. It is the unit that Admission's `session` operation dec
 billing unit, withdrawn with MCP prices, D350), and the `mcp_session` of its `calls` rows.
 
 **Not offered to modern clients in v4.0 (D161, D162).** Tasks of `passthrough` services; `notifications/tasks`;
-resumable streams; `-32042`, never emitted on a modern request; **sealed** services, to which every modern
+resumable streams; **sealed** services, to which every modern
 request is answered as rule 3 above, because envelope v1 binds a 2025-11-25 session
 ([`ext-sealed.md`](ext-sealed.md) §2–§3), so a dual-era client falls back; and **stdio** services, whose bridge
 on the node is legacy only ([`tunnel.md`](tunnel.md) §10) and answers a modern request the same way.
@@ -1602,12 +1616,11 @@ principal: a request without a credential is `401` (§12.1); through a node, the
   `error="invalid_token"` (§2.3, D315, D316). A stale feed or a tenant the gate cannot read is, like an unreadable
   issuer, `503` with `-32603`. A header with `crit`, a key set's RSA key under 2048 bits and keys that are not signing
   keys are refused or skipped (RFC 7515 §4.1.11, RFC 7518 §3.3).
-- A principal that arrived through `/mcp` with OAuth has `via = mcp`. The gate passes `via` to the hooks. An
-  MCP session, like an API key, can never approve anything that moves money: that is the hooks' invariant
-  (Cloud), and the gate gives them what they need to keep it.
+- A principal that arrived through `/mcp` with OAuth has `via = mcp`. The gate passes `via` to the hooks, which
+  may decide on it.
 - **Who the authorization server's principals reach (D301).** An `allow:` entry `oidc:sub:<sub>` admits one of them;
   `oidc:*` admits all of them, and nothing else (§2.3): a listing open to every signed-in user without admitting
-  anonymous callers, `[key:*, oidc:*]` when API keys are welcome too. Price and policy stay Admission's (§13.1).
+  anonymous callers, `[key:*, oidc:*]` when API keys are welcome too. Policy beyond `allow:` stays Admission's (§13.1).
 
 ### 12.2 Tools
 
@@ -1621,9 +1634,9 @@ D332 to D339).
 
 | Tool | Input | Result |
 |---|---|---|
-| `search` | `{query?: string, price?: string, cursor?: string}` | `structuredContent: {services: [{ref, kind, name, description, available, price?}], nextCursor?}`, plus the same as a text block. `available` = at least one connected session or a direct backend. `price` is the operator's annotation, verbatim. Only services whose `allow:` admits the principal by an entry other than `anonymous` (`key:*` and `oidc:*` included, D301), plus services the operator marks `listed`; services of an anonymous tenant never appear, nor services the operator hides from search (`annotations.search.hidden: true`, D321), for any principal. |
+| `search` | `{query?: string, cursor?: string}` | `structuredContent: {services: [{ref, kind, name, description, available}], nextCursor?}`, plus the same as a text block. `available` = at least one connected session or a direct backend. Only services whose `allow:` admits the principal by an entry other than `anonymous` (`key:*` and `oidc:*` included, D301), plus services the operator marks `listed`; services of an anonymous tenant never appear, nor services the operator hides from search (`annotations.search.hidden: true`, D321), for any principal. |
 | `describe` | `{service: string}` | Only for a service `search` would return to the principal were it not hidden (D321) or an MCP service (D350), else the unknown-service error. The served card (A2A) or the cached, filtered, annotated `tools/list` (MCP; never an upstream call per request), `sealed`, `available`, and the URLs to call it directly (`{public_url}/agents/…` or `/mcp/…`). |
-| `hire` | `{service: string, message: string \| {parts: Part[]}, contextId?: string, idempotencyKey?: string}` | Task-augmented (`execution.taskSupport: "optional"`): a `CreateTaskResult`. Plain: a `CallToolResult` whose `structuredContent` is the hire result (below; a quoted task's approve URL and quote in it, and the URL in its text and `_meta`, §12.3). Only `kind: a2a` services: MCP services are called directly at `/mcp/{svc}`. |
+| `hire` | `{service: string, message: string \| {parts: Part[]}, contextId?: string, idempotencyKey?: string}` | Task-augmented (`execution.taskSupport: "optional"`): a `CreateTaskResult`. Plain: a `CallToolResult` whose `structuredContent` is the hire result (below). Only `kind: a2a` services: MCP services are called directly at `/mcp/{svc}`. |
 | `reply` | `{taskId: string, message: string \| {parts: Part[]}}` | Sends a follow-up to a task in `input-required` (§7). Answers the task's new state, as a plain `hire` answers it (the hire result in `structuredContent`). Refused, nothing sent, for a task that is not asking: a running one's text says to follow it with `status`, an ended one's to continue the conversation with `hire` and its `contextId` (D336). |
 | `status` | `{taskId: string, after?: integer ≥ 0, wait?: integer 0..25}` | The hire result with `contextId` and `service`; with `after`, the task's events after that cursor and the next `cursor`; with `wait`, after waiting for a row (§12.6, D332). Read-only. |
 | `tasks` | `{service?: string, contextId?: string, state?: string, cursor?: string}` | The principal's `hire` tasks, newest first, 50 a page: `{tasks: [{taskId, service, contextId, state, statusAt, text}], nextCursor?}` (§12.6, D333). Read-only. |
@@ -1639,8 +1652,9 @@ a task can be followed and answered from any of them, in seq order.
 **Refs, `search` and `describe` (D271).** A `ref` is the service's path segment: `<name>` on a single-tenant gate,
 `<tenant>/<name>` on a multi-tenant one ([`schema/mcp-tools.json`](schema/mcp-tools.json)); `describe` and `hire` take
 it. `search` returns A2A agents only, and takes no `kind`: MCP services are not listed (D350), and `describe` and
-`/mcp/{svc}` reach one by its ref. It matches `query` as a case-insensitive substring of the ref, the name or the
-description; `price` filters by equality, `price` on the `price_model` annotation (§13.4), `free` matching a service without one.
+`/mcp/{svc}` reach one by its ref. Nor does it take a `price`: listings carry none (D351). A `kind` or `price` argument
+is a tool error (`isError`) naming it. It matches `query` as a case-insensitive substring of the ref, the name or the
+description.
 Results are ordered by ref, 50 a page; `nextCursor` is an opaque keyset position that grants nothing, every page being
 filtered for the principal. One request reads at most 1000 services: one that reaches the bound answers what it found,
 fewer than 50 or none, with `nextCursor` at the last service it read (D293). `description` is the served card's
@@ -1654,12 +1668,11 @@ the route to use (`/mcp/…`; the service's A2A URL through a node, which seals)
 `A2A-Extensions`, so of the extensions a served card marks `required: true` (§2.4):
 
 - **the operator's are activated for the buyer (D300).** A required entry of the service's `card_extensions`
-  annotation (§13.4), such as Cloud's escrow entry ([`ext-escrow.md`](ext-escrow.md) §1), is the operator's, carried by
-  its own hooks: Admission's quote and the operator's approve page, which every `hire` task goes through (§12.3).
-  `hire` activates it on the buyer's behalf and Admission receives it in `extensions` (§13.1), as an A2A caller's
+  annotation (§13.4) is the operator's, and what it asks of a caller is the operator's to carry, through its own
+  Admission (§13.1), not the seller's. `hire` activates it on the buyer's behalf and Admission receives it in `extensions` (§13.1), as an A2A caller's
   activation; it is not passed to the service (§6.2), which the buyer asked nothing of. A `reply` needs nothing more.
-- **any other is refused (D294).** A ref of a service whose served card requires an extension of the seller's own, or
-  the sealed extension whoever asserts it, is answered as above with the text naming the service's A2A URL and the
+- **any other is refused (D294).** A ref of a service whose served card requires an extension of the seller's own
+  (AP2 among them, §2.6), or the sealed extension whoever asserts it, is answered as above with the text naming the service's A2A URL and the
   URIs to activate there; a `reply` to a task of such a service is refused the same way, nothing sent.
 
 An optional extension is never activated by `hire` or `reply`, whose messages carry no message metadata either, and
@@ -1687,9 +1700,9 @@ as an unknown one), and `tasks/list` lists them across services, newest first (b
 `kontra.cancel` with `mode: "mcp"` (§14.1, D293).
 
 **Plain calls wait (D272).** A plain `hire` (a legacy call without `params.task`, or a modern request that does not
-declare the tasks extension) and every `reply` wait up to 25 s for the task to end, to reach `input-required` or to be
-`quoted`, and answer what it then is: an ended task as `tasks/result` renders it (above); `input-required` as §12.4's
-reply-tool text; `quoted` at once, without waiting (§12.3); a task still running with a text naming the `status` call that follows
+declare the tasks extension) and every `reply` wait up to 25 s for the task to end or to reach `input-required`, and
+answer what it then is: an ended task as `tasks/result` renders it (above); `input-required` as §12.4's
+reply-tool text; a task still running with a text naming the `status` call that follows
 it (`{taskId, after: 0, wait: 25}`; `status`'s own answer names the cursor it returns, §12.6) and the A2A URL that does too (`GetTask` with the same credential). The wait is cut so that the answer is written within 50 s of the
 request's arrival, at least 1 s (D295): Admission (up to 30 s) and the task's start come first, and the MCP SDKs time
 a request out after 60 s, which on a modern `hire` cancels its task (§12.5).
@@ -1702,14 +1715,10 @@ declare). A client may show its model and its user nothing but `structuredConten
 - `taskId`, and `state`, the A2A state, always;
 - `contextId`, the task's A2A context, and `service`, its ref: what a `hire` that continues the conversation names
   (§12.6, D336);
-- `url`, the task's thread on the operator's page: its approve URL (`kontra.approve.url`, §13.2), byte for byte the
-  URL §12.3's elicitation carries, whenever the task has one, which it keeps after it leaves `quoted`. A task that
-  Admission allowed without a quote has none: the URL is the operator's, and the gate never builds it (D188);
-- `quote` `{approveUrl, expiresAt}`, the quote's terms, while the task is `quoted`;
 - `text`, the text of the content's text blocks other than data parts' JSON: an ended task's answer (each message's
   and artifact's text parts joined as `statusMessage` joins them, one message or artifact per line, after the gate's
-  own text for an ended task whose status message has none: §11.8's reason, a declined or expired quote), §12.4's
-  question with its reply-tool hint, or the gate's text for a quoted or still-running task. Each part is bounded as
+  own text for an ended task whose status message has none: §11.8's reason or the cancel), §12.4's
+  question with its reply-tool hint, or the gate's text for a still-running task. Each part is bounded as
   the content's is (§10.4: a part over 256 KiB is a file);
 - `data`, present only when the rendered message and artifacts have data parts: the array of those parts' values in
   their order (message first, then each artifact's);
@@ -1717,62 +1726,34 @@ declare). A client may show its model and its user nothing but `structuredConten
   resource's `kontra:task/…` name (its bytes are in the content).
 
 The content blocks beside it are as above, and stay for a client that reads only content (MCP's SHOULD that a
-structured result also be text): they carry the text, the data as JSON and the files as resources, and a quoted
-task's text names its thread URL, its task id and the quote's expiry; the thread URL of a task that is no longer quoted
-is in `structuredContent` only.
+structured result also be text): they carry the text, the data as JSON and the files as resources. The hire result
+has no `url` and no `quote`: the first was only ever an approve URL, the second a quote's terms, both withdrawn with
+escrow (D351).
 
 **Metering (D289).** The tools and the MCP Tasks of `/mcp` write no `calls` rows: `/mcp`
 is not a service (§11.4 meters a service's plain calls), and a `hire` is accounted as the A2A task it creates, whose
 row and events are the record.
 
-### 12.3 `hire` and approval
+### 12.3 `hire`: Admission and idempotency
 
 1. Admission (§13.1) with operation `task`, `via`, and in `extensions` the operator's required extensions `hire`
-   activated (§12.2, D300). An allow decision: the task starts `submitted` and `hire` answers as above.
-2. A quote decision (§13.2): the task is created `quoted`. Then:
-   - **The client declared `elicitation.url`:** `hire` answers with the JSON-RPC error `-32042`
-     (`URLElicitationRequiredError`), `data.elicitations = [{mode: "url", elicitationId, url: <approveUrl>,
-     message}]`. The gate stores `(elicitationId, task, mcp_session)` for the session that received the
-     error. When the task leaves `quoted` for any reason (accepted, declined, expired), the gate sends
-     `notifications/elicitation/complete {elicitationId}` once, on one `GET` stream of that session, and never on
-     another session. **Delivery (D288, amending D273):** a server sends each message on only one of a session's
-     streams (MCP 2025-11-25 transports, "Multiple Connections": it MUST NOT broadcast). A replica holding an open
-     `GET` stream of the session, which the task's events wake (§9), claims the notification with `UPDATE tasks SET
-     elicitation_notified_at = now() WHERE id = $1 AND elicitation_notified_at IS NULL` and writes it on that one
-     stream only if its update won; a stream opened within the 10 minutes after the task left `quoted` (the retry
-     window below) gets it only if no stream has claimed it. `GET` streams of `/mcp` carry no event ids and are not
-     resumed: a client that missed the notification retries `hire`. Nor do the response streams of its `tasks/result`
-     (D303): a `GET` naming a `Last-Event-ID` is the session's plain `GET` stream, which never carries a request's
-     answer, so a client whose stream was cut asks `tasks/result` again.
-   - **Otherwise** (and always on a modern request, which never gets `-32042`: 2026-07-28 removed it, D24, D269): `hire` answers at once (task-augmented: `CreateTaskResult` with `status: "working"` and
-     the URL in `statusMessage`; plain: a text block with the URL, the task id and the quote's expiry, and the hire
-     result with `url` and `quote`, §12.2, D324). No input is requested from
-     the client, so a client that cancels input-requiring tasks when it is not interactive does not decline
-     the quote by accident (D21).
-   - **Retries.** For a `hire` task, `first_message_id` is the `messageId` the gate mints for the A2A message it
-     builds, and `first_request` = SHA-256(utf8(service ref) ‖ 0x00 ‖ JCS(arguments)), which replaces §15's
-     request hash for these tasks. A `hire` that matches an existing task on `(tenant, service, buyer_id,
-     principal, first_request)` while it is `quoted`, or within 10 minutes after it left `quoted` (the client's
-     retry after a URL elicitation completes), answers that task in its current state: still `quoted`, the same
-     `-32042` with the same `elicitationId` to a session that declared `elicitation.url` and otherwise the answer
-     above; accepted, the result of §12.2; declined or expired, a `CallToolResult` with `isError: true` saying so
-     (task-augmented: the `cancelled` task). A retry of a task still `quoted` re-issues its start first, as an A2A
-     resend does (§14.5), so a task whose first `hire` lost its start gets the workflow the approval reaches. Any other
-     `hire` is a new task.
-   - **Idempotency (D338).** A `hire` with `idempotencyKey` (1 to 128 characters of `[A-Za-z0-9._:-]`) mints its
-     `messageId` from the key: UUIDv5, in a namespace of its own, of the principal's tenant, `buyer_id`, principal and
-     the key. A `hire` of the same principal and key within 24 h answers the task the first one created, in its
-     current state and whatever it is, with the answers of the retries above (quoted: the same `-32042` or the approve
-     URL; otherwise the result of §12.2), its start re-issued first as a resend's (§14.5); never a second task. The same
-     key with other arguments (another `service`, `message` or `contextId`: another `first_request`) is a
-     `CallToolResult` with `isError` "idempotencyKey already used for a different hire", and nothing is created. The
-     key is looked up across services (`tasks_hired_by_message`, migration 0005) and again in the transaction that
-     creates the task, under an advisory lock of `(buyer_id, principal, messageId)`, so two `hire`s with one key
-     arriving together make one task. A modern `hire` with a key is never cancelled for its client leaving (§12.5).
-3. The URL is the operator's (Cloud: the thread, `https://app.kontra.sh/#/t/<taskId>`, D188). It carries no
-   credential, and the page that serves it must check that the person who opens it owns the principal that
-   called `hire` (MCP elicitation, URL mode, safety rules). Accept: the hold, then `submitted`. Decline or
-   quote expiry: `canceled`, nothing held, nothing created at the payment provider.
+   activated (§12.2, D300). An allow decision: the task starts `submitted` and `hire` answers as above; a deny is
+   the `CallToolResult` of §13.1's codes. Admission that is down or answers what §13.1 refuses is `admission
+   unavailable`, and no task exists. There is no other decision: the quote, approval and URL elicitation of an
+   earlier release are withdrawn (D351), so `/mcp` never answers `-32042` nor sends
+   `notifications/elicitation/complete`.
+2. **Idempotency (D338).** For a `hire` task, `first_message_id` is the `messageId` the gate mints for the A2A
+   message it builds, and `first_request` = SHA-256(utf8(service ref) ‖ 0x00 ‖ JCS(arguments)), which replaces §15's
+   request hash for these tasks. A `hire` without `idempotencyKey` is a new task. A `hire` with `idempotencyKey` (1 to
+   128 characters of `[A-Za-z0-9._:-]`) mints its `messageId` from the key: UUIDv5, in a namespace of its own, of the
+   principal's tenant, `buyer_id`, principal and the key. A `hire` of the same principal and key within 24 h answers
+   the task the first one created, in its current state and whatever it is, with the result of §12.2, its start
+   re-issued first as a resend's (§14.5); never a second task. The same key with other arguments (another
+   `service`, `message` or `contextId`: another `first_request`) is a `CallToolResult` with `isError`
+   "idempotencyKey already used for a different hire", and nothing is created. The key is looked up across services
+   (`tasks_hired_by_message`, migration 0005) and again in the transaction that creates the task, under an advisory
+   lock of `(buyer_id, principal, messageId)`, so two `hire`s with one key arriving together make one task. A modern
+   `hire` with a key is never cancelled for its client leaving (§12.5).
 
 ### 12.4 A `hire` task that asks a question
 
@@ -1809,21 +1790,17 @@ The gate answers both eras itself (D269):
   any other, `ping` and every other method `/mcp` does not serve are `404` with `-32601`: `/mcp`'s tools never change
   while it runs, and `notifications/tasks` is not offered (D161), so it has no notification to send (D295).
 - A modern `hire` whose request declares the tasks extension is answered as §11.12 step 4: in line when the task ends
-  within 2 s, else `CreateTaskResult` (a quoted task `working`, the approve URL in `statusMessage` and
-  `_meta["sh.kontra/approve-url"]`, D21); without the extension it is a plain call (§12.2). A client that closes its
+  within 2 s, else `CreateTaskResult`; without the extension it is a plain call (§12.2). A client that closes its
   response stream before its `hire` is answered, in either case, has cancelled the request (2026-07-28 Streamable
-  HTTP, "Cancellation"): a task that request created and that is not `quoted` is sent `kontra.cancel` in MCP mode
-  (D178's rule; canceled within 10 s, D57). A `quoted` task is left as it is: it runs nothing until a person approves
-  it and ends when its quote expires, and the client's re-issued `hire` answers it (§12.3 Retries; D295). A task
-  that a retry found again is never cancelled for a retry's client leaving, nor is the task of a `hire` with an
-  `idempotencyKey` (D338): the key says the client re-issues the request (2026-07-28: a broken stream's request MUST be
+  HTTP, "Cancellation"): a task that request created is sent `kontra.cancel` in MCP mode
+  (D178's rule; canceled within 10 s, D57), except the task of a `hire` with an `idempotencyKey`, which is never
+  cancelled for its client leaving (D338): the key says the client re-issues the request (2026-07-28: a broken stream's request MUST be
   re-issued), the task runs on durably meanwhile, the re-issued `hire` answers it, and `status` resumes from the
   client's cursor (§12.6). §11.12's `tasks/get`,
   `tasks/update` and `tasks/cancel` serve `hire` tasks, presented as §12.2 and §12.4 say; `tasks/result` and
   `tasks/list` are `-32601` on a modern request (`404`, as for any method `/mcp` does not serve).
 - **A `hire` task to a modern reader (D295).** `tasks/get` is §11.12's table with `resultType: "complete"`, `ttlMs`
-  and `pollIntervalMs`: `quoted`, `submitted` and `working` are `working` (a quoted task's approve URL in
-  `statusMessage` and `_meta`); a question is §12.4's (D274); an ended task carries as `result` the `CallToolResult`
+  and `pollIntervalMs`: `submitted` and `working` are `working`; a question is §12.4's (D274); an ended task carries as `result` the `CallToolResult`
   that `tasks/result` renders (§12.2), with `resultType: "complete"`. Since that is a tool result, never a JSON-RPC
   error, a task that ended `failed` or `rejected` is `completed` with `isError: true` in `result` and
   `sh.kontra/failure` in `_meta` (the tasks extension: `failed` is for a JSON-RPC error and MUST NOT carry a tool result
@@ -1833,14 +1810,13 @@ The gate answers both eras itself (D269):
   elicitation declared in that request; the key and the question are read in one statement, so a key never names
   another question's text); its `accept` with `content.reply` a string becomes the §7 follow-up, once (the workflow
   takes one follow-up per turn end, §7). Every other key, a `decline` or `cancel`, and any answer while the task is
-  `quoted`, working or ended are ignored: the result is the empty acknowledgement and nothing is forwarded (nothing a
-  client answers approves a quote, D38, D45). So is an answer that §7 refuses because the question stopped being
+  working or ended are ignored: the result is the empty acknowledgement and nothing is forwarded. So is an answer that §7 refuses because the question stopped being
   outstanding meanwhile (another follow-up of that turn was taken first). Any other refusal of the follow-up is an
   error, never the acknowledgement (the client never answers a key twice): a lifecycle that does not accept it in time
   and a failure of the gate's own are `503` with `-32603`, an anonymous tenant's limit `429`, any other A2A refusal
   (the anonymous storage limit, a required extension, D294) its JSON-RPC error, so the client answers again.
   `inputResponses` that is not an object is `-32602`. `tasks/cancel` is acknowledged at once: `kontra.cancel` in MCP
-  mode on a task that is not terminal (a quoted one included), awaited only until the workflow accepts it, and not
+  mode on a task that is not terminal, awaited only until the workflow accepts it, and not
   sent again by that replica while one is being sent or for 10 s after its acceptance; nothing on a terminal one. A
   replica's drain waits (at most 11 s) for these cancels, and for those of modern hires its stopping listener cut,
   before it closes its Temporal client.
@@ -1856,7 +1832,7 @@ one answer, a `CallToolResult` with `isError` and the text `unknown task`. They 
 on the replica's waker, as `tasks/result` does; none writes a `calls` row.
 
 - **`status` (D332).** Without `after`, the hire result as a plain `hire` answers it (§12.2: an ended task as
-  `tasks/result` renders it, a question as §12.4's reply-tool text, a quoted task with its approve URL, a running one
+  `tasks/result` renders it, a question as §12.4's reply-tool text, a running one
   with the text naming `status` and the cursor to follow it from). With `after`, the hire result is a summary, so that
   paging a long history does not repeat every artifact on every page: an ended task's `text` is "The task ended
   <state>.", its status message's text (at most 2000 characters) and, when it has artifacts, how to read one with
@@ -1882,13 +1858,11 @@ on the replica's waker, as `tasks/result` does; none writes a `calls` row.
   condition (a first page starts above every task, never at a null that a generic plan could not use). One request
   reads at most 1000 rows (as `search`, D293): one that reaches the bound answers what matched, fewer than 50 or none, with `nextCursor` at
   the last row read. `service` filters by ref (one the principal cannot see matches nothing), `contextId` by context,
-  `state` by A2A state (a quoted task is `TASK_STATE_INPUT_REQUIRED` on the wire, §5.1), `active` (not ended) or
-  `ended`. An entry is `{taskId, service, contextId, state, statusAt, text}`, `text` the status message's text (a
-  quoted task's: its approve URL) cut to 200 characters. A task whose service is not served to the principal is left
+  `state` by A2A state, `active` (not ended) or
+  `ended`. An entry is `{taskId, service, contextId, state, statusAt, text}`, `text` the status message's text cut to 200 characters. A task whose service is not served to the principal is left
   out, so a page may hold fewer than 50.
 - **`cancel` (D334).** Exactly `tasks/cancel`'s legacy semantics (§11.6, D57): `kontra.cancel` in MCP mode, the task
-  `canceled` within 10 s, the upstream receiving §8's `CancelTask`; a quoted task is canceled as the client's cancel
-  (§13.2). Awaited, then the task's hire result, which is not `isError`: the cancel did what was asked. A task that
+  `canceled` within 10 s, the upstream receiving §8's `CancelTask`. Awaited, then the task's hire result, which is not `isError`: the cancel did what was asked. A task that
   has ended is `isError` "the task already ended (<state>)" and nothing is sent; a lifecycle that does not accept the
   cancel in time is `503` with `-32603`.
 - **`artifact` (D335).** One artifact of the task's snapshot, in full, as the hire result renders it: text parts as
@@ -1909,9 +1883,9 @@ on the replica's waker, as `tasks/result` does; none writes a `calls` row.
   a string or an integer, and whose request accepts `text/event-stream`, is answered on an SSE response stream: one
   `notifications/progress {progressToken, progress, message}` for each `task`, `status` and `artifact` row of the
   call's span (`progress` from 1, increasing; `message` the status message's text, else the state, or `artifact
-  <name>`; a message the same as the one before is not sent again), then the result, with no event ids (§12.3). The
+  <name>`; a message the same as the one before is not sent again), then the result, with no event ids. The
   span is a new task's rows from its creation, a reply's turn's from the version it read, and, for a `hire` answered
-  with an existing task (a retry, a re-issued keyed hire) or a `status` with `wait`, the rows after the call's start
+  with an existing task (a re-issued keyed hire) or a `status` with `wait`, the rows after the call's start
   (its tail, or its cursor): rows already in the log when the call came are history, which `status` gives as events. Both eras carry it: MCP 2025-11-25 and 2026-07-28
   let a server send notifications related to a request on that request's response stream, progress among them.
   Without a progress token nothing changes.
@@ -1927,13 +1901,14 @@ on the replica's waker, as `tasks/result` does; none writes a `calls` row.
 
 ## 13. Hook points
 
-The open-source gate contains no money code (PRD §13). It has three hook points: **Admission** (may this
-request create a task, a session or a call, and on what terms), **Lifecycle** (what happens around a task's
-end, including a review window) and **annotations** (operator data the gate shows without interpreting). Each
+The gate contains no money code and names no payment key: it has no quote, approval, hold, review window, dispute
+or price (D351; payment is the agent author's AP2, §2.6). It has three hook points: **Admission** (may this
+request create a task, a session or a call: access control), **Lifecycle** (notifications around a task's
+dispatch and end) and **annotations** (operator data the gate shows without interpreting). Each
 has a built-in implementation, which is what open source ships, and a **remote** one, which is how an
 operator's control plane (Kontra Cloud) fills it **without changing or rebuilding the binary** (D26). Go
-`internal/` packages cannot be imported by another module, and Cloud's settlement code is Python, so "the same
-binary with two hooks filled in" (PRD §13) is done by configuration, not by compilation. The payloads are JSON
+`internal/` packages cannot be imported by another module, and an operator's code may be in any language, so "the
+same binary with two hooks filled in" (PRD §13) is done by configuration, not by compilation. The payloads are JSON
 with the camelCase keys of [`schema/hooks.json`](schema/hooks.json); durations are integer seconds.
 
 `allow:` lists, per-tool policy, Kontra's reserved keys (§2.5) and edge limits are always enforced by the gate
@@ -1946,9 +1921,15 @@ itself, before any hook.
 - `AdmitRequest = {operation: "task" | "session" | "call", taskId (pre-minted, for "task"), service, principal
   {kind, id, buyerId, tenantId, via}, protocol, extensions, contextId, message {messageId, metadata, parts
   [{mediaType, size, sealed}]} (never content), tool}`.
-- `Decision = {outcome: "allow" | "deny" | "quote", refusal {code, message}, metadata, mcpMeta, quote
-  {approveUrl, expiresAt}}`. `metadata` keys must be under an operator prefix (§13.2) and `mcpMeta` keys under
-  `sh.kontra/`; both at most 16 KiB.
+- `Decision = {outcome: "allow" | "deny", refusal {code, message}, metadata, mcpMeta}`. An `allow` creates the
+  task `submitted` (or the session, or forwards the call) with the decision's `metadata` and `mcpMeta`; a `deny`
+  refuses it. There is no other outcome: a `quote`, which an earlier release had, is not a valid decision (below,
+  D351).
+- **Operator metadata (D113).** `metadata` that an operator writes (Admission decisions, `kontra.annotate`,
+  Lifecycle patches) has every key under one of the operator's prefixes (`operator_metadata_prefixes`, default
+  empty; each lies under `kontra.` and is longer than it, so §2.5's stripping vouches for its keys); `mcpMeta` has
+  every key under `sh.kontra/`. Each map is at most 16 KiB. No other key is written: `kontra.keyRetainUntil`, which
+  an earlier release let the operator write, is withdrawn (D351) and is like any key outside the prefixes.
 - **A deny's code (D325).** A `deny` refuses the request with `refusal.message` (`admission denied` when it is empty)
   and an error `refusal.code` decides. One of A2A's own codes (`-32700`, `-32600` to `-32603`, `-32001` to `-32009`)
   is that A2A error (on `/mcp`, answered as `hire` answers any A2A refusal). A code from `-32099` to `-32050`, the
@@ -1968,82 +1949,64 @@ Rules:
   timeout, a non-`2xx` (a `3xx` included: redirects are not followed) or an unparsable answer is a deny with
   `-32603` and message `admission unavailable` (HTTP `503`): admission **fails closed**. So is an answer that is
   not a valid `decision` of [`schema/hooks.json`](schema/hooks.json) read with exact keys (a `deny` without its
-  `refusal`, a `quote` without its terms, an unknown member, a `refusal.code` that is not an integer, `null`
-  included), one whose maps break §13.2's key and size rules, and a quote whose `approveUrl` is not an absolute
-  `https://` URL without userinfo or whose `expiresAt` is not an RFC 3339 `date-time` (written with upper-case `T`
-  and `Z`) in the future (D284). `operations` says which of `task`, `session` (MCP `initialize`) and `call`
+  `refusal`, an `outcome` other than `allow` or `deny`, `quote` included, an unknown member, a `refusal.code` that
+  is not an integer, `null` included), and one whose maps break the key and size rules above (D284, D351).
+  `operations` says which of `task`, `session` (MCP `initialize`) and `call`
   (plain MCP `tools/call`) consult the hook; an operation it does not list is answered as the built-in answers it.
-- **A `quote` is valid only for operation `task` on a gate-owned A2A task** (a `hire` of `/mcp` among them). For an
-  MCP task, `call`, `session`, or a passthrough task-augmented call it is treated as a deny, `-32603` `MCP services
-  are not priced`: MCP services are not priced (D350).
-- **Admission decides; it never moves money.** Nothing makes the hook atomic with the task's creation: the
-  gate can stop between the answer and the task row. Money moves only where a workflow exists, on approval
-  (§13.2) or in the Lifecycle hooks (§13.3). An operator that records anything under the pre-minted `taskId`
-  treats an id that does not appear in `kontra.tasks` within 10 minutes as abandoned (D45).
+- **Admission decides access, nothing else.** Nothing makes the hook atomic with the task's creation: the
+  gate can stop between the answer and the task row. An operator that records anything under the pre-minted
+  `taskId` treats an id that does not appear in `kontra.tasks` within 10 minutes as abandoned (D45).
 - The URL is the operator's own control plane, configured by the operator. It is never derived from a request,
   and it is not a node: the gate still never dials a node.
 
-### 13.2 Quotes and approval
+### 13.2 (withdrawn, D351)
 
-A `quote` decision creates the task `quoted`, with the decision's `metadata` and `mcpMeta` plus
-`kontra.approve.url` (A2A) / `sh.kontra/approve-url` (MCP); nothing is dispatched. `TaskLifecycle` then waits
-for one of:
-
-- the Update **`kontra.approval {accepted: true, metadata, mcpMeta}`**: the metadata is applied (one `metadata`
-  event), the task moves to `submitted` (its `task.timeout` clock starts, §5.2) and dispatch begins;
-- `kontra.approval {accepted: false}`: `canceled`, `metadata["kontra.canceled"] = "declined"`;
-- the quote's `expiresAt`: `canceled`, `metadata["kontra.canceled"] = "quote_expired"`.
-
-`kontra.approval` is an Update, so the control plane learns synchronously whether its approval beat the
-expiry; the validator refuses it once the task has left `quoted`, and refuses metadata keys outside the
-operator's prefixes (`operator_metadata_prefixes`, default empty; Cloud sets `["kontra.escrow."]`; each lies
-under `kontra.` and is longer than it, so §2.5's stripping vouches for its keys, D113) and
-`kontra.keyRetainUntil`, or a map over 16 KiB. The same key and size rules apply to Admission decisions,
-`kontra.annotate` and Lifecycle patches. A control
-plane that places a hold before approving refunds it when its approval is refused. A caller's message to a
-`quoted` task is refused (§7): approval does not happen in the protocol; it happens on the operator's page, by
-a person.
+Quotes and approval are withdrawn with escrow. Their general rules, operator metadata's prefixes and sizes, are in
+§13.1.
 
 ### 13.3 Lifecycle
 
-Five activities of `TaskLifecycle`, each `(TaskRef, args) → result`, all JSON:
+Two activities of `TaskLifecycle`, each `(TaskRef, args) → result`, all JSON:
 
 | Activity | Args | Result | When |
 |---|---|---|---|
 | `kontra.lifecycle.OnDispatched` | `{attempt}` | `null` | on the `kontra.dispatched {n}` signal the dispatch sends when it records an attempt's first upstream task id |
 | `kontra.lifecycle.OnTerminal` | `{}` | `Patch` | once, after the terminal event is in the log |
-| `kontra.lifecycle.ReviewWindow` | `{}` | `{open, seconds}` | after `OnTerminal`; `seconds` ≤ 604800 |
-| `kontra.lifecycle.OnReviewMessage` | `{workItemId, messageId, metadata}`, where `metadata` holds only the message's `caller_metadata` keys (§2.5), at most 16 KiB | `{accept, dispute, patch}` | inside each `kontra.review_message` Update while the window is open (§7) |
-| `kontra.lifecycle.OnReviewClosed` | `{disputed}` | `Patch` | when the window ends, or at once after a message the hook marked `dispute` |
 
 `TaskRef = {taskId, tenantId, service, kind, protocol, buyerId, principal, via, contextId, state, metadata}`,
 built from Postgres by a `task_ref` activity right before each hook call (never kept in workflow state; as the
 hook's input it is in history, D114, and so is its `contextId`, D115), whose `metadata` holds only the
-operator-written keys (§13.2 prefixes, at most 16 KiB), never caller or service metadata. `Patch = {metadata,
-mcpMeta, holdOpenSeconds}`, each map at most 16 KiB; a patch over the limit or with a key outside the rules of
-§13.2 fails its hook activity non-retryably and is dropped (a metric and an `audit` row). A patch is applied as
+operator-written keys (§13.1 prefixes, at most 16 KiB), never caller or service metadata. `Patch = {metadata,
+mcpMeta}`, each map at most 16 KiB; a patch over the limit or with a key outside the rules of
+§13.1 fails its hook activity non-retryably and is dropped (a metric and an `audit` row). A patch is applied as
 one `metadata` event; `mcpMeta` is
-rendered verbatim into the `_meta` of `CreateTaskResult`, `tasks/get` and `tasks/result` for that task (Cloud
-writes `sh.kontra/escrow` there itself; the gate never builds it, D51). A node keeps a hired job's key until
-the task is terminal and the time in the task's `kontra.keyRetainUntil` metadata (RFC 3339 UTC; the operator may
-always write this key), if any, has passed ([`tunnel.md`](tunnel.md) §2.3).
+rendered verbatim into the `_meta` of `CreateTaskResult`, `tasks/get` and `tasks/result` for that task, whatever
+`sh.kontra/` keys the operator writes (the gate never builds them, D51). A node deletes a hired job's key once the
+task is terminal ([`tunnel.md`](tunnel.md) §2.3).
 
-- **Built in:** no-op activities with the same type names on `kontra-lifecycle`; `ReviewWindow` answers
-  `{open: false}`, so **in open source `OnTerminal` is the last hook that fires**.
-- **Remote:** `hooks.lifecycle: {task_queue: kontra-settlement}`. The five activities are scheduled by type
+- **Built in:** no-op activities with the same type names on `kontra-lifecycle`; **`OnTerminal` is the last hook
+  that fires**.
+- **Remote:** `hooks.lifecycle: {task_queue: <queue>}`. The two activities are scheduled by type
   name on that queue; any Temporal SDK can serve them (Cloud's are Python). Retry: unlimited, 1 s doubling to
-  5 min: a hook that is down delays settlement and never skips it. The gate exports the age of the oldest
+  5 min: a hook that is down delays the notification and never skips it. The gate exports the age of the oldest
   pending hook activity as a metric to alert on (a typo in a type name is retried forever, by design); this metric is
   not built yet (D302). The hook configuration in force when a task started is snapshotted into its workflow input.
-- **`kontra.annotate {metadata, mcpMeta}`** (an Update, with the §13.2 rules) may be sent by the operator at any
-  time while the workflow runs; **`kontra.close`** ends the hold that `holdOpenSeconds` started after
-  `OnReviewClosed`; the workflow then completes as §14.1 says, once no `push_webhook` it started is pending (D78).
+- **`kontra.annotate {metadata, mcpMeta}`** (an Update, with the §13.1 rules) may be sent by the operator at any
+  time while the workflow runs; the workflow completes as §14.1 says, once no `push_webhook` it started is pending
+  (D78).
+- **The retired `ReviewWindow` call (D351).** An earlier release called a third activity,
+  `kontra.lifecycle.ReviewWindow`, after `OnTerminal` (escrow's review window), and `OnReviewMessage` and
+  `OnReviewClosed` inside it. The call is retired behind a `workflow.GetVersion` change id (§14.4, D348): a run
+  started before the upgrade, replaying its recorded history, still schedules `ReviewWindow` once after
+  `OnTerminal` and ends whatever it answers; a run started after it never does. The built-in `ReviewWindow` stays
+  registered on `kontra-lifecycle`, answering `{open: false}`, so such runs complete. A remote lifecycle queue needs
+  a `ReviewWindow` worker only for runs started before the upgrade.
 - **Ordering.** Patches and annotations that arrive while a dispatch, `abort` or `forward_cancel` is in flight
   are held in workflow state and applied when it returns: the lifecycle never writes a task row while an a2a-go
   execution holds it (a version bump under a running execution would abort it).
 
-Cancel never races money: the gate writes `canceled` first and only then calls `OnTerminal`. The hook learns of
-a terminal state only after it is in the log.
+The terminal event comes before the hooks: the gate writes `canceled` first and only then calls `OnTerminal`. The
+hook learns of a terminal state only after it is in the log.
 
 ### 13.4 Annotations
 
@@ -2051,13 +2014,12 @@ Operator data the gate attaches without interpreting:
 
 | Where | Key | Shows as |
 |---|---|---|
-| `services.annotations` | `card_extensions` | Appended to the served card's `capabilities.extensions` (§3), e.g. Cloud's `https://kontra.sh/ext/escrow/v1` entry with its `params`. A `required: true` entry is enforced like any other (§2.4); a `hire` of `/mcp` activates it for the buyer (§12.2, D300). |
+| `services.annotations` | `card_extensions` | Appended to the served card's `capabilities.extensions` (§3), with its `params`. A `required: true` entry is enforced like any other (§2.4); a `hire` of `/mcp` activates it for the buyer (§12.2, D300). |
 | | `tool_meta` | `{"<tool name>" \| "*": {<sh.kontra/… keys>}}`, applied to `tools/list` entries' `_meta` (§11.3). |
 | | `initialize_meta` | `{<sh.kontra/… keys>}`, applied to the `initialize` result's `_meta` (§11.2). |
-| | `search` | The `price` and `price_model` strings `search` returns and filters on, verbatim, and its `description` (§12.2). `hidden: true` leaves the service out of every principal's `search`, whatever `allow:` and `listed` say, while `describe`, `hire`, its cards and its calls stay as they decide: a service reachable by its ref and never listed (D321). Only the boolean `true` hides; a team gate refuses any other value than a boolean at load. |
+| | `search` | Its `description` (§12.2), which `search` returns verbatim; `price` and `price_model` are no longer read (D351). `hidden: true` leaves the service out of every principal's `search`, whatever `allow:` and `listed` say, while `describe`, `hire`, its cards and its calls stay as they decide: a service reachable by its ref and never listed (D321). Only the boolean `true` hides; a team gate refuses any other value than a boolean at load. |
 | `services` | `listed` | Whether `search` shows the service to principals outside its tenant, and whether its cards are public (§2.1). |
-| gate config | `caller_metadata` | `kontra.` keys callers may write (§2.5), e.g. Cloud's `kontra.escrow.dispute`. |
-| gate config | `operator_metadata_prefixes` | The metadata prefixes Admission, Updates and patches may write, besides `kontra.keyRetainUntil` (§13.2). |
+| gate config | `operator_metadata_prefixes` | The metadata prefixes Admission, Updates and patches may write (§13.1). `caller_metadata` is withdrawn and refused (§2.5, D351). |
 
 ### 13.5 What an operator reads
 
@@ -2101,9 +2063,8 @@ service removed or disabled answers as an unknown service at once, and its tasks
 Postgres is the record and the log; Temporal is the clock and the durable dispatcher. **Events never enter
 Temporal history**: the workflow's inputs, updates, signals and activity results carry ids, states, small
 outcomes and operator patches of at most 16 KiB; relayed events and caller or service content never do. The
-caller-authored values that cross history are a review-window message's `caller_metadata` keys, at most 16
-KiB (D59), and the two identifiers the hook contract names: the caller's `contextId` in every `TaskRef` (§13.3)
-and a review-window message's `messageId` (D115).
+one caller-authored value that crosses history is the identifier the hook contract names: the caller's
+`contextId` in every `TaskRef` (§13.3, D115).
 
 ### 14.1 Workflow, updates and signals
 
@@ -2111,8 +2072,7 @@ One workflow type, `TaskLifecycle`, id `task-<task_id>`, in the gate's own names
 default `kontra`), on queue `kontra-lifecycle`. Its start input is `{taskId, timeoutSeconds, retries, hooks}`:
 everything it branches on comes from its input or from activity results, never from configuration read inside
 the workflow, so a config reload never changes a running task. `tasks.deadline` is written only by the store, at the
-transition into `submitted` (§5.2); the approval handler's `submitted` write returns it, `prepare` returns it for a
-task created `submitted`, and the workflow sets its timeout timer to that stored value.
+transition into `submitted` (§5.2); `prepare` returns it for a task created `submitted`, and the workflow sets its timeout timer to that stored value.
 
 Interactions that must be refused synchronously are **Updates** with validators (D41); fire-and-forget ones
 are signals:
@@ -2121,31 +2081,28 @@ are signals:
 |---|---|---|---|---|
 | `kontra.message` | Update; the first one starts the workflow (`UpdateWithStart`, conflict policy use-existing, reuse policy reject-duplicate) | `{workItemId}` → `{turn}`; `UpdateID = workItemId` | the work queue's `Write` (§15) | §7's table, on workflow state only: refused unless the task is `input-required` (or new), no turn is running, and the `workItemId` has not been accepted in this run (below, D66); a follow-up to a turn end the workflow has not processed yet is told apart from a final refusal, and sent again (§7, D105) |
 | `kontra.cancel` | Update, awaited up to 60 s | `{mode?: "mcp"}` → `{outcome: canceled \| not_cancelable \| unsupported \| continues, upstreamError?}` (D107) | the cancel interceptor (§8) and MCP `tasks/cancel` (§11.6; on `/mcp`, of a `hire` task, with `mode: "mcp"`, which gives an A2A task §11.6's rule, D293) | refused only for a terminal task; concurrent cancels share one result (the first one's mode) |
-| `kontra.approval` | Update | `{accepted, metadata, mcpMeta}` → `{state}` | the operator's control plane (§13.2) | refused unless `quoted`; metadata keys and size per §13.2 |
-| `kontra.review_message` | Update, `UpdateID = workItemId` | `{workItemId, messageId, metadata}` → `{accepted, seq?}` | the review-window interceptor (§7) | validator: refused unless the window is open and the `workItemId` has not been accepted in this run; before `ReviewWindow` has answered, accepted, and the handler waits for the window, answering `accepted: false` if it does not open (D106). Handler: runs `OnReviewMessage` (start-to-close 8 s, no retry; a failure or timeout is `accept: false`); on accept it appends the message from the work item (`message` event, after-terminal write), applies the patch and returns the `seq`. The append loads the work item by `(id, taskId)` and consumes it in the same transaction; an item that is missing or already consumed completes the Update with `accepted: false` (D66) |
 | `kontra.dispatched` | signal | `{n}` | the dispatch activity, on an attempt's first upstream task id | runs `OnDispatched` |
 | `kontra.push` | signal | `{configId, deleted}` | the push config store (§10.2) | starts or ends a `push_webhook` |
-| `kontra.annotate` | Update | `{metadata, mcpMeta}` → `{}` | the operator's control plane (§13.3) | the §13.2 key and size rules |
+| `kontra.annotate` | Update | `{metadata, mcpMeta}` → `{}` | the operator's control plane (§13.3) | the §13.1 key and size rules |
 | `kontra.input_response` | signal | `{seq}` | the MCP relay (§11.5); updates workflow state only | — |
 | `kontra.reconnected` | signal | `{}` | the replica a node's tunnel session registers on, to each open task whose latest tunnel attempt, on the session's key or a key rotated to it (and not revoked since), has a first upstream task id and a session that is no live candidate, and to each task of the session's services that ended `canceled`, `failed: timeout` or `failed: tunnel_lost` within `task.reattach_grace` on such an attempt (D344, D346) | a reconnect wait (§6.4), or the late `forward_cancel` of a task that ended in one, looks for the session at once; ignored otherwise |
-| `kontra.close` | signal | `{}` | the operator's control plane (§13.3) | — |
 
 **Validators and work items.** A validator runs on the workflow task thread, so it is read-only and does no I/O:
 it checks workflow state only (§7's state table, no turn running, and a `workItemId` not already accepted in this
 run, which the workflow keeps in its state). Work-item ownership is checked where the item is used. The first
 dispatch of a turn loads the work item by `(id, taskId)` and consumes it (`consumed_at`) in Postgres; a later
 dispatch of the same turn (a retry, attempt `n + 1`, or a resume) may reload a consumed item it owns, and any
-other dispatch that finds its item consumed refuses it rather than send it twice (D101).
-`kontra.review_message` has no dispatch: its handler's append loads and consumes the item (above). A refused
-`kontra.message` or `kontra.review_message` deletes its work item. A caller-side timeout (the Update not accepted
+other dispatch that finds its item consumed refuses it rather than send it twice (D101). A refused
+`kontra.message` deletes its work item. A caller-side timeout (the Update not accepted
 within 10 s, below) does not: the workflow may still accept the Update, and the turn then runs. An unconsumed
 work item stays until its task ends, and retention deletes it with the task (§5.4, D66). A first dispatch whose
 work item is missing or belongs to another task fails the task `failed: lifecycle_unavailable` (D63, D66).
 
 An Update needs a `kontra-lifecycle` worker to accept it: the gate waits 10 s for acceptance and maps a timeout
 to `-32603` / HTTP `503`. Once accepted, `kontra.cancel` is awaited up to 60 s, past which the caller gets the
-stored task as it is (§8); every other Update is awaited up to 10 s in all. Sequence: (`quoted`: wait for approval or expiry) → attempt loop →
-terminal → `OnTerminal` → (review window) → the end, once no `push_webhook` it started is pending (§10.2,
+stored task as it is (§8); every other Update is awaited up to 10 s in all. Sequence: attempt loop →
+terminal → `OnTerminal` → the end (a run started before D351's upgrade: `ReviewWindow` once after `OnTerminal`,
+§13.3), once no `push_webhook` it started is pending (§10.2,
 D78). `task.timeout` is a workflow timer at the deadline, never Temporal's own execution timeout (which would end
 the run without writing `failed: timeout` or calling `OnTerminal`). A task takes at most 1,000 turns (each is
 about 11 history events; Temporal allows 2,000 Updates per run); the 1,001st fails `upstream_error` with that
@@ -2219,7 +2176,10 @@ rolling deploys do not cut tasks that finish within `drain_timeout`.
 
 - Gate workers are unversioned. Every change to `TaskLifecycle`'s behaviour goes behind `workflow.GetVersion`,
   and CI replays recorded histories (`worker.NewWorkflowReplayer`). Worker Deployment Versioning does not fit
-  per-replica queues (at most 100 queues per deployment version, D46).
+  per-replica queues (at most 100 queues per deployment version, D46). The reconnect wait is one such change (D348);
+  the retired `ReviewWindow` call is another (§13.3, D351): its change id keeps the call in histories recorded before
+  it, and the approval and review-message Updates and the `kontra.close` signal, which no recorded history carries,
+  are removed outright.
 - The namespace is the gate's own: no node or caller ever reaches Temporal. Its only other clients are the
   operator's (control-plane Updates and signals, remote hook workers). Temporal authorizes by namespace, not by
   queue or Update name, so **any credential for the gate's namespace is equivalent to the gate's own authority
@@ -2232,8 +2192,9 @@ rolling deploys do not cut tasks that finish within `drain_timeout`.
 
 The work queue writes the task row before it starts the workflow (§15). A resend that matches an existing task
 re-issues `UpdateWithStart` with the original work item id as `UpdateID` (idempotent), so a task whose start
-was lost gets its workflow. A sweep on any replica, once a minute, ends tasks in `submitted` or `quoted` older
-than 2 minutes whose workflow does not exist with `failed: lifecycle_unavailable`, written through the store.
+was lost gets its workflow. A sweep on any replica, once a minute, ends tasks in `submitted` older
+than 2 minutes whose workflow does not exist with `failed: lifecycle_unavailable`, written through the store. A
+row left `quoted` by an earlier release (D351) is swept the same way, so none lingers after the upgrade.
 Work items are not swept: an Update not accepted within 10 s keeps its work item, because the workflow may still
 accept it, and an unconsumed item is deleted with its task (§5.4, §14.1, D66).
 
@@ -2245,9 +2206,9 @@ This section records the implementation plan the M0 probes support. It is not no
 |---|---|
 | `taskstore.Store` | Postgres store (§5.2). Owner scoping from `CallContext.User` (the principal's `buyer_id`); `List` scoped to `(tenant, service, buyer)`, ordered by `status_at`, with a2a-go's page-token shape; versions start at 1; `PrevVersion == 0` refused; writes on `context.WithoutCancel`. A per-process registry of running dispatches records every terminal event the relay executor yields for `(task, n)`; while a dispatch is registered, a `failed` write without a status message that the registry does not hold as relay-emitted (a2a-go's own `SetTaskFailed`, on any of its error paths, which never carries one; the relay's failures always do, D93) is refused, and the dispatch returns its outcome from the registry (`retryable`, `tunnel_lost`, `interrupted`, or `context_lost`, which for a direct backend triggers the re-attach of §6.4; a handler or executor error that is not a lost upstream context is `upstream_error`, §6.4); the workflow writes any terminal event through `write_terminal` (D8). |
 | `eventqueue.Puller` | Postgres puller: created at the log's tail (`max(seq)` when the reader is created, because a2a-go always passes a nil first cursor), long-polls on `LISTEN`, skips `message` rows with `role = ROLE_USER` and `metadata` rows (a2a-go's reader stops at the first final event and would otherwise return the caller's own message), returns `eventqueue.Message{Event, TaskVersion: seq}`. Behind `eventqueue.NewPullQueueManager` with `PollInterval` 100 ms and `InactivityTimeout` 0 (the puller already polls), so a blocking `SendMessage` on a quiet task keeps waiting. |
-| `workqueue.Queue` | `workqueue.NewPushQueue(kontraWrite)`. `kontraWrite` for a new task pre-creates the gate task (gate ids, `submitted` or `quoted`), stores the sanitized payload in `work_items`, calls `UpdateWithStart` (`kontra.message`) on `TaskLifecycle`, and sets `payload.TaskID`; a resend (same principal, service and `messageId`, the same request hash (below), the first task younger than 24 h) is answered with the existing task and re-issues the start (§14.5); a reused `messageId` with a different request is a new task (the TCK reuses message ids). For a follow-up it stores the work item and sends the `kontra.message` Update; a refusal becomes `UnsupportedOperationError` and deletes the work item, and an Update not accepted within 10 s becomes `-32603` (HTTP `503`) and keeps it (§14.1, D66). The returned `HandlerFn` is what the `dispatch` activity calls, with a heartbeater attached (`workqueue.AttachHeartbeater`, 5 s); the activity's context reaches the executor, so `abort` stops it. The handler's concurrency limiter is off; the Temporal worker's activity slots bound concurrency. |
+| `workqueue.Queue` | `workqueue.NewPushQueue(kontraWrite)`. `kontraWrite` for a new task pre-creates the gate task (gate ids, `submitted`), stores the sanitized payload in `work_items`, calls `UpdateWithStart` (`kontra.message`) on `TaskLifecycle`, and sets `payload.TaskID`; a resend (same principal, service and `messageId`, the same request hash (below), the first task younger than 24 h) is answered with the existing task and re-issues the start (§14.5); a reused `messageId` with a different request is a new task (the TCK reuses message ids). For a follow-up it stores the work item and sends the `kontra.message` Update; a refusal becomes `UnsupportedOperationError` and deletes the work item, and an Update not accepted within 10 s becomes `-32603` (HTTP `503`) and keeps it (§14.1, D66). The returned `HandlerFn` is what the `dispatch` activity calls, with a heartbeater attached (`workqueue.AttachHeartbeater`, 5 s); the activity's context reaches the executor, so `abort` stops it. The handler's concurrency limiter is off; the Temporal worker's activity slots bound concurrency. |
 | `AgentExecutor` | The relay executor (§6.2–§6.4): never yields a `Task` (the gate task exists), never yields a bare `Message`, rewrites ids deeply, strips Kontra's keys, emits explicit terminal events. |
-| `a2asrv.NewHandler(…, WithClusterMode(…))` | One handler per service, built on first use and cached, with `WithPushNotifications(pgPushConfigStore, noopSender)` (push is the lifecycle's, §10) and call interceptors for authentication, admission, the follow-up state checks of §7, the quoted guard, cancel (§8), inline push configs (§10.1), and review-window messages, which the interceptor stores as a work item, sends as the `kontra.review_message` Update and answers entirely itself as an early response (a2a-go refuses messages to terminal tasks, and must never see them). A blocking `SendMessage` that a2a-go answers "queue is closed" (a turn that ended before its subscription read the store) gets the stored task (D121). |
+| `a2asrv.NewHandler(…, WithClusterMode(…))` | One handler per service, built on first use and cached, with `WithPushNotifications(pgPushConfigStore, noopSender)` (push is the lifecycle's, §10) and call interceptors for authentication, admission, the follow-up state checks of §7 (a message to an ended task is refused there, so a2a-go never sees it), cancel (§8) and inline push configs (§10.1). A blocking `SendMessage` that a2a-go answers "queue is closed" (a turn that ended before its subscription read the store) gets the stored task (D121). |
 | transports | `NewJSONRPCHandler` and `NewRESTHandler` behind the middleware of §2.2–§2.5, except `SendStreamingMessage` and `SubscribeToTask`, which the gate's own SSE writer serves (§9). |
 | cards | Raw-JSON card producer (`AgentCardJSONProducer`); the gate's own JWS signer (§3), since a2a-go's `a2acrypto.Signer` has a fixed protected header. |
 | client | `a2aclient` with `WithJSONRPCTransport`/`WithRESTTransport` over an `http.Client` that dials tunnel streams, no client timeout (deadlines from the context), bodies read through byte limits (§6.6), HTTP/1.1 only; `a2av0` transports for 0.3 upstreams. |
@@ -2269,7 +2230,7 @@ handles cancel: a2a-cli v0.3.1's exec mode can end `failed` instead of `canceled
 with their milestones (D80). M2 runs the tunnel variants of `replica_kill` (after and before the first upstream
 task id) and `cancel_forwarded`, `input_required_sticky` and `key_scope`, with [`tunnel.md`](tunnel.md) §16's
 `tunnel_kill` and `sidecar_not_a_proxy`, and the helloworld seller through the tunnel (D154). M3's are D171's and D189's.
-M4 runs the six `gate_mcp_*` tests and [`tunnel.md`](tunnel.md) §16's `anon_limits`, `anon_lifecycle` and
+M4 runs the six `gate_mcp_*` tests (five since D351 withdrew `gate_mcp_hire_quote`) and [`tunnel.md`](tunnel.md) §16's `anon_limits`, `anon_lifecycle` and
 `login_converts`; the `tck_*` rows run from `make tck`, not `go test` (D279, D282). What ran, and the spec conflict
 met, are D297.
 
@@ -2293,18 +2254,18 @@ met, are D297.
 | `mcp_batch_refused` | §11.1: an array of two `tools/call`, one to a denied tool, is `400` with no upstream traffic |
 | `mcp_case_smuggling` | §11.1: a `tools/call` carrying `"method"` and `"METHOD"`, `"name": "echo"` (denied) and `"NAME": "add"`, a repeated `name`, or a repeated or case-variant key in `params._meta` or at the top level of `arguments`, is `400` with `-32600` and reaches no upstream, Admission or `calls` row; an upstream result `{"isError": true, "ISERROR": false}` is not relayed (`502`, `-32603`) and its `calls` row has `is_error` true |
 | `a2ui_passthrough` | §2.6 (D326, D328, D329): the A2UI example seller hosted through the tunnel, the caller on the other replica, A2A 1.0 only: the served card keeps the seller's A2UI entry equal under JCS; a `SendMessage` activating A2UI has the URI echoed and waits at `input-required` with the seller's form, its A2UI part equal to the example's fixture (which `make check-specs` validates against the vendored A2UI v0.9.1 schemas) in v0.9.1 on a surface of the task's own, with its mark, on `SendMessage`, `GetTask` and an HTTP+JSON stream, two tasks' forms on two surfaces; the form's action through the other replica completes the task with the seller's summary and the form's `deleteSurface`; capabilities in the message metadata alone (under `v0.9`) reach the seller, which sends the form in v0.9; without either the seller asks in text; `/mcp` `hire` gets the text, and `reply` with a data part holding the booking books, as does `reply` with the form's action in a part marked `application/a2ui+json` |
+| `ap2_passthrough` | §2.6 (D326, D351): `examples/sellers/ap2-merchant` hosted through the tunnel, the shopper on the other replica, plain and sealed: the served card keeps the AP2 entry, `required` and `params` equal under JCS; a `SendMessage` activating `https://github.com/google-agentic-commerce/ap2/v1` has it echoed, sent upstream and in Admission's `extensions`, and one without it is `-32008` with no task row; the merchant's checkout part reaches the shopper, and the shopper's mandate part the merchant, equal under JCS with their `metadata`, on `SendMessage`, `GetTask` and a stream; sealed, the gate's log holds only envelopes for those parts; the task completes with the merchant's receipt; `/mcp` `hire` of the merchant is `isError` naming its A2A URL and the URI, with no task (D294) |
 | `a2a_case_smuggling` | §2.4: a JSON-RPC `SendMessage` carrying `"method"` and `"METHOD"`, `"tenant"` and `"TENANT"` in `params`, or a part with two `mediaType` keys, is `-32600` with HTTP `400`, before any task row |
-| `mcp_meta_spoof` | §2.5: an upstream's `sh.kontra/…` keys (`sh.kontra/escrow`, `sh.kontra/approve-url`) and `capabilities.experimental["sh.kontra/sealed"]` never reach a client; an A2A upstream's `kontra.approve.url` and `kontra.escrow.*` never reach a caller; `_meta["sh.kontra/sealed"]` on an `elicitation/create` of a service without `sealed` is removed, and on a sealed service only an exact `{v, envelope}` reaches the client |
+| `mcp_meta_spoof` | §2.5: an upstream's `sh.kontra/…` keys (any, `sh.kontra/escrow` and `sh.kontra/approve-url` among those it tries) and `capabilities.experimental["sh.kontra/sealed"]` never reach a client; an A2A upstream's `kontra.*` keys (`kontra.approve.url` and `kontra.escrow.*` among those it tries) never reach a caller; `_meta["sh.kontra/sealed"]` on an `elicitation/create` of a service without `sealed` is removed, and on a sealed service only an exact `{v, envelope}` reaches the client |
 | `mcp_task_resume` | §11.9: a replica killed during a task-augmented call; `tasks/result` still returns on the other replica, with the task's result if the killed replica held only the client's connection, with the §11.8 form of `failed: tunnel_lost` if it held the tunnel and the upstream task already existed. It never hangs. Modern variant (§11.12, D178): the tunnel killed after the upstream answered the dispatch's `tools/call` with an `InputRequiredResult` fails the task `tunnel_lost`, which `tasks/get` shows on either replica, and the upstream never receives that `tools/call` again |
 | `mcp_modern_task` | §11.12: a 2026-07-28 client's `tools/call` on a `durable` service whose upstream makes a task that asks one question: `CreateTaskResult` with a gate id; `tasks/get` is `input_required` with one gate-keyed request; `tasks/update` answers it, and a second answer to the same key is ignored; `tasks/get` then shows `completed` with the result; `tasks/result` is `-32601`; another buyer's `tasks/get` is `-32602`; the answers are the same from either replica. A request whose `_meta` `protocolVersion` differs from `MCP-Protocol-Version` is `400` with `-32020` and reaches no upstream (D176). A client that closes its response stream during the 2 s wait, before the inline answer or the `CreateTaskResult` is written, is sent neither, and the task ends `canceled` within 10 s, the upstream seeing the cancel, or the abort before its first upstream id (D178) |
 | `mcp_era_fallback` | §11.12: a dual-era client's first modern request to a legacy-only service, to a sealed service and to a stdio service gets the legacy `400`, and its call succeeds after `initialize`; a legacy-only upstream receives the gate's own `server/discover` and no modern request of a client (three sent within a minute), and a sealed service is never probed; a `404` that a dual-era upstream returns to one principal's modern request reaches that client, and another principal's next modern request to the service is still forwarded and answered modern (D177); against a dual-era upstream the client stays modern, pins nothing, and two concurrent first requests write one virtual session row; a client that succeeded modern on `/mcp/a` then gets the legacy `400` from a legacy-only `/mcp/b` on the same origin (the residual of §11.12, logged, not asserted as a pass) |
 | `mcp_peer_hop` | §11.2: with the client routed to one replica and the node's tunnel on the other, `initialize`, a pinned `tools/call` and its SSE stream complete through the peer hop; a `Kontra-Peer` assertion that is forged, older than 30 s or replayed, a request whose upstream session id or forwarded headers were changed after signing, and any other path on the peer listener, are refused and open no stream; killing the replica that held only the client's connection leaves the session open |
-| `gate_mcp_search` | §12.2 (D271): `search` shows a service admitted by an entry other than `anonymous` or `listed`, never one of an anonymous tenant nor one whose only admitting entry is `anonymous`; `query`, `kind`, `price` and the cursor page as specified; `describe` of a service `search` would not return is the unknown-service error; `describe` answers the card or the cached tools with no upstream request, and a cold cache is `toolsCached: false` and drained once |
-| `gate_mcp_hire` | §12.2, §12.3 step 1 (D272): a plain `hire` answers the outcome when the task ends within 25 s and the hire result of a task still running (its state, the follow-up text, and the thread URL when it was quoted) otherwise; a task-augmented `hire` answers `CreateTaskResult`; `tasks/result` renders text, data and file parts, a failed upstream is `isError` with `sh.kontra/failure`; `tasks/list` lists only this buyer's `hire` tasks, newest first; another buyer's `tasks/get` is `-32602`; `tasks/cancel` ends the task `cancelled` within 10 s and the upstream receives `CancelTask`; the same task followed by A2A `SubscribeToTask` shows the same events; a `kind: mcp` ref, a required-sealed ref and a ref whose served card requires an extension of the seller's own are `isError` with no task (D294), and a ref whose only required extension is the operator's `card_extensions` entry is hired, its seller receiving no `A2A-Extensions` (D300); a `null` data part is `isError` with no task; the structured result is the hire result (D289, D324) and no `calls` row is written (D289); a request without a credential is `401`, and one from an API key with only `enroll:` scopes `403` (D293) |
-| `gate_mcp_hire_quote` | §12.3, §13.2 (D275, D288; D38, D45, D188), against an Admission server that quotes `https://app.kontra.sh/#/t/<taskId>`: a client that declared `elicitation.url` gets `-32042` whose `url` is byte-equal to the hook's `approveUrl`, which names the pre-minted `taskId` the gate task then has; nothing is dispatched while `quoted`; the same `hire` again gets the same `elicitationId`. While the task is `quoted`, each of these leaves it `quoted` and the seller with no request: `reply` to it (`isError`, nothing forwarded); a client's JSON-RPC response with id `k.<task>.<quoted seq>` and an `accept` result (dropped, `202`: the gate never sends a URL-mode `elicitation/create` and reads no client result as approval); the same `hire` retried, from this session and from another; an A2A message to the task (`UnsupportedOperationError`, §7). After `kontra.approval {accepted: true}`, of two `GET` streams open on the session exactly one receives `notifications/elicitation/complete`, once, and another session's streams receive none, and the retried `hire` answers the result; a declined quote is `isError` (`cancelled` task-augmented) and an expired one `quote_expired`; a client without `elicitation.url` gets `working` with the URL in `statusMessage` and `_meta`, and its plain `hire` the URL as `structuredContent.url` and `quote.approveUrl` (D324), as the retried `hire` after the approval has the answer's text and the URL there; with an Admission server whose `approveUrl` is a team gate's own page (not `app.kontra.sh`), the `-32042` and the `working` answer carry that URL unchanged; the Admission server down, and a malformed or expired quote from it, are `-32603` `admission unavailable` with no task |
-| `gate_mcp_stock_client` | §12.2, §12.3 (D324), with the stock MCP TypeScript SDK, unmodified (`@modelcontextprotocol/client` 2.4.0 on Node 24, pinned to 2026-07-28 and declaring URL and form elicitation without the tasks extension, and `@modelcontextprotocol/sdk` 1.32.2 on 2025-11-25), whose client validates each tool result's `structuredContent` against the tool's `outputSchema`: `tools/list` gives `hire` and `reply` the hire result's schema, which the client's validator accepts for every fixture shape and refuses for bad ones; from `structuredContent` alone, a quoted `hire` has the thread URL as `url` and `quote.approveUrl`, a free one the answer's text, data and files, a failed one its text, a question its text with the reply-tool hint and `reply` the answer; once the quote is accepted, the retried `hire` has the answer and the URL |
+| `gate_mcp_search` | §12.2 (D271): `search` shows a service admitted by an entry other than `anonymous` or `listed`, never one of an anonymous tenant nor one whose only admitting entry is `anonymous`; `query` and the cursor page as specified, and a `kind` or `price` argument is a tool error naming it (D350, D351); `describe` of a service `search` would not return is the unknown-service error; `describe` answers the card or the cached tools with no upstream request, and a cold cache is `toolsCached: false` and drained once |
+| `gate_mcp_hire` | §12.2, §12.3 step 1 (D272): a plain `hire` answers the outcome when the task ends within 25 s and the hire result of a task still running (its state and the follow-up text) otherwise; a task-augmented `hire` answers `CreateTaskResult`; `tasks/result` renders text, data and file parts, a failed upstream is `isError` with `sh.kontra/failure`; `tasks/list` lists only this buyer's `hire` tasks, newest first; another buyer's `tasks/get` is `-32602`; `tasks/cancel` ends the task `cancelled` within 10 s and the upstream receives `CancelTask`; the same task followed by A2A `SubscribeToTask` shows the same events; a `kind: mcp` ref, a required-sealed ref and a ref whose served card requires an extension of the seller's own are `isError` with no task (D294), and a ref whose only required extension is the operator's `card_extensions` entry is hired, its seller receiving no `A2A-Extensions` (D300); a `null` data part is `isError` with no task; the structured result is the hire result, with no `url` or `quote` (D289, D324, D351), and no `calls` row is written (D289); an Admission server that is down, or that answers a malformed decision or `outcome: "quote"`, is `-32603` `admission unavailable` with no task (§13.1, D284, D351); a request without a credential is `401`, and one from an API key with only `enroll:` scopes `403` (D293) |
+| `gate_mcp_stock_client` | §12.2 (D324, D351), with the stock MCP TypeScript SDK, unmodified (`@modelcontextprotocol/client` 2.4.0 on Node 24, pinned to 2026-07-28 and declaring URL and form elicitation without the tasks extension, and `@modelcontextprotocol/sdk` 1.32.2 on 2025-11-25), whose client validates each tool result's `structuredContent` against the tool's `outputSchema`: `tools/list` gives `hire` and `reply` the hire result's schema, which the client's validator accepts for every fixture shape and refuses for bad ones; from `structuredContent` alone, a completed `hire` has the answer's text, data and files, a failed one its text, a question its text with the reply-tool hint and `reply` the answer, and none has `url` or `quote` |
 | `gate_mcp_reply` | §12.4 (D272, D274), with a seller that asks one question: a legacy client that declared form elicitation sees `input_required` and one `elicitation/create` with the `reply` schema on `tasks/result`, whose `accept` reaches the same upstream task, and `decline` leaves the task waiting; a client without it sees `working`, the question, `(answer with the reply tool, taskId <id>)` and `sh.kontra/input-required`, and `reply` answers the new state; `reply` to a task that is not `input-required` is `isError` and forwards nothing |
-| `gate_mcp_modern` | §12.5 (D269, D274, D295): a 2026-07-28 client gets the gate's `server/discover`; a `hire` declaring the tasks extension is answered in line within 2 s or with `CreateTaskResult`; a client that closes its stream during the wait gets no answer and its task is `canceled` within 10 s, a quoted one stays `quoted` and the re-issued `hire` answers it; a quoted one is `working` with the URL and no `-32042`; a question is `input_required` with one gate-keyed `inputRequests` entry that `tasks/update` answers once; a `tasks/update` on a quoted task, and one with a key that is not an outstanding gate key, is ignored (an empty result, nothing reaches the seller, a quoted task stays `quoted`); `tasks/result` and `tasks/list` are `-32601`; a legacy request without a session is `400` with `-32000`; the answers are the same from either replica |
+| `gate_mcp_modern` | §12.5 (D269, D274, D295): a 2026-07-28 client gets the gate's `server/discover`; a `hire` declaring the tasks extension is answered in line within 2 s or with `CreateTaskResult`; a client that closes its stream during the wait gets no answer and its task is `canceled` within 10 s, unless the `hire` carried an `idempotencyKey`, whose task keeps running and the re-issued keyed `hire` answers it (D338); a question is `input_required` with one gate-keyed `inputRequests` entry that `tasks/update` answers once; a `tasks/update` on a working task, and one with a key that is not an outstanding gate key, is ignored (an empty result, nothing reaches the seller); `tasks/result` and `tasks/list` are `-32601`; a legacy request without a session is `400` with `-32000`; the answers are the same from either replica |
 | `gate_mcp_oauth` | §12.1 (D276, D296), against an in-repository authorization server: a request without a credential to `/mcp`, to an existing `/mcp/{svc}` and to an unknown one is `401` with `resource_metadata` naming that route's RFC 9728 document, whose `resource` is the route's canonical URI, while a service whose `allow:` admits `anonymous` serves it; a token for `/mcp` is accepted there (`via = mcp` on its tasks and sessions) and is `401` with `error="invalid_token"` on `/mcp/{svc}` and `401` on the A2A routes; an expired token, another issuer, an HMAC or `none` algorithm and a bad signature are `401`; a rotated key is fetched once (its `kid`'s refetch comes at most once a minute after the last fetch); an API key is still accepted |
 | `gate_mcp_tools` | §12.6 (D332 to D339), with the official MCP Go SDK as the client, against a local gate with an enrolled node hosting an example A2A seller and `examples/mcp/everything`: `tools/list` gives every tool its schemas; `describe` gives the seller's `capabilities` and the MCP service's tool count; `hire` with an `idempotencyKey` twice is one task, and the key with another message is `isError`; `status {after: 0}` is the task's history and `status {after: <cursor>, wait: 25}` in a loop follows a slow task to its end, with `notifications/progress` when the call carries a progress token; `tasks` lists it, by context and state; `artifact` gives one artifact in full; `push_set` refuses a loopback URL and stores a public one, `push_list` and `push_delete` show and remove it; `cancel` cancels a running task and refuses an ended one; `reply` to an ended task names `hire` with its `contextId`, and that `hire` is a new task in the same context |
 | `tck_jsonrpc`, `tck_rest`, `tck_behind_caddy` | §2, §3, §9 against the pinned TCK, expected failures and expected skips in `test/tck/expected-failures.txt`, each with its reason, per variant and binding and enforced both ways (an unlisted skip of the run's binding fails the run), each test's prerequisite tasks new ones (fresh TCK message ids per test, so cancel, subscribe and history run through the gate; D291); run by `make tck` (D279): `tck_jsonrpc` and `tck_rest` on the direct and the tunnel backend, bare, and `tck_behind_caddy` on the direct backend behind `examples/front/caddy`; nightly also with an API key (`VARIANT=auth`) |
@@ -2329,8 +2290,7 @@ met, are D297.
 | `tls.terminated_by_proxy` | `false` | §2.2 |
 | `edge.client_ip.from`, `.trusted` | `remote`, `[]` | §2.2 |
 | `limits.conns_per_ip`, `limits.max_conns` | `256`, `10000` | §2.2 |
-| `caller_metadata` | `[]` | §2.5 |
-| `operator_metadata_prefixes` | `[]` (Cloud: `["kontra.escrow."]`) | §13.2 |
+| `operator_metadata_prefixes` | `[]` | §13.1 (`caller_metadata` is withdrawn, and refused, D351) |
 | `limits.dispatch_slots`, `limits.push_slots`, `limits.task_bytes` | `10000`, `2000`, `256MiB` | §6.6, §14.2 |
 | `push.allow_private` | `false` | §10.3 |
 | `blobs` | none (parts over 256 KiB refused) | §10.4 |

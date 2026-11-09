@@ -18,9 +18,6 @@
 # services below are hosted by the nodes enrolled for them (`docker compose exec gate kontra-gate enroll -f
 # /etc/kontra/kontra.yaml <service>`), each a repository example: examples/sellers/hello-exec (hello),
 # examples/sealing (sealed), examples/mcp/everything (everything) and examples/mcp/fs-stdio (fs).
-#
-# deploy/compose/kontra.lifecycle.yaml is this file with a remote Lifecycle hook (spec §13.3); the pentest runs its
-# target 7 with it (D169, D186). A test keeps the two in step.
 listen: ":8443"
 public_url: https://localhost:8443
 signing_key: file:/etc/kontra/signing/kontra.key

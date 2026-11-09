@@ -49,29 +49,25 @@ func (e *sweepEnv) exec(sql string, args ...any) {
 	}
 }
 
-// task creates a task in state (submitted or quoted at creation; any other state is set after), created
-// age ago, with one push config.
+// task creates a task in state (submitted at creation; any other state is set after, quoted as an earlier release
+// wrote it, D351), created age ago, with one push config.
 func (e *sweepEnv) task(state store.State, age time.Duration) uuid.UUID {
 	e.t.Helper()
 	id := uuid.Must(uuid.NewV7())
 	ctxID := uuid.NewString()
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
 	msg.TaskID, msg.ContextID = a2a.TaskID(id.String()), ctxID
-	st := state
-	if st != store.StateQuoted {
-		st = store.StateSubmitted
-	}
+	st := store.StateSubmitted
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: ctxID, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{msg}}
 	nt := store.NewTask{ID: id, Service: e.svc, Protocol: store.ProtocolA2A, ContextID: ctxID, State: st, Snapshot: snap,
 		Owner: store.Owner{BuyerID: uuid.New(), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}}
-	if st == store.StateQuoted {
-		exp := time.Now().Add(time.Hour)
-		nt.QuoteExpiresAt = &exp
-	}
 	if _, err := e.log.CreateTask(context.Background(), nil, nt); err != nil {
 		e.t.Fatal(err)
 	}
-	if state != st {
+	switch {
+	case state == stateQuotedLeftover:
+		e.exec(`update kontra.tasks set state = 'quoted', quote_expires_at = now() + interval '1 hour' where id = $1`, id)
+	case state != st:
 		e.exec(`update kontra.tasks set state = $2 where id = $1`, id, string(state))
 	}
 	e.exec(`update kontra.tasks set created_at = now() - $2::bigint * interval '1 microsecond' where id = $1`, id, age.Microseconds())
@@ -106,7 +102,11 @@ func (w *workflows) WorkflowExists(_ context.Context, id a2a.TaskID) (bool, erro
 	return w.exists[string(id)], nil
 }
 
-// The orphan sweep (spec §14.5, D63): a task in submitted or quoted older than 2 minutes whose workflow does
+// stateQuotedLeftover is tasks.state 'quoted', which only a release before D351 wrote.
+const stateQuotedLeftover store.State = "quoted"
+
+// The orphan sweep (spec §14.5, D63, D351): a task in submitted, or left quoted by an earlier release, older than 2
+// minutes whose workflow does
 // not exist ends `failed: lifecycle_unavailable` through the store, its push configs ended in the same
 // transaction; a task with a workflow, a younger one and one past submitted are left alone. A budget smaller
 // than the candidates is continued by the next pass from its cursor.
@@ -114,7 +114,7 @@ func TestOrphanSweep(t *testing.T) {
 	e := newSweepEnv(t)
 	ctx := context.Background()
 	orphan := e.task(store.StateSubmitted, 3*time.Minute)
-	quotedOrphan := e.task(store.StateQuoted, 5*time.Minute)
+	quotedOrphan := e.task(stateQuotedLeftover, 5*time.Minute)
 	withWorkflow := e.task(store.StateSubmitted, 10*time.Minute)
 	young := e.task(store.StateSubmitted, 30*time.Second)
 	working := e.task(store.StateWorking, 10*time.Minute)

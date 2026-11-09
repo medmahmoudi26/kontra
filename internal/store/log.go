@@ -215,8 +215,7 @@ type Write struct {
 	Snapshot   *a2a.Task // the full projection after the event
 	Payload    json.RawMessage
 	PayloadRef string
-	// AfterTerminalOK is set only by apply_metadata and an accepted review-window message, the two
-	// writers allowed after a terminal event (spec §5.1).
+	// AfterTerminalOK is set only by apply_metadata, the one writer allowed after a terminal event (spec §5.1).
 	AfterTerminalOK bool
 	// Timeout and Retention fix tasks.deadline at the transition into submitted and
 	// tasks.retention_until at the terminal event. Zero takes the services row's timeout_s / retention_s.
@@ -312,7 +311,7 @@ with u as (
 	where t.id = $1 and t.version = $2
 	  and ($12::uuid is null or (t.tenant_id = $12::uuid and t.service = $13::text and t.buyer_id = $14::uuid))
 	  and (t.state not in ('completed', 'failed', 'canceled', 'rejected')
-	       or ($3::text in ('metadata', 'message') and coalesce($4::text, t.state) = t.state and $9::bool))
+	       or ($3::text = 'metadata' and coalesce($4::text, t.state) = t.state and $9::bool))
 	  and ($15::integer is null or exists (
 		select 1 from kontra.attempts a
 		 where a.task_id = t.id and a.n = $15::integer and a.ended_at is null and a.dispatch_id = $16::uuid
@@ -523,19 +522,18 @@ func (l *Log) classify(ctx context.Context, q querier, w Write) error {
 	}
 }
 
-// NewTask is a gate task as the work queue pre-creates it (spec §15): gate ids, `submitted` (or `quoted`),
-// the caller's first message in history.
+// NewTask is a gate task as the work queue pre-creates it (spec §15): gate ids, `submitted`, the caller's first
+// message in history.
 type NewTask struct {
 	ID             uuid.UUID
 	Service        ServiceRef
 	Protocol       Protocol
 	Owner          Owner
 	ContextID      string
-	State          State // submitted or quoted (any state through Store.Create)
+	State          State // submitted (any state through Store.Create)
 	Snapshot       *a2a.Task
 	FirstMessageID string   // empty: no resend key
 	FirstRequest   [32]byte // SHA-256 of the request, for resend detection (spec §15, RequestHash)
-	QuoteExpiresAt *time.Time
 	// Payload is the `task` row's payload when it is not the A2A StreamResponse of Snapshot: an MCP task's
 	// (spec §11.9, NewMCPTask).
 	Payload json.RawMessage
@@ -555,8 +553,6 @@ func (t *NewTask) validate() error {
 		return fmt.Errorf("store: protocol %q", t.Protocol)
 	case !t.State.Valid():
 		return fmt.Errorf("store: state %q", t.State)
-	case t.State == StateQuoted && t.QuoteExpiresAt == nil:
-		return errors.New("store: a quoted task needs its quote expiry")
 	case t.Owner.Principal == "" || !validVia(t.Owner.Via):
 		return fmt.Errorf("store: owner principal %q via %q", t.Owner.Principal, t.Owner.Via)
 	case t.Service.TenantID == uuid.Nil || t.Service.Name == "":
@@ -585,34 +581,35 @@ func (t *NewTask) validate() error {
 func storableText(s string) bool { return utf8.ValidString(s) && strings.IndexByte(s, 0) < 0 }
 
 // createSQL inserts the task at version 1 and its `task` row at seq 1, and notifies, in one statement.
-// Every state but quoted counts as submitted at creation: submitted_at and the deadline are fixed then.
+// Every state counts as submitted at creation: submitted_at and the deadline are fixed then. tasks.quote_expires_at
+// is no longer written (D351; the column stays until a later migration drops it).
 const createSQL = `
 with t as (
 	insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id,
-		first_message_id, first_request, state, version, snapshot, status_at, quote_expires_at,
+		first_message_id, first_request, state, version, snapshot, status_at,
 		deadline, submitted_at, terminal_at, retention_until)
 	select $1::uuid, s.tenant_id, s.name, $4::text, $5::uuid, $6::text, $7::text, $8::text, $9::text, $10::bytea,
-		$11::text, 1, $12::json, coalesce($13::timestamptz, now()), $14::timestamptz,
-		case when $11::text <> 'quoted' then now() + coalesce($15::bigint * interval '1 microsecond', s.timeout_s * interval '1 second') end,
-		case when $11::text <> 'quoted' then now() end,
+		$11::text, 1, $12::json, coalesce($13::timestamptz, now()),
+		now() + coalesce($14::bigint * interval '1 microsecond', s.timeout_s * interval '1 second'),
+		now(),
 		case when $11::text in ('completed', 'failed', 'canceled', 'rejected') then now() end,
 		case when $11::text in ('completed', 'failed', 'canceled', 'rejected')
-			then now() + coalesce($16::bigint * interval '1 microsecond', s.retention_s * interval '1 second') end
+			then now() + coalesce($15::bigint * interval '1 microsecond', s.retention_s * interval '1 second') end
 	  from kontra.services s where s.tenant_id = $2::uuid and s.name = $3::text
 	returning id, deadline
 ), e as (
 	insert into kontra.task_events (task_id, seq, kind, payload)
-	select t.id, 1, 'task', $17::json from t
+	select t.id, 1, 'task', $16::json from t
 	returning task_id, seq
 )
 select e.seq, t.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text)
   from e join t on t.id = e.task_id`
 
 // createBlobsSQL is createSQL that also writes the blobs rows of the large parts of the caller's first message
-// (spec §10.4, D167), in the statement that creates the task; the rows' arrays are $18 to $20.
+// (spec §10.4, D167), in the statement that creates the task; the rows' arrays are $17 to $19.
 var createBlobsSQL = strings.Replace(createSQL, ")\nselect e.seq", `), b as (
 	insert into kontra.blobs (ref, tenant_id, task_id, size)
-	select x.ref, x.tenant_id, t.id, x.size from t, unnest($18::text[], $19::uuid[], $20::bigint[]) as x(ref, tenant_id, size)
+	select x.ref, x.tenant_id, t.id, x.size from t, unnest($17::text[], $18::uuid[], $19::bigint[]) as x(ref, tenant_id, size)
 	on conflict (ref) do nothing
 	returning ref
 )
@@ -647,7 +644,7 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 	args := []any{
 		t.ID, t.Service.TenantID, t.Service.Name, string(t.Protocol), t.Owner.BuyerID, t.Owner.Principal,
 		t.Owner.Via, t.ContextID, firstMsg, firstReq, string(t.State), snap,
-		nullTime(StatusTime(t.Snapshot.Status.Timestamp)), t.QuoteExpiresAt,
+		nullTime(StatusTime(t.Snapshot.Status.Timestamp)),
 		micros(t.Service.Timeout), micros(t.Service.Retention), payload,
 	}
 	stmt := createSQL
@@ -674,7 +671,7 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 
 // taskCols are the columns scanTask reads, from kontra.tasks aliased t.
 const taskCols = `t.id, t.tenant_id, t.service, t.protocol, t.buyer_id, t.principal, t.via, t.context_id,
-	coalesce(t.first_message_id, ''), t.state, t.version, t.snapshot, t.status_at, t.quote_expires_at, t.deadline,
+	coalesce(t.first_message_id, ''), t.state, t.version, t.snapshot, t.status_at, t.deadline,
 	t.created_at, t.submitted_at, t.terminal_at, t.retention_until`
 
 func scanTask(row pgx.Row) (*TaskRow, error) {
@@ -684,7 +681,7 @@ func scanTask(row pgx.Row) (*TaskRow, error) {
 	)
 	err := row.Scan(&r.ID, &r.TenantID, &r.Service, &r.Protocol, &r.Owner.BuyerID, &r.Owner.Principal,
 		&r.Owner.Via, &r.ContextID, &r.FirstMessageID, &r.State, &r.Version, &snap, &r.StatusAt,
-		&r.QuoteExpiresAt, &r.Deadline, &r.CreatedAt, &r.SubmittedAt, &r.TerminalAt, &r.RetentionUntil)
+		&r.Deadline, &r.CreatedAt, &r.SubmittedAt, &r.TerminalAt, &r.RetentionUntil)
 	if err != nil {
 		return nil, err
 	}

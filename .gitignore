@@ -5,4 +5,3 @@
 /deploy/compose/tls/
 /deploy/compose/kontra.*.yaml
 !/deploy/compose/kontra.vps.yaml
-!/deploy/compose/kontra.lifecycle.yaml

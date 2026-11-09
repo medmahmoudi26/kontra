@@ -3,6 +3,5 @@
   "state": "TASK_STATE_WORKING",
   "contextId": "ctx",
   "service": "hello",
-  "url": "https://app.kontra.sh/#/t/019a0000-0000-7000-8000-000000000001",
   "text": "The task 019a0000-0000-7000-8000-000000000001 is still working. Follow it here with status {taskId: \"019a0000-0000-7000-8000-000000000001\", after: 0, wait: 25}, or with GetTask at https://gateway.example.com/agents/hello (the same credential); call reply when it asks a question."
 }

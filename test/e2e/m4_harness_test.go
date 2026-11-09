@@ -76,12 +76,11 @@ func TestFrontProxyHeaderIsTheClientAddress(t *testing.T) {
 	}
 }
 
-// The Admission double answers as hooks.json says and as the gate reads it (hooks.ParseDecision, hooks.CheckQuote): a
-// quote for a service it quotes, naming the pre-minted task id in Cloud's thread URL by default and in a team gate's
-// own page when told; allow for any other; a raw decision when set; nothing once Down, and again after Up. It records
-// the requests and their Authorization.
+// The Admission double answers as hooks.json says and as the gate reads it (hooks.ParseDecision): allow, deny for a
+// service it denies, a raw decision when set; nothing once Down, and again after Up. It records the requests, their
+// extensions and their Authorization.
 func TestAdmissionDouble(t *testing.T) {
-	a, err := StartAdmission("paid")
+	a, err := StartAdmission()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +88,8 @@ func TestAdmissionDouble(t *testing.T) {
 	ask := func(service, task string) (hooks.Decision, error) {
 		t.Helper()
 		body := `{"operation":"task","taskId":"` + task + `","service":{"tenantId":"00000000-0000-0000-0000-000000000001","tenant":"default","name":"` +
-			service + `","kind":"a2a"},"principal":{"kind":"key","id":"key:kk_e2e","buyerId":"00000000-0000-0000-0000-000000000002","via":"api_key"},"protocol":"a2a"}`
+			service + `","kind":"a2a"},"principal":{"kind":"key","id":"key:kk_e2e","buyerId":"00000000-0000-0000-0000-000000000002","via":"api_key"},` +
+			`"protocol":"a2a","extensions":["https://github.com/google-agentic-commerce/ap2/v1"]}`
 		req, _ := http.NewRequest(http.MethodPost, a.URL(), strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+a.Secret)
 		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
@@ -101,26 +101,23 @@ func TestAdmissionDouble(t *testing.T) {
 		return hooks.ParseDecision(b)
 	}
 	const task = "01a18a00-0000-7000-8000-000000000001"
-	d, err := ask("paid", task)
-	if err != nil || d.Outcome != hooks.Quote || d.Quote == nil || d.Quote.ApproveURL != "https://app.kontra.sh/#/t/"+task {
-		t.Fatalf("a quoted service: %+v %v", d, err)
+	if d, err := ask("paid", task); err != nil || d.Outcome != hooks.Allow {
+		t.Fatalf("by default: %+v %v", d, err)
 	}
-	if err := hooks.CheckQuote(d.Quote, time.Now()); err != nil {
-		t.Errorf("the double's quote does not pass the gate's check: %v", err)
+	a.Deny("closed")
+	if d, err := ask("closed", task); err != nil || d.Outcome != hooks.Deny || d.Refusal == nil || d.Refusal.Code != -32001 {
+		t.Errorf("a service it denies: %+v %v", d, err)
 	}
 	if d, err := ask("free", task); err != nil || d.Outcome != hooks.Allow {
-		t.Errorf("a service it does not quote: %+v %v", d, err)
+		t.Errorf("a service it does not deny: %+v %v", d, err)
 	}
-	a.Set(func(id string) string { return "https://gate.team.example/approve/" + id }, time.Minute, "")
-	if d, err := ask("paid", task); err != nil || d.Quote == nil || d.Quote.ApproveURL != "https://gate.team.example/approve/"+task {
-		t.Errorf("a team gate's approve URL: %+v %v", d, err)
-	}
-	a.Set(nil, 0, `{"outcome":"deny","refusal":{"code":-32001,"message":"no"}}`)
-	if d, err := ask("paid", task); err != nil || d.Outcome != hooks.Deny {
+	a.Set(`{"outcome":"deny","refusal":{"code":-32001,"message":"no"}}`)
+	if d, err := ask("free", task); err != nil || d.Outcome != hooks.Deny {
 		t.Errorf("a raw decision: %+v %v", d, err)
 	}
 	reqs := a.Requests()
-	if len(reqs) != 4 || reqs[0].Service != "paid" || reqs[0].TaskID != task || reqs[0].Auth != "Bearer "+a.Secret || reqs[1].Service != "free" {
+	if len(reqs) != 4 || reqs[0].Service != "paid" || reqs[0].TaskID != task || reqs[0].Auth != "Bearer "+a.Secret || reqs[1].Service != "closed" ||
+		len(reqs[0].Extensions) != 1 || reqs[0].Extensions[0] != "https://github.com/google-agentic-commerce/ap2/v1" {
 		t.Errorf("the recorded requests: %+v", reqs)
 	}
 	a.Down()
@@ -130,7 +127,7 @@ func TestAdmissionDouble(t *testing.T) {
 	if err := a.Up(); err != nil {
 		t.Fatal(err)
 	}
-	a.Set(nil, 0, "")
+	a.Set("")
 	if d, err := ask("free", task); err != nil || d.Outcome != hooks.Allow {
 		t.Errorf("after Up: %+v %v", d, err)
 	}

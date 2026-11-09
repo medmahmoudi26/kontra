@@ -606,9 +606,8 @@ func TestOriginAndUpstreamRefusals(t *testing.T) {
 	}
 }
 
-// §13.1 with a hooks.Admission fake (C3): a quote on call is a deny with -32603 "MCP services are not priced"; a
-// deny carries the refusal; a failing hook is 503 "admission unavailable"; a quote on session refuses the
-// initialize. The upstream sees none of them.
+// §13.1 with a hooks.Admission fake (C3): a deny carries the refusal; a failing hook is 503 "admission unavailable", and so is an outcome but allow or deny
+// (the retired quote, D351), on a call and on a session's initialize. The upstream sees none of them.
 func TestAdmission(t *testing.T) {
 	e := newEnv(t)
 	up, url := upstreamDouble(t)
@@ -621,11 +620,11 @@ func TestAdmission(t *testing.T) {
 	if adm.n() != 1 || adm.asked[0].Operation != hooks.OpSession || adm.asked[0].Principal.ID != principal || adm.asked[0].Service.Name != "fs" {
 		t.Errorf("session admission %+v", adm.asked)
 	}
-	quote := hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ApproveURL: "https://cp.example/approve", ExpiresAt: "2030-01-01T00:00:00Z"}}
+	quote := hooks.Decision{Outcome: "quote"}
 	adm.set(quote, nil)
 	rep := c.call(r.url+"/mcp/fs", 1, "echo", "x")
-	if rep.errCode(t) != -32603 || !strings.Contains(string(rep.body), "MCP services are not priced") {
-		t.Errorf("quote on call: %s", rep.body)
+	if rep.status != 503 || rep.errCode(t) != -32603 || !strings.Contains(string(rep.body), "admission unavailable") {
+		t.Errorf("quote on call: %d %s", rep.status, rep.body)
 	}
 	if last := adm.asked[len(adm.asked)-1]; last.Operation != hooks.OpCall || last.Tool != "echo" {
 		t.Errorf("call admission %+v", last)
@@ -644,7 +643,7 @@ func TestAdmission(t *testing.T) {
 	adm.set(quote, nil)
 	o := newClient(t, key)
 	rep = o.do(http.MethodPost, r.url+"/mcp/fs", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`, nil)
-	if rep.header.Get("Mcp-Session-Id") != "" || !strings.Contains(string(rep.body), "MCP services are not priced") {
+	if rep.header.Get("Mcp-Session-Id") != "" || !strings.Contains(string(rep.body), "admission unavailable") {
 		t.Errorf("quote on session: %v %s", rep.header, rep.body)
 	}
 	if up.Count("tools/call") != 0 || up.Count("initialize") != 1 || len(e.calls("fs")) != 0 {

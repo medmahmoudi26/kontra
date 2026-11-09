@@ -19,8 +19,9 @@ import (
 //   - up to the terminal row, task, status, artifact and message rows go through a2a-go's update rules
 //     (a2aevent.ApplyShallowUpdate, the default materializer's, so the fold equals the projection a2a-go
 //     wrote);
-//   - after it, message rows (accepted review-window messages) are appended to history directly, because
-//     ApplyUpdate refuses any update to a terminal task; any other carried row there is a corrupt log;
+//   - after it, message rows (review-window messages an earlier release accepted, D351) are appended to history
+//     directly, because ApplyUpdate refuses any update to a terminal task; any other carried row there is a corrupt
+//     log;
 //   - metadata rows are always a top-level merge of their patch into the task's metadata.
 //
 // The writers of this package build every projection with the same functions, so the fold of rows 1..K

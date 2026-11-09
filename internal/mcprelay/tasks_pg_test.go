@@ -581,16 +581,15 @@ func TestDurableTaskRefusals(t *testing.T) {
 			t.Errorf("a denied task: %d, want %d", got, code)
 		}
 	}
-	// Admission quotes: MCP services are not priced, so the quote is a deny whatever the hook answers, and no task is
-	// created or dispatched (D350).
-	adm.set(hooks.Decision{Outcome: hooks.Quote,
-		Quote: &hooks.QuoteTerms{ApproveURL: "https://pay.example/t/1", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}, nil)
+	// An outcome but allow or deny (the retired quote, D351) fails closed: 503 "admission unavailable", and no task
+	// is created or dispatched.
+	adm.set(hooks.Decision{Outcome: "quote"}, nil)
 	rq := c.taskCall(5, "research", map[string]any{})
-	if rq.errCode(t) != -32603 || !strings.Contains(string(rq.body), hooks.MsgNotPriced) {
-		t.Fatalf("a quoted MCP task: %s", rq.body)
+	if rq.status != 503 || rq.errCode(t) != -32603 || !strings.Contains(string(rq.body), "admission unavailable") {
+		t.Fatalf("a quote outcome: %d %s", rq.status, rq.body)
 	}
 	if n := e.count(`select count(*) from kontra.tasks`); n != 0 || up.Count("tools/call") != 0 {
-		t.Fatalf("a quoted MCP task: %d tasks, %d upstream calls", n, up.Count("tools/call"))
+		t.Fatalf("a quote outcome: %d tasks, %d upstream calls", n, up.Count("tools/call"))
 	}
 }
 
@@ -984,7 +983,7 @@ func TestDispatchFenceAndTerminalRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nt, err := store.NewMCPTask(id, svc, store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}, store.StateSubmitted, nil, "", nil, nil)
+	nt, err := store.NewMCPTask(id, svc, store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1332,7 +1331,7 @@ func TestDispatchReattachesDirect(t *testing.T) {
 
 	id := uuid.Must(uuid.NewV7())
 	owner := store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
-	nt, err := store.NewMCPTask(id, svc, owner, store.StateSubmitted, nil, "", nil, nil)
+	nt, err := store.NewMCPTask(id, svc, owner, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1399,7 +1398,7 @@ func directTask(t *testing.T, e *env, log *store.Log, tool string) (uuid.UUID, u
 	}
 	id := uuid.Must(uuid.NewV7())
 	owner := store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
-	nt, err := store.NewMCPTask(id, svc, owner, store.StateSubmitted, nil, "", nil, nil)
+	nt, err := store.NewMCPTask(id, svc, owner, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1636,8 +1635,8 @@ func TestDurableTaskSealedAnswerRefusedByTheNode(t *testing.T) {
 // tasks: required on 2025-11-25 (§11.5, D322; issue #6): the session is shown the gate's tasks; tools/list leaves out
 // the tools the upstream cannot run as tasks and shows taskSupport required on the others; a plain tools/call is
 // -32601 and a left-out tool -32602, neither asking Admission (whose operations are task and call), reaching the
-// upstream or writing a calls row; a task-augmented call is a gate task, Admission asked once with operation task,
-// and a quote creates it quoted with nothing dispatched.
+// upstream or writing a calls row; a task-augmented call asks Admission once with operation task, and a deny creates
+// nothing and dispatches nothing.
 func TestRequiredTasks(t *testing.T) {
 	e := newTaskEnv(t)
 	up := mcptest.New()
@@ -1685,12 +1684,10 @@ func TestRequiredTasks(t *testing.T) {
 		t.Fatalf("the refused calls: Admission asked %d times, %d upstream calls, %d calls rows", adm.n(), up.Count("tools/call"),
 			e.count(`select count(*) from kontra.calls`))
 	}
-	// A task: Admission's task; a quote is a deny (MCP services are not priced, D350), with nothing created or
-	// dispatched.
-	adm.set(hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ApproveURL: "https://pay.example/t/2",
-		ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}, nil)
-	if got := c.taskCall(5, "research", map[string]any{}).errCode(t); got != -32603 {
-		t.Errorf("a quoted task of a required service: %d, want -32603", got)
+	// A task: Admission's task; a deny creates nothing and dispatches nothing.
+	adm.set(hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: -32061, Message: "no"}}, nil)
+	if got := c.taskCall(5, "research", map[string]any{}).errCode(t); got != -32061 {
+		t.Errorf("a denied task of a required service: %d, want -32061", got)
 	}
 	adm.mu.Lock()
 	asked := append([]hooks.AdmitRequest(nil), adm.asked...)
@@ -1699,6 +1696,6 @@ func TestRequiredTasks(t *testing.T) {
 		t.Fatalf("Admission was asked %+v, want once for a task of research", asked)
 	}
 	if n := e.count(`select count(*) from kontra.tasks`); n != 0 || up.Count("tools/call") != 0 {
-		t.Fatalf("the quoted task: %d tasks, %d upstream calls", n, up.Count("tools/call"))
+		t.Fatalf("the denied task: %d tasks, %d upstream calls", n, up.Count("tools/call"))
 	}
 }

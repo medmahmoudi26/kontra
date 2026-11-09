@@ -17,8 +17,8 @@ import (
 	"kontra.sh/kontra/internal/store"
 )
 
-// Sweep intervals: orphans once a minute (spec §14.5, tasks older than 2 minutes in submitted or quoted
-// with no workflow end failed: lifecycle_unavailable), retention every 10 minutes (spec §5.4), and the ends
+// Sweep intervals: orphans once a minute (spec §14.5, tasks older than 2 minutes in submitted, or left quoted by an
+// earlier release (D351), with no workflow end failed: lifecycle_unavailable), retention every 10 minutes (spec §5.4), and the ends
 // of rotation overlaps once a minute (spec/tunnel.md §12: a rotated key's revoked_at is set when its 24 h
 // overlap passes; the registry already stops using the key at overlap_until, enroll.Revocations.KeyUsable).
 const (
@@ -212,9 +212,9 @@ func (r *Replica) sweepRetention(ctx context.Context) {
 	}
 }
 
-// SweepOrphans is one pass of the orphan sweep (spec §14.5, D63): every task in submitted or quoted created
-// before olderThan whose workflow does not exist is ended `failed: lifecycle_unavailable` through the store
-// (store.Log.FailOrphan, which also ends its push configs). It checks at most budget candidates, starting
+// SweepOrphans is one pass of the orphan sweep (spec §14.5, D63): every task in submitted (or a row an earlier release
+// left quoted, D351) created before olderThan whose workflow does not exist is ended `failed: lifecycle_unavailable`
+// through the store (store.Log.FailOrphan, which also ends its push configs). It checks at most budget candidates, starting
 // after *cursor and leaving *cursor where it stopped (the zero value once it has reached the end). A
 // candidate whose workflow cannot be asked about (Temporal unreachable) is never failed: the pass stops and
 // the next one asks again. It returns how many tasks it ended.

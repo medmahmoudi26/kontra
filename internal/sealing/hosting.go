@@ -39,8 +39,8 @@ import (
 
 // Hosting-node bounds (spec/ext-sealed.md §5).
 const (
-	// DefaultMaxAge is --sealed-max-age: how old a request's iat may be; it must cover the operator's longest
-	// quote expiry plus task.timeout.
+	// DefaultMaxAge is --sealed-max-age: how old a request's iat may be when it reaches the service; it must cover
+	// the task's task.timeout (the gate's default is an hour), with margin for a queued task.
 	DefaultMaxAge = 25 * time.Hour
 	// JobRetention is how long a job's state is kept after its last exchange (node-local clock).
 	JobRetention = 7 * 24 * time.Hour

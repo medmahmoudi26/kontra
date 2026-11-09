@@ -29,8 +29,8 @@ const (
 //
 // Ownership and single use are checked where the item is used, never in an Update validator (D66): the
 // first dispatch of a turn loads it by (id, task) and consumes it (ConsumeWorkItem); a later dispatch of
-// the same turn (a retry, attempt n + 1, a resume) may reload the consumed item it owns (LoadWorkItem);
-// kontra.review_message consumes it in its append transaction (AppendReviewMessage). A refused follow-up
+// the same turn (a retry, attempt n + 1, a resume) may reload the consumed item it owns (LoadWorkItem). A refused
+// follow-up
 // deletes its item (DeleteWorkItem); an unconsumed item otherwise stays until its task is deleted.
 //
 // DeliveredAt is a follow-up's delivery (spec §6.4, D81): set by the turn's dispatch when the upstream

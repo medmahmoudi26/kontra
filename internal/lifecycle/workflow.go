@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -28,11 +27,9 @@ const (
 	lifecycleMaxInterval      = 30 * time.Second
 	hookStartToClose          = time.Minute
 	hookMaxInterval           = 5 * time.Minute
-	reviewMessageStartToClose = 8 * time.Second
 	pushHeartbeat             = 60 * time.Second
 	pushMaxInterval           = 5 * time.Minute
 	pushBudget                = 24 * time.Hour
-	maxReviewWindow           = 604800 * time.Second
 	maxResumeBackoff          = 30 * time.Second
 	maxRetryShift             = 20 // 2^20 s: the deadline caps a retry's wait long before
 	listBudget                = 5 * time.Minute
@@ -100,6 +97,11 @@ const (
 	// (§8's row "exists, session gone"), writes canceled at once instead of failed: tunnel_lost, and sends
 	// forward_cancel if the node comes back within the grace. Before it, those tasks failed tunnel_lost.
 	changeReconnect = "tunnel-reconnect"
+	// changeNoReviewWindow: after OnTerminal the workflow ends; it no longer asks ReviewWindow (D351: the review
+	// window was escrow's, withdrawn). Before it, every run scheduled kontra.lifecycle.ReviewWindow once after
+	// OnTerminal, so a run recorded then still schedules it on replay, and ends whatever it answers; the built-in
+	// ReviewWindow stays registered so such a run, in flight across the upgrade, completes.
+	changeNoReviewWindow = "no-review-window"
 )
 
 // A reconnect wait (and a late cancel's look for the node) reads Postgres for a session of its node besides the
@@ -124,8 +126,7 @@ const mcpCancelWait = 8 * time.Second
 type phase int
 
 const (
-	phaseQuoted   phase = iota // waiting for kontra.approval or the quote's expiry
-	phaseNew                   // submitted, its first turn not dispatched yet
+	phaseNew      phase = iota // submitted, its first turn not dispatched yet
 	phaseRunning               // a turn is dispatched, retried or re-attached
 	phaseWaiting               // input-required: waits for the next kontra.message
 	phaseTerminal              // the terminal event is in the log
@@ -147,14 +148,6 @@ type cancelOp struct {
 	done    bool
 	res     CancelResult
 	err     error
-}
-
-// approvalOp is one kontra.approval in flight.
-type approvalOp struct {
-	u    ApprovalUpdate
-	done bool
-	res  ApprovalResult
-	err  error
 }
 
 // heldPatch is an operator patch waiting for no dispatch, abort or forward_cancel to be in flight (spec
@@ -215,15 +208,7 @@ type lc struct {
 	applying bool
 	held     []heldPatch
 
-	cancel       *cancelOp
-	approval     *approvalOp
-	quoteExpired bool
-
-	windowDecided  bool // ReviewWindow answered (or will never be asked)
-	reviewOpen     bool
-	reviewInFlight int
-	disputed       bool
-	closed         bool
+	cancel *cancelOp
 
 	inputSeq int64 // the last kontra.input_response seq (MCP, spec §11.5 step 5): workflow state only
 
@@ -239,9 +224,8 @@ type lc struct {
 
 // TaskLifecycle is the per-task workflow, id task-<task_id>, on kontra-lifecycle (spec §14.1).
 //
-// Sequence: (quoted: wait for kontra.approval or the quote's expiry) → attempt loop → terminal →
-// OnTerminal → (review window; never open in open source) → the end, once no push_webhook it started is
-// pending (D78). The task.timeout is a workflow timer at the deadline the store fixed at submission, never
+// Sequence: attempt loop → terminal → OnTerminal → the end, once no push_webhook it started is pending
+// (D78). The task.timeout is a workflow timer at the deadline the store fixed at submission, never
 // Temporal's execution timeout. Each turn is one dispatch; interrupted (input-required) waits for the next
 // kontra.message. On a dispatch failure the workflow reads attempt_state (Postgres, not heartbeat details)
 // and applies the retry table of spec §6.4: retry with a new attempt before the first upstream task id;
@@ -261,9 +245,6 @@ func TaskLifecycle(ctx workflow.Context, in Input) error {
 		l.in.Retries = 0
 	}
 	l.phase = phaseNew
-	if in.QuoteExpiresAt != nil {
-		l.phase = phaseQuoted
-	}
 	if err := l.register(ctx); err != nil {
 		return err
 	}
@@ -275,12 +256,7 @@ func TaskLifecycle(ctx workflow.Context, in Input) error {
 		l.listedAtStart = true
 		l.listPush(ctx)
 	}
-	if l.phase == phaseQuoted {
-		l.quoted(ctx)
-	}
-	if l.phase != phaseTerminal {
-		l.active(ctx)
-	}
+	l.active(ctx)
 	l.ended(ctx)
 	return ctx.Err()
 }
@@ -295,8 +271,6 @@ func (l *lc) register(ctx workflow.Context) error {
 	}{
 		{UpdateMessage, l.onMessage, l.validateMessage},
 		{UpdateCancel, l.onCancel, l.validateCancel},
-		{UpdateApproval, l.onApproval, l.validateApproval},
-		{UpdateReviewMessage, l.onReviewMessage, l.validateReviewMessage},
 		{UpdateAnnotate, l.onAnnotate, l.validateAnnotate},
 	} {
 		if err := workflow.SetUpdateHandlerWithOptions(ctx, u.name, u.handler, workflow.UpdateHandlerOptions{Validator: u.validator}); err != nil {
@@ -334,8 +308,8 @@ func (l *lc) busy() bool { return (l.disp != nil && !l.disp.done) || l.ctl > 0 }
 
 // --- Updates ---
 
-// validateMessage is §7's table on workflow state (D66): refused unless the task is new (or quoted, its
-// first message) or waits at input-required, no turn is running or queued, no cancel is in flight, and
+// validateMessage is §7's table on workflow state (D66): refused unless the task is new (its first message)
+// or waits at input-required, no turn is running or queued, no cancel is in flight, and
 // the work item has not been accepted in this run.
 //
 // A refusal because a turn is running is final (ErrTypeRefused) when the caller read no turn end later
@@ -359,11 +333,9 @@ func (l *lc) validateMessage(ctx workflow.Context, u MessageUpdate) error {
 	case l.cancelPending():
 		return refusal("the task is being canceled")
 	case l.turns == 0:
-		return nil // the task's first message, with the start (new or quoted)
+		return nil // the task's first message, with the start
 	case l.phase == phaseWaiting:
 		return nil
-	case l.phase == phaseQuoted:
-		return refusal("a quoted task is accepted on the operator's page, not in the protocol")
 	}
 	return refusal("the task takes no input now")
 }
@@ -399,97 +371,6 @@ func (l *lc) onCancel(ctx workflow.Context, u CancelUpdate) (CancelResult, error
 	return op.res, op.err
 }
 
-// validateApproval refuses unless the task is quoted and its quote has not expired, and refuses metadata
-// outside the §13.2 rules.
-func (l *lc) validateApproval(ctx workflow.Context, u ApprovalUpdate) error {
-	if l.phase != phaseQuoted || l.quoteExpired || (l.approval != nil && !l.approval.done) {
-		return refusal("the task is not quoted")
-	}
-	if err := l.rules().CheckOperatorMaps(u.Metadata, u.MCPMeta); err != nil {
-		return refusal(err.Error())
-	}
-	return nil
-}
-
-func (l *lc) onApproval(ctx workflow.Context, u ApprovalUpdate) (ApprovalResult, error) {
-	op := &approvalOp{u: u}
-	l.approval = op
-	if err := workflow.Await(ctx, func() bool { return op.done }); err != nil {
-		return ApprovalResult{}, err
-	}
-	return op.res, op.err
-}
-
-// validateReviewMessage refuses once the review window is decided closed (or a dispute closed it), and a
-// work item already accepted in this run; the caller_metadata keys are at most 16 KiB (D59).
-//
-// SPEC-CONFLICT (D106): spec §14.1's validator refuses "unless the window is open". The caller sends a review
-// message once it read completed from the log, which can be before the workflow learned that the turn
-// ended (the dispatch returns a moment after logging it) and before OnTerminal and ReviewWindow ran (a
-// remote hook can take seconds): read literally, a message sent into a window about to open would be
-// refused. The closest faithful behaviour: before ReviewWindow has answered, the message is accepted and
-// its handler waits for the window; a window that does not open answers accepted: false, which the caller
-// sees exactly as a refusal (the interceptor deletes the work item and answers UnsupportedOperationError).
-func (l *lc) validateReviewMessage(ctx workflow.Context, u ReviewMessageUpdate) error {
-	switch {
-	case (l.windowDecided && !l.reviewOpen) || l.disputed:
-		return refusal("no review window is open")
-	case u.WorkItemID == "" || l.accepted[u.WorkItemID]:
-		return refusal("this work item was already accepted")
-	}
-	if b, err := json.Marshal(u.Metadata); err != nil || len(b) > hooks.MaxMapBytes {
-		return refusal("caller metadata over 16 KiB")
-	}
-	return nil
-}
-
-// onReviewMessage runs OnReviewMessage (8 s, no retry; a failure is accept: false); on accept it appends
-// the message from the work item, consuming it in the same transaction, applies the hook's patch and
-// dispute flag, and returns the seq (spec §7, §14.1, D66). A window that does not open answers
-// accepted: false.
-func (l *lc) onReviewMessage(ctx workflow.Context, u ReviewMessageUpdate) (ReviewMessageResult, error) {
-	l.accepted[u.WorkItemID] = true
-	if err := workflow.Await(ctx, func() bool { return l.windowDecided }); err != nil {
-		return ReviewMessageResult{}, err
-	}
-	if !l.reviewOpen || l.disputed {
-		return ReviewMessageResult{Accepted: false}, nil
-	}
-	l.reviewInFlight++
-	defer func() { l.reviewInFlight-- }()
-	ref, ok := l.taskRef(ctx)
-	if !ok {
-		return ReviewMessageResult{Accepted: false}, nil
-	}
-	md := u.Metadata
-	if md == nil {
-		md = map[string]any{}
-	}
-	// Bounded from its scheduling, not only from its start: on a remote hook queue nobody polls, the
-	// activity never starts, and its timeout is the answer accept: false (spec §14.1).
-	hctx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		TaskQueue: l.in.Hooks.hooksQueue(), StartToCloseTimeout: reviewMessageStartToClose,
-		ScheduleToCloseTimeout: reviewMessageStartToClose, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1},
-	})
-	var hr hooks.ReviewMessageResult
-	err := workflow.ExecuteActivity(hctx, HookOnReviewMessage, ref,
-		hooks.ReviewMessageArgs{WorkItemID: u.WorkItemID, MessageID: u.MessageID, Metadata: md}).Get(ctx, &hr)
-	if err != nil || !hr.Accept {
-		return ReviewMessageResult{Accepted: false}, nil
-	}
-	var seq int64
-	if err := l.call(ctx, ActAppendReviewMessage, &seq, ReviewAppendInput{TaskID: l.in.TaskID, WorkItemID: u.WorkItemID}); err != nil {
-		return ReviewMessageResult{Accepted: false}, nil
-	}
-	if hr.Patch != nil {
-		l.apply(ctx, HookOnReviewMessage, *hr.Patch)
-	}
-	if hr.Dispute {
-		l.disputed = true
-	}
-	return ReviewMessageResult{Accepted: true, Seq: &seq}, nil
-}
-
 // AnnotateResult is kontra.annotate's result, {}.
 type AnnotateResult struct{}
 
@@ -509,7 +390,7 @@ func (l *lc) onAnnotate(ctx workflow.Context, u AnnotateUpdate) (AnnotateResult,
 
 // --- signals, patches, pushes, hooks ---
 
-// signals receives kontra.push, kontra.dispatched, kontra.close and kontra.input_response.
+// signals receives kontra.push, kontra.dispatched, kontra.input_response and kontra.reconnected.
 func (l *lc) signals(ctx workflow.Context) {
 	stop := false
 	sel := workflow.NewSelector(ctx)
@@ -538,11 +419,6 @@ func (l *lc) signals(ctx workflow.Context) {
 				_ = l.hook(gc, HookOnDispatched, ref, hooks.DispatchedArgs{Attempt: n}, nil)
 			}
 		})
-	})
-	sel.AddReceive(workflow.GetSignalChannel(ctx, SignalClose), func(c workflow.ReceiveChannel, _ bool) {
-		var s struct{}
-		c.Receive(ctx, &s)
-		l.closed = true
 	})
 	sel.AddReceive(workflow.GetSignalChannel(ctx, SignalInputResponse), func(c workflow.ReceiveChannel, _ bool) {
 		// MCP (spec §11.5 step 5): the running dispatch, which tails the log, writes the response upstream; the
@@ -639,16 +515,12 @@ func (l *lc) taskRef(ctx workflow.Context) (hooks.TaskRef, bool) {
 }
 
 // pushBound is the deadline a push_webhook's budget counts from: tasks.deadline once known, else an
-// upper bound (a quoted task's deadline is fixed at its approval).
+// upper bound.
 func (l *lc) pushBound(ctx workflow.Context) time.Time {
 	if !l.deadline.IsZero() {
 		return l.deadline
 	}
-	bound := workflow.Now(ctx)
-	if l.in.QuoteExpiresAt != nil && l.in.QuoteExpiresAt.After(bound) {
-		bound = *l.in.QuoteExpiresAt
-	}
-	return bound.Add(time.Duration(l.in.TimeoutSeconds) * time.Second)
+	return workflow.Now(ctx).Add(time.Duration(l.in.TimeoutSeconds) * time.Second)
 }
 
 // startPush starts one push_webhook for the config on kontra-push unless one this run started is still
@@ -733,57 +605,6 @@ func (l *lc) armTimer(ctx workflow.Context) {
 		}
 		l.timedOut = true
 	})
-}
-
-// quoted waits for kontra.approval, the quote's expiry or a cancel (spec §13.2).
-func (l *lc) quoted(ctx workflow.Context) {
-	d := l.in.QuoteExpiresAt.Sub(workflow.Now(ctx))
-	tctx, stop := workflow.WithCancel(ctx)
-	defer stop()
-	workflow.Go(tctx, func(c workflow.Context) {
-		if d > 0 {
-			if err := workflow.NewTimerWithOptions(c, d, workflow.TimerOptions{Summary: "quote.expiry"}).Get(c, nil); err != nil {
-				return
-			}
-		}
-		l.quoteExpired = true
-	})
-	for l.phase == phaseQuoted && ctx.Err() == nil {
-		_ = workflow.Await(ctx, func() bool {
-			return l.cancelPending() || (l.approval != nil && !l.approval.done) || l.quoteExpired
-		})
-		switch {
-		case l.approval != nil && !l.approval.done:
-			l.approve(ctx, l.approval)
-		case l.cancelPending():
-			tr := l.writeTerminal(ctx, WriteTerminalInput{State: string(store.StateCanceled), Canceled: store.CanceledClient})
-			l.finishEnded(l.cancel, tr.State)
-		case l.quoteExpired:
-			l.writeTerminal(ctx, WriteTerminalInput{State: string(store.StateCanceled), Canceled: store.CanceledQuoteExpired})
-		}
-	}
-}
-
-// approve applies an approval: accepted, its metadata and the move to submitted (one activity, which
-// returns the stored deadline); declined, canceled: declined.
-func (l *lc) approve(ctx workflow.Context, op *approvalOp) {
-	defer func() { op.done = true }()
-	if !op.u.Accepted {
-		tr := l.writeTerminal(ctx, WriteTerminalInput{State: string(store.StateCanceled), Canceled: store.CanceledDeclined})
-		op.res = ApprovalResult{State: tr.State}
-		return
-	}
-	var r SubmitResult
-	err := l.call(ctx, ActSubmit, &r, SubmitInput{TaskID: l.in.TaskID, Metadata: op.u.Metadata, MCPMeta: op.u.MCPMeta,
-		TimeoutSeconds: l.in.TimeoutSeconds})
-	if err != nil {
-		op.err = refusal("the approval could not be applied")
-		return
-	}
-	l.deadline = r.Deadline
-	l.armTimer(ctx)
-	l.phase = phaseNew
-	op.res = ApprovalResult{State: string(store.StateSubmitted)}
 }
 
 // active runs the turns until the task is terminal.
@@ -1588,8 +1409,8 @@ func (l *lc) cancelSessionGone(ctx workflow.Context, op *cancelOp, c *call) {
 	l.finishEnded(op, tr.State)
 }
 
-// ended runs after the terminal event: once nothing holds the task, the held patches, OnTerminal, the
-// review window and OnReviewClosed; then the workflow ends once no push_webhook, hook or Update handler
+// ended runs after the terminal event: once nothing holds the task, the held patches and OnTerminal; then the
+// workflow ends once no push_webhook, hook or Update handler
 // it started is pending (D78).
 func (l *lc) ended(ctx workflow.Context) {
 	l.phase = phaseTerminal
@@ -1600,10 +1421,6 @@ func (l *lc) ended(ctx workflow.Context) {
 		st, _ := l.attemptState(ctx)
 		l.finishEnded(l.cancel, st.TaskState)
 	}
-	if op := l.approval; op != nil && !op.done {
-		// Accepted while a cancel or the quote's expiry was ending the task.
-		op.err, op.done = refusal("the task is no longer quoted"), true
-	}
 	if l.disp != nil && !l.disp.done {
 		l.disp.cancel()
 	}
@@ -1612,15 +1429,14 @@ func (l *lc) ended(ctx workflow.Context) {
 		_ = workflow.Await(ctx, func() bool { return len(l.held) == 0 && !l.applying })
 		l.terminalHooks(ctx)
 	}
-	l.windowDecided = true
 	_ = workflow.Await(ctx, func() bool {
 		return l.pushPending == 0 && l.listing == 0 && l.hooksPending == 0 && len(l.held) == 0 && !l.applying &&
 			l.lateCancels == 0 && workflow.AllHandlersFinished(ctx)
 	})
 }
 
-// terminalHooks runs OnTerminal, then ReviewWindow and, when it opens, the window and OnReviewClosed
-// (spec §13.3).
+// terminalHooks runs OnTerminal (spec §13.3). A run recorded before changeNoReviewWindow then asked ReviewWindow;
+// on replay it still schedules it, and ends whatever it answers (D351: no window opens any more).
 func (l *lc) terminalHooks(ctx workflow.Context) {
 	ref, ok := l.taskRef(ctx)
 	if !ok {
@@ -1630,26 +1446,8 @@ func (l *lc) terminalHooks(ctx workflow.Context) {
 	if err := l.hook(ctx, HookOnTerminal, ref, struct{}{}, &p); err == nil {
 		l.apply(ctx, HookOnTerminal, p)
 	}
-	var w hooks.ReviewWindow
-	err := l.hook(ctx, HookReviewWindow, ref, struct{}{}, &w)
-	l.reviewOpen = err == nil && w.Open
-	l.windowDecided = true
-	if !l.reviewOpen {
-		return
-	}
-	d := min(max(time.Duration(w.Seconds)*time.Second, 0), maxReviewWindow)
-	_, _ = workflow.AwaitWithTimeout(ctx, d, func() bool { return l.disputed })
-	l.reviewOpen = false
-	_ = workflow.Await(ctx, func() bool { return l.reviewInFlight == 0 })
-	if ref, ok = l.taskRef(ctx); !ok {
-		return
-	}
-	var closed hooks.Patch
-	if err := l.hook(ctx, HookOnReviewClosed, ref, hooks.ReviewClosedArgs{Disputed: l.disputed}, &closed); err != nil {
-		return
-	}
-	l.apply(ctx, HookOnReviewClosed, closed)
-	if closed.HoldOpenSeconds > 0 {
-		_, _ = workflow.AwaitWithTimeout(ctx, time.Duration(closed.HoldOpenSeconds)*time.Second, func() bool { return l.closed })
+	if workflow.GetVersion(ctx, changeNoReviewWindow, workflow.DefaultVersion, 1) == workflow.DefaultVersion {
+		var w hooks.RetiredReviewWindow
+		_ = l.hook(ctx, HookReviewWindow, ref, struct{}{}, &w)
 	}
 }

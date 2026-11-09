@@ -17,7 +17,7 @@ import (
 // never a value. The start log names the hook without its secret.
 func TestBuildAdmission(t *testing.T) {
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	rules := hooks.KeyRules{OperatorPrefixes: []string{"kontra.escrow."}}
+	rules := hooks.KeyRules{OperatorPrefixes: []string{"kontra.op."}}
 
 	a, ops, err := buildAdmission(&config.Config{}, rules, quiet)
 	if _, ok := a.(hooks.BuiltinAdmission); err != nil || !ok || len(ops) != 0 {

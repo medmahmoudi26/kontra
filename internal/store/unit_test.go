@@ -15,7 +15,7 @@ import (
 )
 
 func TestStateMapping(t *testing.T) {
-	for _, s := range []State{StateQuoted, StateSubmitted, StateWorking, StateAuthRequired, StateInputRequired,
+	for _, s := range []State{StateSubmitted, StateWorking, StateAuthRequired, StateInputRequired,
 		StateCompleted, StateFailed, StateCanceled, StateRejected} {
 		if !s.Valid() {
 			t.Errorf("%s not valid", s)
@@ -24,16 +24,16 @@ func TestStateMapping(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", s, err)
 		}
-		want := s
-		if s == StateQuoted {
-			want = StateInputRequired // a quote shows as input-required on A2A (spec §5.1)
-		}
-		if back != want {
+		if back != s {
 			t.Errorf("%s -> %s -> %s", s, s.A2A(), back)
 		}
 		if s.Terminal() != s.A2A().Terminal() {
 			t.Errorf("%s: Terminal %v, A2A Terminal %v", s, s.Terminal(), s.A2A().Terminal())
 		}
+	}
+	// quoted was a state of an earlier release (D351): no longer one of the vocabulary.
+	if State("quoted").Valid() || State("quoted").A2A() != a2a.TaskStateUnspecified {
+		t.Error("quoted is still a state")
 	}
 	if _, err := StateFromA2A(a2a.TaskStateUnspecified); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("unspecified state: %v", err)
@@ -82,9 +82,13 @@ func TestFailedStatusShape(t *testing.T) {
 	if got := FailedStatus(info, ReasonUpstreamError, "boom").Status.Message.Parts[0].Text(); got != "boom" {
 		t.Errorf("text %q", got)
 	}
-	c := CanceledStatus(info, CanceledDeclined, "")
-	if c.Status.State != a2a.TaskStateCanceled || c.Metadata[MetaCanceled] != "declined" || c.Status.Message.Parts[0].Text() != "the quote was declined" {
+	c := CanceledStatus(info, CanceledClient, "")
+	if c.Status.State != a2a.TaskStateCanceled || c.Metadata[MetaCanceled] != "client" || c.Status.Message.Parts[0].Text() != "the task was canceled" {
 		t.Errorf("canceled %+v", c)
+	}
+	// declined and quote_expired were escrow's (D351): no longer written.
+	if c := CanceledStatus(info, "declined", ""); c.Metadata[MetaCanceled] != nil {
+		t.Errorf("canceled declined %+v", c.Metadata)
 	}
 	for _, r := range []FailureReason{ReasonNoSession, ReasonTunnelLost, ReasonUpstreamUnreachable, ReasonUpstreamError,
 		ReasonServiceUnavailable, ReasonTimeout, ReasonSealedRejected, ReasonLifecycleUnavailable} {

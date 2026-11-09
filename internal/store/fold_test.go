@@ -13,8 +13,8 @@ import (
 
 // Property (spec §9, D75): SnapshotAt(K) equals the projection after the K-th write, for every K of
 // randomized sequences of status, artifact, message and metadata writes through every writer of the
-// package (Store.Update as a2a-go's processor calls it, ApplyMetadata, WriteTerminal,
-// AppendReviewMessage), including message and metadata rows after the terminal row.
+// package (Store.Update as a2a-go's processor calls it, ApplyMetadata, WriteTerminal), including message rows (an
+// earlier release's review-window messages) and metadata rows after the terminal row.
 func TestSnapshotAtEqualsProjection(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
@@ -46,14 +46,20 @@ func TestSnapshotAtEqualsProjection(t *testing.T) {
 							t.Fatal(err)
 						}
 					case 1:
-						w := uuid.Must(uuid.NewV7())
-						if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w, TaskID: id, Kind: WorkExecute,
-							Payload: workPayload(task, fmt.Sprintf("review %d", step), buyerA)}); err != nil {
+						// A message row after the terminal row, as an earlier release's review window wrote
+						// one (D351): the store no longer appends it, so it is written as that release left it;
+						// logs that hold one still fold.
+						msg := workPayload(task, fmt.Sprintf("review %d", step), buyerA).Request.Message
+						row, err := e.log.Load(ctx, id)
+						if err != nil {
 							t.Fatal(err)
 						}
-						if _, err := e.log.AppendReviewMessage(ctx, id, w); err != nil {
-							t.Fatal(err)
-						}
+						payload, _ := json.Marshal(a2a.StreamResponse{Event: msg})
+						snap, _ := json.Marshal(appendHistory(row.Snapshot, msg))
+						e.exec(`with u as (update kontra.tasks set version = version + 1, snapshot = $3::json
+								where id = $1 and version = $2 returning id, version)
+							insert into kontra.task_events (task_id, seq, kind, payload)
+							select id, version, 'message', $4::json from u`, id, row.Version, string(snap), string(payload))
 					}
 					record()
 					continue

@@ -21,32 +21,24 @@ import (
 // outputSchema with its own Ajv and throws when it does not match: @modelcontextprotocol/client 2.4.0 on Node 24,
 // pinned to 2026-07-28 and declaring URL and form elicitation without the tasks extension (as Claude Code does), and
 // @modelcontextprotocol/sdk 1.32.2 on the 2025-11-25 era (examples/mcp/everything's lock), which validates the
-// structuredContent of an isError result too. The Admission double quotes the service paid; free is allowed; both are
-// hosted by a node. For each client, read from structuredContent alone:
+// structuredContent of an isError result too. The service free is hosted by a node. For each client, read from
+// structuredContent alone:
 //
 //   - tools/list gives hire, reply and cancel the outputSchema of spec/schema/mcp-tools.json's hireResult (the tools
 //     that follow a task their own), and the client's own validator accepts every shape of its fixtures
 //     (examples/mcp-tools.hireResult.*.json) and refuses bad ones;
-//   - a quoted hire: url and quote.approveUrl are the hook's approveUrl, the task's thread; quote.expiresAt is set;
-//   - a free hire of the seller's artifact kinds: the answer's text, data and file links, and no url; a failing one is
-//     isError with the failure's text; a question is its text with the reply-tool hint, and reply's answer is the
-//     follow-up's text;
-//   - after the operator accepts the quote, the retried hire is the agent's answer with the thread URL.
+//   - a hire of the seller's artifact kinds: the answer's text, data and file links; a failing one is isError with the
+//     failure's text; a question is its text with the reply-tool hint, and reply's answer is the follow-up's text.
 func TestGateMCPStockClient(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped under -short")
 	}
 	node24 := Node24(t)
-	adm, err := StartAdmission("paid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = adm.Close() })
 	seller := StartSeller(t)
-	h := start(t, Options{Tunnel: map[string]TunnelService{"paid": {}, "free": {}}, Admission: adm})
+	h := start(t, Options{Tunnel: map[string]TunnelService{"free": {}}})
 	ctx := ctxFor(t, 10*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
-	hostOn(t, ctx, h, b, map[string]string{"paid": seller.URL, "free": seller.URL})
+	hostOn(t, ctx, h, b, map[string]string{"free": seller.URL})
 	v2 := installed(t, "test/e2e/testdata/mcp-client-2", "@modelcontextprotocol/client@2.4.0")
 	v1 := installed(t, "examples/mcp/everything", "@modelcontextprotocol/sdk@1.32.2")
 	nodeBin, err := exec.LookPath("node")
@@ -58,7 +50,7 @@ func TestGateMCPStockClient(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixtures, err := filepath.Glob(filepath.Join(repoRoot, "spec", "schema", "examples", "mcp-tools.hireResult.*.json"))
-	if err != nil || len(fixtures) < 8 {
+	if err != nil || len(fixtures) < 7 {
 		t.Fatalf("the hireResult fixtures: %v %v", fixtures, err)
 	}
 	var good []json.RawMessage
@@ -72,7 +64,7 @@ func TestGateMCPStockClient(t *testing.T) {
 	const task = `"taskId":"019a0000-0000-7000-8000-000000000001"`
 	bad := []string{`{` + task + `,"state":"TASK_STATE_WORKING","approveUrl":"https://a.example"}`, `{` + task + `}`,
 		`{` + task + `,"state":"working"}`, `{"taskId":"t1","state":"TASK_STATE_WORKING"}`,
-		`{` + task + `,"state":"TASK_STATE_INPUT_REQUIRED","quote":{"approveUrl":"https://a.example"}}`,
+		`{` + task + `,"state":"TASK_STATE_WORKING","url":"https://a.example"}`,
 		`{` + task + `,"state":"TASK_STATE_COMPLETED","data":[]}`}
 	goodJSON, _ := json.Marshal(good)
 	check := `{"good":` + string(goodJSON) + `,"bad":[` + strings.Join(bad, ",") + `]}`
@@ -96,14 +88,11 @@ func TestGateMCPStockClient(t *testing.T) {
 			}
 			return lines[:len(lines)-1]
 		}
-		ctxArg := fmt.Sprintf(`"contextId":%q`, c.sdk)
-		paid := `{"tool":"hire","arguments":{"service":"paid","message":"hi",` + ctxArg + `}}`
-		lines := run(`[` + paid + `,
-			{"tool":"hire","arguments":{"service":"free","message":"kinds"}},
+		lines := run(`[{"tool":"hire","arguments":{"service":"free","message":"kinds"}},
 			{"tool":"hire","arguments":{"service":"free","message":"fail"}},
 			{"tool":"hire","arguments":{"service":"free","message":"ask"}},
 			{"tool":"reply","arguments":{"taskId":"$taskId","message":"friday"}}]`)
-		if len(lines) != 6 || lines[0].Tools == nil {
+		if len(lines) != 5 || lines[0].Tools == nil {
 			t.Fatalf("%s: %d lines: %+v", c.name, len(lines), lines)
 		}
 		// hire, reply and cancel declare hireResult; the tools that follow a task their own (D332..D337); search and
@@ -128,53 +117,21 @@ func TestGateMCPStockClient(t *testing.T) {
 				t.Fatalf("%s: call %d: the stock client refused the answer: %s (%v)", c.name, i, l.Error, l.Code)
 			}
 		}
-		q := lines[1].structured(t)
-		taskID := q.TaskID
-		thread := "https://app.kontra.sh/#/t/" + taskID
-		if q.State != "TASK_STATE_INPUT_REQUIRED" || q.URL != thread || q.Quote == nil || q.Quote.ApproveURL != thread ||
-			q.Quote.ExpiresAt == "" || !strings.Contains(q.Text, thread) {
-			t.Errorf("%s: the quoted hire's structuredContent %+v, want the thread %s", c.name, q, thread)
-		}
-		if reqs := adm.Requests(); reqs[len(reqs)-1].TaskID != taskID && !hasTask(reqs, taskID) {
-			t.Errorf("%s: the quoted task %s is not the one Admission was asked about", c.name, taskID)
-		}
-		if f := lines[2].structured(t); f.State != "TASK_STATE_COMPLETED" || f.URL != "" || f.Text != "done\nGenerated text content" ||
+		if f := lines[1].structured(t); f.State != "TASK_STATE_COMPLETED" || f.Text != "done\nGenerated text content" ||
 			fmt.Sprint(f.Data) != "[map[total:4] map[count:42 key:value]]" || len(f.Files) != 2 {
-			t.Errorf("%s: a free hire's structuredContent %+v", c.name, f)
+			t.Errorf("%s: a hire's structuredContent %+v", c.name, f)
 		}
-		if f := lines[3].structured(t); !lines[3].Result.IsError || f.State != "TASK_STATE_FAILED" || f.Text != "the exec failed: exit status 1" {
+		if f := lines[2].structured(t); !lines[2].Result.IsError || f.State != "TASK_STATE_FAILED" || f.Text != "the exec failed: exit status 1" {
 			t.Errorf("%s: a failing hire: %+v", c.name, f)
 		}
-		ask := lines[4].structured(t)
+		ask := lines[3].structured(t)
 		if ask.State != "TASK_STATE_INPUT_REQUIRED" || ask.Text != "Which date? (answer with the reply tool, taskId "+ask.TaskID+")" {
 			t.Errorf("%s: a question: %+v", c.name, ask)
 		}
-		if r := lines[5].structured(t); r.TaskID != ask.TaskID || r.State != "TASK_STATE_COMPLETED" || r.Text != "booked for friday" {
+		if r := lines[4].structured(t); r.TaskID != ask.TaskID || r.State != "TASK_STATE_COMPLETED" || r.Text != "booked for friday" {
 			t.Errorf("%s: reply: %+v", c.name, r)
 		}
-
-		// The operator accepts on the thread; the retried hire answers the agent's text, with the thread URL.
-		if err := h.Approve(ctx, taskID, true); err != nil {
-			t.Fatal(err)
-		}
-		eventually(t, 20*time.Second, "the approved task completes", func() bool { return taskState(t, h, taskID) == "completed" })
-		lines = run(`[` + paid + `]`)
-		if len(lines) != 2 || lines[1].Error != "" || lines[1].Result == nil {
-			t.Fatalf("%s: the retried hire: %+v", c.name, lines)
-		}
-		if d := lines[1].structured(t); d.TaskID != taskID || d.State != "TASK_STATE_COMPLETED" || d.Text != "Hello World" || d.URL != thread {
-			t.Errorf("%s: the retried hire's structuredContent %+v", c.name, d)
-		}
 	}
-}
-
-func hasTask(reqs []AdmissionRequest, id string) bool {
-	for _, r := range reqs {
-		if r.TaskID == id {
-			return true
-		}
-	}
-	return false
 }
 
 // stockLine is one line the stock client printed: the tools it listed, or a call's result or error.

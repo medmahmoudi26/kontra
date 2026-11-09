@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
@@ -32,7 +31,7 @@ func TestGateRequestIDs(t *testing.T) {
 }
 
 func TestMCPStatusVocabulary(t *testing.T) {
-	for s, want := range map[State]string{StateQuoted: "working", StateSubmitted: "working", StateWorking: "working",
+	for s, want := range map[State]string{StateSubmitted: "working", StateWorking: "working",
 		StateAuthRequired: "working", StateInputRequired: "input_required", StateCompleted: "completed", StateFailed: "failed",
 		StateRejected: "failed", StateCanceled: "cancelled"} {
 		if got := s.MCPStatus(); got != want {
@@ -51,19 +50,14 @@ func TestMCPStatusVocabulary(t *testing.T) {
 }
 
 // mcpEnv adds an mcp service and an MCP task with its work item.
-func (e *env) mcpTask(state State, approveURL string) (uuid.UUID, ServiceRef) {
+func (e *env) mcpTask() (uuid.UUID, ServiceRef) {
 	e.t.Helper()
 	e.exec(`insert into kontra.services (tenant_id, name, kind, backend, source, timeout_s, retention_s, tasks_mode)
 		values ($1, 'research', 'mcp', '{"mcp": {"url": "http://127.0.0.1:1"}}', 'config', 3600, 604800, 'durable')
 		on conflict do nothing`, e.tenant)
 	svc := ServiceRef{TenantID: e.tenant, Tenant: "default", Name: "research", Kind: "mcp"}
 	id := uuid.Must(uuid.NewV7())
-	var exp *time.Time
-	if state == StateQuoted {
-		x := time.Now().Add(time.Hour)
-		exp = &x
-	}
-	nt, err := NewMCPTask(id, svc, buyerA, state, exp, approveURL, map[string]any{"kontra.escrow.id": "e-1"},
+	nt, err := NewMCPTask(id, svc, buyerA, map[string]any{"kontra.op.id": "e-1"},
 		map[string]any{"sh.kontra/note": "1 USD"})
 	if err != nil {
 		e.t.Fatal(err)
@@ -87,13 +81,13 @@ func (e *env) mcpTask(state State, approveURL string) (uuid.UUID, ServiceRef) {
 func TestMCPTaskLog(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	id, svc := e.mcpTask(StateQuoted, "https://pay.example/t/1")
+	id, svc := e.mcpTask()
 	row, err := e.log.Load(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.Protocol != ProtocolMCP || row.ContextID != id.String() || MCPStatusText(row.Snapshot) != "https://pay.example/t/1" ||
-		MCPMeta(row.Snapshot)["sh.kontra/approve-url"] != "https://pay.example/t/1" || MCPMeta(row.Snapshot)["sh.kontra/note"] != "1 USD" {
+	if row.Protocol != ProtocolMCP || row.ContextID != id.String() || row.State != StateSubmitted || MCPStatusText(row.Snapshot) != "" ||
+		row.Snapshot.Metadata["kontra.op.id"] != "e-1" || MCPMeta(row.Snapshot)["sh.kontra/note"] != "1 USD" {
 		t.Fatalf("the created task: %+v %+v", row, row.Snapshot)
 	}
 	write := func(build func(row *TaskRow) (Write, error)) int64 {
@@ -114,7 +108,7 @@ func TestMCPTaskLog(t *testing.T) {
 	}
 	write(func(row *TaskRow) (Write, error) { return MCPStatusWrite(row, StateSubmitted, "", nil) })
 	write(func(row *TaskRow) (Write, error) { return MCPStatusWrite(row, StateWorking, "Gathering sources", nil) })
-	if _, err := e.log.ApplyPatch(ctx, id, map[string]any{"kontra.escrow.held": true}, map[string]any{"sh.kontra/escrow": "held"}); err != nil {
+	if _, err := e.log.ApplyPatch(ctx, id, map[string]any{"kontra.op.held": true}, map[string]any{"sh.kontra/op": "held"}); err != nil {
 		t.Fatal(err)
 	}
 	write(func(row *TaskRow) (Write, error) { return MCPStatusWrite(row, StateInputRequired, "", nil) })
@@ -161,7 +155,7 @@ func TestMCPTaskLog(t *testing.T) {
 		w.Call, err = e.log.MCPCall(ctx, id, false, int64(len(result)))
 		return w, err
 	})
-	if _, err := e.log.ApplyPatch(ctx, id, map[string]any{"kontra.escrow.released": true}, nil); err != nil {
+	if _, err := e.log.ApplyPatch(ctx, id, map[string]any{"kontra.op.released": true}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +179,7 @@ func TestMCPTaskLog(t *testing.T) {
 	if string(got) != string(want) {
 		t.Fatalf("the fold differs from the projection:\n fold %s\n proj %s", got, want)
 	}
-	if row.State != StateCompleted || MCPMeta(row.Snapshot)["sh.kontra/escrow"] != "held" || row.Snapshot.Metadata["kontra.escrow.released"] != true {
+	if row.State != StateCompleted || MCPMeta(row.Snapshot)["sh.kontra/op"] != "held" || row.Snapshot.Metadata["kontra.op.released"] != true {
 		t.Fatalf("the projection: %s %+v", row.State, row.Snapshot.Metadata)
 	}
 	o, ok, err := e.log.MCPTerminal(ctx, id)
@@ -226,19 +220,19 @@ func TestMCPTaskLog(t *testing.T) {
 func TestMCPTerminalWrites(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	failed, _ := e.mcpTask(StateSubmitted, "")
+	failed, _ := e.mcpTask()
 	if _, err := e.log.WriteTerminal(ctx, TerminalWrite{TaskID: failed, State: StateFailed, Reason: ReasonTimeout}); err != nil {
 		t.Fatal(err)
 	}
-	orphan, _ := e.mcpTask(StateSubmitted, "")
+	orphan, _ := e.mcpTask()
 	if ended, err := e.log.FailOrphan(ctx, orphan); err != nil || !ended {
 		t.Fatalf("fail orphan: %v %v", ended, err)
 	}
-	canceled, _ := e.mcpTask(StateQuoted, "https://pay.example/q")
-	if _, err := e.log.WriteTerminal(ctx, TerminalWrite{TaskID: canceled, State: StateCanceled, Canceled: CanceledQuoteExpired}); err != nil {
+	canceled, _ := e.mcpTask()
+	if _, err := e.log.WriteTerminal(ctx, TerminalWrite{TaskID: canceled, State: StateCanceled, Canceled: CanceledClient}); err != nil {
 		t.Fatal(err)
 	}
-	for id, want := range map[uuid.UUID]string{failed: "timeout", orphan: "lifecycle_unavailable", canceled: "quote_expired"} {
+	for id, want := range map[uuid.UUID]string{failed: "timeout", orphan: "lifecycle_unavailable", canceled: "client"} {
 		row, err := e.log.Load(ctx, id)
 		if err != nil {
 			t.Fatal(err)
@@ -282,7 +276,7 @@ func TestMCPTerminalWrites(t *testing.T) {
 func TestMarkAnswerDelivered(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	id, _ := e.mcpTask(StateSubmitted, "")
+	id, _ := e.mcpTask()
 	wid, err := e.log.FirstWorkItemID(ctx, id)
 	if err != nil {
 		t.Fatal(err)
@@ -332,7 +326,7 @@ func TestMarkAnswerDelivered(t *testing.T) {
 func TestSetFirstUpstreamTask(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	id, _ := e.mcpTask(StateSubmitted, "")
+	id, _ := e.mcpTask()
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +351,7 @@ func TestSetFirstUpstreamTask(t *testing.T) {
 		t.Errorf("another id: %v", err)
 	}
 	// A first id recorded without its session (SetFirstUpstreamID): the same id with a session writes it.
-	id2, _ := e.mcpTask(StateSubmitted, "")
+	id2, _ := e.mcpTask()
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id2, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +369,7 @@ func TestSetFirstUpstreamTask(t *testing.T) {
 		t.Fatalf("the session was not written: %+v", a)
 	}
 	// A fenced dispatch writes neither.
-	id3, _ := e.mcpTask(StateSubmitted, "")
+	id3, _ := e.mcpTask()
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id3, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +394,7 @@ func TestListMCP(t *testing.T) {
 	ctx := context.Background()
 	var ids []uuid.UUID
 	for range MCPPageSize + 3 {
-		id, _ := e.mcpTask(StateSubmitted, "")
+		id, _ := e.mcpTask()
 		ids = append(ids, id)
 	}
 	scope := Scope{TenantID: e.tenant, Service: "research", BuyerID: buyerA.BuyerID}

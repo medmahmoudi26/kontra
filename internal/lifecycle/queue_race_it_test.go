@@ -135,7 +135,7 @@ func TestQueueRacesOverTemporal(t *testing.T) {
 			return e.count(`select count(*) from kontra.work_items where task_id = $1`, pre) == 2
 		})
 		time.Sleep(300 * time.Millisecond)
-		if _, err := e.log.ApplyMetadata(ctx, uuid.MustParse(pre), map[string]any{"kontra.escrow.note": "patched"}); err != nil {
+		if _, err := e.log.ApplyMetadata(ctx, uuid.MustParse(pre), map[string]any{"kontra.op.note": "patched"}); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(1500 * time.Millisecond)

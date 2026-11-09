@@ -17,12 +17,9 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
-	"go.temporal.io/sdk/client"
 
 	"kontra.sh/kontra/internal/gatemcp"
-	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
-	"kontra.sh/kontra/internal/temporaltest"
 )
 
 // hireSeller is an a2a-go v2.7.0 agent for /mcp's hire (spec §12): "hi" completes with Hello World; "kinds" answers
@@ -319,24 +316,6 @@ func (r toolResult) text() string {
 	return b.String()
 }
 
-// approve sends the operator's kontra.approval through Temporal, as a control plane does (spec §13.2).
-func approve(t *testing.T, taskID string, accepted bool) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	h, err := temporaltest.Client(t).UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
-		WorkflowID: lifecycle.WorkflowID(a2a.TaskID(taskID)), UpdateName: lifecycle.UpdateApproval,
-		Args: []any{lifecycle.ApprovalUpdate{Accepted: accepted}}, WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
-	if err != nil {
-		t.Fatalf("kontra.approval: %v", err)
-	}
-	var res lifecycle.ApprovalResult
-	if err := h.Get(ctx, &res); err != nil {
-		t.Fatalf("kontra.approval: %v", err)
-	}
-}
-
 func (e *gateEnv) hireServices(kinds *hireSeller, extra string) string {
 	return `services:
   hello:
@@ -414,9 +393,9 @@ func TestGateMCPHire(t *testing.T) {
 		from kontra.tasks where id = $1`, r.Structured.TaskID, firstReq[:]) {
 		t.Error("the hire task is not an A2A task marked hired with the hire's resend key")
 	}
-	// The same hire again is a new task: a retry is only of a quoted one (§12.3).
+	// The same hire again is a new task: only an idempotencyKey answers an earlier one (§12.3, D338, D351).
 	if _, again := c.call("hire", args); again.tool(t).Structured.TaskID == r.Structured.TaskID {
-		t.Error("a second hire of an allowed task answered the first task")
+		t.Error("a second unkeyed hire answered the first task")
 	}
 
 	// A slow seller: the hire result of a working task after the plain wait, its text naming the A2A URL that follows it;
@@ -647,12 +626,10 @@ func TestGateMCPHire(t *testing.T) {
 	}
 }
 
-// hookServer is an operator's Admission server on loopback (spec §13.1) whose answer the test sets: a quote naming
-// the pre-minted task id in an approve URL built by urlFor, with expiresAt in, or a raw decision.
+// hookServer is an operator's Admission server on loopback (spec §13.1) whose answer the test sets: allow, or a raw
+// decision.
 type hookServer struct {
 	mu     sync.Mutex
-	urlFor func(taskID string) string
-	in     time.Duration
 	raw    string
 	asked  []string
 	bodies []json.RawMessage // each AdmitRequest as received
@@ -660,7 +637,7 @@ type hookServer struct {
 }
 
 func newHookServer(t *testing.T) *hookServer {
-	h := &hookServer{urlFor: func(id string) string { return "https://app.kontra.sh/#/t/" + id }, in: 10 * time.Minute}
+	h := &hookServer{}
 	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			TaskID string `json:"taskId"`
@@ -676,8 +653,7 @@ func newHookServer(t *testing.T) *hookServer {
 			_, _ = io.WriteString(w, h.raw)
 			return
 		}
-		fmt.Fprintf(w, `{"outcome":"quote","quote":{"approveUrl":%q,"expiresAt":%q}}`, h.urlFor(req.TaskID),
-			time.Now().Add(h.in).UTC().Format(time.RFC3339))
+		_, _ = io.WriteString(w, `{"outcome":"allow"}`)
 	}))
 	t.Cleanup(h.srv.Close)
 	return h
@@ -693,248 +669,4 @@ func (h *hookServer) count() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return len(h.asked)
-}
-
-// getStream opens a session's GET stream and collects its messages until stop.
-func getStream(t *testing.T, url, key, sid string) (msgs func() []json.RawMessage, stop func()) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Mcp-Session-Id", sid)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		cancel()
-		t.Fatalf("GET stream: %v %v", resp, err)
-	}
-	var mu sync.Mutex
-	var got []json.RawMessage
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		defer resp.Body.Close()
-		br := bufio.NewReader(resp.Body)
-		var data []string
-		for {
-			line, err := br.ReadString('\n')
-			line = strings.TrimRight(line, "\r\n")
-			if strings.HasPrefix(line, "id:") {
-				mu.Lock()
-				got = append(got, json.RawMessage(`"unexpected event id"`))
-				mu.Unlock()
-			}
-			if strings.HasPrefix(line, "data: ") {
-				data = append(data, strings.TrimPrefix(line, "data: "))
-			}
-			if line == "" && len(data) > 0 {
-				mu.Lock()
-				got = append(got, json.RawMessage(strings.Join(data, "\n")))
-				mu.Unlock()
-				data = nil
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-	return func() []json.RawMessage {
-			mu.Lock()
-			defer mu.Unlock()
-			return append([]json.RawMessage(nil), got...)
-		}, func() {
-			cancel()
-			<-done
-		}
-}
-
-// A quoting Admission on /mcp (spec §12.3, §13.2; D21, D38, D45, D188, D288): a session that declared
-// elicitation.url gets -32042 whose url is the hook's approveUrl byte for byte, naming the pre-minted id that became
-// the task's id, and a retry gets the same elicitationId; the quote-acceptance invariant holds (a reply, a client
-// response to the quoted event's gate id, a retried hire and an A2A message to the task leave it quoted, and the
-// seller sees nothing); a session without URL elicitation gets the URL at once (text, or CreateTaskResult working
-// with sh.kontra/approve-url); once the operator approves, exactly one of the session's two GET streams (on two
-// replicas) gets one notifications/elicitation/complete and another session's stream none, and the retried hire
-// answers the result; a declined and an expired quote answer isError saying so; a team gate's own approve URL is
-// passed through; a malformed or past quote is -32603 admission unavailable and no task.
-func TestGateMCPHireQuote(t *testing.T) {
-	e := newGateEnv(t)
-	ctx := context.Background()
-	kinds := newHireSeller(t)
-	hook := newHookServer(t)
-	t.Setenv("KONTRA_TEST_ADMISSION_SECRET", "Hk4nW8qZ2xV6bM1tR9yL3pD7sF0gJ5cA")
-	services := e.hireServices(kinds, `operator_metadata_prefixes: ["kontra.escrow."]
-hooks:
-  admission: { url: "`+hook.srv.URL+`/admit", secret_env: KONTRA_TEST_ADMISSION_SECRET, timeout: 3s, operations: [task] }
-`)
-	timing := fastTiming
-	timing.PlainWait = 4 * time.Second
-	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), timing)
-	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, services), timing)
-	key := e.mintKey("buyer")
-
-	s1 := newMCPClient(t, a.url, key)
-	s1.initialize(`{"elicitation":{"url":{},"form":{}}}`)
-	s2 := newMCPClient(t, b.url, key)
-	s2.initialize(`{"elicitation":{"url":{}}}`)
-	plain := newMCPClient(t, b.url, key)
-	plain.initialize(`{}`)
-
-	args := `{"service":"hello","message":"hi"}`
-	_, ans := s1.call("hire", args)
-	if ans.Error == nil || ans.Error.Code != -32042 {
-		t.Fatalf("a quoted hire to a session that declared elicitation.url: %s", ans.raw)
-	}
-	var data struct {
-		Elicitations []struct {
-			Mode, ElicitationID, URL, Message string
-		} `json:"elicitations"`
-	}
-	if err := json.Unmarshal(ans.Error.Data, &data); err != nil || len(data.Elicitations) != 1 {
-		t.Fatalf("-32042's data: %s", ans.Error.Data)
-	}
-	el := data.Elicitations[0]
-	taskID := scalar[string](t, e.pool, `select id::text from kontra.tasks where hired order by created_at desc limit 1`)
-	hook.mu.Lock()
-	asked := append([]string(nil), hook.asked...)
-	hook.mu.Unlock()
-	if el.Mode != "url" || el.ElicitationID == "" || el.URL != "https://app.kontra.sh/#/t/"+taskID || len(asked) != 1 || asked[0] != taskID {
-		t.Fatalf("the URL elicitation %+v; the task %s, the hook was asked about %v", el, taskID, asked)
-	}
-	quoted := func(what string) {
-		t.Helper()
-		if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, taskID); st != "quoted" {
-			t.Fatalf("after %s the task is %s, want quoted", what, st)
-		}
-		if n := e.seller.count("SendMessage") + e.seller.count("SendStreamingMessage"); n != 0 {
-			t.Fatalf("after %s the seller received %d messages", what, n)
-		}
-	}
-	quoted("the hire")
-
-	// The quote-acceptance invariant (D38, D45): nothing the buyer sends approves the quote.
-	_, ans = s2.call("hire", args) // a retry from another declaring session: the same elicitation, now S2's
-	if ans.Error == nil || ans.Error.Code != -32042 || !strings.Contains(string(ans.Error.Data), el.ElicitationID) {
-		t.Fatalf("a retry from another session: %s", ans.raw)
-	}
-	_, ans = s1.call("hire", args) // and back to S1, which receives the notification
-	if ans.Error == nil || ans.Error.Code != -32042 || !strings.Contains(string(ans.Error.Data), el.ElicitationID) {
-		t.Fatalf("a retry: %s", ans.raw)
-	}
-	if hook.count() != 1 {
-		t.Errorf("retries asked Admission again: %d requests", hook.count())
-	}
-	quoted("the retried hires")
-	_, ans = s1.call("reply", `{"taskId":"`+taskID+`","message":"I accept"}`)
-	if rr := ans.tool(t); !rr.IsError || rr.Meta["sh.kontra/approve-url"] != el.URL {
-		t.Errorf("reply to a quoted task: %s", ans.raw)
-	}
-	quoted("a reply")
-	seq := scalar[int64](t, e.pool, `select max(seq) from kontra.task_events where task_id = $1`, taskID)
-	for _, result := range []string{`{"action":"accept","content":{"reply":"yes"}}`, `{"action":"accept"}`} {
-		if status, _, _ := s1.post(fmt.Sprintf(`{"jsonrpc":"2.0","id":"k.%s.%d","result":%s}`, taskID, seq, result)); status != http.StatusAccepted {
-			t.Errorf("a client response to the quoted event's gate id: %d", status)
-		}
-	}
-	quoted("a client response to the quoted event's gate id")
-	ac := a2aClient(t, a.url, key)
-	follow := &a2a.Message{ID: "m-accept", Role: a2a.MessageRoleUser, TaskID: a2a.TaskID(taskID),
-		Parts: a2a.ContentParts{a2a.NewTextPart("I accept")}, Metadata: map[string]any{"kontra.approval": map[string]any{"accepted": true}}}
-	if _, err := ac.SendMessage(ctx, &a2a.SendMessageRequest{Message: follow}); err == nil {
-		t.Error("an A2A message to the quoted task was accepted")
-	}
-	quoted("an A2A message")
-	for _, m := range append(s1.seen, s2.seen...) {
-		if strings.Contains(string(m), `"elicitation/create"`) {
-			t.Errorf("the gate sent a session an elicitation/create: %s", m)
-		}
-	}
-
-	// A session that declared no URL elicitation: the URL at once, as text or as CreateTaskResult working.
-	_, ans = plain.call("hire", args)
-	if pr := ans.tool(t); pr.IsError || !strings.Contains(pr.text(), el.URL) || pr.Meta["sh.kontra/approve-url"] != el.URL ||
-		pr.Structured.TaskID != taskID {
-		t.Errorf("a quoted hire to a session without URL elicitation: %s", ans.raw)
-	}
-	_, ans = plain.rpc("tools/call", `{"name":"hire","arguments":`+args+`,"task":{}}`)
-	if ctr := ans.tool(t); ctr.Task == nil || ctr.Task.TaskID != taskID || ctr.Task.Status != "working" || ctr.Task.StatusMessage != el.URL ||
-		ctr.Meta["sh.kontra/approve-url"] != el.URL {
-		t.Errorf("a task-augmented quoted hire: %s", ans.raw)
-	}
-	quoted("the answers to sessions without URL elicitation")
-
-	// Two GET streams of S1 (one on each replica) and one of S2; the operator approves; exactly one of S1's streams
-	// gets one elicitation/complete, S2's none.
-	m1, stop1 := getStream(t, a.url+gatemcp.Path, key, s1.sid)
-	m2, stop2 := getStream(t, b.url+gatemcp.Path, key, s1.sid)
-	m3, stop3 := getStream(t, a.url+gatemcp.Path, key, s2.sid)
-	approve(t, taskID, true)
-	eventually(t, 15*time.Second, "one of the session's streams gets elicitation/complete", func() bool { return len(m1())+len(m2()) >= 1 })
-	time.Sleep(5 * time.Second) // past two rescans of every stream
-	stop1()
-	stop2()
-	stop3()
-	got := append(m1(), m2()...)
-	if len(got) != 1 || string(got[0]) != `{"jsonrpc":"2.0","method":"notifications/elicitation/complete","params":{"elicitationId":"`+el.ElicitationID+`"}}` {
-		t.Fatalf("the session's streams got %s", got)
-	}
-	if len(m3()) != 0 {
-		t.Errorf("another session's stream got %s", m3())
-	}
-	// The client's retry after the elicitation completed: the result.
-	_, ans = s1.call("hire", args)
-	if rr := ans.tool(t); rr.IsError || rr.text() != "Hello World" || rr.Structured.TaskID != taskID {
-		t.Fatalf("the retry after approval: %s", ans.raw)
-	}
-
-	// A declined quote and an expired one: the retry answers isError saying so.
-	_, ans = plain.call("hire", `{"service":"hello","message":"hi","contextId":"declined"}`)
-	declined := ans.tool(t).Structured.TaskID
-	approve(t, declined, false)
-	_, ans = plain.call("hire", `{"service":"hello","message":"hi","contextId":"declined"}`)
-	if dr := ans.tool(t); !dr.IsError || dr.Meta["sh.kontra/canceled"] != "declined" || !strings.Contains(dr.text(), "declined") || dr.Structured.TaskID != declined {
-		t.Errorf("a retry of a declined quote: %s", ans.raw)
-	}
-	hook.set(func(h *hookServer) { h.in = 2 * time.Second })
-	_, ans = plain.call("hire", `{"service":"hello","message":"hi","contextId":"expires"}`)
-	expiring := ans.tool(t).Structured.TaskID
-	eventually(t, 20*time.Second, "the quote expires", func() bool {
-		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, expiring) == "canceled"
-	})
-	_, ans = plain.call("hire", `{"service":"hello","message":"hi","contextId":"expires"}`)
-	if xr := ans.tool(t); !xr.IsError || xr.Meta["sh.kontra/canceled"] != "quote_expired" || !strings.Contains(xr.text(), "expired") || xr.Structured.TaskID != expiring {
-		t.Errorf("a retry of an expired quote: %s", ans.raw)
-	}
-	_, ans = plain.rpc("tools/call", `{"name":"hire","arguments":{"service":"hello","message":"hi","contextId":"expires"},"task":{}}`)
-	if xr := ans.tool(t); xr.Task == nil || xr.Task.TaskID != expiring || xr.Task.Status != "cancelled" || xr.Meta["sh.kontra/canceled"] != "quote_expired" {
-		t.Errorf("a task-augmented retry of an expired quote: %s", ans.raw)
-	}
-
-	// A team gate's own approve URL is passed through byte for byte.
-	hook.set(func(h *hookServer) {
-		h.in = 10 * time.Minute
-		h.urlFor = func(id string) string { return "https://gate.team.example/approve/" + id }
-	})
-	_, ans = s1.call("hire", `{"service":"hello","message":"hi","contextId":"team"}`)
-	if ans.Error == nil || ans.Error.Code != -32042 {
-		t.Fatalf("a team gate's quote: %s", ans.raw)
-	}
-	teamTask := scalar[string](t, e.pool, `select id::text from kontra.tasks where hired order by created_at desc limit 1`)
-	if !strings.Contains(string(ans.Error.Data), `"url":"https://gate.team.example/approve/`+teamTask+`"`) {
-		t.Errorf("the team gate's URL: %s", ans.Error.Data)
-	}
-
-	// A malformed or past quote: -32603 admission unavailable (503), no task.
-	before := scalar[int64](t, e.pool, `select count(*) from kontra.tasks`)
-	for _, raw := range []string{`{"outcome":"quote","quote":{"approveUrl":"http://app.kontra.sh/x","expiresAt":"2099-01-01T00:00:00Z"}}`,
-		`{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/x","expiresAt":"2020-01-01T00:00:00Z"}}`} {
-		hook.set(func(h *hookServer) { h.raw = raw })
-		status, ans := s1.call("hire", `{"service":"hello","message":"hi","contextId":"bad"}`)
-		if status != http.StatusServiceUnavailable || ans.Error == nil || ans.Error.Code != -32603 || ans.Error.Message != "admission unavailable" {
-			t.Errorf("quote %s: %d %s", raw, status, ans.raw)
-		}
-	}
-	if after := scalar[int64](t, e.pool, `select count(*) from kontra.tasks`); after != before {
-		t.Errorf("refused quotes created %d tasks", after-before)
-	}
 }

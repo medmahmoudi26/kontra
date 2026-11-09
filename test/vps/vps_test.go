@@ -823,7 +823,7 @@ func TestOperatorSecretsAreIgnored(t *testing.T) {
 			t.Errorf("%s is not ignored by git", p)
 		}
 	}
-	for _, p := range []string{"deploy/compose/kontra.yaml", "deploy/compose/kontra.vps.yaml", "deploy/compose/kontra.lifecycle.yaml",
+	for _, p := range []string{"deploy/compose/kontra.yaml", "deploy/compose/kontra.vps.yaml",
 		"deploy/compose/postgres-init.sh", "compose.yaml"} {
 		if ignored(p) {
 			t.Errorf("%s, which ships, is ignored by git", p)

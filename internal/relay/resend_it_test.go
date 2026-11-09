@@ -2,7 +2,6 @@ package relay
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -92,7 +91,7 @@ func (r *resendRig) handlers(lc *lifecycle.Client, reg *Registry) *Handlers {
 	deps.Registry = reg
 	deps.Queue = func(s store.ServiceRef) workqueue.Queue { return lifecycle.NewQueue(s, r.log, lc, r.queues) }
 	deps.Interceptors = func(s store.ServiceRef) []a2asrv.CallInterceptor {
-		i := &Interceptors{Svc: s, Log: r.log, Admit: r.admit, Canceler: lc, Reviews: lc, Starts: lifecycle.NewQueue(s, r.log, lc, r.queues)}
+		i := &Interceptors{Svc: s, Log: r.log, Admit: r.admit, Canceler: lc}
 		return i.Chain()
 	}
 	return NewHandlers(deps)
@@ -180,106 +179,6 @@ func TestBlockingResendAtTurnEnd(t *testing.T) {
 	}
 	if sent := r.agent.sentMessages(t); len(sent) != 3 {
 		t.Errorf("the seller received %d messages, want 3 (two first turns and one follow-up)", len(sent))
-	}
-}
-
-// lostStarts is a Temporal client whose UpdateWithStartWorkflow never reaches the server: the work queue's start of
-// a new task is lost after its row and work item committed (spec §14.5).
-type lostStarts struct{ client.Client }
-
-func (lostStarts) UpdateWithStartWorkflow(context.Context, client.UpdateWithStartWorkflowOptions) (client.WorkflowUpdateHandle, error) {
-	return nil, errors.New("the start was lost")
-}
-
-// TestBlockingResendOfAQuotedTask (D290 as amended by M4 WP-02's review): a quoted task stands at input-required on
-// the wire (spec §5.1), and a blocking SendMessage returns on it (§9, A2A §3.1.1), so a resend of the request that
-// created it is answered at once with the task as it stands, approve URL and all, as D108 closes the stream of the same
-// resend. Before that the re-issued start of a quoted task is re-issued (§14.5): a task whose start was lost gets its
-// workflow, waiting for kontra.approval, and the operator's approval then runs it. The seller sees nothing until then.
-// Before the fix each resend ran into its 10 s deadline.
-func TestBlockingResendOfAQuotedTask(t *testing.T) {
-	approve := "https://approve.example.com/t/x"
-	adm := &recordingAdmission{decision: hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{
-		ApproveURL: approve, ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
-	}}}
-	r := newResendRig(t, adm)
-	ctx := context.Background()
-	quoted := func(what string, task *a2a.Task, want a2a.TaskID, took time.Duration) {
-		t.Helper()
-		if want != "" && task.ID != want {
-			t.Fatalf("%s: task %s, want %s", what, task.ID, want)
-		}
-		if task.Status.State != a2a.TaskStateInputRequired || task.Metadata[lifecycle.MetaApproveURL] != approve {
-			t.Fatalf("%s: %s %v, want input-required with the approve URL", what, task.Status.State, task.Metadata)
-		}
-		if took > 3*time.Second {
-			t.Errorf("%s answered after %v: a quoted task is answered at once", what, took.Round(time.Millisecond))
-		}
-	}
-
-	// A quoted task, and two resends of its request.
-	first, took := r.send(r.h, "the first request", resendRequest("tck-quoted-0a1b2c3d", "book"))
-	quoted("the first request", first, "", took)
-	for n := 1; n <= 2; n++ {
-		again, took := r.send(r.h, "a resend of the quoted task", resendRequest("tck-quoted-0a1b2c3d", "book"))
-		quoted("a resend of the quoted task", again, first.ID, took)
-	}
-
-	// A quoted task whose start was lost: its row and work item committed, its workflow never started.
-	lost := r.handler(r.handlers(lifecycle.NewClient(lostStarts{r.c}), NewRegistry()))
-	cctx, cancel := context.WithTimeout(asCaller(buyerA), 10*time.Second)
-	_, err := lost.SendMessage(cctx, resendRequest("tck-lost-0a1b2c3d", "book"))
-	cancel()
-	if err == nil {
-		t.Fatal("the request whose start was lost was answered")
-	}
-	prev, err := r.log.FindResend(ctx, r.svc, buyerA, "tck-lost-0a1b2c3d", mustHash(t, resendRequest("tck-lost-0a1b2c3d", "book")), time.Now().Add(-time.Hour))
-	if err != nil || prev == nil || prev.State != store.StateQuoted {
-		t.Fatalf("the task whose start was lost: %+v, %v; want a quoted row", prev, err)
-	}
-	lostID := a2a.TaskID(prev.ID.String())
-	if ok, err := r.lc.WorkflowExists(ctx, lostID); err != nil || ok {
-		t.Fatalf("the lost start's workflow exists: %v, %v", ok, err)
-	}
-	again, took := r.send(r.h, "a resend of the task whose start was lost", resendRequest("tck-lost-0a1b2c3d", "book"))
-	quoted("a resend of the task whose start was lost", again, lostID, took)
-	if ok, err := r.lc.WorkflowExists(ctx, lostID); err != nil || !ok {
-		t.Fatalf("the resend did not re-issue the lost start: workflow exists %v, %v", ok, err)
-	}
-	if sent := r.agent.sentMessages(t); len(sent) != 0 {
-		t.Fatalf("the seller received %d messages before any approval, want 0", len(sent))
-	}
-
-	// The re-issued workflow waits for the operator's approval, and runs the task once it has it.
-	uctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	h, err := r.c.UpdateWorkflow(uctx, client.UpdateWorkflowOptions{
-		WorkflowID: lifecycle.WorkflowID(lostID), UpdateName: lifecycle.UpdateApproval,
-		Args: []any{lifecycle.ApprovalUpdate{Accepted: true}}, WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
-	if err != nil {
-		t.Fatalf("kontra.approval: %v", err)
-	}
-	var res lifecycle.ApprovalResult
-	if err := h.Get(uctx, &res); err != nil || res.State != "submitted" {
-		t.Fatalf("kontra.approval answered %+v, %v; want submitted", res, err)
-	}
-	deadline := time.Now().Add(20 * time.Second)
-	for {
-		row, err := r.log.Load(ctx, prev.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if row.State == store.StateInputRequired {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the approved task stands at %s, want input-required (the seller asks)", row.State)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if sent := r.agent.sentMessages(t); len(sent) != 1 || sent[0].ID != "tck-lost-0a1b2c3d" {
-		t.Fatalf("the seller received %+v, want the approved task's message once", sent)
 	}
 }
 

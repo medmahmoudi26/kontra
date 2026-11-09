@@ -29,7 +29,7 @@ const (
 // the caller is answered with, so callers test either.
 var (
 	// ErrRefused is an Update the workflow refused: its validator (spec §7's table on workflow state, a
-	// work item already accepted, no review window open), or a workflow that has ended. It is answered
+	// work item already accepted), or a workflow that has ended. It is answered
 	// UnsupportedOperationError (wrapped a2a.ErrUnsupportedOperation).
 	ErrRefused = errors.New("lifecycle: the task's lifecycle refused the update")
 	// ErrClosed is a workflow that has ended (it also wraps ErrRefused): a resend of a finished task
@@ -79,8 +79,7 @@ func Dial(ctx context.Context, address, namespace string) (client.Client, error)
 	return c, nil
 }
 
-// Client is the gate's request-path use of Temporal: the work queue, the cancel interceptor, the review
-// interceptor, the push config store and the dispatch's kontra.dispatched signal go through it.
+// Client is the gate's request-path use of Temporal: the work queue, the cancel interceptor, the push config store and the dispatch's kontra.dispatched signal go through it.
 type Client struct {
 	c client.Client
 }
@@ -137,18 +136,6 @@ func (c *Client) Message(ctx context.Context, taskID a2a.TaskID, u MessageUpdate
 	err := c.update(ctx, AcceptWait, taskID, UpdateMessage, u.WorkItemID, u, &res)
 	if err != nil {
 		return MessageResult{}, classify(err, "the task takes no message now")
-	}
-	return res, nil
-}
-
-// ReviewMessage sends kontra.review_message and waits up to AcceptWait for its result (spec §7, §14.1),
-// with relay.ReviewMessenger's error contract: a refusal (no window open, the work item already accepted,
-// the workflow closed) wraps a2a.ErrUnsupportedOperation; anything else counts as a timeout.
-func (c *Client) ReviewMessage(ctx context.Context, taskID a2a.TaskID, u ReviewMessageUpdate) (ReviewMessageResult, error) {
-	var res ReviewMessageResult
-	err := c.update(ctx, AcceptWait, taskID, UpdateReviewMessage, u.WorkItemID, u, &res)
-	if err != nil {
-		return ReviewMessageResult{}, classify(err, "no review window is open")
 	}
 	return res, nil
 }

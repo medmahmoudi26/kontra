@@ -413,7 +413,7 @@ func probePost(t *testing.T, url, body string, hdr map[string][]string) (int, st
 // P4/P5: A2A-Version and A2A-Extensions as a2a-go v2.7.0 reads them (why D9 normalizes them in front).
 func TestP4VersionAndExtensionHeaders(t *testing.T) {
 	t.Parallel()
-	const ext = "https://kontra.sh/ext/escrow/v1"
+	const ext = "https://kontra.sh/ext/example/v1"
 	enf, err := a2asrv.NewAgentCardEnforcer(&a2a.AgentCard{Capabilities: a2a.AgentCapabilities{Extensions: []a2a.AgentExtension{{URI: ext, Required: true}}}})
 	if err != nil {
 		t.Fatal(err)

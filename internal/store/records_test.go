@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -133,87 +134,6 @@ func TestWorkItems(t *testing.T) {
 	}
 	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: uuid.New(), TaskID: uuid.Must(uuid.NewV7()), Kind: WorkExecute, Payload: want}); !isNotFound(err) {
 		t.Errorf("an item of an unknown task: %v", err)
-	}
-}
-
-// kontra.review_message's append (D66): the item is consumed in the same transaction as the message row,
-// once; a retry of an append that committed answers its seq again (a lost activity outcome); a missing,
-// other task's item, or one consumed by something else, writes nothing.
-func TestAppendReviewMessage(t *testing.T) {
-	e := newEnv(t)
-	ctx := context.Background()
-	task := e.newTask(e.svc, buyerA, "", "q")
-	id := uid(t, task.ID)
-	if _, err := e.log.WriteTerminal(ctx, TerminalWrite{TaskID: id, State: StateCompleted, Text: "done"}); err != nil {
-		t.Fatal(err)
-	}
-	w := uuid.Must(uuid.NewV7())
-	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "a dispute", buyerA)}); err != nil {
-		t.Fatal(err)
-	}
-	other := e.newTask(e.svc, buyerA, "", "q")
-	if _, err := e.log.AppendReviewMessage(ctx, uid(t, other.ID), w); !errors.Is(err, ErrWorkItemNotFound) {
-		t.Errorf("another task's item: %v", err)
-	}
-	seq, err := e.log.AppendReviewMessage(ctx, id, w)
-	if err != nil {
-		t.Fatal(err)
-	}
-	row, _ := e.log.Load(ctx, id)
-	if seq != 3 || row.Version != 3 || row.State != StateCompleted {
-		t.Fatalf("seq %d, version %d, state %s", seq, row.Version, row.State)
-	}
-	last := row.Snapshot.History[len(row.Snapshot.History)-1]
-	if last.Role != a2a.MessageRoleUser || last.Parts[0].Text() != "a dispute" {
-		t.Errorf("history ends with %+v", last)
-	}
-	if wi, _ := e.log.LoadWorkItem(ctx, w, id); wi.ConsumedAt == nil {
-		t.Error("the item was not consumed")
-	}
-	// The first call committed but its outcome was lost: the retry answers the same seq, writes nothing.
-	if again, err := e.log.AppendReviewMessage(ctx, id, w); err != nil || again != seq {
-		t.Errorf("a retried append: %d %v, want %d", again, err, seq)
-	}
-	if row, _ := e.log.Load(ctx, id); row.Version != 3 || len(row.Snapshot.History) != 2 {
-		t.Errorf("a retried append wrote: version %d, history %d", row.Version, len(row.Snapshot.History))
-	}
-	if _, err := e.log.AppendReviewMessage(ctx, id, uuid.Must(uuid.NewV7())); !errors.Is(err, ErrWorkItemNotFound) {
-		t.Errorf("a missing item: %v", err)
-	}
-
-	// A second review message reusing the first one's messageId (a caller resend): its own row, and each
-	// item's retry answers its own seq.
-	resent := workPayload(task, "a dispute", buyerA)
-	first, _ := e.log.LoadWorkItem(ctx, w, id)
-	resent.Request.Message.ID = first.Payload.Request.Message.ID
-	w2 := uuid.Must(uuid.NewV7())
-	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w2, TaskID: id, Kind: WorkExecute, Payload: resent}); err != nil {
-		t.Fatal(err)
-	}
-	seq2, err := e.log.AppendReviewMessage(ctx, id, w2)
-	if err != nil || seq2 != 4 {
-		t.Fatalf("a second review message: %d %v", seq2, err)
-	}
-	if again, err := e.log.AppendReviewMessage(ctx, id, w2); err != nil || again != seq2 {
-		t.Errorf("the second item's retry: %d %v, want %d", again, err, seq2)
-	}
-	if again, err := e.log.AppendReviewMessage(ctx, id, w); err != nil || again != seq {
-		t.Errorf("the first item's retry after the second message: %d %v, want %d", again, err, seq)
-	}
-
-	// An item consumed by a dispatch (ConsumeWorkItem) logged no message in its transaction: consumed.
-	w3 := uuid.Must(uuid.NewV7())
-	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w3, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "turn", buyerA)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.log.ConsumeWorkItem(ctx, w3, id); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.log.AppendReviewMessage(ctx, id, w3); !errors.Is(err, ErrWorkItemConsumed) {
-		t.Errorf("an item a dispatch consumed: %v", err)
-	}
-	if seqs, kinds := e.seqs(task.ID); len(seqs) != 4 || kinds[2] != KindMessage || kinds[3] != KindMessage {
-		t.Errorf("rows %v %v", seqs, kinds)
 	}
 }
 
@@ -436,7 +356,7 @@ func TestWriteTerminalAndApplyMetadata(t *testing.T) {
 	if err != nil || again != seq {
 		t.Fatalf("a second WriteTerminal: %d %v, want %d", again, err, seq)
 	}
-	m1, err := e.log.ApplyMetadata(ctx, id, map[string]any{"kontra.escrow.status": "held", "x": map[string]any{"a": 1.0}})
+	m1, err := e.log.ApplyMetadata(ctx, id, map[string]any{"kontra.op.status": "held", "x": map[string]any{"a": 1.0}})
 	if err != nil || m1 != 3 {
 		t.Fatalf("ApplyMetadata: %d %v", m1, err)
 	}
@@ -445,7 +365,7 @@ func TestWriteTerminalAndApplyMetadata(t *testing.T) {
 		t.Errorf("an empty patch wrote: %d", same)
 	}
 	row, _ = e.log.Load(ctx, id)
-	if row.Snapshot.Metadata["kontra.escrow.status"] != "held" || row.Snapshot.Metadata["x"] != "replaced" || row.Snapshot.Metadata[MetaFailure] != "no_session" {
+	if row.Snapshot.Metadata["kontra.op.status"] != "held" || row.Snapshot.Metadata["x"] != "replaced" || row.Snapshot.Metadata[MetaFailure] != "no_session" {
 		t.Errorf("metadata %v", row.Snapshot.Metadata)
 	}
 	if row.State != StateFailed || row.Version != m2 {
@@ -603,5 +523,33 @@ func TestLoadService(t *testing.T) {
 	}
 	if _, err := e.log.LoadService(ctx, e.tenant, "missing"); err == nil {
 		t.Error("a missing service loaded")
+	}
+}
+
+// A row an earlier release left quoted (D351: the state is no longer written) is still an orphan candidate and
+// FailOrphan ends it failed: lifecycle_unavailable, so it cannot linger (spec §14.5).
+func TestFailOrphanEndsALeftoverQuotedRow(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	task := e.newTask(e.svc, buyerA, "", "q")
+	id := uid(t, task.ID)
+	e.exec(`update kontra.tasks set state = 'quoted', quote_expires_at = now() + interval '1 hour',
+		submitted_at = null, deadline = null, created_at = now() - interval '1 hour' where id = $1`, id)
+	cands, err := e.log.OrphanCandidates(ctx, time.Now().Add(-2*time.Minute), OrphanCandidate{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(cands, func(c OrphanCandidate) bool { return c.ID == id }) {
+		t.Fatalf("the quoted row is not a candidate: %v", cands)
+	}
+	if ended, err := e.log.FailOrphan(ctx, id); err != nil || !ended {
+		t.Fatalf("fail orphan: %v %v", ended, err)
+	}
+	row, err := e.log.Load(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.State != StateFailed || row.Snapshot.Metadata[MetaFailure] != string(ReasonLifecycleUnavailable) {
+		t.Errorf("the quoted row ended %s %v", row.State, row.Snapshot.Metadata)
 	}
 }

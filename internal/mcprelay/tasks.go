@@ -116,17 +116,17 @@ type CreateTask struct {
 	// initialize declares (§11.5 step 3).
 	ClientCapabilities json.RawMessage
 	Sealed             bool           // the service's sealed flag (D174)
-	Decision           hooks.Decision // Admission's allow, with its metadata and mcpMeta (an MCP task is never quoted, D350)
+	Decision           hooks.Decision // Admission's allow, with its metadata and mcpMeta
 	// Headers are a modern call's Mcp-Param-* headers, which the modern dispatch sends with its tools/call (§11.12).
 	Headers map[string][]string
 }
 
-// errAdmission is an Admission decision a task cannot be created with (a quote, keys outside §13.2):
+// errAdmission is an Admission decision a task cannot be created with (not an allow, keys outside §13.1):
 // the request is answered "admission unavailable" (it fails closed, §13.1).
 var errAdmission = errors.New("mcprelay: admission unavailable")
 
 // Create creates a gate-owned task for an admitted task-augmented call (§11.5 steps 1–2, §11.12 steps 2–4): the
-// task row (protocol mcp, created submitted: an MCP task is never quoted, D350), the work item holding the request
+// task row (protocol mcp, created submitted), the work item holding the request
 // with the client session's hash and JSON-RPC id, in one transaction, and the TaskLifecycle start. It returns once
 // the row is committed and the start was issued. A start that fails leaves the row (the orphan sweep ends it
 // lifecycle_unavailable after 2 minutes, D63) and is an error.
@@ -150,11 +150,9 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 		return uuid.Nil, errAdmission
 	}
 	if d.Outcome != hooks.Allow {
-		// admitTask refuses a quote (D350); a decision that is not an allow never creates a task.
+		// A decision that is not an allow never creates a task.
 		return uuid.Nil, errAdmission
 	}
-	state, approveURL := store.StateSubmitted, ""
-	var quoteExpires *time.Time
 	id := req.TaskID
 	if id == uuid.Nil {
 		if id, err = uuid.NewV7(); err != nil {
@@ -162,7 +160,7 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 		}
 	}
 	owner := store.Owner{BuyerID: req.BuyerID, Principal: req.Principal, Via: req.Via}
-	nt, err := store.NewMCPTask(id, svc, owner, state, quoteExpires, approveURL, d.Metadata, d.MCPMeta)
+	nt, err := store.NewMCPTask(id, svc, owner, d.Metadata, d.MCPMeta)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -193,7 +191,7 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 	}
 	in := lifecycle.Input{
 		TaskID: id.String(), TimeoutSeconds: int64(svc.Timeout / time.Second), Retries: svc.Retries, Hooks: t.hooks,
-		QuoteExpiresAt: quoteExpires, Protocol: lifecycle.ProtocolMCP,
+		Protocol: lifecycle.ProtocolMCP,
 	}
 	if _, err := t.lc.StartWithMessage(context.WithoutCancel(ctx), in, wid.String()); err != nil {
 		return id, fmt.Errorf("mcprelay: start the lifecycle of task %s: %w", id, err)
@@ -360,7 +358,7 @@ func notCancelable(s store.State) *mcpwire.Error {
 func mcpTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 // ttlOf is a task's ttl in milliseconds (§11.6): retention_until − created_at once terminal; before, an upper
-// bound: the deadline (a quoted task's: its quote's expiry plus the task timeout) plus the retention.
+// bound: the deadline plus the retention.
 func ttlOf(row *store.TaskRow, pol store.ServiceRef) int64 {
 	var end time.Time
 	switch {
@@ -368,8 +366,6 @@ func ttlOf(row *store.TaskRow, pol store.ServiceRef) int64 {
 		end = *row.RetentionUntil
 	case row.Deadline != nil:
 		end = row.Deadline.Add(pol.Retention)
-	case row.QuoteExpiresAt != nil:
-		end = row.QuoteExpiresAt.Add(pol.Timeout + pol.Retention)
 	default:
 		end = row.CreatedAt.Add(pol.Timeout + pol.Retention)
 	}
@@ -377,7 +373,7 @@ func ttlOf(row *store.TaskRow, pol store.ServiceRef) int64 {
 }
 
 // taskObject is an MCP 2025-11-25 Task as the gate shows its task (§11.6): taskId, status (§5.1's mapping),
-// statusMessage (a quoted task's approve URL, D21; a failure's reason text, §11.8), createdAt, lastUpdatedAt, ttl
+// statusMessage (a failure's reason text, §11.8), createdAt, lastUpdatedAt, ttl
 // and pollInterval 1000.
 func taskObject(row *store.TaskRow, pol store.ServiceRef) (json.RawMessage, error) {
 	type task struct {
@@ -744,8 +740,7 @@ func writeResult(w http.ResponseWriter, sid string, id json.RawMessage, res json
 
 // durableCall is a task-augmented tools/call on a durable service (§11.5 steps 0–2), the tool already resolved
 // against the cached tools/list (an unknown or denied one was -32602): a tool whose execution.taskSupport is absent
-// or forbidden is -32601, with no Admission and no task; then Admission with operation task (a quote is a deny:
-// MCP services are not priced, D350), the gate task and its work item, the TaskLifecycle start, and the CreateTaskResult, with
+// or forbidden is -32601, with no Admission and no task; then Admission with operation task, the gate task and its work item, the TaskLifecycle start, and the CreateTaskResult, with
 // pollInterval 1000, once the row is committed. Nothing is forwarded on the client's session: the dispatch opens
 // its own upstream session (D22).
 func (h *Handler) durableCall(rq *request, name string, tool json.RawMessage) {
@@ -808,8 +803,7 @@ func (h *Handler) durableCall(rq *request, name string, tool json.RawMessage) {
 }
 
 // admitTask consults Admission with operation task for a durable task (§13.1): the pre-minted task id, and the
-// decision (an allow); a denial, a quote (MCP services are not priced, D350) or a hook that fails is the refusal to
-// write. Without the hook for task,
+// decision (an allow); a denial or a hook that fails (an outcome but allow or deny included) is the refusal to write. Without the hook for task,
 // the built-in allows and the id is minted here.
 func (h *Handler) admitTask(rq *request, tool string) (uuid.UUID, hooks.Decision, *mcpwire.Refusal) {
 	id, err := uuid.NewV7()
@@ -824,7 +818,7 @@ func (h *Handler) admitTask(rq *request, tool string) (uuid.UUID, hooks.Decision
 		Operation: hooks.OpTask, TaskID: id.String(),
 		Service:   hooks.Service{TenantID: ref.TenantID.String(), Tenant: ref.Tenant, Name: ref.Name, Kind: config.KindMCP},
 		Principal: hooks.Principal{Kind: string(rq.p.Kind), ID: rq.p.ID, BuyerID: rq.p.BuyerID.String(), Via: string(rq.p.Via)},
-		Protocol:  hooks.ProtocolMCP,
+		Protocol:  string(store.ProtocolMCP),
 		Tool:      tool,
 	}
 	if rq.p.TenantID != nil {
@@ -838,8 +832,6 @@ func (h *Handler) admitTask(rq *request, tool string) (uuid.UUID, hooks.Decision
 	switch d.Outcome {
 	case hooks.Allow:
 		return id, d, nil
-	case hooks.Quote:
-		return uuid.Nil, d, refusal(http.StatusOK, rq.msg.ID, mcpwire.CodeInternal, hooks.MsgNotPriced)
 	case hooks.Deny:
 		code, msg := mcpwire.CodeInternal, "admission denied"
 		if d.Refusal != nil {
@@ -885,13 +877,13 @@ func taskSupported(tool json.RawMessage) bool {
 
 // --- the client side of a gate-owned task for 2026-07-28 readers (§11.12, D159, D178; M3 WP-07) ---
 
-// modernStatus is a state as the tasks extension's Task.status shows it: as MCPStatus (quoted, submitted and working
+// modernStatus is a state as the tasks extension's Task.status shows it: as MCPStatus (submitted and working
 // are working; input-required is input_required; canceled is cancelled).
 func modernStatus(s store.State) string { return s.MCPStatus() }
 
 // modernTask is a Task as the extension shows it (ext-tasks v0.2.2, "Tasks"): taskId, status, statusMessage,
 // createdAt, lastUpdatedAt, ttlMs (§11.6's ttl) and pollIntervalMs 1000, with the task's _meta (the operator's
-// mcpMeta; a quoted task's approve URL is its statusMessage and sh.kontra/approve-url, D21).
+// mcpMeta).
 func modernTask(row *store.TaskRow, pol store.ServiceRef, status string) map[string]any {
 	o := map[string]any{"taskId": row.ID.String(), "status": status, "createdAt": mcpTime(row.CreatedAt),
 		"lastUpdatedAt": mcpTime(row.StatusAt), "ttlMs": ttlOf(row, pol), "pollIntervalMs": store.MCPPollInterval}
@@ -919,7 +911,7 @@ func createTaskResultModern(row *store.TaskRow, pol store.ServiceRef) (json.RawM
 }
 
 // AnswerCall answers the modern tools/call that created task id (§11.12 step 4, D159, D178), once its row is
-// committed (an MCP task is never quoted, D350; the check on a quoted row stays as a guard): after waiting on LISTEN up to modernInlineWait for the task to end, its
+// committed: after waiting on LISTEN up to modernInlineWait for the task to end, its
 // outcome in line (the stored CallToolResult with resultType "complete", the stored JSON-RPC error, or §11.8's forms
 // of a failure or a cancel), and the client never sees a task; a task that did not end (or that waits for the
 // client's input, which it cannot get before the client learns its id) is answered with its CreateTaskResult. A
@@ -949,26 +941,24 @@ func (t *Tasks) AnswerCall(ctx context.Context, w http.ResponseWriter, svc store
 		writeError(w, http.StatusServiceUnavailable, reqID, mcpwire.CodeInternal, "the gate could not serve the request", nil)
 		return
 	}
-	if row.State != store.StateQuoted {
-		wake, stop := t.waker.WaitTask(ctx, id)
-		defer stop()
-		until := time.NewTimer(modernInlineWait)
-		defer until.Stop()
-		reread := time.NewTicker(250 * time.Millisecond)
-		defer reread.Stop()
-	wait:
-		for !row.State.Terminal() && row.State != store.StateInputRequired {
-			select {
-			case <-ctx.Done():
-				break wait
-			case <-until.C:
-				break wait
-			case <-wake:
-			case <-reread.C:
-			}
-			if r, err := t.log.Load(ctx, id); err == nil {
-				row = r
-			}
+	wake, stop := t.waker.WaitTask(ctx, id)
+	defer stop()
+	until := time.NewTimer(modernInlineWait)
+	defer until.Stop()
+	reread := time.NewTicker(250 * time.Millisecond)
+	defer reread.Stop()
+wait:
+	for !row.State.Terminal() && row.State != store.StateInputRequired {
+		select {
+		case <-ctx.Done():
+			break wait
+		case <-until.C:
+			break wait
+		case <-wake:
+		case <-reread.C:
+		}
+		if r, err := t.log.Load(ctx, id); err == nil {
+			row = r
 		}
 	}
 	const closed = "the client closed its stream before the task was answered (D178)"
@@ -1064,8 +1054,8 @@ func (t *Tasks) ServeModern(ctx context.Context, who Caller, m *mcpwire.Message)
 	return nil, &mcpwire.Error{Code: mcpwire.CodeMethodNotFound, Message: "Method not found"}, nil
 }
 
-// detailedTask is tasks/get's DetailedTask (§11.12's table): resultType "complete" and the task; quoted, submitted
-// and working are working; input-required is input_required with inputRequests, every input request no answer was
+// detailedTask is tasks/get's DetailedTask (§11.12's table): resultType "complete" and the task; submitted and
+// working are working; input-required is input_required with inputRequests, every input request no answer was
 // logged for, keyed by its gate id ({method, params} of the request as logged); a terminal task is presented by its
 // terminal event, not its gate state: a stored CallToolResult, whatever its isError, is completed with result; a
 // stored JSON-RPC error or a failure the gate wrote is failed with error in §11.8's forms (sh.kontra/failure also in

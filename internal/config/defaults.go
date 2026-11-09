@@ -101,9 +101,6 @@ func (c *Config) applyDerivedDefaults() {
 	if i := strings.Index(c.PublicURL, "://"); i >= 0 {
 		c.PublicURL = c.PublicURL[:i+3] + strings.TrimRight(c.PublicURL[i+3:], "/")
 	}
-	if c.CallerMetadata == nil {
-		c.CallerMetadata = []string{}
-	}
 	if c.OperatorMetadataPrefixes == nil {
 		c.OperatorMetadataPrefixes = []string{}
 	}

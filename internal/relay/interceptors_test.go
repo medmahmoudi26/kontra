@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2aevent"
@@ -90,16 +89,16 @@ func echoAgent() a2asrv.AgentExecutor {
 	})
 }
 
-// A new task end to end through a2a-go's handler: identity, caller keys stripped (sealing keys and
-// caller_metadata kept), Admission asked with the pre-minted task id the work queue then uses, the relay
+// A new task end to end through a2a-go's handler: identity, caller keys stripped (sealing keys kept,
+// every other kontra. key removed), Admission asked with the pre-minted task id the work queue then uses, the relay
 // dispatched, the caller answered with the completed gate task.
 func TestNewTaskThroughTheHandler(t *testing.T) {
 	adm := &recordingAdmission{}
-	e := newEnv(t, envOptions{admit: adm, rules: hooks.KeyRules{CallerMetadata: []string{"kontra.escrow.dispute"}}})
+	e := newEnv(t, envOptions{admit: adm})
 	agent, b, info := newAgent(t, echoAgent(), agentConfig{})
 	e.backends.set(b, info, nil)
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
-	msg.Metadata = map[string]any{"kontra.approve.url": "https://evil", "kontra.sealed.replyTo": "k1_x", "kontra.escrow.dispute": true, "note": "kept"}
+	msg.Metadata = map[string]any{"kontra.approve.url": "https://evil", "kontra.sealed.replyTo": "k1_x", "kontra.op.dispute": true, "note": "kept"}
 	msg.Parts[0].Metadata = map[string]any{"kontra.failure": "spoof", "p": 1}
 	res, err := e.handler().SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg, Metadata: map[string]any{"kontra.x": 1, "r": 2}})
 	if err != nil {
@@ -121,7 +120,7 @@ func TestNewTaskThroughTheHandler(t *testing.T) {
 	stored := row.Snapshot.History[0]
 	for _, m := range []*a2a.Message{stored, agent.sentMessages(t)[0]} {
 		md := m.Metadata
-		if md["kontra.approve.url"] != nil || md["kontra.sealed.replyTo"] != "k1_x" || md["kontra.escrow.dispute"] != true || md["note"] != "kept" {
+		if md["kontra.approve.url"] != nil || md["kontra.sealed.replyTo"] != "k1_x" || md["kontra.op.dispute"] != nil || md["note"] != "kept" {
 			t.Errorf("message metadata %v", md)
 		}
 		if pm := m.Parts[0].Metadata; pm["kontra.failure"] != nil || pm["p"] == nil {
@@ -153,7 +152,7 @@ func TestFollowUpTable(t *testing.T) {
 		{"", a2a.ErrUnsupportedOperation}, // submitted
 		{a2a.TaskStateWorking, a2a.ErrUnsupportedOperation},
 		{a2a.TaskStateAuthRequired, a2a.ErrUnsupportedOperation},
-		{a2a.TaskStateCompleted, a2a.ErrUnsupportedOperation}, // no review window in open source
+		{a2a.TaskStateCompleted, a2a.ErrUnsupportedOperation}, // no review window (D351)
 		{a2a.TaskStateFailed, a2a.ErrUnsupportedOperation},
 		{a2a.TaskStateCanceled, a2a.ErrUnsupportedOperation},
 		{a2a.TaskStateRejected, a2a.ErrUnsupportedOperation},
@@ -169,17 +168,6 @@ func TestFollowUpTable(t *testing.T) {
 		if len(e.queue.written()) != before {
 			t.Errorf("%s: the refused follow-up reached the work queue", tc.state)
 		}
-	}
-	// quoted (only an Admission quote creates it).
-	qid := uuid.Must(uuid.NewV7())
-	exp := time.Now().Add(time.Hour)
-	qsnap := &a2a.Task{ID: a2a.TaskID(qid.String()), ContextID: "qc", Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired}}
-	if _, err := e.log.CreateTask(context.Background(), nil, store.NewTask{ID: qid, Service: e.svc, Protocol: store.ProtocolA2A, Owner: buyerA,
-		ContextID: "qc", State: store.StateQuoted, Snapshot: qsnap, QuoteExpiresAt: &exp}); err != nil {
-		t.Fatal(err)
-	}
-	if err := follow(a2a.TaskID(qid.String()), "", buyerA); !errors.Is(err, a2a.ErrUnsupportedOperation) {
-		t.Errorf("quoted: %v", err)
 	}
 	// Disagreeing ids, a malformed id, another buyer's task.
 	id, _ := e.newTask(taskSpec{owner: buyerA, contextID: "c-1", text: "q"})
@@ -345,22 +333,11 @@ func TestAdmissionRefusals(t *testing.T) {
 	if err := send(); !errors.Is(err, a2a.ErrInternalError) {
 		t.Errorf("a decision with a forbidden key: %v", err)
 	}
-	// A quote the gate may not create a task from, whatever Admission gave it (hooks.CheckQuote, D284): -32603
-	// "admission unavailable", which the HTTP+JSON binding answers 503 (it carries lifecycle.ErrUnavailable).
-	soon := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
-	for name, q := range map[string]*hooks.QuoteTerms{
-		"no terms":                nil,
-		"an http approveUrl":      {ApproveURL: "http://app.kontra.sh/#/t/1", ExpiresAt: soon},
-		"an approveUrl with user": {ApproveURL: "https://u:p@app.kontra.sh/#/t/1", ExpiresAt: soon},
-		"a relative approveUrl":   {ApproveURL: "/approve", ExpiresAt: soon},
-		"an expired quote":        {ApproveURL: "https://app.kontra.sh/#/t/1", ExpiresAt: "2020-01-01T00:00:00Z"},
-		"an unparsable expiry":    {ApproveURL: "https://app.kontra.sh/#/t/1", ExpiresAt: "in an hour"},
-	} {
-		adm.decision, adm.err = hooks.Decision{Outcome: hooks.Quote, Quote: q}, nil
-		err := send()
-		if !errors.Is(err, a2a.ErrInternalError) || !strings.Contains(err.Error(), "admission unavailable") || !errors.Is(err, lifecycle.ErrUnavailable) {
-			t.Errorf("%s: %v, want -32603 admission unavailable (503)", name, err)
-		}
+	// An outcome that is neither allow nor deny (D351: the retired quote) fails closed: -32603 "admission
+	// unavailable", which the HTTP+JSON binding answers 503 (it carries lifecycle.ErrUnavailable).
+	adm.decision, adm.err = hooks.Decision{Outcome: "quote"}, nil
+	if err := send(); !errors.Is(err, a2a.ErrInternalError) || !strings.Contains(err.Error(), "admission unavailable") || !errors.Is(err, lifecycle.ErrUnavailable) {
+		t.Errorf("a quote outcome: %v, want -32603 admission unavailable (503)", err)
 	}
 	adm.decision, adm.err = hooks.Decision{}, errors.New("hook down")
 	if err := send(); !errors.Is(err, lifecycle.ErrUnavailable) {
@@ -462,90 +439,6 @@ func TestCancelInterceptor(t *testing.T) {
 	}
 }
 
-// fakeReviews is the kontra.review_message Update; when it accepts it appends the message as the
-// workflow's handler does.
-type fakeReviews struct {
-	e      *env
-	mode   string // accept | refuse | reject | timeout
-	got    []lifecycle.ReviewMessageUpdate
-	taskID a2a.TaskID
-}
-
-func (f *fakeReviews) ReviewMessage(ctx context.Context, id a2a.TaskID, u lifecycle.ReviewMessageUpdate) (lifecycle.ReviewMessageResult, error) {
-	f.got = append(f.got, u)
-	switch f.mode {
-	case "refuse":
-		return lifecycle.ReviewMessageResult{}, fmt.Errorf("validator: %w", a2a.ErrUnsupportedOperation)
-	case "reject":
-		return lifecycle.ReviewMessageResult{Accepted: false}, nil
-	case "timeout":
-		return lifecycle.ReviewMessageResult{}, context.DeadlineExceeded
-	case "unavailable":
-		return lifecycle.ReviewMessageResult{}, fmt.Errorf("update: %w", lifecycle.ErrUnavailable)
-	}
-	seq, err := f.e.log.AppendReviewMessage(ctx, uid(f.e.t, id), uuid.MustParse(u.WorkItemID))
-	if err != nil {
-		return lifecycle.ReviewMessageResult{}, err
-	}
-	return lifecycle.ReviewMessageResult{Accepted: true, Seq: &seq}, nil
-}
-
-// A message to a completed task is offered to the review window: accepted, it is appended and the caller
-// gets the task; refused, its work item is deleted; not accepted in time, the item is kept (spec §7, D66).
-// It never goes upstream.
-func TestReviewWindowMessages(t *testing.T) {
-	fr := &fakeReviews{}
-	e := newEnv(t, envOptions{reviews: fr, rules: hooks.KeyRules{CallerMetadata: []string{"kontra.escrow.dispute"}}})
-	fr.e = e
-	h := e.handler()
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
-	e.setState(id, a2a.TaskStateCompleted)
-	items := func() int {
-		var n int
-		_ = e.pool.QueryRow(context.Background(), `select count(*) from kontra.work_items where task_id = $1`, uid(t, id)).Scan(&n)
-		return n
-	}
-	base := items()
-	send := func(text string) (a2a.SendMessageResult, error) {
-		m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
-		m.TaskID = id
-		m.Metadata = map[string]any{"kontra.escrow.dispute": true, "kontra.approve.url": "x"}
-		return h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m})
-	}
-	fr.mode = "accept"
-	res, err := send("this is not what I ordered")
-	if err != nil {
-		t.Fatal(err)
-	}
-	task := res.(*a2a.Task)
-	last := task.History[len(task.History)-1]
-	if task.Status.State != a2a.TaskStateCompleted || last.Parts[0].Text() != "this is not what I ordered" {
-		t.Errorf("accepted: %+v", task)
-	}
-	if md := fr.got[0].Metadata; len(md) != 1 || md["kontra.escrow.dispute"] != true {
-		t.Errorf("the hook got metadata %v (caller_metadata keys only)", md)
-	}
-	fr.mode = "refuse"
-	if _, err := send("again"); !errors.Is(err, a2a.ErrUnsupportedOperation) || items() != base+1 {
-		t.Errorf("refused: %v, items %d", err, items())
-	}
-	fr.mode = "reject"
-	if _, err := send("again"); !errors.Is(err, a2a.ErrUnsupportedOperation) || items() != base+1 {
-		t.Errorf("rejected: %v, items %d", err, items())
-	}
-	fr.mode = "timeout"
-	if _, err := send("again"); !errors.Is(err, a2a.ErrInternalError) || items() != base+2 {
-		t.Errorf("not accepted in time: %v, items %d", err, items())
-	}
-	fr.mode = "unavailable"
-	if _, err := send("again"); !errors.Is(err, a2a.ErrInternalError) || !errors.Is(err, lifecycle.ErrUnavailable) || items() != base+3 {
-		t.Errorf("not accepted in time (lifecycle unavailable): %v, items %d", err, items())
-	}
-	if len(e.queue.written()) != 0 {
-		t.Error("a review-window message reached the work queue")
-	}
-}
-
 // The a2a-go race of P15 through the gate: the turn ends at input-required before the blocking
 // SendMessage's subscription reads the store, and the caller still gets the task, new or follow-up.
 func TestFinishedTurnAnswersTheTask(t *testing.T) {
@@ -644,47 +537,5 @@ func TestFollowUpInlinePushConfigNotResolvedAgain(t *testing.T) {
 	// CreateTaskPushNotificationConfig is a config being set: checked.
 	if _, _, err := e.intc.pushURLs(asCaller(buyerA), nil, &a2asrv.Request{Payload: &a2a.PushConfig{TaskID: id, URL: "https://hooks.example/cb"}}); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("CreateTaskPushNotificationConfig to a private name: %v", err)
-	}
-}
-
-// A message to a completed task (the review window) keeps no inline push config: its webhook credentials
-// never reach work_items, which hold no credentials (0001), and the message is not refused for it.
-func TestReviewMessageStoresNoPushCredentials(t *testing.T) {
-	fr := &fakeReviews{mode: "accept"}
-	e := newEnv(t, envOptions{reviews: fr})
-	fr.e = e
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
-	e.setState(id, a2a.TaskStateCompleted)
-	m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("this is not what I ordered"))
-	m.TaskID = id
-	const secret = "whsec-review-5ecret"
-	historyLength := 5
-	req := &a2a.SendMessageRequest{Message: m, Config: &a2a.SendMessageConfig{HistoryLength: &historyLength, PushConfig: &a2a.PushConfig{
-		URL: "https://hooks.example/" + secret, Token: secret, Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: secret}}}}
-	if _, err := e.handler().SendMessage(asCaller(buyerA), req); err != nil {
-		t.Fatal(err)
-	}
-	var payloads []string
-	rows, err := e.pool.Query(context.Background(), `select payload::text from kontra.work_items where task_id = $1`, uid(t, id))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			t.Fatal(err)
-		}
-		payloads = append(payloads, p)
-	}
-	if rows.Err() != nil || len(payloads) < 2 {
-		t.Fatalf("work items %d %v", len(payloads), rows.Err())
-	}
-	for _, p := range payloads {
-		if strings.Contains(p, secret) {
-			t.Fatalf("a work item stores the review message's push credentials: %s", p)
-		}
-	}
-	if !strings.Contains(payloads[len(payloads)-1], `"historyLength":5`) {
-		t.Errorf("the rest of the request's configuration is kept: %s", payloads[len(payloads)-1])
 	}
 }

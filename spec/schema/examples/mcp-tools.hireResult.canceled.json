@@ -1,0 +1,7 @@
+{
+  "taskId": "019a0000-0000-7000-8000-000000000001",
+  "state": "TASK_STATE_CANCELED",
+  "contextId": "ctx",
+  "service": "hello",
+  "text": "the task was canceled"
+}

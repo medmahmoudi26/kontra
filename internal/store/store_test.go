@@ -101,7 +101,8 @@ func TestVersionConflict(t *testing.T) {
 }
 
 // PrevVersion 0 is a conflict; after the terminal event status, artifact and plain message writes are
-// refused, and only metadata and a review-window message (AfterTerminalOK) are accepted (spec §5.1, §5.2).
+// refused, and only a metadata write with AfterTerminalOK is accepted (spec §5.1, §5.2): a message row with it is
+// refused too (D351: no review-window message is appended after the end any more).
 func TestPrevVersionZeroAndTerminalRule(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
@@ -165,8 +166,8 @@ func TestPrevVersionZeroAndTerminalRule(t *testing.T) {
 		t.Fatalf("metadata with AfterTerminalOK: %v %v", a, err)
 	}
 	if _, err := e.log.Append(ctx, nil, Write{TaskID: id, PrevVersion: a.Seq, Kind: KindMessage,
-		Snapshot: late, Payload: payload, AfterTerminalOK: true}); err != nil {
-		t.Fatalf("a review-window message with AfterTerminalOK: %v", err)
+		Snapshot: late, Payload: payload, AfterTerminalOK: true}); !errors.Is(err, taskstore.ErrConcurrentModification) {
+		t.Fatalf("a message with AfterTerminalOK after the end: %v, want refused", err)
 	}
 	row, _ := e.log.Load(ctx, id)
 	if row.State != StateCompleted || row.Snapshot.Status.State != a2a.TaskStateCompleted {
@@ -457,39 +458,26 @@ func TestDeadlineTerminalAndStatusTime(t *testing.T) {
 		t.Errorf("TerminalSeq %d, want %d", ts, seq)
 	}
 
-	// A quoted task has no deadline until it enters submitted; a zero ServiceRef timeout takes the
-	// services row's (120 s here), and the transition returns it.
+	// A zero ServiceRef timeout takes the services row's (120 s here) at creation, and a later status keeps it.
 	quick := e.service("quick", 120, 3600)
 	qid := uuid.Must(uuid.NewV7())
-	qtask := &a2a.Task{ID: a2a.TaskID(qid.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateInputRequired}}
-	exp := dbNow.Add(time.Hour)
+	qtask := &a2a.Task{ID: a2a.TaskID(qid.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}
 	qa, err := e.log.CreateTask(ctx, nil, NewTask{ID: qid, Service: quick, Protocol: ProtocolA2A, Owner: buyerA,
-		ContextID: "c", State: StateQuoted, Snapshot: qtask, QuoteExpiresAt: &exp})
+		ContextID: "c", State: StateSubmitted, Snapshot: qtask})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if qa.Deadline != nil {
-		t.Errorf("a quoted task has deadline %v", qa.Deadline)
-	}
-	sub := status(qtask, a2a.TaskStateSubmitted, "")
-	qnext, _ := a2aevent.ApplyShallowUpdate(qtask, sub)
-	payload, _ := json.Marshal(a2a.StreamResponse{Event: sub})
-	app, err := e.log.Append(ctx, nil, Write{TaskID: qid, PrevVersion: 1, Kind: KindStatus, State: StateSubmitted,
-		StatusAt: StatusTime(sub.Status.Timestamp), Snapshot: qnext, Payload: payload})
-	if err != nil {
-		t.Fatal(err)
-	}
-	near("approved deadline", app.Deadline, dbNow.Add(120*time.Second))
+	near("created deadline", qa.Deadline, dbNow.Add(120*time.Second))
 	work := status(qtask, a2a.TaskStateWorking, "")
-	wnext, _ := a2aevent.ApplyShallowUpdate(qnext, work)
-	payload, _ = json.Marshal(a2a.StreamResponse{Event: work})
-	app2, err := e.log.Append(ctx, nil, Write{TaskID: qid, PrevVersion: 2, Kind: KindStatus, State: StateWorking,
+	wnext, _ := a2aevent.ApplyShallowUpdate(qtask, work)
+	payload, _ := json.Marshal(a2a.StreamResponse{Event: work})
+	app2, err := e.log.Append(ctx, nil, Write{TaskID: qid, PrevVersion: 1, Kind: KindStatus, State: StateWorking,
 		Snapshot: wnext, Payload: payload})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !app2.Deadline.Equal(*app.Deadline) {
-		t.Errorf("deadline moved from %v to %v", app.Deadline, app2.Deadline)
+	if !app2.Deadline.Equal(*qa.Deadline) {
+		t.Errorf("deadline moved from %v to %v", qa.Deadline, app2.Deadline)
 	}
 }
 

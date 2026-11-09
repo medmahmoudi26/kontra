@@ -150,8 +150,7 @@ func (t *HireTasks) service(ctx context.Context, row *store.TaskRow) (store.Serv
 	return t.log.LoadService(ctx, row.TenantID, row.Service)
 }
 
-// Get answers tasks/get: the task in the reader's era's vocabulary (§5.1, §12.4), quoted as working with the
-// approve URL (D21), and sh.kontra/failure or sh.kontra/canceled in _meta for an ended one (§12.2). A modern reader
+// Get answers tasks/get: the task in the reader's era's vocabulary (§5.1, §12.4), and sh.kontra/failure or sh.kontra/canceled in _meta for an ended one (§12.2). A modern reader
 // gets the tasks extension's DetailedTask (modernGet).
 func (t *HireTasks) Get(ctx context.Context, rd Reader, taskID uuid.UUID) (json.RawMessage, *mcpwire.Error, error) {
 	row, asked, err := t.load(ctx, rd, taskID)
@@ -434,9 +433,9 @@ var ackComplete = json.RawMessage(`{"resultType":"complete"}`)
 // key that can be answered is the gate id k.<taskId>.<seq> of the question outstanding now, as the reader's own request
 // would see it in tasks/get's inputRequests (follow): its accept {action: "accept", content: {reply: string}} becomes
 // the §7 follow-up, once (the workflow takes one follow-up per turn end, §7, D105). Every other key, decline and
-// cancel, and every answer while the task is quoted, working or ended, is ignored and forwards nothing, and the result
+// cancel, and every answer while the task is working or ended, is ignored and forwards nothing, and the result
 // is the empty acknowledgement, resultType "complete" (the extension: a server SHOULD ignore inputResponses for a key
-// that is not outstanding): nothing a client answers approves a quote (D38, D45). So is the outstanding key's answer
+// that is not outstanding). So is the outstanding key's answer
 // when the workflow refuses it because the question stopped being outstanding meanwhile (another follow-up of that turn
 // end was accepted first, the task moved on or ended: a2a.ErrUnsupportedOperation, §7). Any other refusal is not
 // acknowledged, since the extension tells the client never to answer a key twice: the answer would be lost while the
@@ -500,8 +499,8 @@ func (e *followUpRefused) settled() bool {
 // §12.4): an accept whose content is {reply: string} becomes the §7 follow-up, once, and only when it answers the
 // question outstanding now (the task, a hire task of the reader's buyer, is at input-required and seq is the event
 // that asked, a text-only question this reader's session would have been sent as a form); decline and cancel leave
-// the task waiting. A response about a quoted task, an earlier turn, an unknown or foreign task, or one in any other
-// shape is dropped: nothing a client answers approves a quote (D38, D45). It reports whether the response was the
+// the task waiting. A response about an earlier turn, an unknown or foreign task, or one in any other shape is
+// dropped. It reports whether the response was the
 // follow-up.
 func (t *HireTasks) Respond(ctx context.Context, rd Reader, m *mcpwire.Message) bool {
 	var s string
@@ -555,7 +554,7 @@ func (t *HireTasks) follow(ctx context.Context, rd Reader, row *store.TaskRow, a
 // the replica's drain awaits (Wait). One per task at a time on this replica: while a cancel of the task is being sent,
 // and for CancelSettle after it was accepted, another is not sent (the workflow would join it, §8; each would be an
 // Update in the task's history, counted against Temporal's per-workflow limits, which then refuse the task's own
-// kontra.message and kontra.approval). A cancel not accepted in time is forgotten, so a later one is sent again.
+// kontra.message). A cancel not accepted in time is forgotten, so a later one is sent again.
 func (t *HireTasks) cancelDetached(id uuid.UUID, why string) {
 	t.mu.Lock()
 	now := time.Now()

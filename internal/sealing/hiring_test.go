@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -116,6 +117,8 @@ type fakeGate struct {
 	service func(msgBody []byte) string // the echo service's answer body for a forwarded request
 	// label, when set, is the Content-Type the gate delivers the answer with ("" none).
 	label *string
+	// edit, when set, changes the answer body as the gate delivers it (after rewrite).
+	edit func(string) string
 }
 
 func newFakeGate(t *testing.T) *fakeGate {
@@ -190,6 +193,9 @@ func (g *fakeGate) do(path string, body []byte, sse bool) (*http.Response, strin
 	}
 	sb, _ := io.ReadAll(sealedResp.Body)
 	gateBody := g.rewrite(string(sb))
+	if g.edit != nil {
+		gateBody = g.edit(gateBody)
+	}
 	g.seen.WriteString(gateBody)
 	resp := &http.Response{StatusCode: sealedResp.StatusCode, Header: sealedResp.Header.Clone(), Request: req,
 		Body: io.NopCloser(strings.NewReader(gateBody))}
@@ -272,6 +278,50 @@ func TestFakeGateA2A(t *testing.T) {
 				t.Error("the per-job key is kept after the task's end")
 			}
 		})
+	}
+}
+
+// A terminal task whose metadata still carries kontra.keyRetainUntil (written by an escrow operator before D351) has
+// its job's key deleted at once: the node reads no retention any more.
+func TestFakeGateA2AKeyRetainUntilIgnored(t *testing.T) {
+	g := newFakeGate(t)
+	g.service = echoTask("jsonrpc")
+	g.edit = func(s string) string {
+		out := strings.Replace(s, `"id":"`+g.task+`"`, `"id":"`+g.task+`","metadata":{"kontra.keyRetainUntil":"2099-01-01T00:00:00Z"}`, 1)
+		if out == s {
+			t.Fatalf("no task id in the answer: %s", s)
+		}
+		return out
+	}
+	path, body := localSend("jsonrpc", "MARKER-retain")
+	resp, out := g.do(path, body, false)
+	if resp.StatusCode != 200 || !strings.Contains(out, "echo: MARKER-retain") || !strings.Contains(out, "kontra.keyRetainUntil") {
+		t.Fatalf("the local client gets %d %s", resp.StatusCode, out)
+	}
+	if _, err := g.hr.h.cfg.Jobs.Load(g.task); err == nil {
+		t.Error("the per-job key is kept after the task's end for a kontra.keyRetainUntil")
+	}
+}
+
+// A job file an earlier release wrote with delete_at (a terminal job kept for kontra.keyRetainUntil) is dropped, key and
+// file, at the next sweep, whatever its delete_at says (D351).
+func TestHiringSweepDropsRetainedJob(t *testing.T) {
+	f := newFixture(t)
+	hr := newHirer(t, f, pins.Options{})
+	h := hr.h
+	const id = "0193c0de-0000-7000-8000-0000000003b1"
+	if _, err := h.cfg.Jobs.Mint(id, f.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.saveJob(&hireJob{ID: id, Service: "echo", Created: f.now, DeleteAt: f.now.Add(30 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	h.Sweep()
+	if _, err := h.cfg.Jobs.Load(id); err == nil {
+		t.Error("a retained terminal job's key is kept past the sweep")
+	}
+	if _, err := os.Stat(filepath.Join(h.cfg.Jobs.Dir(), id+".json")); err == nil {
+		t.Error("a retained terminal job's file is kept past the sweep")
 	}
 }
 

@@ -8,8 +8,8 @@
 //
 //   - Legacy (2025-11-25, 2025-06-18): initialize opens a session, an mcp_sessions row whose service is NULL and
 //     whose tenant is the principal's (internal/mcprelay's Sessions). Nothing is pinned and nothing hops: any replica
-//     serves any request of a session. The session's GET stream carries notifications/elicitation/complete (§12.3,
-//     D288) and nothing else; it has no event ids and is not resumed.
+//     serves any request of a session. The session's GET stream carries keep-alives and nothing else (D351: no URL
+//     elicitation completes on it); it has no event ids and is not resumed.
 //   - Modern (2026-07-28): the gate answers server/discover itself, advertising the tasks extension; a hire whose
 //     request declares it becomes a task answered as §11.12 step 4, and tasks/get, tasks/update and tasks/cancel
 //     serve hire tasks. No virtual session is opened and Admission's session operation is not consulted (D269).
@@ -19,15 +19,12 @@
 // principal (oidc:sub:<sub>, via mcp). Through a node, the session's principal applies (spec/tunnel.md §9).
 //
 // hire creates an ordinary A2A gate task (protocol a2a, dispatched as §6) through the A2A service's own handler
-// and work queue (Hirer, internal/relay), marked tasks.hired (D272); Admission (operation task) decides first, and
-// a quote leads to URL elicitation (-32042, legacy clients that declared elicitation.url) or to the approve URL in
-// the answer (D21). The URL is the operator's (Cloud: https://app.kontra.sh/#/t/<taskId>, D188); the gate never
-// builds it, and nothing a client sends approves a quote (D38, D45): a reply, a client response to a gate request
-// id and a retried hire all leave a quoted task quoted, and the gate never sends a URL-mode elicitation/create.
+// and work queue (Hirer, internal/relay), marked tasks.hired (D272); Admission (operation task) allows or denies it
+// first (D351). The gate never sends a URL-mode elicitation/create.
 //
 // /mcp writes no calls rows: a hire is accounted as the A2A task it creates (D289).
 //
-// Work packages: M4 WP-04 (the legacy era, the four tools, -32042, MCP Tasks over hire tasks), M4 WP-05 (the
+// Work packages: M4 WP-04 (the legacy era, the four tools, MCP Tasks over hire tasks), M4 WP-05 (the
 // 2026-07-28 era), M4 WP-06 (the OAuth resource server in front of it).
 package gatemcp
 
@@ -72,7 +69,6 @@ type Deps struct {
 	Catalog        *Catalog            // search, describe, and the service a hire names
 	Hirer          Hirer               // creates and follows up hire tasks (*relay.Hirer)
 	Tasks          *HireTasks          // the MCP Tasks of hire tasks, both eras
-	Elicitations   *Elicitations       // -32042 and notifications/elicitation/complete (§12.3)
 	Log            *store.Log          // the task log hire tasks are read from
 	Waker          store.TaskWaker     // the replica's LISTEN connection: plain waits, tasks/result, GET streams
 	Render         *blob.Renderer      // kontra-blob: parts as presigned GETs in what /mcp answers; nil renders none
@@ -105,8 +101,8 @@ func NewHandler(deps Deps) (*Handler, error) {
 	switch {
 	case deps.Auth == nil:
 		return nil, errors.New("gatemcp: no authenticator")
-	case deps.Sessions == nil || deps.Catalog == nil || deps.Hirer == nil || deps.Tasks == nil || deps.Elicitations == nil:
-		return nil, errors.New("gatemcp: the sessions, the catalog, the hirer, the tasks and the elicitations are required")
+	case deps.Sessions == nil || deps.Catalog == nil || deps.Hirer == nil || deps.Tasks == nil:
+		return nil, errors.New("gatemcp: the sessions, the catalog, the hirer and the tasks are required")
 	case deps.Log == nil || deps.Waker == nil:
 		return nil, errors.New("gatemcp: the log and the waker are required")
 	}
@@ -380,7 +376,7 @@ func (h *Handler) session(rq *request) {
 	case http.MethodGet:
 		// The session is in use while its stream is open: the idle sweep leaves it (§11.2, D303).
 		defer h.deps.Sessions.KeepSeen(sess.Hash, h.now, h.log)()
-		h.deps.Elicitations.Stream(rq.ctx(), rq.w, sid, sess)
+		h.stream(rq.ctx(), rq.w, sid)
 		return
 	case http.MethodDelete:
 		if _, err := h.deps.Sessions.Close(rq.ctx(), sess.Hash, mcprelay.CloseDeleted); err != nil {
@@ -394,7 +390,7 @@ func (h *Handler) session(rq *request) {
 	switch {
 	case m.Method == "" && m.ID != nil:
 		// A client response: one to a gate request id (an elicitation/create tasks/result delivered, §12.4) is the
-		// gate's to consume once; any other is dropped. Nothing a client answers ever approves a quote.
+		// gate's to consume once; any other is dropped.
 		h.deps.Tasks.Respond(rq.ctx(), rq.reader(), m)
 		writeEmpty(rq.w, http.StatusAccepted)
 		return
@@ -569,14 +565,26 @@ func declaresForm(caps json.RawMessage) bool {
 	return form || !url
 }
 
-// declaresURL reports whether a client's capabilities declare URL elicitation (elicitation.url, 2025-11-25).
-func declaresURL(caps json.RawMessage) bool {
-	e, ok := capsMember(caps, "elicitation")
-	if !ok {
-		return false
+// stream serves a legacy session's GET stream: keep-alives every 15 s (§2.2) until the client goes, and nothing else
+// (D351: the notifications/elicitation/complete it carried went with URL elicitation). No event ids; it is not
+// resumed.
+func (h *Handler) stream(ctx context.Context, w http.ResponseWriter, sid string) {
+	s := mcprelay.NewGateStream(w, sid)
+	if s.Start() != nil {
+		return
 	}
-	_, url := capsMember(e, "url")
-	return url
+	keep := time.NewTicker(keepAliveEvery)
+	defer keep.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-keep.C:
+			if s.KeepAlive() != nil {
+				return
+			}
+		}
+	}
 }
 
 // capsMember reads an object member of a capabilities object with exact keys; a member that is not an object (or

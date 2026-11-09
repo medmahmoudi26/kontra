@@ -63,7 +63,7 @@ func newPGEnv(t *testing.T) *pgEnv {
 		values ($1, 'hello', 'a2a', '{"a2a": {"url": "http://127.0.0.1:1"}}', 'config', 3600, 2)`, tenant)
 	e.svc = store.ServiceRef{TenantID: tenant, Tenant: "default", Name: "hello", Kind: "a2a", Timeout: time.Hour, Retries: 2, Retention: 7 * 24 * time.Hour}
 	e.acts = &LifecycleActivities{Log: e.log, Backends: resolver{}, Push: lister{ids: []string{"b", "a", "b"}},
-		Rules: hooks.KeyRules{OperatorPrefixes: []string{"kontra.escrow."}}}
+		Rules: hooks.KeyRules{OperatorPrefixes: []string{"kontra.op."}}}
 	return e
 }
 
@@ -84,10 +84,6 @@ func (e *pgEnv) task(state store.State, meta map[string]any) uuid.UUID {
 		History: []*a2a.Message{msg}, Metadata: meta}
 	nt := store.NewTask{ID: id, Service: e.svc, Protocol: store.ProtocolA2A, Owner: buyer, ContextID: "ctx-1",
 		State: state, Snapshot: snap}
-	if state == store.StateQuoted {
-		exp := time.Now().Add(10 * time.Minute)
-		nt.QuoteExpiresAt = &exp
-	}
 	if _, err := e.log.CreateTask(context.Background(), nil, nt); err != nil {
 		e.t.Fatal(err)
 	}
@@ -298,7 +294,7 @@ func TestApplyMetadataRefusesAndAudits(t *testing.T) {
 	if rows != 1 || !strings.Contains(row, EventPatchRefused) || !strings.Contains(row, "forbidden_key") || strings.Contains(row, "evil") {
 		t.Errorf("audit rows %d %s: one row naming the refusal, never the patch", rows, row)
 	}
-	big := map[string]any{"kontra.escrow.x": strings.Repeat("x", 17<<10)}
+	big := map[string]any{"kontra.op.x": strings.Repeat("x", 17<<10)}
 	if _, err := e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Source: UpdateAnnotate, Patch: hooks.Patch{Metadata: big}}); appType(err) != ErrTypePatchRefused {
 		t.Errorf("a patch over 16 KiB: %v", err)
 	}
@@ -312,54 +308,19 @@ func TestApplyMetadataRefusesAndAudits(t *testing.T) {
 	}
 
 	seq, err := e.acts.ApplyMetadata(ctx, ApplyMetadataInput{TaskID: id.String(), Source: UpdateAnnotate,
-		Patch: hooks.Patch{Metadata: map[string]any{"kontra.escrow.status": "released", hooks.KeyRetainUntil: "2026-11-01T00:00:00Z"}}})
+		Patch: hooks.Patch{Metadata: map[string]any{"kontra.op.status": "released"}}})
 	if err != nil || seq != 2 {
 		t.Fatalf("apply_metadata %d %v", seq, err)
 	}
 	after, _ := e.log.Load(ctx, id)
-	if after.Snapshot.Metadata["kontra.escrow.status"] != "released" || after.State != store.StateCompleted {
+	if after.Snapshot.Metadata["kontra.op.status"] != "released" || after.State != store.StateCompleted {
 		t.Errorf("after the patch: %s %v", after.State, after.Snapshot.Metadata)
-	}
-}
-
-func TestSubmitMovesAQuotedTaskToSubmitted(t *testing.T) {
-	e := newPGEnv(t)
-	ctx := context.Background()
-	id := e.task(store.StateQuoted, map[string]any{MetaApproveURL: "https://pay.example/t"})
-	before := time.Now()
-	r, err := e.acts.Submit(ctx, SubmitInput{TaskID: id.String(), Metadata: map[string]any{"kontra.escrow.status": "held"}, TimeoutSeconds: 600})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Deadline.Before(before.Add(590*time.Second)) || r.Deadline.After(time.Now().Add(610*time.Second)) {
-		t.Errorf("deadline %v, want about 10 minutes from the approval", r.Deadline)
-	}
-	row, _ := e.log.Load(ctx, id)
-	if row.State != store.StateSubmitted || row.SubmittedAt == nil || row.Snapshot.Metadata["kontra.escrow.status"] != "held" {
-		t.Fatalf("task %s %v", row.State, row.Snapshot.Metadata)
-	}
-	r2, err := e.acts.Submit(ctx, SubmitInput{TaskID: id.String(), TimeoutSeconds: 600})
-	if err != nil || !r2.Deadline.Equal(r.Deadline) {
-		t.Errorf("a retried submit %+v %v", r2, err)
-	}
-	var kinds []string
-	rows, _ := e.pool.Query(ctx, `select kind from kontra.task_events where task_id = $1 order by seq`, id)
-	for rows.Next() {
-		var k string
-		_ = rows.Scan(&k)
-		kinds = append(kinds, k)
-	}
-	if strings.Join(kinds, ",") != "task,metadata,status" {
-		t.Errorf("events %v, want the approval's metadata then the submitted status", kinds)
-	}
-	if _, err := e.acts.Submit(ctx, SubmitInput{TaskID: id.String(), Metadata: map[string]any{"x": 1}}); appType(err) != ErrTypePatchRefused {
-		t.Errorf("approval metadata outside the prefixes: %v", err)
 	}
 }
 
 func TestTaskRefCarriesOperatorKeysOnly(t *testing.T) {
 	e := newPGEnv(t)
-	id := e.task(store.StateSubmitted, map[string]any{"caller": "x", "kontra.escrow.status": "held", hooks.KeyRetainUntil: "t", "kontra.failure": "no"})
+	id := e.task(store.StateSubmitted, map[string]any{"caller": "x", "kontra.op.status": "held", "kontra.keyRetainUntil": "t", "kontra.failure": "no"})
 	ref, err := e.acts.TaskRef(context.Background(), id.String())
 	if err != nil {
 		t.Fatal(err)
@@ -368,33 +329,9 @@ func TestTaskRefCarriesOperatorKeysOnly(t *testing.T) {
 		ref.Principal != buyer.Principal || ref.Via != "api_key" || ref.ContextID != "ctx-1" || ref.State != "submitted" || ref.Service != "hello" {
 		t.Errorf("task ref %+v", ref)
 	}
-	if len(ref.Metadata) != 2 || ref.Metadata["kontra.escrow.status"] != "held" || ref.Metadata[hooks.KeyRetainUntil] != "t" {
+	// kontra.keyRetainUntil is no longer an operator key (D351): a TaskRef leaves it out like any other.
+	if len(ref.Metadata) != 1 || ref.Metadata["kontra.op.status"] != "held" {
 		t.Errorf("task ref metadata %v: operator keys only", ref.Metadata)
-	}
-}
-
-func TestAppendReviewMessageActivity(t *testing.T) {
-	e := newPGEnv(t)
-	ctx := context.Background()
-	id := e.task(store.StateCompleted, nil)
-	wid := uuid.Must(uuid.NewV7())
-	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("one more thing"))
-	msg.TaskID = a2a.TaskID(id.String())
-	if err := e.log.InsertWorkItem(ctx, nil, store.WorkItem{ID: wid, TaskID: id, Kind: store.WorkExecute,
-		Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, Owner: buyer}}); err != nil {
-		t.Fatal(err)
-	}
-	seq, err := e.acts.AppendReviewMessage(ctx, ReviewAppendInput{TaskID: id.String(), WorkItemID: wid.String()})
-	if err != nil || seq != 2 {
-		t.Fatalf("append %d %v", seq, err)
-	}
-	again, err := e.acts.AppendReviewMessage(ctx, ReviewAppendInput{TaskID: id.String(), WorkItemID: wid.String()})
-	if err != nil || again != seq {
-		t.Errorf("a retried append %d %v, want the committed seq %d", again, err, seq)
-	}
-	other := uuid.Must(uuid.NewV7())
-	if _, err := e.acts.AppendReviewMessage(ctx, ReviewAppendInput{TaskID: id.String(), WorkItemID: other.String()}); appType(err) != ErrTypeWorkItemGone {
-		t.Errorf("a missing work item: %v", err)
 	}
 }
 

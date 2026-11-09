@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kontra.sh/schema/listing/v1.json",
   "title": "A listing file: what `kontra publish <listing.yaml>` sends to the operator's control plane (D323)",
-  "description": "How one of the publisher's A2A services is sold, as Kontra Cloud's PUT /v1/services/{name} takes it (kontra-cloud D-M5-95, D-M5-110): its visibility, sealing and price, in USD. Listings are A2A only: an MCP service is not listed, and the control plane refuses a listing for one (D350). The file is YAML (or JSON); the price keys are ext-escrow.md's. The CLI checks the file against this schema and sends it; the control plane decides what it accepts, and the gate holds no price.",
+  "description": "How one of the publisher's A2A services is listed, as Kontra Cloud's PUT /v1/services/{name} takes it (kontra-cloud D-M5-95, D-M5-110): its visibility, sealing, state and task timeout. Listings are A2A only: an MCP service is not listed, and the control plane refuses a listing for one (D350). A listing has no price: a seller that charges declares AP2 in its agent card, and neither the gate nor the CLI holds an amount (D351). The file is YAML (or JSON). The CLI checks the file against this schema and sends it; the control plane decides what it accepts.",
   "type": "object",
-  "required": ["service", "price"],
+  "required": ["service"],
   "additionalProperties": false,
   "properties": {
     "service": {
@@ -17,46 +17,18 @@
       "default": "public",
       "description": "public: listed and searched; unlisted: reachable by its URL, never searched (relay.md §12.2, D321); private: the publisher's own tenant only."
     },
-    "price": { "$ref": "#/$defs/price" },
     "sealed": { "enum": ["off", "optional", "required"], "default": "off" },
     "published": {
       "type": "boolean",
       "default": true,
       "description": "false unpublishes the service (the gate answers it as unknown) and keeps the listing as a new version."
-    }
-  },
-  "$defs": {
-    "cents": {
-      "type": "string",
-      "pattern": "^(0|[1-9][0-9]{0,11})(\\.[0-9]{1,2})?$",
-      "not": { "pattern": "^0(\\.0{1,2})?$" },
-      "description": "USD above 0 with at most 2 decimals: a task is charged in cents."
     },
-    "price": {
-      "type": "object",
-      "required": ["model"],
-      "additionalProperties": false,
-      "properties": {
-        "model": { "enum": ["free", "per_task"] },
-        "amount": { "type": "string", "maxLength": 24 },
-        "currency": { "const": "USD", "default": "USD" },
-        "reviewWindowSeconds": { "type": "integer", "minimum": 0, "maximum": 604800 },
-        "taskTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 604800, "default": 3600 }
-      },
-      "allOf": [
-        {
-          "if": { "properties": { "model": { "const": "free" } } },
-          "then": { "properties": { "amount": { "enum": ["0", "0.0", "0.00"] } } }
-        },
-        {
-          "if": { "properties": { "model": { "const": "per_task" } } },
-          "then": { "required": ["amount"], "properties": { "amount": { "$ref": "#/$defs/cents" } } }
-        },
-        {
-          "if": { "properties": { "model": { "not": { "const": "per_task" } } } },
-          "then": { "properties": { "reviewWindowSeconds": { "const": 0 } } }
-        }
-      ]
+    "taskTimeoutSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 604800,
+      "default": 3600,
+      "description": "The service's task.timeout, which the control plane writes (relay.md §6.5): how long a task may run before the gate fails it."
     }
   }
 }

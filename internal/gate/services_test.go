@@ -357,7 +357,7 @@ func TestMultiTenantRegistryFollowsTheRows(t *testing.T) {
 		}
 	}
 	exec(`insert into kontra.tenants (id, slug, kind) values ($1, 'acme', 'account')`, acme)
-	exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, source) values ($1, 'quote', 'a2a', '{"tunnel": {}}', '{org:acme}', 'db')`, acme)
+	exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, source) values ($1, 'offer', 'a2a', '{"tunnel": {}}', '{org:acme}', 'db')`, acme)
 	var changed []string
 	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Multi: true, OnChange: func(ref store.ServiceRef) {
 		changed = append(changed, ref.Tenant+"/"+ref.Name)
@@ -372,10 +372,10 @@ func TestMultiTenantRegistryFollowsTheRows(t *testing.T) {
 	if n := scalar[int](t, pool, `select count(*) from kontra.tenants where slug = 'default'`); n != 0 {
 		t.Fatal("a multi-tenant gate created the team tenant")
 	}
-	if q, _ := s.Lookup(ctx, "acme", "quote"); q == nil || q.Ref.TenantID != acme {
-		t.Fatalf("Lookup acme/quote: %+v", q)
+	if q, _ := s.Lookup(ctx, "acme", "offer"); q == nil || q.Ref.TenantID != acme {
+		t.Fatalf("Lookup acme/offer: %+v", q)
 	}
-	if got := ServicePath("acme", "quote", true); got != "/agents/acme/quote" {
+	if got := ServicePath("acme", "offer", true); got != "/agents/acme/offer" {
 		t.Fatalf("ServicePath = %s", got)
 	}
 
@@ -385,18 +385,18 @@ func TestMultiTenantRegistryFollowsTheRows(t *testing.T) {
 	if b, _ := s.Lookup(ctx, "acme", "book"); b == nil || !b.Allow.AdmitsAnonymous() {
 		t.Fatalf("Lookup acme/book after its NOTIFY: %+v", b)
 	}
-	exec(`update kontra.services set listed = true, retries = 5 where name = 'quote'`)
-	s.Notify("acme/quote")
-	if q, _ := s.Lookup(ctx, "acme", "quote"); q == nil || !q.Listed || q.Ref.Retries != 5 {
-		t.Fatalf("Lookup acme/quote after its change: %+v", q)
+	exec(`update kontra.services set listed = true, retries = 5 where name = 'offer'`)
+	s.Notify("acme/offer")
+	if q, _ := s.Lookup(ctx, "acme", "offer"); q == nil || !q.Listed || q.Ref.Retries != 5 {
+		t.Fatalf("Lookup acme/offer after its change: %+v", q)
 	}
-	if !slices.Equal(changed[len(changed)-2:], []string{"acme/book", "acme/quote"}) {
+	if !slices.Equal(changed[len(changed)-2:], []string{"acme/book", "acme/offer"}) {
 		t.Fatalf("OnChange saw %v", changed)
 	}
 	// A deleted tenant's services go.
 	exec(`update kontra.tenants set deleted_at = now() where id = $1`, acme)
-	s.Notify("acme/quote")
-	if q, _ := s.Lookup(ctx, "acme", "quote"); q != nil {
+	s.Notify("acme/offer")
+	if q, _ := s.Lookup(ctx, "acme", "offer"); q != nil {
 		t.Fatal("a deleted tenant's service is still served")
 	}
 	if err := s.Reload(ctx); err != nil {

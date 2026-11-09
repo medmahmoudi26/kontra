@@ -3,7 +3,6 @@
   "state": "TASK_STATE_COMPLETED",
   "contextId": "ctx",
   "service": "hello",
-  "url": "https://app.kontra.sh/#/t/019a0000-0000-7000-8000-000000000001",
   "text": "the service ended the task: completed\nHello World",
   "data": [
     {

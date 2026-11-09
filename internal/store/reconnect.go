@@ -105,7 +105,7 @@ type ReconnectWait struct {
 // ReconnectWaitingMeta(since, until). It is a status event like any other: A2A streams, SubscribeToTask, push, /mcp
 // and an operator's console read it from the log; working ends no turn anywhere (§9).
 //
-// Nothing is logged for a task that is terminal, quoted, or waits at input-required or auth-required: their status
+// Nothing is logged for a task that is terminal or waits at input-required or auth-required: their status
 // message is the question or the instructions the caller acts on, and stays the status (D341). A task of a sealed
 // service (services.sealed optional or required, or a service no longer found) gets the status with no message, the
 // metadata alone: a hiring node refuses any unsealed part of a sealed job but a terminal status's gate text

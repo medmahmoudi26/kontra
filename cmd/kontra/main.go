@@ -80,7 +80,7 @@ through one outbound connection (spec/tunnel.md):
   --local-token FILE         a token every local request must carry (Authorization: Bearer); required off loopback
   --allow-origin ORIGIN      a browser Origin allowed to call --listen; repeatable (default none)
   --sealed-max-age DURATION  how old a sealed request may be when it reaches a hosted service (default 25h; at least
-                             the gate's longest quote expiry plus task.timeout)
+                             the service's task.timeout, with margin)
   --sealed-required NAME     refuse an unsealed request to the hosted service NAME; repeatable
   --pin-recipients           refuse any new recipient or seller key of a sealed service this node hires
   --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME, the one
@@ -106,8 +106,8 @@ kontra login gets an API key for a gate (default https://gateway.kontra.sh) from
 ~/.kontra/credentials for that gate only; kontra connect then hires as it, and an anonymous session's next handshake
 with it becomes the account's (spec/tunnel.md §6.3). --no-browser prints the sign-in URL instead of opening it.
 
-kontra publish sends a listing file for an A2A agent (spec/schema/listing.json: visibility, price free or per_task
-in USD, sealing; MCP servers are not listed) to the gate operator's control plane, after a sign-in in the browser for that
+kontra publish sends a listing file for an A2A agent (spec/schema/listing.json: visibility, sealing, task timeout; no
+price, and MCP servers are not listed) to the gate operator's control plane, after a sign-in in the browser for that
 publish only: a person publishes, never an API key (spec/tunnel.md §6.4). It never replaces a listing unseen: name
 the version you read (--version N) or --replace. --dry-run checks the file and prints the request; kontra publish -h
 has the flags.

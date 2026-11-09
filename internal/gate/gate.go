@@ -404,7 +404,7 @@ func (r *Replica) assemble() error {
 
 	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, Resolver: pushResolver(log)}
 	pushStore := push.NewConfigStore(r.pool, r.lifecycle, policy, log)
-	rules := hooks.KeyRules{OperatorPrefixes: cfg.OperatorMetadataPrefixes, CallerMetadata: cfg.CallerMetadata}
+	rules := hooks.KeyRules{OperatorPrefixes: cfg.OperatorMetadataPrefixes}
 	var err error
 	if r.admission, r.admissionOps, err = buildAdmission(cfg, rules, log); err != nil {
 		return err
@@ -473,10 +473,8 @@ func (r *Replica) assemble() error {
 			return lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)
 		},
 		Interceptors: func(svc store.ServiceRef) []a2asrv.CallInterceptor {
-			// Starts: the service's work queue re-issues a quoted task's start before its resend is answered (D290).
 			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Admit: r.admission, Canceler: r.lifecycle,
-				Reviews: r.lifecycle, PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log,
-				Starts: lifecycle.NewQueue(svc, r.storeLog, r.lifecycle, queueOpts)}
+				PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log}
 			if r.anonCaps != nil {
 				i.Anon = r.anonCaps
 			}
@@ -549,7 +547,7 @@ func (r *Replica) assemble() error {
 	}
 	// /mcp's hire is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4), with
 	// the operator's card_extensions URIs a hire activates for the buyer (D300), and the service's work queue
-	// re-issuing a retried quoted task's start (§14.5), as the A2A routes have them.
+	// re-issuing a keyed hire's start (§14.5, D338), as the A2A routes have them.
 	hirer := &relay.Hirer{Handlers: handlers, Log: r.storeLog,
 		Extensions: func(svc store.ServiceRef) relay.CardExtensions {
 			served, _ := r.services.Lookup(context.Background(), svc.Tenant, svc.Name)

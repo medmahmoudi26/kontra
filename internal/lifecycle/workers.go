@@ -118,7 +118,6 @@ func NewWorkers(c client.Client, cfg WorkerConfig, acts Activities) (*Workers, e
 	for name, fn := range map[string]any{
 		ActPrepare: la.Prepare, ActAttemptState: la.AttemptState, ActListPushConfigs: la.ListPushConfigs,
 		ActWriteTerminal: la.WriteTerminal, ActApplyMetadata: la.ApplyMetadata, ActTaskRef: la.TaskRef,
-		ActSubmit: la.Submit, ActAppendReviewMessage: la.AppendReviewMessage,
 		ActReconnectWait: la.ReconnectWait, ActReattachSession: la.ReattachSession,
 	} {
 		w.lifecycle.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: name})
@@ -206,13 +205,12 @@ type HookRegistry interface {
 }
 
 // RegisterBuiltinHooks registers open source's no-op Lifecycle under the type names a remote operator
-// serves (spec §13.3).
+// serves (spec §13.3). ReviewWindow is retired (D351) and stays registered only for runs recorded before
+// changeNoReviewWindow, which still schedule it once after OnTerminal.
 func RegisterBuiltinHooks(r HookRegistry, h hooks.BuiltinLifecycle) {
 	r.RegisterActivityWithOptions(h.OnDispatched, activity.RegisterOptions{Name: HookOnDispatched})
 	r.RegisterActivityWithOptions(h.OnTerminal, activity.RegisterOptions{Name: HookOnTerminal})
 	r.RegisterActivityWithOptions(h.ReviewWindow, activity.RegisterOptions{Name: HookReviewWindow})
-	r.RegisterActivityWithOptions(h.OnReviewMessage, activity.RegisterOptions{Name: HookOnReviewMessage})
-	r.RegisterActivityWithOptions(h.OnReviewClosed, activity.RegisterOptions{Name: HookOnReviewClosed})
 }
 
 func (w *Workers) all() []worker.Worker {

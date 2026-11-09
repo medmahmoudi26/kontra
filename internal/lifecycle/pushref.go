@@ -10,7 +10,7 @@ import (
 // ConfigRef names a push config wherever it crosses Temporal history: the kontra.push signal,
 // list_push_configs' result and push_webhook's input (spec §10.2, §14.1, §14.2). A config's id may be chosen
 // by the caller (A2A lets a client name its configs, up to 128 characters), and no caller-authored value
-// crosses history but a review-window message's caller_metadata keys (spec §14), so history carries this
+// crosses history (spec §14), so history carries this
 // digest of the task id and the config id instead, and push_webhook finds the config among the task's (at
 // most 10) by it. It is stable: a config deleted and set again with the same id has the same ref.
 func ConfigRef(taskID uuid.UUID, configID string) string {

@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,20 +21,13 @@ import (
 )
 
 // ErrAdmissionUnavailable is an Admission hook that failed or answered nothing the gate may act on: a timeout, a
-// non-2xx (a 3xx included), an answer that is not a valid decision, maps outside §13.2's rules, a malformed or expired
-// quote. Every caller answers it -32603 "admission unavailable" (HTTP 503): Admission fails closed (spec §13.1).
+// non-2xx (a 3xx included), an answer that is not a valid decision (a "quote" among them, D351), maps outside
+// §13.1's key rules. Every caller answers it -32603 "admission unavailable" (HTTP 503): Admission fails closed (spec §13.1).
 var ErrAdmissionUnavailable = errors.New("hooks: admission unavailable")
 
 // ErrInvalidDecision is a decision that is not valid against spec/schema/hooks.json's decision; it wraps into
 // ErrAdmissionUnavailable when the remote hook answers one.
 var ErrInvalidDecision = errors.New("hooks: not a valid Admission decision")
-
-// MsgNotPriced is the refusal of a quote for anything but a gate-owned A2A task: an MCP task, session or call, or a
-// passthrough task-augmented call (spec §13.1). MCP services are not priced (D350).
-const MsgNotPriced = "MCP services are not priced"
-
-// ProtocolMCP is AdmitRequest.Protocol for an MCP request (hooks.json#/$defs/admitRequest).
-const ProtocolMCP = "mcp"
 
 // CodeInternalError is JSON-RPC's -32603, the code of every Admission refusal the gate itself makes.
 const CodeInternalError = -32603
@@ -63,8 +55,6 @@ type RemoteAdmissionConfig struct {
 	// no address check, https:// or http:// to loopback, no redirects, no proxy, the timeout above. A client of the
 	// caller's (tests) gets no redirects all the same.
 	Client *http.Client
-	// Now is the clock a quote's expiresAt is checked against; nil is time.Now.
-	Now func() time.Time
 }
 
 // String shows the configuration without its secret, so that no log line or error carries it.
@@ -83,15 +73,13 @@ func (c RemoteAdmissionConfig) LogValue() slog.Value {
 
 // RemoteAdmission is the remote Admission hook (§13.1; built in M4, D275). It POSTs the AdmitRequest and reads a
 // Decision, and fails closed: a timeout, a non-2xx, an unparsable answer, a key outside §13.2's rules or a map over
-// 16 KiB is a deny with -32603 "admission unavailable" (HTTP 503). A quote for anything but operation task on a
-// gate-owned A2A task (a hire among them) is a deny with -32603 "MCP services are not priced" (D350). An operation the hook does not consult is answered as BuiltinAdmission answers it.
+// 16 KiB is a deny with -32603 "admission unavailable" (HTTP 503). An operation the hook does not consult is answered
+// as BuiltinAdmission answers it.
 //
 // The unavailable cases are returned as an error wrapping ErrAdmissionUnavailable (every caller maps an Admission
 // error to -32603 "admission unavailable", 503), never as a Decision, so that no caller can mistake one for the
 // operator's own deny. The hook is §10.3's operator-configured endpoint (D284), and its answer is read as
-// spec/schema/hooks.json's decision with exact keys (ParseDecision); a quote must name an absolute https:// URL
-// without userinfo and an RFC 3339 expiry in the future (CheckQuote). The approve URL is passed through untouched
-// (D188).
+// spec/schema/hooks.json's decision with exact keys (ParseDecision): allow or deny (D351).
 type RemoteAdmission struct {
 	url     string
 	secret  string
@@ -99,7 +87,6 @@ type RemoteAdmission struct {
 	ops     []Operation
 	rules   KeyRules
 	client  *http.Client
-	now     func() time.Time
 }
 
 var _ Admission = (*RemoteAdmission)(nil)
@@ -154,12 +141,8 @@ func NewRemoteAdmission(cfg RemoteAdmissionConfig) (*RemoteAdmission, error) {
 		c.CheckRedirect = ssrf.NoRedirects
 		client = &c
 	}
-	now := cfg.Now
-	if now == nil {
-		now = time.Now
-	}
 	return &RemoteAdmission{url: u.String(), secret: cfg.Secret, timeout: timeout, ops: seen, rules: cfg.Rules,
-		client: client, now: now}, nil
+		client: client}, nil
 }
 
 // shownURL is u for an error or a log line, without its userinfo.
@@ -233,16 +216,6 @@ func (r *RemoteAdmission) Admit(ctx context.Context, req AdmitRequest) (Decision
 	if err := r.rules.CheckOperatorMaps(d.Metadata, d.MCPMeta); err != nil {
 		return Decision{}, r.unavailable("the decision's maps", err)
 	}
-	if d.Outcome == Quote {
-		if req.Operation != OpTask || req.Protocol == ProtocolMCP {
-			// A quote is valid only for a gate-owned A2A task (§13.1): MCP services are not priced (D350). The MCP
-			// relay refuses a quote the same way whatever Admission answers it.
-			return Decision{Outcome: Deny, Refusal: &Refusal{Code: CodeInternalError, Message: MsgNotPriced}}, nil
-		}
-		if err := CheckQuote(d.Quote, r.now()); err != nil {
-			return Decision{}, r.unavailable("the quote", err)
-		}
-	}
 	return d, nil
 }
 
@@ -295,27 +268,24 @@ func secretForms(secret string) []string {
 	return forms
 }
 
-// decisionMembers are the members of hooks.json's decision; refusalMembers and quoteMembers those of its refusal and
-// quote (additionalProperties: false, exact keys).
+// decisionMembers are the members of hooks.json's decision; refusalMembers those of its refusal
+// (additionalProperties: false, exact keys).
 var (
-	decisionMembers = []string{"outcome", "refusal", "metadata", "mcpMeta", "quote"}
+	decisionMembers = []string{"outcome", "refusal", "metadata", "mcpMeta"}
 	refusalMembers  = []string{"code", "message"}
-	quoteMembers    = []string{"approveUrl", "expiresAt"}
 )
 
 // ParseDecision reads b as spec/schema/hooks.json's decision with exact keys: one JSON object; no repeated or
-// case-variant key at its level or in refusal, quote, metadata and mcpMeta; no member the schema does not name;
-// outcome allow, deny or quote; a deny with its refusal {code: integer, message: string}, a quote with its terms
-// {approveUrl: string, expiresAt: string}; metadata and mcpMeta objects, mcpMeta's keys under sh.kontra/. A
-// refusal on another outcome than deny, and quote terms on another than quote, are dropped. Anything else is
-// ErrInvalidDecision. The quote's terms are checked by CheckQuote, the maps' keys and sizes by
-// KeyRules.CheckOperatorMaps.
+// case-variant key at its level or in refusal, metadata and mcpMeta; no member the schema does not name; outcome
+// allow or deny; a deny with its refusal {code: integer, message: string}; metadata and mcpMeta objects, mcpMeta's
+// keys under sh.kontra/. A refusal on an allow is dropped. Anything else, the retired outcome "quote" among it
+// (D351), is ErrInvalidDecision. The maps' keys and sizes are checked by KeyRules.CheckOperatorMaps.
 func ParseDecision(b []byte) (Decision, error) {
 	top, err := strictjson.Members(b)
 	if err != nil {
 		return Decision{}, fmt.Errorf("%w: %v", ErrInvalidDecision, err)
 	}
-	if err := strictjson.CheckMembers(top, strictjson.Path{"refusal"}, strictjson.Path{"quote"},
+	if err := strictjson.CheckMembers(top, strictjson.Path{"refusal"},
 		strictjson.Path{"metadata"}, strictjson.Path{"mcpMeta"}); err != nil {
 		return Decision{}, fmt.Errorf("%w: %v", ErrInvalidDecision, err)
 	}
@@ -332,9 +302,9 @@ func ParseDecision(b []byte) (Decision, error) {
 		return Decision{}, fmt.Errorf("%w: outcome is not a string", ErrInvalidDecision)
 	}
 	switch d.Outcome = Outcome(outcome); d.Outcome {
-	case Allow, Deny, Quote:
+	case Allow, Deny:
 	default:
-		return Decision{}, fmt.Errorf("%w: outcome %s is not allow, deny or quote", ErrInvalidDecision, strictjson.Quote(outcome))
+		return Decision{}, fmt.Errorf("%w: outcome %s is not allow or deny", ErrInvalidDecision, strictjson.Quote(outcome))
 	}
 	if raw, ok := top["refusal"]; ok {
 		m, err := object(raw, "refusal")
@@ -360,28 +330,6 @@ func ParseDecision(b []byte) (Decision, error) {
 		}
 		d.Refusal = &rf
 	}
-	if raw, ok := top["quote"]; ok {
-		m, err := object(raw, "quote")
-		if err != nil {
-			return Decision{}, err
-		}
-		if err := onlyMembers(m, quoteMembers, "quote."); err != nil {
-			return Decision{}, err
-		}
-		var q QuoteTerms
-		au, oka := m["approveUrl"]
-		ex, oke := m["expiresAt"]
-		if !oka || !oke {
-			return Decision{}, fmt.Errorf("%w: a quote needs its approveUrl and expiresAt", ErrInvalidDecision)
-		}
-		if !isString(au) || json.Unmarshal(au, &q.ApproveURL) != nil {
-			return Decision{}, fmt.Errorf("%w: quote.approveUrl is not a string", ErrInvalidDecision)
-		}
-		if !isString(ex) || json.Unmarshal(ex, &q.ExpiresAt) != nil {
-			return Decision{}, fmt.Errorf("%w: quote.expiresAt is not a string", ErrInvalidDecision)
-		}
-		d.Quote = &q
-	}
 	for name, dst := range map[string]*map[string]any{"metadata": &d.Metadata, "mcpMeta": &d.MCPMeta} {
 		raw, ok := top[name]
 		if !ok {
@@ -406,14 +354,8 @@ func ParseDecision(b []byte) (Decision, error) {
 		if d.Refusal == nil {
 			return Decision{}, fmt.Errorf("%w: a deny needs its refusal", ErrInvalidDecision)
 		}
-		d.Quote = nil
-	case Quote:
-		if d.Quote == nil {
-			return Decision{}, fmt.Errorf("%w: a quote needs its terms", ErrInvalidDecision)
-		}
-		d.Refusal = nil
 	default:
-		d.Refusal, d.Quote = nil, nil
+		d.Refusal = nil
 	}
 	return d, nil
 }
@@ -487,53 +429,4 @@ func integer(raw json.RawMessage) (int, bool) {
 		return 0, false
 	}
 	return int(n), true
-}
-
-// ErrBadQuote is a quote the gate may not create a task from.
-var ErrBadQuote = errors.New("hooks: the quote's terms are not usable")
-
-// rfc3339 is RFC 3339's date-time (§5.6) as every reader of a quote's expiresAt parses it, with time.RFC3339 (the A2A
-// queue, the MCP relay): upper-case T and Z, a fraction only after a period, an offset up to ±23:59. time.Parse alone
-// also takes a comma fraction, a one-digit hour and an offset of +24:00 or with minute 60 (Go issue 54580), which
-// RFC 3339 and hooks.json's format date-time do not. Lower-case t and z, which they allow, no reader parses: refused,
-// failing closed. The ranges of the date and time fields are time.Parse's.
-var rfc3339 = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$`)
-
-// CheckQuote checks a quote decision's terms (spec §13.1, D284): approveUrl an absolute https:// URL (the scheme
-// written in lowercase, as hooks.json's pattern says) with a host, no userinfo, a valid port and nothing but URI
-// characters; expiresAt an RFC 3339 time (rfc3339) after now. The URL is otherwise the operator's and passed through
-// untouched (D188).
-func CheckQuote(q *QuoteTerms, now time.Time) error {
-	if q == nil {
-		return fmt.Errorf("%w: no terms", ErrBadQuote)
-	}
-	if !strings.HasPrefix(q.ApproveURL, "https://") {
-		return fmt.Errorf("%w: approveUrl is not an https:// URL", ErrBadQuote)
-	}
-	if strings.ContainsFunc(q.ApproveURL, func(r rune) bool { return r <= 0x20 || r >= 0x7f }) {
-		return fmt.Errorf("%w: approveUrl holds a character a URI cannot", ErrBadQuote)
-	}
-	u, err := url.Parse(q.ApproveURL)
-	switch {
-	case err != nil:
-		return fmt.Errorf("%w: approveUrl is not a URL", ErrBadQuote)
-	case u.User != nil:
-		return fmt.Errorf("%w: approveUrl carries userinfo", ErrBadQuote)
-	case u.Scheme != "https" || u.Opaque != "" || u.Hostname() == "":
-		return fmt.Errorf("%w: approveUrl is not an absolute https:// URL", ErrBadQuote)
-	}
-	if err := ssrf.CheckOperatorURL(u); err != nil {
-		return fmt.Errorf("%w: approveUrl: %v", ErrBadQuote, err)
-	}
-	if !rfc3339.MatchString(q.ExpiresAt) {
-		return fmt.Errorf("%w: expiresAt is not an RFC 3339 time", ErrBadQuote)
-	}
-	exp, err := time.Parse(time.RFC3339, q.ExpiresAt)
-	if err != nil {
-		return fmt.Errorf("%w: expiresAt is not an RFC 3339 time", ErrBadQuote)
-	}
-	if !exp.After(now) {
-		return fmt.Errorf("%w: expiresAt %s has passed", ErrBadQuote, exp.UTC().Format(time.RFC3339))
-	}
-	return nil
 }

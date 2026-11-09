@@ -29,8 +29,7 @@ func (directOnly) BackendFor(context.Context, uuid.UUID, string) (store.Backend,
 // interceptors, the Temporal-backed work queue, TaskLifecycle on a development server, the dispatch
 // activity (this package's Dispatcher) and an a2a-go seller that asks for input once (spec §7, §9, §14.1;
 // the audit's "follow-up turn through the real stack"). Then a cancel of an input-required task through
-// the cancel interceptor and kontra.cancel (spec §8), and a message to a finished task through the review
-// path (spec §7).
+// the cancel interceptor and kontra.cancel (spec §8), and a message to a finished task, refused (spec §7).
 func TestTurnsOverTheLifecycle(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
@@ -55,7 +54,7 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	backends := &staticBackends{}
 	backends.set(b, info, nil)
 	reg := NewRegistry()
-	intc := &Interceptors{Svc: svc, Log: log, Canceler: lc, Reviews: lc}
+	intc := &Interceptors{Svc: svc, Log: log, Canceler: lc}
 	handlers := NewHandlers(HandlerDeps{
 		Log: log, Puller: store.NewPullerProvider(log, listener),
 		Queue: func(s store.ServiceRef) workqueue.Queue {
@@ -117,7 +116,7 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	if a, _ = log.GetAttempt(ctx, id, 1); a.EndedAt == nil || a.Outcome != store.OutcomeCompleted {
 		t.Errorf("attempt %+v: ended completed by the follow-up turn", a)
 	}
-	// The workflow has ended: a message to the completed task is refused through the review path.
+	// The workflow has ended: a message to the completed task is refused before any work item (D351).
 	m3 := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("again"))
 	m3.TaskID = task.ID
 	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m3}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
@@ -126,7 +125,7 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	var items int
 	_ = pool.QueryRow(ctx, `select count(*) from kontra.work_items where task_id = $1`, id).Scan(&items)
 	if items != 2 {
-		t.Errorf("%d work items: the refused review message's item must be deleted", items)
+		t.Errorf("%d work items: the refused message stores none", items)
 	}
 
 	// Cancel of an input-required task: forward_cancel to the seller, then canceled in the log, before
@@ -167,7 +166,7 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	}
 }
 
-// waitClosed waits for the task's workflow to complete: after OnTerminal and ReviewWindow {open: false}.
+// waitClosed waits for the task's workflow to complete: after OnTerminal.
 func waitClosed(t *testing.T, c client.Client, id a2a.TaskID) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)

@@ -1,0 +1,6 @@
+{
+  "service": "hello",
+  "visibility": "public",
+  "sealed": "off",
+  "taskTimeoutSeconds": 600
+}

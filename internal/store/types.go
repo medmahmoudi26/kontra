@@ -14,7 +14,6 @@ type State string
 
 // Task states.
 const (
-	StateQuoted        State = "quoted"
 	StateSubmitted     State = "submitted"
 	StateWorking       State = "working"
 	StateAuthRequired  State = "auth-required"
@@ -34,21 +33,20 @@ func (s State) Terminal() bool {
 	return false
 }
 
-// Valid reports whether s is one of the nine states of tasks.state.
+// Valid reports whether s is one of the eight states of tasks.state (D351: quoted is no longer one).
 func (s State) Valid() bool {
 	switch s {
-	case StateQuoted, StateSubmitted, StateWorking, StateAuthRequired, StateInputRequired,
+	case StateSubmitted, StateWorking, StateAuthRequired, StateInputRequired,
 		StateCompleted, StateFailed, StateCanceled, StateRejected:
 		return true
 	}
 	return false
 }
 
-// A2A is the A2A wire state of s (spec §5.1): quoted shows as input-required, with the approve URL in the
-// task's metadata.
+// A2A is the A2A wire state of s (spec §5.1).
 func (s State) A2A() a2a.TaskState {
 	switch s {
-	case StateQuoted, StateInputRequired:
+	case StateInputRequired:
 		return a2a.TaskStateInputRequired
 	case StateSubmitted:
 		return a2a.TaskStateSubmitted
@@ -68,9 +66,8 @@ func (s State) A2A() a2a.TaskState {
 	return a2a.TaskStateUnspecified
 }
 
-// StateFromA2A maps an A2A task state to tasks.state. input-required maps to input-required: only the
-// writers that create or end a quote write quoted, explicitly (spec §13.2). The unspecified state, or a
-// value a2a-go does not define, is an error wrapping a2a.ErrInvalidParams.
+// StateFromA2A maps an A2A task state to tasks.state. The unspecified state, or a value a2a-go does not define,
+// is an error wrapping a2a.ErrInvalidParams.
 func StateFromA2A(ts a2a.TaskState) (State, error) {
 	switch ts {
 	case a2a.TaskStateSubmitted:
@@ -236,7 +233,6 @@ type TaskRow struct {
 	Version        int64
 	Snapshot       *a2a.Task
 	StatusAt       time.Time
-	QuoteExpiresAt *time.Time
 	Deadline       *time.Time
 	CreatedAt      time.Time
 	SubmittedAt    *time.Time

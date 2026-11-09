@@ -331,7 +331,7 @@ type goneCtx struct{ context.Context }
 func (goneCtx) Err() error { return context.Canceled }
 
 // A client that closes its response stream before the answer to its modern tools/call is written has cancelled the
-// request and never learned the task's id (relay §11.12 step 4, D178): a quoted task too is sent kontra.cancel and
+// request and never learned the task's id (relay §11.12 step 4, D178): a task not yet run is sent kontra.cancel and
 // nothing is written, and so is one whose policy read fails because the client left; a client that stays gets its
 // CreateTaskResult and cancels nothing.
 func TestAnswerCallClientGone(t *testing.T) {
@@ -348,11 +348,9 @@ func TestAnswerCallClientGone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	quoted := func() uuid.UUID {
+	submitted := func() uuid.UUID {
 		id := uuid.Must(uuid.NewV7())
-		exp := time.Now().Add(time.Hour)
-		nt, err := store.NewMCPTask(id, svc, store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey},
-			store.StateQuoted, &exp, "https://app.example/#/t/approve", nil, nil)
+		nt, err := store.NewMCPTask(id, svc, store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,22 +360,22 @@ func TestAnswerCallClientGone(t *testing.T) {
 		return id
 	}
 
-	stays := quoted()
+	stays := submitted()
 	w := httptest.NewRecorder()
 	tasks.AnswerCall(ctx, w, svc, stays, json.RawMessage(`7`))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"resultType":"task"`) {
 		t.Fatalf("a client that stays: %d %s", w.Code, w.Body)
 	}
 
-	gone := quoted()
+	gone := submitted()
 	w = httptest.NewRecorder()
 	tasks.AnswerCall(goneCtx{ctx}, w, svc, gone, json.RawMessage(`8`))
 	if w.Body.Len() != 0 {
 		t.Fatalf("an answer was written to a client that left: %d %s", w.Code, w.Body)
 	}
-	eventually(t, 5*time.Second, "the quoted task is sent kontra.cancel", func() bool { return lc.cancelled(gone) })
+	eventually(t, 5*time.Second, "the task is sent kontra.cancel", func() bool { return lc.cancelled(gone) })
 
-	failing := quoted()
+	failing := submitted()
 	other := svc
 	other.Name, other.Retention = "no-such-service", 0 // the policy read fails
 	w = httptest.NewRecorder()
