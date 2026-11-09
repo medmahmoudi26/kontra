@@ -74,7 +74,6 @@ func (r Ref) String() string {
 // SearchArgs are search's arguments (mcp-tools.json#/$defs/search).
 type SearchArgs struct {
 	Query  string `json:"query,omitempty"`
-	Kind   string `json:"kind,omitempty"`  // a2a | mcp
 	Price  string `json:"price,omitempty"` // equality on the price_model annotation; "free": none (D271)
 	Cursor string `json:"cursor,omitempty"`
 }
@@ -117,9 +116,8 @@ type DescribeResult struct {
 
 // Capabilities is describe's normalized summary of a service (D339). For A2A, from the served card: streaming and
 // pushNotifications (capabilities), the default input and output modes, the skills, the extensions with whether each is
-// required, and inputSchema, params.schema of the card's https://kontra.sh/ext/input-schema/v1 entry (the hire message
-// then carries {parts: [{data: {...}}]}, spec/ext-input-schema.md). For MCP, the number of tools describe shows and
-// whether the list was cached.
+// required; a skill's examples are what a client may suggest as a first message, which is plain A2A (D350). For MCP, the
+// number of tools describe shows and whether the list was cached.
 type Capabilities struct {
 	Streaming         *bool             `json:"streaming,omitempty"`
 	PushNotifications *bool             `json:"pushNotifications,omitempty"`
@@ -127,7 +125,6 @@ type Capabilities struct {
 	OutputModes       []string          `json:"outputModes,omitempty"`
 	Skills            []SkillSummary    `json:"skills,omitempty"`
 	Extensions        []ExtensionInCard `json:"extensions,omitempty"`
-	InputSchema       json.RawMessage   `json:"inputSchema,omitempty"`
 	Tools             *int              `json:"tools,omitempty"`
 	ToolsCached       *bool             `json:"toolsCached,omitempty"`
 }
@@ -149,9 +146,6 @@ type ExtensionInCard struct {
 	Required bool   `json:"required"`
 }
 
-// InputSchemaURI is the input schema extension (spec/ext-input-schema.md).
-const InputSchemaURI = "https://kontra.sh/ext/input-schema/v1"
-
 // cardCapabilities reads a served A2A card's capabilities (D339); nil when the card is none or not an object.
 func cardCapabilities(card json.RawMessage) *Capabilities {
 	if len(card) == 0 {
@@ -164,9 +158,6 @@ func cardCapabilities(card json.RawMessage) *Capabilities {
 			Extensions        []struct {
 				URI      string `json:"uri"`
 				Required bool   `json:"required"`
-				Params   struct {
-					Schema json.RawMessage `json:"schema"`
-				} `json:"params"`
 			} `json:"extensions"`
 		} `json:"capabilities"`
 		DefaultInputModes  []string       `json:"defaultInputModes"`
@@ -180,9 +171,6 @@ func cardCapabilities(card json.RawMessage) *Capabilities {
 		InputModes: c.DefaultInputModes, OutputModes: c.DefaultOutputModes, Skills: c.Skills}
 	for _, x := range c.Capabilities.Extensions {
 		out.Extensions = append(out.Extensions, ExtensionInCard{URI: x.URI, Required: x.Required})
-		if x.URI == InputSchemaURI && firstByte(x.Params.Schema) == '{' && out.InputSchema == nil {
-			out.InputSchema = x.Params.Schema
-		}
 	}
 	return out
 }
@@ -251,7 +239,7 @@ const (
 	schemaMessage = `{"oneOf":[{"type":"string","minLength":1},{"type":"object","required":["parts"],"additionalProperties":false,` +
 		`"properties":{"parts":{"type":"array","minItems":1,"items":` + schemaPart + `}}}]}`
 	schemaSearch = `{"type":"object","additionalProperties":false,"properties":{"query":{"type":"string","maxLength":256},` +
-		`"kind":{"enum":["a2a","mcp"]},"price":{"type":"string","maxLength":32},"cursor":{"type":"string"}}}`
+		`"price":{"type":"string","maxLength":32},"cursor":{"type":"string"}}}`
 	schemaDescribe = `{"type":"object","required":["service"],"additionalProperties":false,` +
 		`"properties":{"service":{"type":"string","pattern":"^([a-z0-9-]+/)?[a-z0-9-]+$"}}}`
 	schemaHire = `{"type":"object","required":["service","message"],"additionalProperties":false,` +
@@ -371,11 +359,11 @@ type toolExecution struct {
 // asks, cancel, tasks to find old ones, artifact for one artifact.
 var tools = []tool{
 	{Name: ToolSearch, Title: "Search services",
-		Description: "Find the agents and MCP servers this gate serves that you may call. Returns refs for describe and hire.",
+		Description: "Find the agents this gate lists that you may hire. Returns refs for describe and hire.",
 		InputSchema: json.RawMessage(schemaSearch),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolDescribe, Title: "Describe a service",
-		Description: "Show a service's capabilities (skills, input and output modes, its input schema when it has one) and agent card (A2A) " +
+		Description: "Show a service's capabilities (skills with example first messages, input and output modes) and agent card (A2A) " +
 			"or its tools (MCP), whether it is sealed and available, and the URLs to call it directly.",
 		InputSchema: json.RawMessage(schemaDescribe),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
@@ -511,22 +499,13 @@ var refPattern = regexp.MustCompile(`^([a-z0-9-]+/)?[a-z0-9-]+$`)
 
 // parseSearchArgs reads search's arguments against its schema.
 func parseSearchArgs(args json.RawMessage) (SearchArgs, error) {
-	m, err := members(args, "query", "kind", "price", "cursor")
+	m, err := members(args, "query", "price", "cursor") // no kind: search returns A2A agents only (D350)
 	if err != nil {
 		return SearchArgs{}, err
 	}
 	var a SearchArgs
 	if a.Query, _, err = stringArg(m, "query", 256); err != nil {
 		return a, err
-	}
-	if a.Kind, _, err = stringArg(m, "kind", 0); err != nil {
-		return a, err
-	}
-	if a.Kind != "" && a.Kind != config.KindA2A && a.Kind != config.KindMCP {
-		return a, badArgs("kind must be a2a or mcp")
-	}
-	if _, ok := m["kind"]; ok && a.Kind == "" {
-		return a, badArgs("kind must be a2a or mcp")
 	}
 	if a.Price, _, err = stringArg(m, "price", 32); err != nil {
 		return a, err

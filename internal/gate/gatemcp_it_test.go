@@ -614,8 +614,10 @@ func TestGateMCPHire(t *testing.T) {
 	}
 
 	// search and describe through the replica; D289: /mcp's tools write no calls rows.
-	_, ans = c.call("search", `{"kind":"a2a"}`)
-	if sr := ans.tool(t); !strings.Contains(sr.text(), `"ref":"hello"`) || strings.Contains(sr.text(), `"ref":"closed"`) {
+	// search returns A2A agents only: the MCP service web is never listed (D350).
+	_, ans = c.call("search", `{}`)
+	if sr := ans.tool(t); !strings.Contains(sr.text(), `"ref":"hello"`) || strings.Contains(sr.text(), `"ref":"closed"`) ||
+		strings.Contains(sr.text(), `"ref":"web"`) {
 		t.Errorf("search: %s", ans.raw)
 	}
 	_, ans = c.call("describe", `{"service":"web"}`)

@@ -432,14 +432,15 @@ func TestParseMessage(t *testing.T) {
 // The tools' arguments are read against their schemas: unknown members, wrong types and refs that do not match the
 // pattern are invalid-arguments errors (a tool execution error, never a protocol error).
 func TestArguments(t *testing.T) {
-	if a, err := parseSearchArgs(json.RawMessage(`{"query":"Hello","kind":"a2a","price":"free","cursor":"x"}`)); err != nil ||
-		a.Query != "Hello" || a.Kind != "a2a" || a.Price != "free" {
+	if a, err := parseSearchArgs(json.RawMessage(`{"query":"Hello","price":"free","cursor":"x"}`)); err != nil ||
+		a.Query != "Hello" || a.Price != "free" {
 		t.Errorf("search: %+v %v", a, err)
 	}
 	if _, err := parseSearchArgs(nil); err != nil {
 		t.Errorf("search without arguments: %v", err)
 	}
-	for _, bad := range []string{`{"kind":"x"}`, `{"query":1}`, `{"other":1}`, `{"query":"` + strings.Repeat("q", 257) + `"}`} {
+	// kind is not an argument: search returns A2A agents only (D350).
+	for _, bad := range []string{`{"kind":"a2a"}`, `{"kind":"x"}`, `{"query":1}`, `{"other":1}`, `{"query":"` + strings.Repeat("q", 257) + `"}`} {
 		var ae *argError
 		if _, err := parseSearchArgs(json.RawMessage(bad)); !errors.As(err, &ae) {
 			t.Errorf("search %s: %v", bad, err)

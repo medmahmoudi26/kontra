@@ -17,21 +17,22 @@ import (
 // <tenant>/<name>, and the caller is buyer A, an API key of the team tenant default (principal org:default). Seeded:
 // acme/pub (a2a, another tenant's, listed, annotations.search {price, price_model per_call}, §13.4), default/team (a2a, allow org:default), default/open
 // (a2a, allow anonymous only, not listed), default/fs (mcp, its tools cached on replica A by a client's tools/list
-// through the relay), default/cold (mcp, nothing cached), 60 default/page-NN (mcp) for paging, an anonymous tenant's
+// through the relay), default/cold (mcp, nothing cached), 60 default/page-NN (a2a, one seller) for paging, an anonymous tenant's
 // service that every rule but the anonymous-tenant one would show (listed, allow anonymous, its own org and
 // org:default), and the harness's default/slow. Asserted:
 //
-//   - search with no arguments returns, in ref order and 50 a page, every service but open and the anonymous tenant's;
-//     the cursor continues with no duplicate and no gap;
-//   - query matches a case-insensitive substring of the ref, the name or the description; kind and price filter by
-//     equality (price=free: no price_model); every answer is ordered by ref;
+//   - search with no arguments returns, in ref order and 50 a page, every A2A service but open and the anonymous
+//     tenant's, and no MCP service (D350); the cursor continues with no duplicate and no gap;
+//   - query matches a case-insensitive substring of the ref, the name or the description; price filters by equality
+//     (price=free: no price_model); kind is not an argument (a tool error); every answer is ordered by ref;
 //   - describe of open and of the anonymous tenant's service is the unknown-service error; describe of an A2A ref
 //     answers the served card and the URLs to call it directly;
 //   - describe of fs answers the cached tools with no upstream request during the call; describe of cold answers
 //     toolsCached false and, however many describes are sent, starts exactly one background drain on that replica.
 func TestGateMCPSearch(t *testing.T) {
-	sellers := map[string]*Seller{"pub": StartSeller(t), "team": StartSeller(t), "open": StartSeller(t), "anon": StartSeller(t)}
-	fsUp, coldUp, pageUp := mcptest.New(), mcptest.New(), mcptest.New()
+	sellers := map[string]*Seller{"pub": StartSeller(t), "team": StartSeller(t), "open": StartSeller(t), "anon": StartSeller(t),
+		"page": StartSeller(t)}
+	fsUp, coldUp := mcptest.New(), mcptest.New()
 	fsUp.Tools = []json.RawMessage{mcptest.Tool("read_file", ""), mcptest.Tool("list_dir", "")}
 	coldUp.Tools = []json.RawMessage{mcptest.Tool("freeze", "")}
 	h := start(t, Options{Multi: true})
@@ -52,9 +53,8 @@ func TestGateMCPSearch(t *testing.T) {
 		// Visible by every other rule (listed, and its allow names buyer A's org): only the anonymous-tenant rule hides it.
 		{Tenant: anonSlug, Name: "shown", URL: sellers["anon"].URL, Allow: []string{"anonymous", "org:" + anonSlug, "org:" + TeamTenant}, Listed: true},
 	}
-	pageURL := doubleURL(t, pageUp)
 	for i := range 60 {
-		svcs = append(svcs, SeededService{Tenant: TeamTenant, Name: fmt.Sprintf("page-%02d", i), Kind: "mcp", URL: pageURL})
+		svcs = append(svcs, SeededService{Tenant: TeamTenant, Name: fmt.Sprintf("page-%02d", i), URL: sellers["page"].URL})
 	}
 	if err := h.SeedServices(ctx, svcs...); err != nil {
 		t.Fatal(err)
@@ -73,11 +73,11 @@ func TestGateMCPSearch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := h.WaitMCP(ctx, "default/page-59", h.APIKey, 30*time.Second); err != nil {
+	if err := h.WaitA2A(ctx, "default/page-59", h.APIKey, 60*time.Second); err != nil {
 		t.Fatal(err)
 	}
 
-	visible := []string{"acme/pub", "default/cold", "default/fs"}
+	visible := []string{"acme/pub"}
 	for i := range 60 {
 		visible = append(visible, fmt.Sprintf("default/page-%02d", i))
 	}
@@ -166,17 +166,27 @@ func TestGateMCPSearch(t *testing.T) {
 		want []string
 	}{
 		{`{"query":"PUB"}`, []string{"acme/pub"}},
-		{`{"query":"page-1"}`, visible[13:23]},
-		{`{"query":"every kind"}`, []string{"acme/pub", "default/team"}}, // the seller card's description
-		{`{"kind":"a2a"}`, []string{"acme/pub", "default/slow", "default/team"}},
-		{`{"kind":"mcp"}`, visible[1:63]},
+		{`{"query":"page-1"}`, visible[11:21]},
+		{`{"query":"default/fs"}`, nil}, // an MCP service is never returned (D350)
+		{`{"query":"cold"}`, nil},
 		{`{"price":"per_call"}`, []string{"acme/pub"}},
 		{`{"price":"free"}`, visible[1:]},
-		{`{"kind":"a2a","price":"free"}`, []string{"default/slow", "default/team"}},
 	} {
 		if got := all(c.args); !slices.Equal(got, c.want) {
 			t.Errorf("search %s:\n got %v\nwant %v", c.args, got, c.want)
 		}
+	}
+	// The seller card's description: every service whose served card it is (acme/pub, default/team and the pages
+	// once their card was read), and nothing else.
+	if got := all(`{"query":"every kind"}`); !slices.Contains(got, "acme/pub") || !slices.Contains(got, "default/team") ||
+		slices.ContainsFunc(got, func(r string) bool {
+			return r != "acme/pub" && r != "default/team" && !strings.HasPrefix(r, "default/page-")
+		}) {
+		t.Errorf("search {query: every kind}: %v", got)
+	}
+	// kind is not an argument: a tool error naming it, as for any argument search does not take (D350).
+	if r := Tool(t, s.Tool("search", `{"kind":"a2a"}`)); !r.IsError || !strings.Contains(r.Text(), `"kind"`) {
+		t.Errorf("search {kind: a2a}: %+v, want a tool error naming kind", r)
 	}
 	for _, f := range append(all(`{}`), all(`{"query":"anon"}`)...) {
 		if f == "default/open" || strings.HasPrefix(f, "anon-") {

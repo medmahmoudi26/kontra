@@ -116,17 +116,17 @@ type CreateTask struct {
 	// initialize declares (§11.5 step 3).
 	ClientCapabilities json.RawMessage
 	Sealed             bool           // the service's sealed flag (D174)
-	Decision           hooks.Decision // Admission's: allow, or quote with its terms; its metadata and mcpMeta
+	Decision           hooks.Decision // Admission's allow, with its metadata and mcpMeta (an MCP task is never quoted, D350)
 	// Headers are a modern call's Mcp-Param-* headers, which the modern dispatch sends with its tools/call (§11.12).
 	Headers map[string][]string
 }
 
-// errAdmission is an Admission decision a task cannot be created with (an unparsable quote, keys outside §13.2):
+// errAdmission is an Admission decision a task cannot be created with (a quote, keys outside §13.2):
 // the request is answered "admission unavailable" (it fails closed, §13.1).
 var errAdmission = errors.New("mcprelay: admission unavailable")
 
 // Create creates a gate-owned task for an admitted task-augmented call (§11.5 steps 1–2, §11.12 steps 2–4): the
-// task row (protocol mcp; created quoted on a quote, with the approve URL, D21), the work item holding the request
+// task row (protocol mcp, created submitted: an MCP task is never quoted, D350), the work item holding the request
 // with the client session's hash and JSON-RPC id, in one transaction, and the TaskLifecycle start. It returns once
 // the row is committed and the start was issued. A start that fails leaves the row (the orphan sweep ends it
 // lifecycle_unavailable after 2 minutes, D63) and is an error.
@@ -149,19 +149,12 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 		t.logger.Warn("an Admission decision's metadata was refused; the task is not created", "service", svc.Name, "error", err)
 		return uuid.Nil, errAdmission
 	}
+	if d.Outcome != hooks.Allow {
+		// admitTask refuses a quote (D350); a decision that is not an allow never creates a task.
+		return uuid.Nil, errAdmission
+	}
 	state, approveURL := store.StateSubmitted, ""
 	var quoteExpires *time.Time
-	if d.Outcome == hooks.Quote {
-		if d.Quote == nil || d.Quote.ApproveURL == "" {
-			return uuid.Nil, errAdmission
-		}
-		exp, err := time.Parse(time.RFC3339, d.Quote.ExpiresAt)
-		if err != nil {
-			return uuid.Nil, errAdmission
-		}
-		exp = exp.UTC()
-		state, approveURL, quoteExpires = store.StateQuoted, d.Quote.ApproveURL, &exp
-	}
 	id := req.TaskID
 	if id == uuid.Nil {
 		if id, err = uuid.NewV7(); err != nil {
@@ -751,8 +744,8 @@ func writeResult(w http.ResponseWriter, sid string, id json.RawMessage, res json
 
 // durableCall is a task-augmented tools/call on a durable service (§11.5 steps 0–2), the tool already resolved
 // against the cached tools/list (an unknown or denied one was -32602): a tool whose execution.taskSupport is absent
-// or forbidden is -32601, with no Admission and no task; then Admission with operation task (a quote creates the
-// task quoted, §13.2), the gate task and its work item, the TaskLifecycle start, and the CreateTaskResult, with
+// or forbidden is -32601, with no Admission and no task; then Admission with operation task (a quote is a deny:
+// MCP services are not priced, D350), the gate task and its work item, the TaskLifecycle start, and the CreateTaskResult, with
 // pollInterval 1000, once the row is committed. Nothing is forwarded on the client's session: the dispatch opens
 // its own upstream session (D22).
 func (h *Handler) durableCall(rq *request, name string, tool json.RawMessage) {
@@ -815,7 +808,8 @@ func (h *Handler) durableCall(rq *request, name string, tool json.RawMessage) {
 }
 
 // admitTask consults Admission with operation task for a durable task (§13.1): the pre-minted task id, and the
-// decision (allow, or a quote); a denial or a hook that fails is the refusal to write. Without the hook for task,
+// decision (an allow); a denial, a quote (MCP services are not priced, D350) or a hook that fails is the refusal to
+// write. Without the hook for task,
 // the built-in allows and the id is minted here.
 func (h *Handler) admitTask(rq *request, tool string) (uuid.UUID, hooks.Decision, *mcpwire.Refusal) {
 	id, err := uuid.NewV7()
@@ -830,7 +824,7 @@ func (h *Handler) admitTask(rq *request, tool string) (uuid.UUID, hooks.Decision
 		Operation: hooks.OpTask, TaskID: id.String(),
 		Service:   hooks.Service{TenantID: ref.TenantID.String(), Tenant: ref.Tenant, Name: ref.Name, Kind: config.KindMCP},
 		Principal: hooks.Principal{Kind: string(rq.p.Kind), ID: rq.p.ID, BuyerID: rq.p.BuyerID.String(), Via: string(rq.p.Via)},
-		Protocol:  "mcp",
+		Protocol:  hooks.ProtocolMCP,
 		Tool:      tool,
 	}
 	if rq.p.TenantID != nil {
@@ -842,8 +836,10 @@ func (h *Handler) admitTask(rq *request, tool string) (uuid.UUID, hooks.Decision
 		return uuid.Nil, d, refusal(http.StatusServiceUnavailable, rq.msg.ID, mcpwire.CodeInternal, "admission unavailable")
 	}
 	switch d.Outcome {
-	case hooks.Allow, hooks.Quote:
+	case hooks.Allow:
 		return id, d, nil
+	case hooks.Quote:
+		return uuid.Nil, d, refusal(http.StatusOK, rq.msg.ID, mcpwire.CodeInternal, hooks.MsgNotPriced)
 	case hooks.Deny:
 		code, msg := mcpwire.CodeInternal, "admission denied"
 		if d.Refusal != nil {
@@ -923,14 +919,13 @@ func createTaskResultModern(row *store.TaskRow, pol store.ServiceRef) (json.RawM
 }
 
 // AnswerCall answers the modern tools/call that created task id (§11.12 step 4, D159, D178), once its row is
-// committed: a quoted task at once with its CreateTaskResult (working, the approve URL in statusMessage and
-// _meta["sh.kontra/approve-url"]); otherwise, after waiting on LISTEN up to modernInlineWait for the task to end, its
+// committed (an MCP task is never quoted, D350; the check on a quoted row stays as a guard): after waiting on LISTEN up to modernInlineWait for the task to end, its
 // outcome in line (the stored CallToolResult with resultType "complete", the stored JSON-RPC error, or §11.8's forms
 // of a failure or a cancel), and the client never sees a task; a task that did not end (or that waits for the
 // client's input, which it cannot get before the client learns its id) is answered with its CreateTaskResult. A
 // client that closes its response stream before either answer is written has cancelled the request (2026-07-28
 // Streamable HTTP, "Cancellation") and never learned the task's id: the task is sent kontra.cancel, not awaited.
-// That is checked right before each answer is written (a quoted task's too), and whenever a read fails, so a client
+// That is checked right before each answer is written, and whenever a read fails, so a client
 // that left during Admission, the task's creation, the wait or the reads after it is never written a refusal in
 // place of the cancel; a task that is terminal already has nothing to cancel.
 func (t *Tasks) AnswerCall(ctx context.Context, w http.ResponseWriter, svc store.ServiceRef, id uuid.UUID, reqID json.RawMessage) {

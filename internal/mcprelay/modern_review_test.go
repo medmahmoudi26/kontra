@@ -74,7 +74,7 @@ func TestModernEraDroppedOnEveryReplica(t *testing.T) {
 }
 
 // A modern client polling its gate-owned task is sending requests: tasks/get touches its principal's virtual
-// session, which the idle sweep then keeps (relay §11.12 "per_session": closed idle after session_idle_s without a
+// session, which the idle sweep then keeps (relay §11.12 "Virtual sessions": closed idle after session_idle_s without a
 // request; last_seen_at written at most once a minute).
 func TestModernTaskPollingKeepsVirtualSession(t *testing.T) {
 	e := newTaskEnv(t)

@@ -47,15 +47,15 @@ func TestToolPolicy(t *testing.T) {
 	e := newEnv(t)
 	up, url := upstreamDouble(t)
 	for _, n := range []string{"add", "echo", "echo2", "mul", "sub"} {
-		up.Tools = append(up.Tools, mcptest.Tool(n, `{"sh.kontra/price":"seller's","io.example/x":1}`))
+		up.Tools = append(up.Tools, mcptest.Tool(n, `{"sh.kontra/note":"seller's","io.example/x":1}`))
 	}
 	up.Tools = up.Tools[1:] // drop the default echo
 	up.PageSize = 2
 	e.service("fs", url, func(s *Service) {
 		s.Tools = Policy{Deny: []string{"ec*"}}
 		s.ToolMeta = map[string]map[string]json.RawMessage{
-			"*":   {"sh.kontra/price": json.RawMessage(`"1 USD"`)},
-			"mul": {"sh.kontra/price": json.RawMessage(`"5 USD"`)},
+			"*":   {"sh.kontra/note": json.RawMessage(`"1 USD"`)},
+			"mul": {"sh.kontra/note": json.RawMessage(`"5 USD"`)},
 		}
 	})
 	r := e.replica("a", replicaOpts{})
@@ -75,7 +75,7 @@ func TestToolPolicy(t *testing.T) {
 		if n == "mul" {
 			want = "5 USD"
 		}
-		if m["sh.kontra/price"] != want || m["io.example/x"] == nil {
+		if m["sh.kontra/note"] != want || m["io.example/x"] == nil {
 			t.Errorf("%s _meta %v", n, m)
 		}
 	}
@@ -369,13 +369,13 @@ func openGET(t *testing.T, c *client, url string, up *mcptest.Server, hdr map[st
 	return resp
 }
 
-// mcp_meta_spoof (§2.5, D174): an upstream's sh.kontra/price, escrow and approve-url and
-// capabilities.experimental["sh.kontra/sealed"] never reach the client; a client's sh.kontra/price never reaches the
+// mcp_meta_spoof (§2.5, D174): an upstream's sh.kontra/note, escrow and approve-url and
+// capabilities.experimental["sh.kontra/sealed"] never reach the client; a client's sh.kontra/note never reaches the
 // upstream; _meta["sh.kontra/sealed"] on an upstream elicitation/create and on a client's tools/call is removed on a
 // service without sealed, and on a sealed service only an exact {v, envelope} passes.
 func TestMetaSpoof(t *testing.T) {
 	const env = `{"v":1,"envelope":"AAEC"}`
-	spoof := `{"sh.kontra/price":"9 USD","sh.kontra/escrow":{"held":true},"sh.kontra/approve-url":"https://evil.example/approve","sh.kontra/session_idle_s":1}`
+	spoof := `{"sh.kontra/note":"9 USD","sh.kontra/escrow":{"held":true},"sh.kontra/approve-url":"https://evil.example/approve","sh.kontra/session_idle_s":1}`
 	for _, sealed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("sealed=%v", sealed), func(t *testing.T) {
 			e := newEnv(t)
@@ -406,15 +406,15 @@ func TestMetaSpoof(t *testing.T) {
 				t.Errorf("tools/list: %s", rep.body)
 			}
 			body := func(meta string) string {
-				return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"sh.kontra/price":"args are never read"},"_meta":` + meta + `}}`
+				return `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"sh.kontra/note":"args are never read"},"_meta":` + meta + `}}`
 			}
-			rep = c.do(http.MethodPost, r.url+"/mcp/fs", body(`{"sh.kontra/price":"0 USD","sh.kontra/sealed":`+env+`,"progressToken":1}`), nil)
+			rep = c.do(http.MethodPost, r.url+"/mcp/fs", body(`{"sh.kontra/note":"0 USD","sh.kontra/sealed":`+env+`,"progressToken":1}`), nil)
 			if rep.status != 200 || strings.Contains(string(rep.body), "sh.kontra/") {
 				t.Errorf("tools/call answer: %s", rep.body)
 			}
 			got := string(lastRequest(t, up, "tools/call").Body)
-			if strings.Contains(got, `"sh.kontra/price":"0 USD"`) || !strings.Contains(got, `"progressToken":1`) ||
-				!strings.Contains(got, `"arguments":{"sh.kontra/price":"args are never read"}`) {
+			if strings.Contains(got, `"sh.kontra/note":"0 USD"`) || !strings.Contains(got, `"progressToken":1`) ||
+				!strings.Contains(got, `"arguments":{"sh.kontra/note":"args are never read"}`) {
 				t.Errorf("upstream saw %s", got)
 			}
 			if strings.Contains(got, `"sh.kontra/sealed"`) != sealed {
@@ -436,7 +436,7 @@ func TestMetaSpoof(t *testing.T) {
 			defer resp.Body.Close()
 			ups := up.Sessions()[0]
 			for _, m := range []string{
-				`{"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"message":"?","_meta":{"sh.kontra/sealed":` + env + `,"sh.kontra/price":"1"}}}`,
+				`{"jsonrpc":"2.0","id":"e1","method":"elicitation/create","params":{"message":"?","_meta":{"sh.kontra/sealed":` + env + `,"sh.kontra/note":"1"}}}`,
 				`{"jsonrpc":"2.0","id":"e2","method":"elicitation/create","params":{"message":"?","_meta":{"sh.kontra/sealed":{"v":1,"envelope":"AAEC","x":1}}}}`,
 				`{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"x","_meta":` + spoof + `}}`,
 			} {
@@ -448,21 +448,21 @@ func TestMetaSpoof(t *testing.T) {
 			if len(evs) != 3 {
 				t.Fatalf("events %q", evs)
 			}
-			if strings.Contains(evs[0], `"sh.kontra/sealed"`) != sealed || strings.Contains(evs[0], "sh.kontra/price") {
+			if strings.Contains(evs[0], `"sh.kontra/sealed"`) != sealed || strings.Contains(evs[0], "sh.kontra/note") {
 				t.Errorf("sealed=%v, elicitation e1: %s", sealed, evs[0])
 			}
 			if strings.Contains(evs[1], "sh.kontra/") || strings.Contains(evs[2], "sh.kontra/") {
 				t.Errorf("e2 or the notification: %q", evs[1:])
 			}
 			// The client's answer: the envelope kept on a sealed service only.
-			c.do(http.MethodPost, r.url+"/mcp/fs", `{"jsonrpc":"2.0","id":"e1","result":{"action":"accept","_meta":{"sh.kontra/sealed":`+env+`,"sh.kontra/price":"x"}}}`, nil)
+			c.do(http.MethodPost, r.url+"/mcp/fs", `{"jsonrpc":"2.0","id":"e1","result":{"action":"accept","_meta":{"sh.kontra/sealed":`+env+`,"sh.kontra/note":"x"}}}`, nil)
 			var answer string
 			for _, rq := range up.Requests() {
 				if strings.Contains(string(rq.Body), `"id":"e1"`) {
 					answer = string(rq.Body)
 				}
 			}
-			if strings.Contains(answer, `"sh.kontra/sealed"`) != sealed || strings.Contains(answer, "sh.kontra/price") || answer == "" {
+			if strings.Contains(answer, `"sh.kontra/sealed"`) != sealed || strings.Contains(answer, "sh.kontra/note") || answer == "" {
 				t.Errorf("sealed=%v, the client's answer upstream: %s", sealed, answer)
 			}
 		})
@@ -606,7 +606,7 @@ func TestOriginAndUpstreamRefusals(t *testing.T) {
 	}
 }
 
-// §13.1 with a hooks.Admission fake (C3): a quote on call is a deny with -32603 "priced tasks need tasks: durable"; a
+// §13.1 with a hooks.Admission fake (C3): a quote on call is a deny with -32603 "MCP services are not priced"; a
 // deny carries the refusal; a failing hook is 503 "admission unavailable"; a quote on session refuses the
 // initialize. The upstream sees none of them.
 func TestAdmission(t *testing.T) {
@@ -624,7 +624,7 @@ func TestAdmission(t *testing.T) {
 	quote := hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ApproveURL: "https://cp.example/approve", ExpiresAt: "2030-01-01T00:00:00Z"}}
 	adm.set(quote, nil)
 	rep := c.call(r.url+"/mcp/fs", 1, "echo", "x")
-	if rep.errCode(t) != -32603 || !strings.Contains(string(rep.body), "priced tasks need tasks: durable") {
+	if rep.errCode(t) != -32603 || !strings.Contains(string(rep.body), "MCP services are not priced") {
 		t.Errorf("quote on call: %s", rep.body)
 	}
 	if last := adm.asked[len(adm.asked)-1]; last.Operation != hooks.OpCall || last.Tool != "echo" {
@@ -644,7 +644,7 @@ func TestAdmission(t *testing.T) {
 	adm.set(quote, nil)
 	o := newClient(t, key)
 	rep = o.do(http.MethodPost, r.url+"/mcp/fs", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`, nil)
-	if rep.header.Get("Mcp-Session-Id") != "" || !strings.Contains(string(rep.body), "priced tasks need tasks: durable") {
+	if rep.header.Get("Mcp-Session-Id") != "" || !strings.Contains(string(rep.body), "MCP services are not priced") {
 		t.Errorf("quote on session: %v %s", rep.header, rep.body)
 	}
 	if up.Count("tools/call") != 0 || up.Count("initialize") != 1 || len(e.calls("fs")) != 0 {

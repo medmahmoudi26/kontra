@@ -1,13 +1,12 @@
 // Command a2ui is a small A2A 1.0 agent, written with a2a-go v2.7.0 and no LLM, that takes a table booking through an
 // A2UI v0.9.1 form (https://a2ui.org): a name, the number of guests and a date and time.
 //
-// Its card declares two extensions, neither required: A2UI v0.9.1 (https://a2ui.org/a2a-extension/a2ui/v0.9.1, with
-// the basic catalog as its one catalog) and the input-schema extension (spec/ext-input-schema.md), which is a JSON
-// entry of the card like any seller's own. A first message stops at input-required with the form, as A2UI messages in
+// Its card declares one extension, not required: A2UI v0.9.1 (https://a2ui.org/a2a-extension/a2ui/v0.9.1, with the
+// basic catalog as its one catalog), and its skill's examples suggest a first message (D350). A first message stops at input-required with the form, as A2UI messages in
 // one data part, when the client renders A2UI; the form's Book button sends an A2UI action whose context holds the
 // three fields, and the agent completes with a text that sums the booking up and deletes the form. Each task's form is
-// its own surface, so one context holds several. A client that renders no A2UI is asked in text for the input
-// schema's data part instead, and a first message that already carries that data part, complete, is booked at once.
+// its own surface, so one context holds several. A client that renders no A2UI is asked in text for a data part
+// holding the booking instead, and a first message that already carries that data part, complete, is booked at once.
 //
 // It is an example seller (examples/README.md): a plain A2A agent that imports nothing from Kontra and has no
 // Kontra-specific endpoint. It serves its card at /.well-known/agent-card.json, JSON-RPC at its root and HTTP+JSON
@@ -65,10 +64,6 @@ const (
 	v091 = "v0.9.1"
 	v09  = "v0.9"
 )
-
-// ExtInputSchema is the input-schema extension's URI (spec/ext-input-schema.md): the card says what a first
-// message's data part may hold.
-const ExtInputSchema = "https://kontra.sh/ext/input-schema/v1"
 
 // The form. A task's surface is surfacePrefix and the task's id: A2UI refuses a createSurface for an id a client
 // still shows, and a context (A2UI's session) holds as many forms as it has tasks.
@@ -193,45 +188,22 @@ func card(base string) *a2a.AgentCard {
 			Name:        "Book a table",
 			Description: "Shows a booking form (A2UI v0.9.1, basic catalog) and confirms the name, guests and date it is sent.",
 			Tags:        []string{"booking", "a2ui", "input-required"},
-			Examples:    []string{"a table, please"},
+			Examples:    []string{"a table, please", "book a table for two"},
 		}},
 	}
 }
 
-// extensions are the card's two extension entries.
+// extensions are the card's extension entries: A2UI's alone.
 func extensions() []a2a.AgentExtension {
-	return []a2a.AgentExtension{
-		{
-			URI:         ExtA2UI,
-			Description: "Shows its booking form as A2UI v0.9.1 messages, built with the basic catalog.",
-			Params:      map[string]any{"supportedCatalogIds": []any{BasicCatalog}},
-		},
-		{
-			URI:         ExtInputSchema,
-			Description: "The booking a first message's data part may hold.",
-			Params:      map[string]any{"schema": inputSchema(), "mediaType": "application/json"},
-		},
-	}
+	return []a2a.AgentExtension{{
+		URI:         ExtA2UI,
+		Description: "Shows its booking form as A2UI v0.9.1 messages, built with the basic catalog.",
+		Params:      map[string]any{"supportedCatalogIds": []any{BasicCatalog}},
+	}}
 }
 
-// inputSchema is the input schema's JSON Schema: the booking, as the form's action context holds it, with the
-// number of guests as a number.
-func inputSchema() map[string]any {
-	return map[string]any{
-		"$schema": "https://json-schema.org/draft/2020-12/schema",
-		"type":    "object",
-		"properties": map[string]any{
-			"name":   map[string]any{"type": "string", "minLength": 1, "maxLength": maxName, "description": "The name the table is booked under."},
-			"guests": map[string]any{"type": "integer", "minimum": 1, "maximum": maxGuests, "description": "How many guests."},
-			"date":   map[string]any{"type": "string", "format": "date-time", "description": "When, as an RFC 3339 date-time."},
-		},
-		"required":             []any{"name", "guests", "date"},
-		"additionalProperties": false,
-	}
-}
-
-// cardJSON is the card as served. a2a-go's AgentExtension leaves out a false `required`; the A2UI and input-schema
-// specifications write it out, so the served entries do too.
+// cardJSON is the card as served. a2a-go's AgentExtension leaves out a false `required`; the A2UI specification writes
+// it out, so the served entry does too.
 func cardJSON(base string) ([]byte, error) {
 	raw, err := json.Marshal(card(base))
 	if err != nil {
@@ -267,7 +239,7 @@ func cardJSON(base string) ([]byte, error) {
 // agent is the agent's a2asrv.AgentExecutor.
 type agent struct{}
 
-// Execute runs one turn: a booking that checks out (an A2UI action, or the input schema's data part) completes the
+// Execute runs one turn: a booking that checks out (an A2UI action, or a data part holding the booking) completes the
 // task; anything else asks for it (input-required).
 func (agent) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
@@ -309,7 +281,7 @@ const (
 	askForm    = "Fill in the booking form: a name, the number of guests and a date and time."
 	askCorrect = "Correct the booking form and press Book."
 	askData    = `To book a table, reply with a data part {"name": "…", "guests": 1 to 6, "date": "2026-11-09T19:30:00Z"} ` +
-		`(this agent's input schema), or ask again from a client that renders A2UI v0.9.1.`
+		`(the booking), or ask again from a client that renders A2UI v0.9.1.`
 )
 
 // ask ends the turn at input-required with why (what was wrong, or nothing) and the question. A client that renders
@@ -431,7 +403,7 @@ func dataModel(id, version string, b booking) map[string]any {
 // --- reading a message ---
 
 // incoming is what a message holds that the agent reads: a booking, from the form's action or from a data part of
-// the input schema's shape.
+// the booking's shape.
 type incoming struct {
 	found   bool
 	booking booking
@@ -567,7 +539,7 @@ type booking struct {
 	bad    []string  // what did not check out, in the order parse reads the fields
 }
 
-// Layouts a date may take: RFC 3339 (the input schema's date-time), a DateTimeInput's local date and time, with or
+// Layouts a date may take: RFC 3339 (a data part's date-time), a DateTimeInput's local date and time, with or
 // without seconds, and a date alone.
 var layouts = []struct {
 	layout      string

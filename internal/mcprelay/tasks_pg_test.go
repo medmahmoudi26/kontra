@@ -581,23 +581,16 @@ func TestDurableTaskRefusals(t *testing.T) {
 			t.Errorf("a denied task: %d, want %d", got, code)
 		}
 	}
-	// Admission quotes: the task is created quoted, working to the client with the approve URL (D21).
-	adm.set(hooks.Decision{Outcome: hooks.Quote, MCPMeta: map[string]any{"sh.kontra/price": "1 USD"},
+	// Admission quotes: MCP services are not priced, so the quote is a deny whatever the hook answers, and no task is
+	// created or dispatched (D350).
+	adm.set(hooks.Decision{Outcome: hooks.Quote,
 		Quote: &hooks.QuoteTerms{ApproveURL: "https://pay.example/t/1", ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}, nil)
 	rq := c.taskCall(5, "research", map[string]any{})
-	taskID := created(t, rq)
-	if !strings.Contains(string(rq.body), `"statusMessage":"https://pay.example/t/1"`) || !strings.Contains(string(rq.body), `"sh.kontra/approve-url":"https://pay.example/t/1"`) ||
-		!strings.Contains(string(rq.body), `"sh.kontra/price":"1 USD"`) {
-		t.Fatalf("a quoted task: %s", rq.body)
+	if rq.errCode(t) != -32603 || !strings.Contains(string(rq.body), hooks.MsgNotPriced) {
+		t.Fatalf("a quoted MCP task: %s", rq.body)
 	}
-	var st string
-	_ = e.pool.QueryRow(context.Background(), `select state from kontra.tasks where id = $1`, taskID).Scan(&st)
-	if st != "quoted" || up.Count("tools/call") != 0 {
-		t.Fatalf("a quoted task is %s and dispatched %d calls", st, up.Count("tools/call"))
-	}
-	g := c.tasks("tasks/get", taskID, 6)
-	if status(t, g) != "working" || !strings.Contains(string(g.body), `"sh.kontra/approve-url"`) {
-		t.Fatalf("tasks/get of a quoted task: %s", g.body)
+	if n := e.count(`select count(*) from kontra.tasks`); n != 0 || up.Count("tools/call") != 0 {
+		t.Fatalf("a quoted MCP task: %d tasks, %d upstream calls", n, up.Count("tools/call"))
 	}
 }
 
@@ -1692,19 +1685,20 @@ func TestRequiredTasks(t *testing.T) {
 		t.Fatalf("the refused calls: Admission asked %d times, %d upstream calls, %d calls rows", adm.n(), up.Count("tools/call"),
 			e.count(`select count(*) from kontra.calls`))
 	}
-	// A task: Admission's task, then quoted with nothing dispatched.
+	// A task: Admission's task; a quote is a deny (MCP services are not priced, D350), with nothing created or
+	// dispatched.
 	adm.set(hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ApproveURL: "https://pay.example/t/2",
 		ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}, nil)
-	taskID := created(t, c.taskCall(5, "research", map[string]any{}))
+	if got := c.taskCall(5, "research", map[string]any{}).errCode(t); got != -32603 {
+		t.Errorf("a quoted task of a required service: %d, want -32603", got)
+	}
 	adm.mu.Lock()
 	asked := append([]hooks.AdmitRequest(nil), adm.asked...)
 	adm.mu.Unlock()
 	if len(asked) != 1 || asked[0].Operation != hooks.OpTask || asked[0].Tool != "research" {
 		t.Fatalf("Admission was asked %+v, want once for a task of research", asked)
 	}
-	var st string
-	_ = e.pool.QueryRow(context.Background(), `select state from kontra.tasks where id = $1`, taskID).Scan(&st)
-	if st != "quoted" || up.Count("tools/call") != 0 {
-		t.Fatalf("the quoted task is %s with %d upstream calls", st, up.Count("tools/call"))
+	if n := e.count(`select count(*) from kontra.tasks`); n != 0 || up.Count("tools/call") != 0 {
+		t.Fatalf("the quoted task: %d tasks, %d upstream calls", n, up.Count("tools/call"))
 	}
 }

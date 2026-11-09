@@ -1394,7 +1394,7 @@ func TestMCPServicesInTheRegistry(t *testing.T) {
     tasks: passthrough
     session_idle_s: 120
     max_sessions_per_principal: 5
-    annotations: { tool_meta: { "*": { "sh.kontra/price": "1 USD" } }, initialize_meta: { "sh.kontra/price": "per session" } }
+    annotations: { tool_meta: { "*": { "sh.kontra/note": "1 USD" } }, initialize_meta: { "sh.kontra/note": "per session" } }
   fs:
     kind: mcp
     backend: { tunnel: {} }
@@ -1425,7 +1425,7 @@ func TestMCPServicesInTheRegistry(t *testing.T) {
 	if ok, _ := web.Tools.Allows("write_file"); ok {
 		t.Error("write_file is allowed outside allow")
 	}
-	if string(web.ToolMeta["*"]["sh.kontra/price"]) != `"1 USD"` || string(web.InitializeMeta["sh.kontra/price"]) != `"per session"` {
+	if string(web.ToolMeta["*"]["sh.kontra/note"]) != `"1 USD"` || string(web.InitializeMeta["sh.kontra/note"]) != `"per session"` {
 		t.Errorf("annotations %v %v", web.ToolMeta, web.InitializeMeta)
 	}
 	fs, _ := s.MCPService(ctx, TeamTenant, "fs")

@@ -94,7 +94,7 @@ func (w *countingWarmer) WarmTools(_ *mcprelay.Service, _ auth.Principal, info f
 // search and describe on a single-tenant gate (§12.2, D271): only the services whose allow: admits the principal by
 // an entry other than anonymous, plus listed ones, never a disabled one; ordered by ref, 50 a page, the cursor
 // granting nothing; query matches the ref, the name or the description (the served card's, else search.description)
-// case-insensitively; kind and price filter (free: no price_model); available is a direct backend or a session of a
+// case-insensitively; price filters (free: no price_model); an MCP service is never returned (D350); available is a direct backend or a session of a
 // live replica. describe of a ref search would not return is the unknown-service error; an MCP service's cold tools
 // cache answers toolsCached false and starts one drain per service per 10 minutes, a warm one its filtered tools.
 func TestCatalogSingleTenant(t *testing.T) {
@@ -119,7 +119,7 @@ func TestCatalogSingleTenant(t *testing.T) {
 	warm := &countingWarmer{}
 	webSvc := &mcprelay.Service{}
 	webSvc.Tools = mcprelay.Policy{Deny: []string{"secret"}}
-	webSvc.ToolMeta = map[string]map[string]json.RawMessage{"*": {"sh.kontra/price": json.RawMessage(`"1 EUR"`)}}
+	webSvc.ToolMeta = map[string]map[string]json.RawMessage{"*": {"sh.kontra/note": json.RawMessage(`"1 EUR"`)}}
 	c := NewCatalog(CatalogConfig{DB: e.pool, PublicURL: "https://gate.example/", MCP: mcpServices{"web": webSvc}, Tools: tools, Warm: warm})
 	p := keyPrincipal(e.team, tenant.TeamSlug, "kk_default_ab12cd34")
 
@@ -148,7 +148,6 @@ func TestCatalogSingleTenant(t *testing.T) {
 	for i := range 55 {
 		want = append(want, fmt.Sprintf("s%03d", i))
 	}
-	want = append(want, "web")
 	if fmt.Sprint(refs) != fmt.Sprint(want) {
 		t.Fatalf("search returned %v\nwant %v", refs, want)
 	}
@@ -159,8 +158,8 @@ func TestCatalogSingleTenant(t *testing.T) {
 	if h := byRef["hello"]; h.Kind != "a2a" || h.Description != "Says hello" || h.Price != "1 EUR a task" || !h.Available || h.Name != "hello" {
 		t.Errorf("hello: %+v", h)
 	}
-	if w := byRef["web"]; w.Kind != "mcp" || w.Description != "Web tools" || !w.Available {
-		t.Errorf("web: %+v", w)
+	if w, ok := byRef["web"]; ok {
+		t.Errorf("search returned an MCP service: %+v", w)
 	}
 	if n := byRef["nodeonly"]; n.Available {
 		t.Errorf("a tunnel service no session serves is available: %+v", n)
@@ -173,10 +172,9 @@ func TestCatalogSingleTenant(t *testing.T) {
 		args SearchArgs
 		want string
 	}{
-		{SearchArgs{Kind: "mcp"}, "[web]"},
 		{SearchArgs{Query: "HELLO"}, "[hello]"},
 		{SearchArgs{Query: "says"}, "[hello]"},
-		{SearchArgs{Query: "web t"}, "[web]"},
+		{SearchArgs{Query: "web t"}, "[]"},
 		{SearchArgs{Price: "per_task"}, "[hello]"},
 		{SearchArgs{Price: "per_call"}, "[]"},
 		{SearchArgs{Query: "s05", Price: "free"}, "[s050 s051 s052 s053 s054]"},
@@ -219,11 +217,6 @@ func TestCatalogSingleTenant(t *testing.T) {
 	if _, err := c.Describe(ctx, p, Ref{Name: "web"}); err != nil || warm.n.Load() != 1 {
 		t.Fatalf("a second describe within 10 minutes started %d drains, want 1 (%v)", warm.n.Load(), err)
 	}
-	// The drain's serverInfo describes an MCP service without a search.description annotation.
-	e.exec(`update kontra.services set annotations = '{}' where tenant_id = $1 and name = 'web'`, e.team)
-	if r, _ := c.Search(ctx, p, SearchArgs{Kind: "mcp"}); len(r.Services) != 1 || r.Services[0].Description != "The web server" {
-		t.Errorf("an MCP service described by its serverInfo: %+v", r.Services)
-	}
 	// Warm the cache as a client's session would: describe then shows the relay's view (denied tools dropped, tool_meta).
 	key := mcprelay.ToolsKey{TenantID: e.team, Service: "web"}
 	if _, err := tools.List(ctx, key, mcpwire.EraLegacy, mcprelay.ToolView{}, func(context.Context, string) (json.RawMessage, error) {
@@ -235,7 +228,7 @@ func TestCatalogSingleTenant(t *testing.T) {
 	if err != nil || d.ToolsCached == nil || !*d.ToolsCached || len(d.Tools) != 1 || d.Capabilities.Tools == nil || *d.Capabilities.Tools != 1 {
 		t.Fatalf("describe web, warm: %+v %v", d, err)
 	}
-	if got := string(d.Tools[0]); got != `{"name":"fetch","inputSchema":{"type":"object"},"_meta":{"sh.kontra/price":"1 EUR"}}` {
+	if got := string(d.Tools[0]); got != `{"name":"fetch","inputSchema":{"type":"object"},"_meta":{"sh.kontra/note":"1 EUR"}}` {
 		t.Errorf("the described tool: %s", got)
 	}
 

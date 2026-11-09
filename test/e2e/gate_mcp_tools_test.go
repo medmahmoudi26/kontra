@@ -18,11 +18,12 @@ import (
 // gate_mcp_tools (spec/relay.md §16; §12.6, D332 to D339). The gate's own /mcp called by the official MCP Go SDK
 // (github.com/modelcontextprotocol/go-sdk), unmodified, in both eras (a 2025-11-25 session and 2026-07-28 requests),
 // with an API key; a node enrolled on the gate hosts the in-test seller (the TCK seller's artifact kinds, "slow", "ask";
-// its card carries the input schema extension) and examples/mcp/everything. Every tool, as a client that shows its
+// its card still carries the withdrawn input-schema extension, D350) and examples/mcp/everything. Every tool, as a client that shows its
 // model only tools uses them:
 //
 //   - tools/list gives every tool its input schema and the tools that answer a task their output schemas;
-//   - describe gives the seller's capabilities (streaming, skills, the input schema) and the MCP service's tool count;
+//   - describe gives the seller's capabilities (streaming, skills; the withdrawn input schema is listed as an extension
+//     and never surfaced as inputSchema) and the MCP service's tool count;
 //   - hire with an idempotencyKey twice is one task; the key with another message is isError and creates nothing;
 //   - status {after: 0} is the task's history (its artifacts' ids among them); artifact gives one of them in full;
 //   - a slow hire with a progress token gets notifications/progress, then the hire result naming status; status {after:
@@ -38,7 +39,7 @@ func TestGateMCPTools(t *testing.T) {
 		t.Skip("e2e: skipped under -short")
 	}
 	const inputSchema = `{"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]}`
-	seller := StartSellerCaps(t, `{"streaming":true,"extensions":[{"uri":"`+gatemcp.InputSchemaURI+`","required":false,`+
+	seller := StartSellerCaps(t, `{"streaming":true,"extensions":[{"uri":"https://kontra.sh/ext/input-schema/v1","required":false,`+
 		`"params":{"schema":`+inputSchema+`}}]}`)
 	h := start(t, Options{Tunnel: map[string]TunnelService{"kinds": {}}, MCP: map[string]MCPService{"everything": {}}})
 	ctx := ctxFor(t, 10*time.Minute)
@@ -162,7 +163,7 @@ func (c *goSDKClient) run(t *testing.T, ctx context.Context, h *Harness, version
 	d := c.call(t, ctx, "describe", map[string]any{"service": "kinds"}, nil)
 	caps, _ := d.structured["capabilities"].(map[string]any)
 	skills, _ := caps["skills"].([]any)
-	if d.isError || caps["streaming"] != true || caps["inputSchema"] == nil || len(skills) != 1 {
+	if d.isError || caps["streaming"] != true || caps["inputSchema"] != nil || len(skills) != 1 {
 		t.Fatalf("describe kinds: %+v", d)
 	}
 	d = c.call(t, ctx, "describe", map[string]any{"service": "everything"}, nil)

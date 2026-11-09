@@ -189,7 +189,7 @@ func TestParseUpstreamProbes(t *testing.T) {
 	for _, c := range []struct{ name, body string }{
 		{"isError/ISERROR", `{"jsonrpc":"2.0","id":1,"result":{"content":[],"isError":true,"ISERROR":false}}`},
 		{"tools name/NAME", `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","inputSchema":{}},{"name":"add","NAME":"rm","inputSchema":{}}]}}`},
-		{"tools _meta", `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","_meta":{"sh.kontra/price":1,"SH.KONTRA/PRICE":0}}]}}`},
+		{"tools _meta", `{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"echo","_meta":{"sh.kontra/note":1,"SH.KONTRA/NOTE":0}}]}}`},
 		{"capabilities.extensions", `{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"extensions":{"io.modelcontextprotocol/tasks":{},"Io.modelcontextprotocol/tasks":{}}}}}`},
 		{"capabilities.experimental", `{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"experimental":{"sh.kontra/sealed":{},"sh.kontra/SEALED":{}}}}}`},
 		{"result.task", `{"jsonrpc":"2.0","id":1,"result":{"task":{"taskId":"t1","TASKID":"t2","status":"working"}}}`},

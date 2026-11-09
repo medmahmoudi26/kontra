@@ -215,7 +215,7 @@ Buyer-written: `kontra.escrow.dispute: {reason}` on a message to the task inside
 
 `params.required` says whether unsealed parts are rejected. Buyer-written metadata: `kontra.sealed.replyTo` (per-job public key). Sealed parts are recognized by `mediaType`, so no status key is needed.
 
-**Input schema** `https://kontra.sh/ext/input-schema/v1` (open source, optional)
+**Input schema** `https://kontra.sh/ext/input-schema/v1` (open source, optional). *Withdrawn on 7 Nov (D350): a first message is plain A2A; sellers suggest one with `skills[].examples`.*
 
 ```json
 {

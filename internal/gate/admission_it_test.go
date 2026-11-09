@@ -86,7 +86,7 @@ func (d *admissionDouble) requests() ([]hooks.AdmitRequest, []string) {
 // decision's metadata, under the pre-minted id the hook was shown, and dispatches nothing; kontra.approval {accepted:
 // true}, sent through Temporal as a control plane would, moves it to submitted and it completes. A hook that is down,
 // and one whose quote has expired, are -32603 "admission unavailable" (503 on HTTP+JSON) with no task. On MCP, a quote
-// for a plain call is the deny "priced tasks need tasks: durable" and reaches no upstream.
+// for a plain call is the deny "MCP services are not priced" and reaches no upstream.
 func TestRemoteAdmissionThroughTheGate(t *testing.T) {
 	e := newGateEnv(t)
 	ctx := context.Background()
@@ -210,7 +210,7 @@ hooks:
 		t.Errorf("a refused admission created %d tasks", after-before)
 	}
 
-	// MCP: the hook asked about a plain call (operation call); a quote there is "priced tasks need tasks: durable".
+	// MCP: the hook asked about a plain call (operation call); a quote there is "MCP services are not priced".
 	adm.set("quote")
 	endpoint := run.url + "/mcp/web"
 	st, hd, body := mcpPost(t, endpoint, key, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`)
@@ -219,7 +219,7 @@ hooks:
 		t.Fatalf("initialize: %d %s", st, body)
 	}
 	st, _, body = mcpPost(t, endpoint, key, sid, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}`)
-	if st != 200 || !strings.Contains(body, `-32603`) || !strings.Contains(body, "priced tasks need tasks: durable") {
+	if st != 200 || !strings.Contains(body, `-32603`) || !strings.Contains(body, "MCP services are not priced") {
 		t.Errorf("a quoted plain call: %d %s", st, body)
 	}
 	if up.Calls("echo") != 0 {

@@ -279,12 +279,12 @@ func TestModernHeaderChecks(t *testing.T) {
 // row, named by the calls rows; no Mcp-Session-Id answered.
 func TestModernDualEra(t *testing.T) {
 	e := newEnv(t)
-	up, url := dualEra(t, mcptest.Tool("echo", ""), mcptest.Tool("secret", ""), mcptest.Tool("priced", `{"sh.kontra/price":"9","vendor/x":1}`))
+	up, url := dualEra(t, mcptest.Tool("echo", ""), mcptest.Tool("secret", ""), mcptest.Tool("priced", `{"sh.kontra/note":"9","vendor/x":1}`))
 	up.InitMeta = json.RawMessage(`{"sh.kontra/escrow":"held"}`)
 	up.ModernCapabilities = json.RawMessage(`{"tools":{},"extensions":{"io.modelcontextprotocol/tasks":{},"sh.kontra/x":{}},"experimental":{"sh.kontra/sealed":{}}}`)
 	e.service("svc", url, func(s *Service) {
 		s.Tools = Policy{Deny: []string{"secret"}}
-		s.ToolMeta = map[string]map[string]json.RawMessage{"*": {"sh.kontra/price": json.RawMessage(`"1 USD"`)}}
+		s.ToolMeta = map[string]map[string]json.RawMessage{"*": {"sh.kontra/note": json.RawMessage(`"1 USD"`)}}
 		s.InitializeMeta = map[string]json.RawMessage{"sh.kontra/operator": json.RawMessage(`"op"`)}
 	})
 	r := e.replica("a", replicaOpts{})
@@ -318,7 +318,7 @@ func TestModernDualEra(t *testing.T) {
 	for _, x := range tools {
 		tl := x.(map[string]any)
 		names = append(names, tl["name"].(string))
-		if tm, _ := tl["_meta"].(map[string]any); tm["sh.kontra/price"] != "1 USD" {
+		if tm, _ := tl["_meta"].(map[string]any); tm["sh.kontra/note"] != "1 USD" {
 			t.Errorf("tool_meta not applied to %v", tl)
 		}
 	}
@@ -1362,10 +1362,10 @@ func TestModernAdmissionSessionDeny(t *testing.T) {
 	}
 }
 
-// A quoted modern task is answered at once, working, with the approve URL in statusMessage and
-// _meta["sh.kontra/approve-url"] (§11.12 step 4, D21); nothing is dispatched; and a service whose gate owns no
-// modern tasks (passthrough) is shown no tasks extension by server/discover.
-func TestModernTaskQuoted(t *testing.T) {
+// A quote for a modern task is a deny, -32603 "MCP services are not priced" (§11.12 step 2, D350): no task is
+// created and nothing is dispatched; and a service whose gate owns no modern tasks (passthrough) is shown no tasks
+// extension by server/discover.
+func TestModernTaskQuoteRefused(t *testing.T) {
 	e := newTaskEnv(t)
 	up, url := modernTaskDouble(t)
 	e.service("research", url, nil)
@@ -1382,19 +1382,12 @@ func TestModernTaskQuoted(t *testing.T) {
 	}
 	m := newModern(t, key, r.url+"/mcp/research", true)
 	result(t, m.req(1, "tools/list", nil))
-	start := time.Now()
 	rep := m.req(2, "tools/call", map[string]any{"name": "research", "arguments": map[string]any{}})
-	taskID := createdModern(t, rep)
-	res := result(t, rep)
-	if res["status"] != "working" || res["statusMessage"] != "https://app.example/#/t/approve" ||
-		res["_meta"].(map[string]any)["sh.kontra/approve-url"] != "https://app.example/#/t/approve" || time.Since(start) > time.Second {
-		t.Fatalf("the quoted task after %v: %s", time.Since(start), rep.body)
+	if rep.errCode(t) != -32603 || !strings.Contains(string(rep.body), hooks.MsgNotPriced) {
+		t.Fatalf("a quoted modern task: %s", rep.body)
 	}
-	if get := result(t, m.req(3, "tasks/get", map[string]any{"taskId": taskID})); get["status"] != "working" {
-		t.Fatalf("tasks/get of the quoted task: %v", get)
-	}
-	if up.Calls("research") != 0 {
-		t.Fatal("a quoted task was dispatched")
+	if n := e.count(`select count(*) from kontra.tasks`); n != 0 || up.Calls("research") != 0 {
+		t.Fatalf("a quoted modern task: %d tasks, %d upstream calls", n, up.Calls("research"))
 	}
 }
 

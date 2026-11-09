@@ -1,7 +1,8 @@
 # Escrow extension `https://kontra.sh/ext/escrow/v1`
 
-Status: **draft** (M0, revision 3, 1 Nov: a task's methods need no activation, D318; rails other than `stripe` and the
-`ref` of each receipt, D320; `per_task` on MCP needs `tasks: required`, D322). Public specification; implemented only
+Status: **draft** (M0, revision 4, 7 Nov: MCP services are not priced or escrowed, and the metered prices are
+withdrawn, D350; revision 3, 1 Nov: a task's methods need no activation, D318; rails other than `stripe` and the
+`ref` of each receipt, D320). Public specification; implemented only
 by Kontra Cloud. The open-source gate contains no escrow code and names no escrow key: it passes the card entry
 through from the operator's annotations, enforces `required: true` like any extension (a `hire` of its own `/mcp`
 activates the entry for the buyer, as it does every required entry of the operator's, [`relay.md`](relay.md) §12.2),
@@ -9,9 +10,8 @@ stores the task metadata the operator's hooks write, renders the operator's `mcp
 review-window messages to the operator's `OnReviewMessage` hook ([`relay.md`](relay.md) §2.5, §7, §13).
 
 Escrow is the price shape `per_task` (README, "Pricing"): a fixed quote held once a person accepts it, released
-to the seller after a review window, refunded on dispute or failure. The two metered shapes,
-`per_call` and `per_session`, are not escrow; their advertisement format is in §6 because they share
-the price object.
+to the seller after a review window, refunded on dispute or failure. It covers A2A tasks, a `hire` of the gate's own
+`/mcp` among them; an MCP service is not priced (§6, D350).
 
 ## 1. Card entry
 
@@ -61,8 +61,8 @@ The operator's Admission hook ([`relay.md`](relay.md) §13.1) decides for each n
 money, because nothing makes it atomic with the task's creation. So every paid task starts `quoted`:
 
 1. Admission answers `quote` with an approve URL. The task is `quoted`: on A2A its state is
-   `TASK_STATE_INPUT_REQUIRED` with `metadata["kontra.approve.url"]`; on MCP it is `working` with the URL
-   in `statusMessage` ([`relay.md`](relay.md) §5.1, §12.3). Nothing is dispatched.
+   `TASK_STATE_INPUT_REQUIRED` with `metadata["kontra.approve.url"]`; through `/mcp` `hire` it is `working`
+   with the URL in its result ([`relay.md`](relay.md) §5.1, §12.3). Nothing is dispatched.
 2. A person accepts on that page (Cloud: a confirmed session; a card checkout first when one is needed).
    The operator places the hold, then sends the `kontra.approval` Update with the metadata of §3
    (`kontra.escrow.status = "held"`). If the Update is refused because the quote expired or the task was
@@ -136,41 +136,13 @@ JSON Schema for the message metadata: [`schema/ext-escrow.dispute.json`](schema/
 
 MCP has no in-protocol dispute: a task hired through MCP is disputed on the operator's page.
 
-## 6. Metered prices (`per_call`, `per_session`)
+## 6. MCP services are not priced
 
-Not escrow: nothing is held. The gate meters ([`relay.md`](relay.md) §11.4) and the operator invoices
-(Cloud: monthly, through Stripe Billing; Kontra holds no balance). The price is advertised so a client
-can show it before calling:
-
-- **`per_call`:** on each entry of `tools/list`, `_meta["sh.kontra/price"]`:
-  ```json
-  {"model": "per_call", "amount": "0.002", "currency": "EUR", "freePerMonth": 100, "capPerMonth": "10.00"}
-  ```
-  Written by the operator's `tool_meta` annotation ([`relay.md`](relay.md) §13.4). A call is billable when its
-  `calls` row has `is_error = false` (not a JSON-RPC error, not a top-level `isError: true`); rows with
-  `is_error` null (passthrough task-augmented calls, [`relay.md`](relay.md) §11.5) are never billable.
-- **`per_session`:** on the `initialize` result, `_meta["sh.kontra/price"]`, written by the operator's
-  `initialize_meta` annotation:
-  ```json
-  {"model": "per_session", "amount": "0.50", "currency": "EUR", "idleTimeoutSeconds": 900}
-  ```
-  One billable session is one `mcp_sessions` row, from `created_at` to `closed_at`; `idleTimeoutSeconds` must
-  equal the service's `session_idle_s`, which closes it ([`relay.md`](relay.md) §11.2).
-- **`per_task` on MCP:** requires the service's `tasks: required` ([`relay.md`](relay.md) §11.5, D322): every call
-  is then a gate task, which Admission quotes. Under `durable` a client that does not augment a call reaches the
-  service with no quote, unless the gate-wide `hooks.admission.operations` lists `call`; a priced passthrough call is
-  refused ([`relay.md`](relay.md) §13.1). The operator renders its escrow state on `CreateTaskResult`, `tasks/get` and
-  `tasks/result` through `mcpMeta` as `_meta["sh.kontra/escrow"] = {status, quote, holdId, reviewEndsAt,
-  receipts}` (the fields of §3 without the `kontra.escrow.` prefix); the gate never builds it.
-
-What a metered call costs depends on facts the service controls: the top-level `isError` it returns
-decides whether a call is billable. A service that reports failures as successes bills its callers for
-them; `capPerMonth` bounds that exposure before an invoice, and an operator can stop a listing whose error
-rate does not match what callers report. The gate cannot do better without reading content it must not
-read.
-
-`freePerMonth` and `capPerMonth` are optional. Key names follow MCP's `_meta` rule (a reverse-DNS prefix
-for third parties, D27). JSON Schema: [`schema/price.json`](schema/price.json).
+An MCP service is not listed and not priced (D350): there is no metered price (`per_call`, `per_session`, withdrawn
+with `schema/price.json`) and no escrow on an MCP task. A `quote` from Admission for an MCP task, session or call is
+a deny `-32603` "MCP services are not priced" ([`relay.md`](relay.md) §13.1), so no MCP request is ever `quoted`.
+The gate still renders an operator's `mcpMeta` and `tool_meta` verbatim ([`relay.md`](relay.md) §13.4), but this
+extension defines no key for them.
 
 ## 7. AP2
 

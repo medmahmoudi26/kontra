@@ -42,9 +42,9 @@ var ErrUsage = errors.New("usage")
 // Usage is the command's help.
 const Usage = `usage: kontra publish [--gate <url>] [--control-plane <url>] [--version <n> | --replace] [--dry-run] [--no-browser] <listing.yaml>
 
-kontra publish sends a listing, how one of your services is sold, to the gate operator's control plane (Kontra Cloud):
-its kind (a2a or mcp), visibility, MCP policy, sealing and price, free, per_task, per_call or per_session, in USD
-(spec/schema/listing.json). It checks the file first, then signs you in at the gate's authorization server for the
+kontra publish sends a listing, how one of your A2A agents is sold, to the gate operator's control plane (Kontra
+Cloud): its visibility, sealing and price, free or per_task, in USD (spec/schema/listing.json). MCP servers are not
+listed: host one with kontra connect and it is free and private to your tenant. It checks the file first, then signs you in at the gate's authorization server for the
 control plane, in the browser as kontra login does: a publish is a person's act, never an API key's, and the sign-in
 it gets is used for this publish only and not kept. A listing is never replaced unseen: without --version or
 --replace, kontra publish publishes only a service's first listing, and for one that has a listing it prints that

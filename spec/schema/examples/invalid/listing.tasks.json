@@ -1,0 +1,7 @@
+{
+  "service": "hello",
+  "price": {
+    "model": "free"
+  },
+  "tasks": "durable"
+}

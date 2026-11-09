@@ -141,7 +141,7 @@ func ScrubMessage(src Source, body []byte, m *Message, requestMethod string, sea
 }
 
 // IsKontraKey reports whether k starts with sh.kontra/ under Unicode case folding: a decoder that matches names
-// case-insensitively (encoding/json into a struct field tagged "sh.kontra/price") reads "SH.KONTRA/PRICE", or one
+// case-insensitively (encoding/json into a struct field tagged "sh.kontra/note") reads "SH.KONTRA/NOTE", or one
 // spelled with a long s (U+017F), as the gate's own key, so every such spelling is Kontra's (§2.5).
 func IsKontraKey(k string) bool {
 	n := utf8.RuneCountInString(KontraPrefix)
