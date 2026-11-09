@@ -262,7 +262,7 @@ const searchBatch = 200
 const SearchExamine = 1000
 
 // Search answers search for p (D271): the services visible to p whose ref, name or description contains query
-// (case-insensitively), of kind, whose price_model annotation equals price ("free": none); ordered by ref (byte
+// (case-insensitively), of kind a2a, whose price_model annotation equals price ("free": none); ordered by ref (byte
 // order), PageSize a page, with an opaque keyset cursor; anonymous tenants and services hidden from search (D321)
 // never appear. One request reads at most SearchExamine rows: past them the page ends early, its nextCursor at the
 // last row read.
@@ -279,10 +279,8 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 	if c.multi {
 		refExpr, scope = `t.slug || '/' || s.name`, ` and t.kind <> 'anonymous'`
 	}
-	var kind any
-	if args.Kind != "" {
-		kind = args.Kind
-	}
+	// search returns A2A agents only: MCP services are not listed (D350); describe still answers one by its ref.
+	kind := config.KindA2A
 	query := strings.ToLower(args.Query)
 	out := SearchResult{Services: []ServiceEntry{}}
 	examined := 0
@@ -350,7 +348,7 @@ type scanTail struct {
 
 func (s scanTail) Scan(dest ...any) error { return s.rows.Scan(append(dest, s.extra)...) }
 
-// matches applies search's query and price filters (kind is the query's).
+// matches applies search's query and price filters (kind a2a is the query's).
 func (c *Catalog) matches(s *service, query, price string) bool {
 	switch {
 	case price == "free" && s.priceModel != "":

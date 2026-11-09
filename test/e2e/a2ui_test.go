@@ -23,7 +23,7 @@ const (
 	a2uiAskForm = "Fill in the booking form: a name, the number of guests and a date and time."
 	a2uiBooked  = `Booked a table for 4 under "Robin" on Monday, 9 November 2026 at 19:30.`
 	a2uiAskData = `To book a table, reply with a data part {"name": "…", "guests": 1 to 6, "date": "2026-11-09T19:30:00Z"} ` +
-		`(this agent's input schema), or ask again from a client that renders A2UI v0.9.1.`
+		`(the booking), or ask again from a client that renders A2UI v0.9.1.`
 )
 
 // a2uiFixture is the example seller's testdata/<name>, which make check-specs validates against the vendored A2UI
@@ -167,8 +167,8 @@ func actionPart(t *testing.T) *a2a.Part {
 // seller (examples/sellers/a2ui: a2a-go v2.7.0, A2A 1.0, run unmodified) is hosted by a node whose tunnel is on
 // replica B; the caller is on replica A unless a step says otherwise, and speaks A2A 1.0 only. Asserted:
 //
-//   - the card both replicas serve keeps the seller's capabilities.extensions (A2UI v0.9.1 with the basic catalog,
-//     the input schema) equal under JCS to the seller's own card;
+//   - the card both replicas serve keeps the seller's capabilities.extensions (A2UI v0.9.1 with the basic catalog)
+//     equal under JCS to the seller's own card;
 //   - JSON-RPC SendMessage with A2A-Extensions naming A2UI v0.9.1 and no capabilities: the response's A2A-Extensions
 //     echoes the URI, and the task waits at input-required with the form, so the activation reached the seller: the
 //     A2UI part's data is the example's testdata/messages/surface.json in v0.9.1 on a surface of the task's own, which
@@ -182,7 +182,7 @@ func actionPart(t *testing.T) *a2a.Part {
 //     task's, in the input-required status update and echoes the URI, and a2a-go's own REST client completes the
 //     task with the action;
 //   - /mcp hire activates no optional extension and carries no message metadata (D328's known limit): the seller asks
-//     in text, structuredContent holds no data, and reply with the input schema's data part completes the booking; a
+//     in text, structuredContent holds no data, and reply with a data part holding the booking completes it; a
 //     part's own marks do reach the seller: reply with the form's action in a part marked application/a2ui+json
 //     books another hire.
 func TestA2UIPassthrough(t *testing.T) {
@@ -269,7 +269,7 @@ func TestA2UIPassthrough(t *testing.T) {
 	if pt := plain.(*a2a.Task); pt.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("without A2UI: %s", pt.Status.State)
 	} else if text, ui := a2uiParts(pt.Status.Message); text != a2uiAskData || len(ui) != 0 || len(pt.Status.Message.Parts) != 1 {
-		t.Fatalf("without A2UI: %q with %d parts, want the input schema's question alone", text, len(pt.Status.Message.Parts))
+		t.Fatalf("without A2UI: %q with %d parts, want the question in text alone", text, len(pt.Status.Message.Parts))
 	}
 	withCaps := newMessage("a table, please")
 	withCaps.Message.Metadata = map[string]any{"a2uiClientCapabilities": a2uiFixture(t, "messages/capabilities.json")}
@@ -312,18 +312,18 @@ func TestA2UIPassthrough(t *testing.T) {
 	}
 	checkBooked(t, "the action over HTTP+JSON", done, streamedSurface, "v0.9.1")
 
-	// /mcp hire: no activation and no capabilities reach the seller, which asks in text; reply with the input schema's
-	// data part books.
+	// /mcp hire: no activation and no capabilities reach the seller, which asks in text; reply with a data part
+	// holding the booking books.
 	s := OpenGateSession(t, ctx, a, h.APIKey, `{}`)
 	hire := Tool(t, s.Tool("hire", `{"service":"a2ui","message":"a table, please"}`))
 	if hire.IsError || hire.TaskID() == "" || !strings.Contains(hire.Text(), a2uiAskData) || hire.Structured == nil || len(hire.Structured.Data) != 0 {
 		t.Fatalf("hire: %+v (%s)", hire, hire.StructuredRaw)
 	}
-	data, _ := json.Marshal(a2uiFixture(t, "card/input-schema-data.json"))
+	data, _ := json.Marshal(a2uiFixture(t, "booking.json"))
 	booked := Tool(t, s.Tool("reply", `{"taskId":"`+hire.TaskID()+`","message":{"parts":[{"data":`+string(data)+`,"mediaType":"application/json"}]}}`))
 	if booked.IsError || booked.State() != "TASK_STATE_COMPLETED" ||
 		!strings.Contains(booked.Text(), `Booked a table for 4 under "Robin" on Monday, 9 November 2026 at 19:30 +01:00.`) {
-		t.Fatalf("reply with the input schema's data: %+v", booked)
+		t.Fatalf("reply with the booking's data: %+v", booked)
 	}
 	// A part's metadata and mediaType do pass: the form's action, marked as A2UI in its part, books.
 	again := Tool(t, s.Tool("hire", `{"service":"a2ui","message":"a table, please"}`))

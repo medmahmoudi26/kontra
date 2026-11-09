@@ -60,7 +60,7 @@ func pages(n, size int, calls *atomic.Int32) Pager {
 		}
 		var tools []string
 		for i := range size {
-			tools = append(tools, fmt.Sprintf(`{"name":"t%d-%d","_meta":{"sh.kontra/price":"seller","io.x/k":1},"execution":{"taskSupport":"optional"}}`, p, i))
+			tools = append(tools, fmt.Sprintf(`{"name":"t%d-%d","_meta":{"sh.kontra/note":"seller","io.x/k":1},"execution":{"taskSupport":"optional"}}`, p, i))
 		}
 		res := `{"tools":[` + strings.Join(tools, ",") + `]`
 		if p+1 < n {
@@ -77,8 +77,8 @@ func TestToolsCache(t *testing.T) {
 	v := ToolView{
 		Policy: Policy{Deny: []string{"t1-*"}},
 		Meta: map[string]map[string]json.RawMessage{
-			"*":    {"sh.kontra/price": json.RawMessage(`"1 USD"`)},
-			"t2-0": {"sh.kontra/price": json.RawMessage(`"2 USD"`), "sh.kontra/x": json.RawMessage(`true`)},
+			"*":    {"sh.kontra/note": json.RawMessage(`"1 USD"`)},
+			"t2-0": {"sh.kontra/note": json.RawMessage(`"2 USD"`), "sh.kontra/x": json.RawMessage(`true`)},
 		},
 		DropExecution: true,
 	}
@@ -102,7 +102,7 @@ func TestToolsCache(t *testing.T) {
 		if tool.Name == "t2-0" {
 			want = "2 USD"
 		}
-		if tool.Meta["sh.kontra/price"] != want || tool.Meta["io.x/k"] == nil || tool.Execution != nil {
+		if tool.Meta["sh.kontra/note"] != want || tool.Meta["io.x/k"] == nil || tool.Execution != nil {
 			t.Errorf("%s: %s", tool.Name, raw)
 		}
 	}
@@ -384,7 +384,7 @@ func TestToolViewRequireTasks(t *testing.T) {
 		`{"name":"plain"},` +
 		`{"name":"variant","execution":{"TaskSupport":"optional"}}]}`
 	pager := func(context.Context, string) (json.RawMessage, error) { return json.RawMessage(list), nil }
-	v := ToolView{Meta: map[string]map[string]json.RawMessage{"*": {"sh.kontra/price": json.RawMessage(`"0.01 USD"`)}}, RequireTasks: true}
+	v := ToolView{Meta: map[string]map[string]json.RawMessage{"*": {"sh.kontra/note": json.RawMessage(`"0.01 USD"`)}}, RequireTasks: true}
 	got, err := c.List(context.Background(), key, mcpwire.EraLegacy, v, pager)
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +400,7 @@ func TestToolViewRequireTasks(t *testing.T) {
 			t.Fatal(err)
 		}
 		names = append(names, tool.Name)
-		if tool.Execution["taskSupport"] != "required" || tool.Meta["sh.kontra/price"] != "0.01 USD" {
+		if tool.Execution["taskSupport"] != "required" || tool.Meta["sh.kontra/note"] != "0.01 USD" {
 			t.Errorf("%s under required: %s", tool.Name, raw)
 		}
 		if tool.Name == "research" && tool.Execution["x"] != float64(1) {

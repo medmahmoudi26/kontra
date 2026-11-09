@@ -392,7 +392,7 @@ func TestPublishDryRun(t *testing.T) {
 	}
 	stdout.Reset()
 	if code := run(context.Background(), []string{"publish", "--dry-run", bad}, &stdout, &stderr); code != 1 ||
-		!strings.Contains(stderr.String(), "service: \"Hello\"") || !strings.Contains(stderr.String(), "kind: mcp") {
+		!strings.Contains(stderr.String(), "service: \"Hello\"") || !strings.Contains(stderr.String(), `price.model: "per_call"`) {
 		t.Fatalf("an invalid listing: %d %s", code, stderr.String())
 	}
 }

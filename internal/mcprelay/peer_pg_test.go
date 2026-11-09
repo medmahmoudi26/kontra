@@ -29,7 +29,7 @@ func TestPeerHop(t *testing.T) {
 	a := e.replica("a", replicaOpts{peer: true})
 	b := e.replica("b", replicaOpts{peer: true})
 	up := mcptest.New()
-	up.Tools = []json.RawMessage{mcptest.Tool("echo", `{"sh.kontra/price":"seller's"}`)}
+	up.Tools = []json.RawMessage{mcptest.Tool("echo", `{"sh.kontra/note":"seller's"}`)}
 	up.SSE = true
 	n := e.node(b, up, "tun")
 	key, _ := e.apiKey("buyer")

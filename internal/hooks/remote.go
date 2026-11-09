@@ -30,8 +30,12 @@ var ErrAdmissionUnavailable = errors.New("hooks: admission unavailable")
 // ErrAdmissionUnavailable when the remote hook answers one.
 var ErrInvalidDecision = errors.New("hooks: not a valid Admission decision")
 
-// MsgPricedTasks is the refusal of a quote outside operation task on a gate-owned task (spec §13.1).
-const MsgPricedTasks = "priced tasks need tasks: durable"
+// MsgNotPriced is the refusal of a quote for anything but a gate-owned A2A task: an MCP task, session or call, or a
+// passthrough task-augmented call (spec §13.1). MCP services are not priced (D350).
+const MsgNotPriced = "MCP services are not priced"
+
+// ProtocolMCP is AdmitRequest.Protocol for an MCP request (hooks.json#/$defs/admitRequest).
+const ProtocolMCP = "mcp"
 
 // CodeInternalError is JSON-RPC's -32603, the code of every Admission refusal the gate itself makes.
 const CodeInternalError = -32603
@@ -79,9 +83,8 @@ func (c RemoteAdmissionConfig) LogValue() slog.Value {
 
 // RemoteAdmission is the remote Admission hook (§13.1; built in M4, D275). It POSTs the AdmitRequest and reads a
 // Decision, and fails closed: a timeout, a non-2xx, an unparsable answer, a key outside §13.2's rules or a map over
-// 16 KiB is a deny with -32603 "admission unavailable" (HTTP 503). A quote for any operation but task on a
-// gate-owned task (an A2A task, a hire, an MCP task with tasks: durable) is a deny with -32603 "priced tasks need
-// tasks: durable". An operation the hook does not consult is answered as BuiltinAdmission answers it.
+// 16 KiB is a deny with -32603 "admission unavailable" (HTTP 503). A quote for anything but operation task on a
+// gate-owned A2A task (a hire among them) is a deny with -32603 "MCP services are not priced" (D350). An operation the hook does not consult is answered as BuiltinAdmission answers it.
 //
 // The unavailable cases are returned as an error wrapping ErrAdmissionUnavailable (every caller maps an Admission
 // error to -32603 "admission unavailable", 503), never as a Decision, so that no caller can mistake one for the
@@ -231,10 +234,10 @@ func (r *RemoteAdmission) Admit(ctx context.Context, req AdmitRequest) (Decision
 		return Decision{}, r.unavailable("the decision's maps", err)
 	}
 	if d.Outcome == Quote {
-		if req.Operation != OpTask {
-			// A quote is valid only for a gate-owned task (§13.1); a passthrough task, which the hook is also asked
-			// about with operation task, is refused the same way by the MCP relay.
-			return Decision{Outcome: Deny, Refusal: &Refusal{Code: CodeInternalError, Message: MsgPricedTasks}}, nil
+		if req.Operation != OpTask || req.Protocol == ProtocolMCP {
+			// A quote is valid only for a gate-owned A2A task (§13.1): MCP services are not priced (D350). The MCP
+			// relay refuses a quote the same way whatever Admission answers it.
+			return Decision{Outcome: Deny, Refusal: &Refusal{Code: CodeInternalError, Message: MsgNotPriced}}, nil
 		}
 		if err := CheckQuote(d.Quote, r.now()); err != nil {
 			return Decision{}, r.unavailable("the quote", err)

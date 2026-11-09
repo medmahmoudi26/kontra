@@ -268,11 +268,11 @@ func actionMessage(t *testing.T, name string) *a2a.Message {
 	return a2a.NewMessage(a2a.MessageRoleUser, p)
 }
 
-// The booking testdata/messages/action.json holds (testdata/card/input-schema-data.json too).
+// The booking testdata/messages/action.json holds (testdata/booking.json too).
 const booked = `Booked a table for 4 under "Robin" on Monday, 9 November 2026 at 19:30.`
 
-// The card is A2A 1.0 with both extensions, each with an explicit "required": false: A2UI v0.9.1 with the basic
-// catalog (testdata/card/a2ui-params.json) and the input schema (testdata/card/input-schema-params.json).
+// The card is A2A 1.0 with one extension, with an explicit "required": false: A2UI v0.9.1 with the basic catalog
+// (testdata/card/a2ui-params.json). It declares no input schema (D350); its skill suggests first messages instead.
 func TestCard(t *testing.T) {
 	base := serve(t)
 	resp, err := http.Get(base + "/.well-known/agent-card.json")
@@ -289,15 +289,18 @@ func TestCard(t *testing.T) {
 		card.SupportedInterfaces[0].ProtocolVersion != "1.0" || !card.Capabilities.Streaming {
 		t.Fatalf("interfaces %+v, capabilities %+v", card.SupportedInterfaces, card.Capabilities)
 	}
+	if len(card.Skills) != 1 || len(card.Skills[0].Examples) == 0 {
+		t.Fatalf("skills %+v: want one skill with examples", card.Skills)
+	}
 	var doc struct {
 		Capabilities struct {
 			Extensions []map[string]json.RawMessage `json:"extensions"`
 		} `json:"capabilities"`
 	}
-	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Capabilities.Extensions) != 2 {
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Capabilities.Extensions) != 1 {
 		t.Fatalf("extensions %v %v", doc.Capabilities.Extensions, err)
 	}
-	for i, want := range []struct{ uri, params string }{{ExtA2UI, "card/a2ui-params.json"}, {ExtInputSchema, "card/input-schema-params.json"}} {
+	for i, want := range []struct{ uri, params string }{{ExtA2UI, "card/a2ui-params.json"}} {
 		e := doc.Capabilities.Extensions[i]
 		var uri string
 		_ = json.Unmarshal(e["uri"], &uri)
@@ -362,7 +365,7 @@ func TestSurfacePerTask(t *testing.T) {
 
 // A client renders the form when its a2uiClientCapabilities list the basic catalog under v0.9.1 or v0.9 (message
 // metadata, or the request's), or, without them, when it activates the extension (A2A-Extensions in any spelling,
-// X-A2A-Extensions, or the message's extensions). Anything else is asked for the input schema's data part. The form
+// X-A2A-Extensions, or the message's extensions). Anything else is asked in text for a data part holding the booking. The form
 // is in v0.9.1 for a client that said it reads v0.9.1 (a v0.9.1 entry, or the activation), else in v0.9, which a
 // v0.9 renderer's schemas require.
 func TestNegotiation(t *testing.T) {
@@ -418,12 +421,11 @@ func TestNegotiation(t *testing.T) {
 	}
 }
 
-// A first message whose data part is the input schema's (testdata/card/input-schema-data.json, which make
-// check-specs validates against the card's schema) books at once, with or without A2UI. One that holds part of it is
+// A first message whose data part holds the booking (testdata/booking.json) books at once, with or without A2UI. One that holds part of it is
 // asked for the rest: with the form holding what checked out, for a client that renders A2UI.
-func TestInputSchemaData(t *testing.T) {
+func TestDataPartBooking(t *testing.T) {
 	c := client(t, serve(t), a2a.TransportProtocolJSONRPC, nil)
-	p := a2a.NewDataPart(fixture(t, "card/input-schema-data.json"))
+	p := a2a.NewDataPart(fixture(t, "booking.json"))
 	p.MediaType = "application/json"
 	done := send(t, c, a2a.NewMessage(a2a.MessageRoleUser, p, a2a.NewTextPart("for the window table")), nil)
 	if text, _ := statusParts(t, done); done.Status.State != a2a.TaskStateCompleted || text != `Booked a table for 4 under "Robin" on Monday, 9 November 2026 at 19:30 +01:00.` {
@@ -537,7 +539,7 @@ func TestCorrections(t *testing.T) {
 		t.Fatalf("the form was sent twice: %d parts", len(again.Status.Message.Parts))
 	}
 	// The form it was sent is deleted when the task ends, by a client that renders none too.
-	closed(t, send(t, plain, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewDataPart(fixture(t, "card/input-schema-data.json"))), asked),
+	closed(t, send(t, plain, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewDataPart(fixture(t, "booking.json"))), asked),
 		a2a.TaskStateCompleted, `Booked a table for 4 under "Robin" on Monday, 9 November 2026 at 19:30 +01:00.`, surfacePrefix+string(asked.ID), v091)
 }
 

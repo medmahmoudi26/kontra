@@ -51,9 +51,7 @@ for p in sorted((SCHEMAS / "examples").glob("*.json")):
 #     checks are held to the same files: internal/publish's tests, D323; the gate's loader to config.*, D321). A rule
 #     JSON Schema cannot state is checked outside it: its fixture is listed here with the rule, and must validate, so
 #     that it tests that rule alone (the CLI and the control plane refuse it).
-BEYOND_SCHEMA = {
-    "listing.too_many_globs.json": "tools.allow and tools.deny hold at most 64 globs together",
-}
+BEYOND_SCHEMA = {}  # none since listings lost their MCP tools policy (D350)
 for p in sorted((SCHEMAS / "examples" / "invalid").glob("*.json")):
     base = p.name.split(".")[0]
     schema = schemas.get(f"{base}.json")
@@ -115,11 +113,10 @@ for what, value in [
 
 # 6. The A2UI example's fixtures (examples/sellers/a2ui/testdata) against the A2UI v0.9.1 schemas vendored beside them,
 #    each file pinned by SHA256SUMS: the agent's form and a renderer's action, a client's capabilities and the card's
-#    A2UI params; its input-schema params against spec/schema, and the booking against the schema they hold. A file
-#    under invalid/ must not validate. The A2UI schemas name the catalog `catalog.json` relative to their $ids: the
-#    basic catalog is served under that name too, as A2UI's own test runner does. Formats are asserted, as A2UI's own
-#    runner does (ajv-formats): an action's `timestamp` and the booking's `date` are RFC 3339 date-times, which
-#    jsonschema checks only with rfc3339-validator installed (`make check-specs` installs it; without it, this fails).
+#    A2UI params. A file under invalid/ must not validate. The A2UI schemas name the catalog `catalog.json` relative to
+#    their $ids: the basic catalog is served under that name too, as A2UI's own test runner does. Formats are asserted,
+#    as A2UI's own runner does (ajv-formats): an action's `timestamp` is an RFC 3339 date-time, which jsonschema checks
+#    only with rfc3339-validator installed (`make check-specs` installs it; without it, this fails).
 import hashlib  # noqa: E402
 
 A2UI = ROOT / "examples" / "sellers" / "a2ui" / "testdata"
@@ -137,19 +134,12 @@ for f in sorted((VENDORED / "json").glob("*.json")) + [VENDORED / "catalogs" / "
     a2ui = a2ui.with_resource(doc.get("$id", A2UI_BASE + f.name), res)
     if f.name == "catalog.json":
         a2ui = a2ui.with_resource(A2UI_BASE + "catalog.json", res)
-params = json.loads((A2UI / "card" / "input-schema-params.json").read_text())
-try:
-    Draft202012Validator.check_schema(params["schema"])
-except Exception as e:  # noqa: BLE001
-    problems.append(f"examples/sellers/a2ui/testdata/card/input-schema-params.json: params.schema: {e.message}")
 A2UI_SCHEMAS = {
     "surface": {"$ref": A2UI_BASE + "server_to_client_list.json"},
     "delete": {"$ref": A2UI_BASE + "server_to_client_list.json"},
     "action": {"$ref": A2UI_BASE + "client_to_server_list.json"},
     "capabilities": {"$ref": A2UI_BASE + "client_capabilities.json"},
     "a2ui-params": {"$ref": A2UI_BASE + "server_capabilities.json#/properties/v0.9"},
-    "input-schema-params": {"$ref": "https://kontra.sh/schema/ext/input-schema/v1/params.json"},
-    "input-schema-data": params["schema"],
 }
 FORMATS = Draft202012Validator.FORMAT_CHECKER
 if not {"date-time", "date", "time"} <= set(FORMATS.checkers):

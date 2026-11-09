@@ -170,7 +170,7 @@ func (v *virtuals) sweep(now time.Time) {
 	}
 }
 
-// virtualAdmit is what a modern request needs before it is forwarded (§11.12 "per_session", D177): the principal's
+// virtualAdmit is what a modern request needs before it is forwarded (§11.12 "Virtual sessions", D177): the principal's
 // open virtual session at the service, read (and touched at most once a minute); without one, Admission's session
 // decision when hooks.admission.operations lists session (none consults the built-in, which allows), one call per
 // principal and service at a time on this replica. A refusal is the request's answer; the virtual session itself is
@@ -232,7 +232,7 @@ func (h *Handler) decideSession(detached context.Context, rq *request, k vkey, f
 // touchVirtual is what a request served without virtualAdmit (tasks/get, tasks/update, tasks/cancel: from Postgres,
 // whatever the upstream) does to the principal's virtual session: it is a request, so the session's last_seen_at is
 // written (at most once a minute), and a client polling its gate-owned task keeps its session from closing idle
-// (§11.12 "per_session": closed idle after session_idle_s without a request). A principal with none opens none here;
+// (§11.12 "Virtual sessions": closed idle after session_idle_s without a request). A principal with none opens none here;
 // a session that cannot be read is logged and the request served all the same.
 func (h *Handler) touchVirtual(rq *request) {
 	_, err := h.deps.Sessions.OpenVirtual(rq.ctx(), rq.svc.Ref.TenantID, rq.svc.Ref.Name, rq.p.ID, h.deps.now())
@@ -261,7 +261,7 @@ func withID(ref *mcpwire.Refusal, id json.RawMessage) *mcpwire.Refusal {
 // principal and service). It is the session the request's calls row names. A failure is logged: the answer is
 // relayed all the same, and the next request opens it.
 //
-// SPEC-CONFLICT (D204; relay §11.12 "per_session", D177: the row opens "once the upstream has answered that request
+// SPEC-CONFLICT (D204; relay §11.12 "Virtual sessions", D177: the row opens "once the upstream has answered that request
 // with a modern result"): two modern requests are answered without the upstream answering them, a tools/list served
 // from the modern cache (§11.3) and a tools/call that becomes a gate-owned task (whose upstream call is the
 // dispatch's, later). The closest faithful behaviour: both open the virtual session too, since the service is known
@@ -412,7 +412,7 @@ func (h *Handler) modernForward(rq *request, meter *callMeter, rewrite func(m *m
 					// §11.4 says one calls row is written when "the response completes" and does not say what an
 					// InputRequiredResult is. The closest faithful behaviour: as for a passthrough task's
 					// CreateTaskResult (§11.5), the row is written with is_error NULL (the outcome is not observed),
-					// so an operator never bills per_call on it; the call sent again with the answers gets its own row.
+					// as a usage record whose outcome is unknown; the call sent again with the answers gets its own row.
 					meter.isError = nil
 				}
 			}
@@ -745,7 +745,7 @@ func (h *Handler) ownsModernTask(rq *request) bool {
 }
 
 // modernTaskCall creates a gate-owned task for a modern tools/call (§11.12 steps 2–4, D159): Admission task (a quote
-// creates it quoted, §13.2), the virtual session opened (its hash names the task's calls row, never a preamble,
+// is a deny, D350), the virtual session opened (its hash names the task's calls row, never a preamble,
 // D180), the gate task with the request as it came after §2.5 (params.task removed, the tasks extension kept: the
 // dispatch sends the call with the client's _meta) and its Mcp-Param-* headers, the TaskLifecycle start, then the
 // answer: in line when the task ends within 2 s, else a CreateTaskResult (Tasks.AnswerCall).

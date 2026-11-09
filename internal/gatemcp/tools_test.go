@@ -1,13 +1,15 @@
 package gatemcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"reflect"
 	"testing"
 )
 
-// describe's capabilities (D339): the served card's capabilities, modes, skills and extensions, normalized, and the
-// input schema extension's params.schema as inputSchema; a card that is none has none.
+// describe's capabilities (D339): the served card's capabilities, modes, skills (with their examples, the suggested
+// first messages) and extensions, normalized. A card that still carries the withdrawn input-schema extension lists it
+// as an extension and nothing more: no inputSchema (D350). A card that is none has none.
 func TestCardCapabilities(t *testing.T) {
 	card := json.RawMessage(`{"name":"booking","capabilities":{"streaming":true,"pushNotifications":false,
 		"extensions":[{"uri":"https://kontra.sh/ext/input-schema/v1","required":false,"params":{"schema":{"type":"object",
@@ -24,12 +26,11 @@ func TestCardCapabilities(t *testing.T) {
 		Examples: []string{"a table for two"}, InputModes: []string{"application/json"}}}) {
 		t.Errorf("skills %+v", c.Skills)
 	}
-	if !reflect.DeepEqual(c.Extensions, []ExtensionInCard{{URI: InputSchemaURI}, {URI: "https://seller.example/ext/x", Required: true}}) {
+	if !reflect.DeepEqual(c.Extensions, []ExtensionInCard{{URI: "https://kontra.sh/ext/input-schema/v1"}, {URI: "https://seller.example/ext/x", Required: true}}) {
 		t.Errorf("extensions %+v", c.Extensions)
 	}
-	var schema map[string]any
-	if err := json.Unmarshal(c.InputSchema, &schema); err != nil || schema["type"] != "object" {
-		t.Errorf("inputSchema %s", c.InputSchema)
+	if raw, err := json.Marshal(c); err != nil || bytes.Contains(raw, []byte("inputSchema")) || bytes.Contains(raw, []byte(`"topic"`)) {
+		t.Errorf("capabilities carry the input schema: %s", raw)
 	}
 	if cardCapabilities(nil) != nil || cardCapabilities(json.RawMessage(`[1]`)) != nil {
 		t.Error("a card that is none has capabilities")

@@ -456,11 +456,11 @@ converts into the team as an account's does; a gate that stopped opening anonymo
 ### 6.4 `kontra publish` (D323)
 
 `kontra publish [--gate URL] [--control-plane URL] [--version N | --replace] [--dry-run] [--no-browser] <listing.yaml>` sends a
-listing, how one of the person's services is sold, to the gate operator's control plane. Its file is YAML (or JSON),
-one document, at most 64 KiB, as [`schema/listing.json`](schema/listing.json) describes it: `service` (the name at the
-gate, under the person's tenant), `kind` (`a2a` or `mcp`), `visibility` (`public`, `unlisted`, `private`), `price`
-(`free`, `per_task`, `per_call` or `per_session`, in USD, with ext-escrow.md's and price.json's keys), an MCP service's
-`tools` and `tasks`, `sealed` and `published`. The CLI carries the listing: it computes, converts and compares no
+listing, how one of the person's A2A services is sold, to the gate operator's control plane. Its file is YAML (or
+JSON), one document, at most 64 KiB, as [`schema/listing.json`](schema/listing.json) describes it: `service` (the name
+at the gate, under the person's tenant), `visibility` (`public`, `unlisted`, `private`), `price` (`free` or
+`per_task`, in USD, with ext-escrow.md's keys), `sealed` and `published`. Listings are A2A only: an MCP service is not
+listed, and the control plane refuses a listing for one (D350). The CLI carries the listing: it computes, converts and compares no
 amount, and the gate holds no price ([`relay.md`](relay.md) §13.5).
 
 1. It checks the file against the schema, and stops at a file it refuses, naming each problem. `--dry-run` stops

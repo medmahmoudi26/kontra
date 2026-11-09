@@ -11,7 +11,7 @@ identity, policy and end-to-end sealing. Nothing on the node listens on a public
   money code.
 
 This repository holds the open-source parts: the `kontra` CLI, the `kontra-gate` server image,
-the Helm chart and compose file, the extension specs (`escrow`, `sealed`, `input-schema`) and the
+the Helm chart and compose file, the extension specs (`escrow`, `sealed`) and the
 examples. The marketplace, listings, escrow and settlement live in a separate private repository
 that deploys and configures this one; nothing here imports from it.
 
@@ -58,9 +58,8 @@ this order:
 3. [`docs/architecture/02-deployment-topology.html`](docs/architecture/02-deployment-topology.html)
    — one CLI on the user's machine, gates as clusters, `kontra dev` removed. Supersedes PRD §10
    (embedded Temporal), §11 (`kontra dev`), §14 M4, §15 demo.
-4. [`spec/`](spec/) — [`tunnel.md`](spec/tunnel.md), [`relay.md`](spec/relay.md) and the three
-   extensions ([`ext-escrow.md`](spec/ext-escrow.md), [`ext-sealed.md`](spec/ext-sealed.md),
-   [`ext-input-schema.md`](spec/ext-input-schema.md)), with the schema in [`migrations/`](migrations/).
+4. [`spec/`](spec/) — [`tunnel.md`](spec/tunnel.md), [`relay.md`](spec/relay.md) and the two
+   extensions ([`ext-escrow.md`](spec/ext-escrow.md), [`ext-sealed.md`](spec/ext-sealed.md)), with the schema in [`migrations/`](migrations/).
    Every place they depart from the documents above is numbered in [`docs/decisions.md`](docs/decisions.md).
 
 Where a note and the PRD disagree, the later document wins; `docs/README.md` has the section map.
@@ -271,8 +270,9 @@ services:
 ```
 
 A denied tool is missing from `tools/list`, and a call to it is answered `Unknown tool`, as for one that does not
-exist; `allow:` narrows the rest (absent, every tool; empty, none). The gate meters each call by tool name, bytes,
-duration and the result's top-level `isError`, and never reads arguments or content, which may be sealed.
+exist; `allow:` narrows the rest (absent, every tool; empty, none). The gate records each call by tool name, bytes,
+duration and the result's top-level `isError`, and never reads arguments or content, which may be sealed. MCP
+services are not listed or priced (D350).
 
 ## The CLI
 
@@ -283,21 +283,20 @@ One binary, four commands (`kontra <command> -h` has every flag):
 | `kontra connect` | Hosts the agents and MCP servers on this machine at a gate (`--serve`), and lets local clients hire the gate's services on `127.0.0.1:7777`, through one outbound connection | [`spec/tunnel.md`](spec/tunnel.md) |
 | `kontra login` | Gets an API key for a gate from its operator's sign-in, kept in `~/.kontra/credentials` for that gate only | [`spec/tunnel.md`](spec/tunnel.md) §6.3 |
 | `kontra seal` | Seals a file for a sealed service without a node, and opens a sealed answer | [`spec/ext-sealed.md`](spec/ext-sealed.md) §5.1 |
-| `kontra publish` | Sends a listing, how one of your services is sold, to the gate operator's control plane (Kontra Cloud) | [`spec/tunnel.md`](spec/tunnel.md) §6.4 |
+| `kontra publish` | Sends a listing, how one of your A2A agents is sold, to the gate operator's control plane (Kontra Cloud) | [`spec/tunnel.md`](spec/tunnel.md) §6.4 |
 
-**Publishing a listing (M5).** A listing file says how one of your services is sold: its kind, visibility, MCP
-policy, sealing and price, one of four in USD: `free`; `per_task`, a quote held in escrow and released after a review
-window ([`spec/ext-escrow.md`](spec/ext-escrow.md)); `per_call` or `per_session`, metered and invoiced monthly
-([`spec/schema/listing.json`](spec/schema/listing.json) has every key and bound):
+**Publishing a listing (M5).** A listing file says how one of your A2A agents is sold: its visibility, sealing and
+price, one of two in USD: `free`, or `per_task`, a quote held in escrow and released after a review window
+([`spec/ext-escrow.md`](spec/ext-escrow.md); [`spec/schema/listing.json`](spec/schema/listing.json) has every key and
+bound). MCP servers are not listed: hosted through `kontra connect`, one is free and private to your tenant (D350).
 
 ```yaml
 # hello.listing.yaml: the agent `kontra connect --serve a2a:hello=…` hosts, sold per task
 service: hello
-kind: a2a
 visibility: public            # public | unlisted (reachable by URL, never searched) | private
 price:
-  model: per_task             # free | per_task | per_call | per_session
-  amount: "1.00"              # USD, quoted: at most 2 decimals per task, 6 when metered
+  model: per_task             # free | per_task
+  amount: "1.00"              # USD, quoted: at most 2 decimals
   reviewWindowSeconds: 86400  # the buyer may dispute for a day after completion
   taskTimeoutSeconds: 600
 ```
@@ -309,9 +308,7 @@ kontra publish hello.listing.yaml
 #  kontra publish: hello is published at version 1: per_task 1.00 USD, public, on https://api.kontra.sh.
 ```
 
-An MCP service is `kind: mcp`, with `per_call` (per-tool amounts under `price.tools`, `freePerMonth`, `capPerMonth`)
-or `per_session` (`idleTimeoutSeconds`), its own `tools: {allow, deny}` and `tasks`; a `per_task` MCP service sets
-`tasks: required`, so every call is a task its quote covers. `published: false` unpublishes the service and keeps the
+`published: false` unpublishes the service and keeps the
 listing. Each publish is a new version of the listing; tasks keep the quote they were admitted with. `kontra publish`
 signs you in in the browser for that publish only, as `kontra login` does, and keeps nothing but the client
 registration: an API key never publishes. It never replaces a listing unseen: for a service that already has one it
@@ -377,7 +374,7 @@ local hiring to the first node. Each node is its own row on Cloud's Network page
 cmd/kontra/        the CLI: connect, login, seal, publish, version
 cmd/kontra-gate/   the gate: serve, migrate, enroll, health, version
 internal/          relay, tunnel, gatemcp (/mcp), anon, store (Postgres), lifecycle (Temporal), sealing, …
-spec/              tunnel.md, relay.md, ext-escrow.md, ext-sealed.md, ext-input-schema.md, schema/
+spec/              tunnel.md, relay.md, ext-escrow.md, ext-sealed.md, schema/
 migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mcp_tools.sql (the gate's Postgres schema, embedded in kontra-gate)
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)

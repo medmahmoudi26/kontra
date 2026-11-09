@@ -64,7 +64,7 @@ func (e *env) mcpTask(state State, approveURL string) (uuid.UUID, ServiceRef) {
 		exp = &x
 	}
 	nt, err := NewMCPTask(id, svc, buyerA, state, exp, approveURL, map[string]any{"kontra.escrow.id": "e-1"},
-		map[string]any{"sh.kontra/price": "1 USD"})
+		map[string]any{"sh.kontra/note": "1 USD"})
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestMCPTaskLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	if row.Protocol != ProtocolMCP || row.ContextID != id.String() || MCPStatusText(row.Snapshot) != "https://pay.example/t/1" ||
-		MCPMeta(row.Snapshot)["sh.kontra/approve-url"] != "https://pay.example/t/1" || MCPMeta(row.Snapshot)["sh.kontra/price"] != "1 USD" {
+		MCPMeta(row.Snapshot)["sh.kontra/approve-url"] != "https://pay.example/t/1" || MCPMeta(row.Snapshot)["sh.kontra/note"] != "1 USD" {
 		t.Fatalf("the created task: %+v %+v", row, row.Snapshot)
 	}
 	write := func(build func(row *TaskRow) (Write, error)) int64 {

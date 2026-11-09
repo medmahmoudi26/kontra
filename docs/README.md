@@ -13,8 +13,8 @@ the two architecture notes correct it after the prototypes of 21–24 October 20
 
 The specifications in [`../spec/`](../spec/) are written from the three documents above and are later
 than all of them: [`tunnel.md`](../spec/tunnel.md), [`relay.md`](../spec/relay.md),
-[`ext-escrow.md`](../spec/ext-escrow.md), [`ext-sealed.md`](../spec/ext-sealed.md),
-[`ext-input-schema.md`](../spec/ext-input-schema.md), and the schema, one file per milestone
+[`ext-escrow.md`](../spec/ext-escrow.md), [`ext-sealed.md`](../spec/ext-sealed.md) (the input-schema extension was
+withdrawn, D350), and the schema, one file per milestone
 ([`0001_init.sql`](../migrations/0001_init.sql), [`0002_m3.sql`](../migrations/0002_m3.sql),
 [`0003_m4.sql`](../migrations/0003_m4.sql), [`0004_m5.sql`](../migrations/0004_m5.sql)). Where a spec differs from a document, the
 spec wins once the owner has signed it, and the difference is a numbered entry in
@@ -85,15 +85,14 @@ called at their own URL (D339).
 
 ## Pricing (decided 25 Oct, in the Cloud repository's console issue; recorded here for the extension specs)
 
-Three price shapes on a listing, matching the three request shapes the gate distinguishes:
+Two price shapes on a listing, which lists an A2A agent:
 
-- `per_task` — A2A tasks and task-augmented MCP calls. Quote held at admission, released after the
-  review window, refunded on dispute or failure. The escrow extension, unchanged.
-- `per_call` — plain MCP `tools/call`, gate-metered on non-error results (tool name, bytes,
-  duration and `isError` are outside the sealed content). Prices per tool, attached to
-  `tools/list` as `_meta["kontra.price"]`. Invoiced monthly through Stripe Billing; Kontra holds no
-  balance.
-- `per_session` — per `Mcp-Session-Id`, metered and invoiced the same way.
+- `free`.
+- `per_task` — A2A tasks (a `hire` of `/mcp` among them). Quote held at admission, released after the review
+  window, refunded on dispute or failure. The escrow extension.
+
+The metered MCP shapes (`per_call`, `per_session`) and MCP listings decided on 25 Oct were withdrawn on 7 Nov
+(D350): an MCP service is hosted, free and private to its tenant or team gate, and not listed.
 
 Open: whether the gate should fabricate task-augmented calls over a plain upstream so every tool
 call is durable (default: no, mirror the upstream); session affinity on tunnel loss (default: 404,

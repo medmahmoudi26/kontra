@@ -51,10 +51,10 @@ func has(keys []string, k string) bool {
 // mcp_meta_spoof (relay §2.5): an upstream's sh.kontra/ keys never reach a client from the protocol-level
 // locations, case and long-s variants included, and content, structuredContent and arguments are never touched.
 func TestScrubResultFromUpstream(t *testing.T) {
-	spoof := `{"sh.kontra/price":"1 USD","sh.kontra/escrow":{"a":1},"sh.kontra/approve-url":"https://evil","SH.KONTRA/PRICE":2,"ſh.kontra/x":3,"io.example/keep":true}`
+	spoof := `{"sh.kontra/note":"1 USD","sh.kontra/escrow":{"a":1},"sh.kontra/approve-url":"https://evil","SH.KONTRA/NOTE":2,"ſh.kontra/x":3,"io.example/keep":true}`
 	res := `{"_meta":` + spoof + `,
-		"content":[{"type":"text","text":"x","_meta":{"sh.kontra/price":"stays: content is never read"}}],
-		"structuredContent":{"_meta":{"sh.kontra/price":"stays"}},
+		"content":[{"type":"text","text":"x","_meta":{"sh.kontra/note":"stays: content is never read"}}],
+		"structuredContent":{"_meta":{"sh.kontra/note":"stays"}},
 		"tools":[{"name":"echo","_meta":` + spoof + `}],
 		"capabilities":{"experimental":{"sh.kontra/sealed":{"recipients":["evil"]},"other":{}},"extensions":{"sh.kontra/escrow":{},"io.x/y":{}}},
 		"task":{"taskId":"t","_meta":` + spoof + `},
@@ -83,15 +83,15 @@ func TestScrubResultFromUpstream(t *testing.T) {
 	if ks := metaKeys(t, out, "capabilities", "extensions"); has(ks, "sh.kontra/escrow") || !has(ks, "io.x/y") {
 		t.Errorf("extensions: %v", ks)
 	}
-	for _, keep := range []string{`"text":"x","_meta":{"sh.kontra/price":"stays: content is never read"}`, `"structuredContent":{"_meta":{"sh.kontra/price":"stays"}}`} {
+	for _, keep := range []string{`"text":"x","_meta":{"sh.kontra/note":"stays: content is never read"}`, `"structuredContent":{"_meta":{"sh.kontra/note":"stays"}}`} {
 		if !bytes.Contains(out, []byte(keep)) {
 			t.Errorf("content or structuredContent changed: %s", out)
 		}
 	}
 
 	// Method-aware: a tools/call result's tools member (not a tools/list) is not a protocol location.
-	out, err = ScrubResult(FromUpstream, MethodToolsCall, json.RawMessage(`{"tools":[{"_meta":{"sh.kontra/price":1}}],"_meta":{"sh.kontra/price":1}}`), false)
-	if err != nil || !bytes.Contains(out, []byte(`"tools":[{"_meta":{"sh.kontra/price":1}}]`)) || has(metaKeys(t, out, "_meta"), "sh.kontra/price") {
+	out, err = ScrubResult(FromUpstream, MethodToolsCall, json.RawMessage(`{"tools":[{"_meta":{"sh.kontra/note":1}}],"_meta":{"sh.kontra/note":1}}`), false)
+	if err != nil || !bytes.Contains(out, []byte(`"tools":[{"_meta":{"sh.kontra/note":1}}]`)) || has(metaKeys(t, out, "_meta"), "sh.kontra/note") {
 		t.Errorf("tools/call: %s %v", out, err)
 	}
 }
@@ -103,13 +103,13 @@ func TestScrubKeepsBytesWhenNothingIsRemoved(t *testing.T) {
 	if err != nil || !bytes.Equal(out, in) {
 		t.Fatalf("%q %v", out, err)
 	}
-	p := json.RawMessage(`{"name":"echo","arguments":{"sh.kontra/price":1},"_meta":{"progressToken":7}}`)
+	p := json.RawMessage(`{"name":"echo","arguments":{"sh.kontra/note":1},"_meta":{"progressToken":7}}`)
 	out, err = ScrubParams(FromClient, MethodToolsCall, p, false)
 	if err != nil || !bytes.Equal(out, p) {
 		t.Fatalf("%q %v", out, err)
 	}
 	// A rewrite keeps the order and the other members' bytes.
-	p = json.RawMessage(`{"name":"echo","arguments":{"b":1,"a":2},"_meta":{"z":1,"sh.kontra/price":"x","a":2}}`)
+	p = json.RawMessage(`{"name":"echo","arguments":{"b":1,"a":2},"_meta":{"z":1,"sh.kontra/note":"x","a":2}}`)
 	out, err = ScrubParams(FromClient, MethodToolsCall, p, false)
 	if err != nil || string(out) != `{"name":"echo","arguments":{"b":1,"a":2},"_meta":{"z":1,"a":2}}` {
 		t.Fatalf("%s %v", out, err)
@@ -120,7 +120,7 @@ func TestScrubKeepsBytesWhenNothingIsRemoved(t *testing.T) {
 // exactly {v, envelope}; removed everywhere else.
 func TestScrubSealedEnvelope(t *testing.T) {
 	withEnv := func(v string) json.RawMessage {
-		return json.RawMessage(`{"name":"echo","_meta":{"sh.kontra/sealed":` + v + `,"sh.kontra/price":1}}`)
+		return json.RawMessage(`{"name":"echo","_meta":{"sh.kontra/sealed":` + v + `,"sh.kontra/note":1}}`)
 	}
 	kept := func(b []byte) bool { return bytes.Contains(b, []byte(`"sh.kontra/sealed"`)) }
 	for _, tc := range []struct {
@@ -150,7 +150,7 @@ func TestScrubSealedEnvelope(t *testing.T) {
 			if kept(out) != tc.keep {
 				t.Errorf("kept = %v, want %v: %s", kept(out), tc.keep, out)
 			}
-			if bytes.Contains(out, []byte("sh.kontra/price")) {
+			if bytes.Contains(out, []byte("sh.kontra/note")) {
 				t.Errorf("another sh.kontra/ key stayed: %s", out)
 			}
 		})
@@ -177,7 +177,7 @@ func TestScrubSealedEnvelope(t *testing.T) {
 }
 
 func TestScrubMessage(t *testing.T) {
-	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","_meta":{"sh.kontra/price":1}}}`)
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","_meta":{"sh.kontra/note":1}}}`)
 	m, err := Parse(body, FromClient)
 	if err != nil {
 		t.Fatal(err)
@@ -199,20 +199,20 @@ func TestScrubMessage(t *testing.T) {
 }
 
 func TestMergeMeta(t *testing.T) {
-	out, err := MergeMeta([]byte(`{"name":"a","_meta":{"sh.kontra/price":"seller","k":1}}`),
-		map[string]json.RawMessage{"sh.kontra/price": json.RawMessage(`"operator"`), "sh.kontra/z": json.RawMessage(`1`)})
-	if err != nil || string(out) != `{"name":"a","_meta":{"k":1,"sh.kontra/price":"operator","sh.kontra/z":1}}` {
+	out, err := MergeMeta([]byte(`{"name":"a","_meta":{"sh.kontra/note":"seller","k":1}}`),
+		map[string]json.RawMessage{"sh.kontra/note": json.RawMessage(`"operator"`), "sh.kontra/z": json.RawMessage(`1`)})
+	if err != nil || string(out) != `{"name":"a","_meta":{"k":1,"sh.kontra/note":"operator","sh.kontra/z":1}}` {
 		t.Fatalf("%s %v", out, err)
 	}
-	out, err = MergeMeta([]byte(`{"name":"a"}`), map[string]json.RawMessage{"sh.kontra/price": json.RawMessage(`1`)})
-	if err != nil || string(out) != `{"name":"a","_meta":{"sh.kontra/price":1}}` {
+	out, err = MergeMeta([]byte(`{"name":"a"}`), map[string]json.RawMessage{"sh.kontra/note": json.RawMessage(`1`)})
+	if err != nil || string(out) != `{"name":"a","_meta":{"sh.kontra/note":1}}` {
 		t.Fatalf("%s %v", out, err)
 	}
 }
 
 func TestIsKontraKey(t *testing.T) {
 	for k, want := range map[string]bool{
-		"sh.kontra/price": true, "SH.Kontra/x": true, "ſh.kontra/x": true, "sh.kontra/": true,
+		"sh.kontra/note": true, "SH.Kontra/x": true, "ſh.kontra/x": true, "sh.kontra/": true,
 		"sh.kontra": false, "xsh.kontra/a": false, "io.modelcontextprotocol/related-task": false, "": false,
 	} {
 		if got := IsKontraKey(k); got != want {

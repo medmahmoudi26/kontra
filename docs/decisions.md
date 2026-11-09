@@ -1801,7 +1801,7 @@ by D178 (a client that leaves cancels; the first upstream id of a multi round-tr
 ### D160. `per_session` for modern clients is a virtual session per principal and service — **decided under the owner's standing instruction, 26 Oct** (carries out D24)
 
 D24 redefines `per_session` for modern clients as "per principal per service per period" without saying what the
-gate records. `per_session` prices carry `idleTimeoutSeconds` ([`schema/price.json`](../spec/schema/price.json)),
+gate records. `per_session` prices carry `idleTimeoutSeconds` (`schema/price.json` (withdrawn, D350)),
 and Admission has a `session` operation. Decision: the gate keeps one `mcp_sessions` row per service and principal
 for modern requests, `protocol_version = '2026-07-28'`, keyed by the hash of a random id it never sends, with no
 upstream or tunnel ids; it is opened by the principal's first modern request (after Admission `session`), closed
@@ -6092,3 +6092,31 @@ only when they changed. The JSON log keeps its own lines (tunnel.md §13). A wai
 printed in milliseconds ("reconnecting in 430ms", "back after 120ms"), and no wait as "reconnecting at once" (review:
 the backoff's full jitter made "reconnecting in 0s" the usual first line). The absence is measured from when the node
 noticed the loss, which after a stopped process is later than the loss itself.
+
+## The owner's decision of 7 Nov: plain A2A first message, no MCP listings (kontra#22)
+
+### D350. A first message is plain A2A, and only A2A agents are listed — **decided by the owner, 7 Nov** (kontra#22; supersedes the input-schema extension and MCP pricing)
+
+Two features were too early to maintain, and are withdrawn together (OpenSpec change
+`drop-input-schema-and-mcp-listings`):
+
+- **No input-schema extension.** A2A has no typed first message, and Kontra does not invent one.
+  `spec/ext-input-schema.md` and its schemas are deleted; `describe` no longer returns `inputSchema` (D339's
+  `InputSchema` / `InputSchemaURI`), and `hire` no longer documents a `{data: …}` first message. Authors suggest
+  prompts with the card's own `skills[].examples`, which `describe` already returns; an agent that needs structured
+  input asks for it with an A2UI surface (`input-required`) and validates its own input. A seller card that still
+  carries the entry is relayed as an extension the gate does not own (D326). No client ever rendered the schema:
+  `kontra connect` did not read it.
+- **No MCP listings and no MCP prices.** Listings are A2A only: the listing file loses `kind`, `tools` and `tasks`,
+  and the control plane refuses a listing for an MCP service. The `per_call` and `per_session` price models are
+  removed with `spec/schema/price.json`; `sh.kontra/price` (D27) is no longer defined for MCP `tools/list` or
+  `initialize`, and `per_session`'s billing unit (D160) no longer exists. A `quote` from Admission for an MCP task is
+  a deny `-32603` "MCP services are not priced", as it already was for MCP sessions and plain calls (whose text
+  "priced tasks need tasks: durable" it replaces). `/mcp` `search` returns A2A agents only and takes no `kind`.
+
+What stays: hosting MCP servers through the tunnel (`--serve mcp:…`, stdio, roots, `/mcp/{svc}`, sessions, sealing),
+`describe` on an MCP service the caller can reach, the `calls` usage record, the operator annotations `tool_meta`,
+`initialize_meta` and `mcpMeta` (rendered verbatim, whatever keys the operator writes) and the scrub of an upstream's
+`sh.kontra/` keys. `tasks: required` (D322) stays as a hosting mode: its pricing reason is gone, but an operator can
+still want every call durable, and removing it would need a migration for no gain. An MCP service is free and private
+to its tenant or team gate, like an unlisted A2A service. No migration: no table holds a price.

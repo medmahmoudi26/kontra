@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +29,7 @@ import (
 func TestSchemaFixtures(t *testing.T) {
 	valid, _ := filepath.Glob("../../spec/schema/examples/listing.*.json")
 	invalid, _ := filepath.Glob("../../spec/schema/examples/invalid/listing.*.json")
-	if len(valid) < 5 || len(invalid) < 20 {
+	if len(valid) < 3 || len(invalid) < 20 {
 		t.Fatalf("%d valid and %d refused fixtures found", len(valid), len(invalid))
 	}
 	for _, f := range valid {
@@ -43,8 +42,8 @@ func TestSchemaFixtures(t *testing.T) {
 		}
 	}
 	// A fixture of a rule the schema cannot state (check_specs.py's BEYOND_SCHEMA, which the schema accepts) is refused
-	// for that rule.
-	beyond := map[string]string{"listing.too_many_globs.json": "at most 64 globs in allow and deny together"}
+	// for that rule. There is none since listings lost the MCP tools policy (D350).
+	beyond := map[string]string{}
 	for _, f := range invalid {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -64,12 +63,11 @@ func TestSchemaFixtures(t *testing.T) {
 }
 
 // YAML as a publisher writes it: off and on stay strings, an unquoted amount is refused with the hint to quote it, a
-// key twice, two documents, a scalar, an unknown key and a file over MaxFile are refused, and the globs of tools
-// count together (at most 64, which the schema cannot say).
+// key twice, two documents, a scalar, an unknown key and a file over MaxFile are refused, and so are the members and
+// price models of an MCP listing (kind, tools, tasks, per_call, per_session): listings are A2A only (D350).
 func TestParseYAML(t *testing.T) {
 	l, err := Parse([]byte(`# hello, sold per task
 service: hello
-kind: a2a
 visibility: unlisted
 sealed: off
 price:
@@ -81,15 +79,10 @@ price:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.Service != "hello" || l.Kind != "a2a" || l.Visibility != "unlisted" || l.Sealed != "off" || !l.Published ||
+	if l.Service != "hello" || l.Visibility != "unlisted" || l.Sealed != "off" || !l.Published ||
 		l.Price.Model != ModelPerTask || *l.Price.Amount != "1.50" || *l.Price.ReviewWindowSeconds != 86400 || *l.Price.TaskTimeoutSeconds != 600 {
 		t.Fatalf("parsed %+v %+v", l, l.Price)
 	}
-	globs := make([]string, 40)
-	for i := range globs {
-		globs[i] = fmt.Sprintf("t%d", i)
-	}
-	list, _ := json.Marshal(globs)
 	for name, c := range map[string]struct{ file, want string }{
 		"an unquoted amount":  {"service: hello\nprice: { model: per_task, amount: 1.50 }\n", `price.amount: want a string (quote it`},
 		"a key twice":         {"service: hello\nservice: other\nprice: { model: free }\n", "not YAML"},
@@ -99,10 +92,14 @@ price:
 		"an unknown key":      {"service: hello\nprice: { model: free }\nquote: 1\n", `"quote" is not a key`},
 		"a version":           {"service: hello\nprice: { model: free }\nversion: 2\n", `"version" is not a key`},
 		"a non-string key":    {"service: hello\nprice: { model: free }\n1: x\n", "the listing: want a mapping"},
-		"globs over 64":       {"service: t\nkind: mcp\nprice: { model: free }\ntools: { allow: " + string(list) + ", deny: " + string(list) + " }\n", "at most 64 globs"},
+		"a kind":              {"service: t\nkind: mcp\nprice: { model: free }\n", `"kind" is not a key`},
+		"a tools policy":      {"service: t\nprice: { model: free }\ntools: { deny: [x] }\n", `"tools" is not a key`},
+		"a tasks mode":        {"service: t\nprice: { model: free }\ntasks: durable\n", `"tasks" is not a key`},
+		"per_call":            {"service: t\nprice: { model: per_call, amount: \"0.002\" }\n", "price.model"},
+		"per_session":         {"service: t\nprice: { model: per_session, amount: \"0.50\" }\n", "price.model"},
+		"a price's tools":     {"service: t\nprice: { model: free, tools: { x: \"0.01\" } }\n", `"tools" is not a key`},
 		"an integer as float": {"service: hello\nprice: { model: per_task, amount: \"1.00\", taskTimeoutSeconds: 60.5 }\n", "taskTimeoutSeconds: want an integer"},
 		"currency":            {"service: hello\nprice: { model: per_task, amount: \"1.00\", currency: EUR }\n", `"EUR": listings are priced in USD`},
-		"per_task on mcp":     {"service: t\nkind: mcp\nprice: { model: per_task, amount: \"1.00\" }\ntasks: durable\n", "tasks: required"},
 	} {
 		_, err := Parse([]byte(c.file))
 		if err == nil || !strings.Contains(err.Error(), c.want) {
@@ -144,12 +141,15 @@ func TestParseNumbersAndJSON(t *testing.T) {
 		t.Errorf("a quoted 0600: %v", err)
 	}
 
-	smile := `{"service":"t","kind":"mcp","price":{"model":"free","currency":"USD"},"tools":{"allow":["\ud83d\ude00","a\u00e9\/b"],"deny":[]},"tasks":"durable"}`
+	// Escapes are read as JSON reads them: the unknown key names the character the surrogate pair and \u00e9 stand for.
+	smile := `{"service":"t","price":{"model":"free","currency":"USD"},"a\u00e9\/b\ud83d\ude00":1}`
 	for name, file := range map[string]string{"JSON": smile, "JSON after a byte order mark": "\ufeff\n " + smile + "\n"} {
-		l, err := Parse([]byte(file))
-		if err != nil || l.Tools == nil || len(l.Tools.Allow) != 2 || l.Tools.Allow[0] != "\U0001F600" || l.Tools.Allow[1] != "aé/b" || l.Tasks != "durable" {
-			t.Errorf("%s: %+v %v", name, l, err)
+		if _, err := Parse([]byte(file)); err == nil || !strings.Contains(err.Error(), "aé/b\U0001F600") {
+			t.Errorf("%s: %v", name, err)
 		}
+	}
+	if l, err := Parse([]byte(`{"service":"t","price":{"model":"free","currency":"USD"}}` + "\n")); err != nil || l.Service != "t" {
+		t.Errorf("JSON: %+v %v", l, err)
 	}
 	if l, err := Parse([]byte(`{"service":"hello","price":{"model":"per_task","amount":"1.00","taskTimeoutSeconds":600,"reviewWindowSeconds":6e2}}`)); err != nil ||
 		*l.Price.TaskTimeoutSeconds != 600 || *l.Price.ReviewWindowSeconds != 600 {
@@ -158,7 +158,7 @@ func TestParseNumbersAndJSON(t *testing.T) {
 	for name, c := range map[string]struct{ file, want string }{
 		"a JSON key twice":         {`{"service":"hello","price":{"model":"free","model":"per_task"}}`, `the key "model" is written twice`},
 		"a JSON key twice on top":  {`{"service":"hello","service":"other","price":{"model":"free"}}`, `the key "service" is written twice`},
-		"JSON not in UTF-8":        {"{\"service\":\"hello\",\"price\":{\"model\":\"free\"},\"tools\":{\"allow\":[\"\xff\"]}}", "not UTF-8"},
+		"JSON not in UTF-8":        {"{\"service\":\"hello\",\"price\":{\"model\":\"free\"},\"x\xff\":1}", "not UTF-8"},
 		"JSON, a fraction":         {`{"service":"hello","price":{"model":"per_task","amount":"1.00","taskTimeoutSeconds":60.5}}`, "taskTimeoutSeconds: want an integer"},
 		"JSON, an unquoted amount": {`{"service":"hello","price":{"model":"per_task","amount":1.5}}`, "quote it"},
 		"two JSON values":          {`{"service":"hello","price":{"model":"free"}} {"service":"other"}`, "more than one"},
@@ -173,17 +173,16 @@ func TestParseNumbersAndJSON(t *testing.T) {
 	}
 }
 
-// The request is Cloud's ListingPut (D-M5-95): kind, visibility, sealed, published and currency always written, the
-// price's other keys as the file wrote them, tools and tasks only when written (an empty allow sent as []), and the
-// version given.
+// The request is Cloud's ListingPut (D-M5-95): kind (always a2a: listings are A2A only, D350), visibility, sealed,
+// published and currency always written, the price's other keys as the file wrote them, and the version given.
 func TestBody(t *testing.T) {
 	for _, c := range []struct{ file, want string }{
 		{"service: echo\nprice: { model: free }\n",
 			`{"kind":"a2a","visibility":"public","price":{"model":"free","currency":"USD"},"sealed":"off","published":true,"version":0}`},
-		{"service: search\nkind: mcp\nvisibility: unlisted\nprice: { model: per_call, amount: \"0.002\", tools: { deep: \"0.01\" }, freePerMonth: 100, capPerMonth: \"10.00\" }\ntools: { allow: [], deny: [admin-*] }\ntasks: durable\npublished: false\n",
-			`{"kind":"mcp","visibility":"unlisted","price":{"model":"per_call","amount":"0.002","currency":"USD","tools":{"deep":"0.01"},"freePerMonth":100,"capPerMonth":"10.00"},"tools":{"allow":[],"deny":["admin-*"]},"tasks":"durable","sealed":"off","published":false,"version":7}`},
-		{"service: research\nkind: mcp\nprice: { model: per_task, amount: \"5.00\", reviewWindowSeconds: 3600, taskTimeoutSeconds: 1800 }\ntasks: required\nsealed: optional\ntools: { deny: [] }\n",
-			`{"kind":"mcp","visibility":"public","price":{"model":"per_task","amount":"5.00","currency":"USD","reviewWindowSeconds":3600,"taskTimeoutSeconds":1800},"tools":{"deny":[]},"tasks":"required","sealed":"optional","published":true,"version":7}`},
+		{"service: search\nvisibility: unlisted\nprice: { model: free }\npublished: false\n",
+			`{"kind":"a2a","visibility":"unlisted","price":{"model":"free","currency":"USD"},"sealed":"off","published":false,"version":7}`},
+		{"service: research\nprice: { model: per_task, amount: \"5.00\", reviewWindowSeconds: 3600, taskTimeoutSeconds: 1800 }\nsealed: optional\n",
+			`{"kind":"a2a","visibility":"public","price":{"model":"per_task","amount":"5.00","currency":"USD","reviewWindowSeconds":3600,"taskTimeoutSeconds":1800},"sealed":"optional","published":true,"version":7}`},
 	} {
 		l, err := Parse([]byte(c.file))
 		if err != nil {

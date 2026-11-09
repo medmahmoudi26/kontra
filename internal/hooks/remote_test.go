@@ -106,9 +106,9 @@ func TestRemoteAdmissionDecisions(t *testing.T) {
 	r := h.remote(t, nil)
 	ctx := context.Background()
 
-	h.answer(200, `{"outcome":"allow","metadata":{"kontra.escrow.note":"ok"},"mcpMeta":{"sh.kontra/price":"1 EUR"}}`)
+	h.answer(200, `{"outcome":"allow","metadata":{"kontra.escrow.note":"ok"},"mcpMeta":{"sh.kontra/note":"1 EUR"}}`)
 	d, err := r.Admit(ctx, taskRequest())
-	if err != nil || d.Outcome != Allow || d.Metadata["kontra.escrow.note"] != "ok" || d.MCPMeta["sh.kontra/price"] != "1 EUR" {
+	if err != nil || d.Outcome != Allow || d.Metadata["kontra.escrow.note"] != "ok" || d.MCPMeta["sh.kontra/note"] != "1 EUR" {
 		t.Fatalf("allow: %+v, %v", d, err)
 	}
 	reqs := h.requests()
@@ -292,19 +292,25 @@ func TestRemoteAdmissionFailsClosed(t *testing.T) {
 	}
 }
 
-// A quote is valid only for operation task (spec §13.1): for call and session it is the deny "priced tasks need
-// tasks: durable", -32603.
+// A quote is valid only for operation task on a gate-owned A2A task (spec §13.1): for an MCP task, call or session it
+// is the deny "MCP services are not priced", -32603 (D350); an A2A task's quote stands.
 func TestRemoteAdmissionQuoteOutsideTask(t *testing.T) {
 	h := newHook(t)
 	r := h.remote(t, nil)
 	h.answer(200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"`+future()+`"}}`)
-	for _, op := range []Operation{OpCall, OpSession} {
+	for _, op := range []Operation{OpCall, OpSession, OpTask} {
 		req := taskRequest()
-		req.Operation, req.TaskID, req.Protocol, req.Tool = op, "", "mcp", "echo"
-		d, err := r.Admit(context.Background(), req)
-		if err != nil || d.Outcome != Deny || d.Refusal == nil || d.Refusal.Code != -32603 || d.Refusal.Message != "priced tasks need tasks: durable" || d.Quote != nil {
-			t.Errorf("a quote for %s: %+v, %v", op, d, err)
+		req.Operation, req.Protocol, req.Tool = op, ProtocolMCP, "echo"
+		if op != OpTask {
+			req.TaskID = ""
 		}
+		d, err := r.Admit(context.Background(), req)
+		if err != nil || d.Outcome != Deny || d.Refusal == nil || d.Refusal.Code != -32603 || d.Refusal.Message != MsgNotPriced || d.Quote != nil {
+			t.Errorf("a quote for an MCP %s: %+v, %v", op, d, err)
+		}
+	}
+	if d, err := r.Admit(context.Background(), taskRequest()); err != nil || d.Outcome != Quote || d.Quote == nil {
+		t.Errorf("a quote for an A2A task: %+v, %v", d, err)
 	}
 }
 

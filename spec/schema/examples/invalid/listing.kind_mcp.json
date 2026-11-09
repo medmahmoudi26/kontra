@@ -1,0 +1,7 @@
+{
+  "service": "files",
+  "kind": "mcp",
+  "price": {
+    "model": "free"
+  }
+}

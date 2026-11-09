@@ -26,41 +26,32 @@ import (
 const MaxFile = 64 << 10
 
 // Bounds a listing's values take (spec/schema/listing.json; Cloud's gate/listings: MAX_REVIEW_WINDOW,
-// MAX_TASK_TIMEOUT, MAX_TOOL_PRICES, its 64 globs and a week's idle bound).
+// MAX_TASK_TIMEOUT).
 const (
-	MaxWindowSeconds = 604800 // reviewWindowSeconds, taskTimeoutSeconds, idleTimeoutSeconds
-	MaxToolPrices    = 100
-	MaxGlobs         = 64
-	MaxFreePerMonth  = 1_000_000_000
+	MaxWindowSeconds = 604800 // reviewWindowSeconds, taskTimeoutSeconds
 	maxAmountLen     = 24
 )
 
-// Price models.
+// Price models: a listing is free or priced per task. Listings are A2A only, and MCP services are not priced (D350).
 const (
-	ModelFree       = "free"
-	ModelPerTask    = "per_task"
-	ModelPerCall    = "per_call"
-	ModelPerSession = "per_session"
+	ModelFree    = "free"
+	ModelPerTask = "per_task"
 )
 
 var (
 	serviceRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	centsRE   = regexp.MustCompile(`^(0|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$`)
-	microsRE  = regexp.MustCompile(`^(0|[1-9][0-9]{0,8})(\.[0-9]{1,6})?$`)
 	zeroRE    = regexp.MustCompile(`^0(\.0+)?$`)
-	toolRE    = regexp.MustCompile(`^[^\x00-\x1f\x7f]{1,128}$`)
 )
 
-// Listing is a listing file as spec/schema/listing.json describes it, its defaults filled in.
+// Listing is a listing file as spec/schema/listing.json describes it, its defaults filled in. It lists an A2A service:
+// an MCP service is not listed (D350).
 type Listing struct {
 	Service    string
-	Kind       string // a2a (default) or mcp
 	Visibility string // public (default), unlisted or private
 	Price      Price
-	Tools      *ToolsPolicy // mcp only
-	Tasks      string       // mcp only; "" when the file names none
-	Sealed     string       // off (default), optional or required
-	Published  bool         // true unless the file says false
+	Sealed     string // off (default), optional or required
+	Published  bool   // true unless the file says false
 }
 
 // Price is the listing's price, its members as the file writes them (nil: absent).
@@ -69,16 +60,6 @@ type Price struct {
 	Amount              *string
 	ReviewWindowSeconds *int64
 	TaskTimeoutSeconds  *int64
-	IdleTimeoutSeconds  *int64
-	Tools               map[string]string // per_call: a tool's own amount
-	FreePerMonth        *int64
-	CapPerMonth         *string
-}
-
-// ToolsPolicy is an MCP service's tools policy (relay.md §11.3).
-type ToolsPolicy struct {
-	Allow []string // nil: absent (every tool)
-	Deny  []string
 }
 
 // Problems is a listing file the schema refuses: one line per problem, each naming where.
@@ -351,7 +332,8 @@ func (v *checker) listing(doc any) *Listing {
 	if m == nil {
 		return nil
 	}
-	v.unknown("the listing", m, "service", "kind", "visibility", "price", "tools", "tasks", "sealed", "published")
+	// kind, tools and tasks were an MCP listing's: listings are A2A only (D350), so they are unknown members.
+	v.unknown("the listing", m, "service", "visibility", "price", "sealed", "published")
 	l := &Listing{Published: true}
 	if s, ok := v.str(m, "", "service"); !ok {
 		if _, present := m["service"]; !present {
@@ -362,7 +344,6 @@ func (v *checker) listing(doc any) *Listing {
 	} else {
 		l.Service = s
 	}
-	l.Kind = v.enum(m, "", "kind", "a2a", "a2a", "mcp")
 	l.Visibility = v.enum(m, "", "visibility", "public", "public", "unlisted", "private")
 	l.Sealed = v.enum(m, "", "sealed", "off", "off", "optional", "required")
 	if x, present := m["published"]; present {
@@ -373,45 +354,21 @@ func (v *checker) listing(doc any) *Listing {
 		l.Published = !ok || b
 	}
 	if x, present := m["price"]; !present {
-		v.add("price", "required: {model: free | per_task | per_call | per_session, amount, …}")
+		v.add("price", "required: {model: free | per_task, amount, …}")
 	} else if pm := v.object("price", x); pm != nil {
 		l.Price = v.price(pm)
-	}
-	if x, present := m["tools"]; present {
-		if l.Kind != "mcp" {
-			v.add("tools", "an MCP service's (kind: mcp)")
-		} else if tm := v.object("tools", x); tm != nil {
-			l.Tools = v.tools(tm)
-		}
-	}
-	if _, present := m["tasks"]; present {
-		if l.Kind != "mcp" {
-			v.add("tasks", "an MCP service's (kind: mcp)")
-		} else {
-			l.Tasks = v.enum(m, "", "tasks", "", "durable", "required", "passthrough", "off")
-		}
-	}
-	switch model := l.Price.Model; {
-	case (model == ModelPerCall || model == ModelPerSession) && l.Kind != "mcp":
-		v.add("price.model", "%s prices an MCP service's calls: kind: mcp", model)
-	case l.Kind == "mcp" && model == ModelPerTask && l.Tasks != "required":
-		v.add("tasks", "per_task on an MCP service needs tasks: required, so that every call is a task its quote covers "+
-			"(ext-escrow.md §6, D322)")
-	case l.Kind == "mcp" && model != "" && model != ModelFree && l.Tasks == "passthrough":
-		v.add("tasks", "a priced MCP service is never passthrough: the gate does not observe those calls (relay.md §11.5)")
 	}
 	return l
 }
 
 // price reads the price mapping (spec/schema/listing.json $defs/price).
 func (v *checker) price(m map[string]any) Price {
-	v.unknown("price", m, "model", "amount", "currency", "reviewWindowSeconds", "taskTimeoutSeconds",
-		"idleTimeoutSeconds", "tools", "freePerMonth", "capPerMonth")
+	v.unknown("price", m, "model", "amount", "currency", "reviewWindowSeconds", "taskTimeoutSeconds")
 	var p Price
 	if _, present := m["model"]; !present {
-		v.add("price.model", "required: free, per_task, per_call or per_session")
+		v.add("price.model", "required: free or per_task")
 	}
-	p.Model = v.enum(m, "price", "model", "", ModelFree, ModelPerTask, ModelPerCall, ModelPerSession)
+	p.Model = v.enum(m, "price", "model", "", ModelFree, ModelPerTask)
 	if c, ok := v.str(m, "price", "currency"); ok && c != "USD" {
 		v.add("price.currency", "%q: listings are priced in USD", c)
 	}
@@ -424,42 +381,6 @@ func (v *checker) price(m map[string]any) Price {
 	}
 	p.ReviewWindowSeconds = v.integer(m, "price", "reviewWindowSeconds", 0, MaxWindowSeconds)
 	p.TaskTimeoutSeconds = v.integer(m, "price", "taskTimeoutSeconds", 1, MaxWindowSeconds)
-	p.IdleTimeoutSeconds = v.integer(m, "price", "idleTimeoutSeconds", 1, MaxWindowSeconds)
-	p.FreePerMonth = v.integer(m, "price", "freePerMonth", 0, MaxFreePerMonth)
-	if c, ok := v.str(m, "price", "capPerMonth"); ok {
-		if !microsRE.MatchString(c) || zeroRE.MatchString(c) {
-			v.add("price.capPerMonth", "%q: want USD above 0 with at most 6 decimals", c)
-		} else {
-			p.CapPerMonth = &c
-		}
-	}
-	if x, present := m["tools"]; present {
-		if tm := v.object("price.tools", x); tm != nil {
-			if len(tm) > MaxToolPrices {
-				v.add("price.tools", "at most %d tools", MaxToolPrices)
-			}
-			p.Tools = map[string]string{}
-			names := make([]string, 0, len(tm))
-			for k := range tm {
-				names = append(names, k)
-			}
-			sort.Strings(names)
-			for _, k := range names {
-				at := "price.tools[" + fmt.Sprintf("%q", k) + "]"
-				a, ok := tm[k].(string)
-				switch {
-				case k == "*" || !toolRE.MatchString(k):
-					v.add(at, "not a tool name: the price's amount is every other tool's")
-				case !ok:
-					v.add(at, `want a string (quote it: "0.01")`)
-				case !microsRE.MatchString(a) || zeroRE.MatchString(a):
-					v.add(at, "%q: want USD above 0 with at most 6 decimals", a)
-				default:
-					p.Tools[k] = a
-				}
-			}
-		}
-	}
 	_, amountWritten := m["amount"]
 	switch p.Model {
 	case ModelFree:
@@ -474,104 +395,35 @@ func (v *checker) price(m map[string]any) Price {
 		case !centsRE.MatchString(*p.Amount) || zeroRE.MatchString(*p.Amount):
 			v.add("price.amount", "%q: want USD above 0 with at most 2 decimals (a task is charged in cents)", *p.Amount)
 		}
-	case ModelPerCall, ModelPerSession:
-		switch {
-		case p.Amount == nil && !amountWritten:
-			v.add("price.amount", "required: the price of a %s in USD, e.g. \"0.002\"", strings.TrimPrefix(p.Model, "per_"))
-		case p.Amount == nil:
-		case !microsRE.MatchString(*p.Amount) || zeroRE.MatchString(*p.Amount):
-			v.add("price.amount", "%q: want USD above 0 with at most 6 decimals (metered amounts are micro-USD)", *p.Amount)
-		}
 	}
 	if p.Model != ModelPerTask && p.ReviewWindowSeconds != nil && *p.ReviewWindowSeconds != 0 {
 		v.add("price.reviewWindowSeconds", "a per_task price's")
 	}
-	if p.Model != ModelPerCall {
-		for _, k := range []string{"tools", "freePerMonth", "capPerMonth"} {
-			if _, present := m[k]; present {
-				v.add("price."+k, "a per_call price's")
-			}
-		}
-	}
 	return p
-}
-
-// tools reads an MCP service's tools policy.
-func (v *checker) tools(m map[string]any) *ToolsPolicy {
-	v.unknown("tools", m, "allow", "deny")
-	t := &ToolsPolicy{Deny: []string{}}
-	globs := func(key string) []string {
-		x, present := m[key]
-		if !present {
-			return nil
-		}
-		xs, ok := x.([]any)
-		if !ok {
-			v.add("tools."+key, "want a list of tool globs")
-			return nil
-		}
-		out := []string{}
-		for i, g := range xs {
-			s, ok := g.(string)
-			if !ok || !toolRE.MatchString(s) {
-				v.add(fmt.Sprintf("tools.%s[%d]", key, i), "want a tool glob: 1 to 128 characters, * for any run")
-				continue
-			}
-			out = append(out, s)
-		}
-		return out
-	}
-	t.Allow = globs("allow")
-	if d := globs("deny"); d != nil {
-		t.Deny = d
-	}
-	if len(t.Allow)+len(t.Deny) > MaxGlobs {
-		v.add("tools", "at most %d globs in allow and deny together", MaxGlobs)
-	}
-	return t
 }
 
 // Body is the request PUT /v1/services/{name} takes (Cloud's ListingPut, D-M5-95): the listing, whether the gate
 // serves it, and the version it replaces (0: none). Every key the file left out is the control plane's default, and
-// the keys it wrote are sent as written.
+// the keys it wrote are sent as written. kind is always "a2a": the file has none, and ListingPut still names it.
 func (l *Listing) Body(version int64) ([]byte, error) {
 	type price struct {
-		Model               string            `json:"model"`
-		Amount              *string           `json:"amount,omitempty"`
-		Currency            string            `json:"currency"`
-		Tools               map[string]string `json:"tools,omitempty"`
-		FreePerMonth        *int64            `json:"freePerMonth,omitempty"`
-		CapPerMonth         *string           `json:"capPerMonth,omitempty"`
-		ReviewWindowSeconds *int64            `json:"reviewWindowSeconds,omitempty"`
-		TaskTimeoutSeconds  *int64            `json:"taskTimeoutSeconds,omitempty"`
-		IdleTimeoutSeconds  *int64            `json:"idleTimeoutSeconds,omitempty"`
-	}
-	type tools struct {
-		Allow *[]string `json:"allow,omitempty"` // nil: absent (every tool); [] allows none, and is sent
-		Deny  []string  `json:"deny"`
+		Model               string  `json:"model"`
+		Amount              *string `json:"amount,omitempty"`
+		Currency            string  `json:"currency"`
+		ReviewWindowSeconds *int64  `json:"reviewWindowSeconds,omitempty"`
+		TaskTimeoutSeconds  *int64  `json:"taskTimeoutSeconds,omitempty"`
 	}
 	body := struct {
 		Kind       string `json:"kind"`
 		Visibility string `json:"visibility"`
 		Price      price  `json:"price"`
-		Tools      *tools `json:"tools,omitempty"`
-		Tasks      string `json:"tasks,omitempty"`
 		Sealed     string `json:"sealed"`
 		Published  bool   `json:"published"`
 		Version    int64  `json:"version"`
 	}{
-		Kind: l.Kind, Visibility: l.Visibility, Sealed: l.Sealed, Published: l.Published, Version: version, Tasks: l.Tasks,
-		Price: price{Model: l.Price.Model, Amount: l.Price.Amount, Currency: "USD", Tools: l.Price.Tools,
-			FreePerMonth: l.Price.FreePerMonth, CapPerMonth: l.Price.CapPerMonth,
-			ReviewWindowSeconds: l.Price.ReviewWindowSeconds, TaskTimeoutSeconds: l.Price.TaskTimeoutSeconds,
-			IdleTimeoutSeconds: l.Price.IdleTimeoutSeconds},
-	}
-	if l.Tools != nil {
-		body.Tools = &tools{Deny: l.Tools.Deny}
-		if l.Tools.Allow != nil {
-			allow := l.Tools.Allow
-			body.Tools.Allow = &allow
-		}
+		Kind: "a2a", Visibility: l.Visibility, Sealed: l.Sealed, Published: l.Published, Version: version,
+		Price: price{Model: l.Price.Model, Amount: l.Price.Amount, Currency: "USD",
+			ReviewWindowSeconds: l.Price.ReviewWindowSeconds, TaskTimeoutSeconds: l.Price.TaskTimeoutSeconds},
 	}
 	return json.Marshal(body)
 }

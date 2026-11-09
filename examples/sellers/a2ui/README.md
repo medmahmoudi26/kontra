@@ -12,21 +12,21 @@ module only so that `go build ./...` builds it and the e2e tests can run it.
 | `kontra.yaml` | A team gate on one machine with the tunnel service `a2ui` |
 | `testdata/a2ui-v0.9.1/` | The A2UI v0.9.1 schemas and basic catalog, vendored unmodified with A2UI's licence ([its README](testdata/a2ui-v0.9.1/README.md)) |
 | `testdata/messages/` | The form the agent sends (`surface.json`), the message that deletes it (`delete.json`), a renderer's action (`action.json`), a client's capabilities (`capabilities.json`); a task's surface id is written `booking-{taskId}` |
-| `testdata/card/` | The card's A2UI params, its input-schema params, and a booking that schema accepts |
+| `testdata/card/` | The card's A2UI params |
+| `testdata/booking.json` | A booking a first message's data part may hold |
 | `testdata/invalid/` | Fixtures the schemas must refuse |
 
-`make check-specs` validates every fixture against the vendored A2UI schemas (or `spec/schema` and the card's own input
-schema), formats included (an RFC 3339 `timestamp` and `date`), and checks the vendored files against `SHA256SUMS`; the
+`make check-specs` validates every fixture against the vendored A2UI schemas, formats included (an RFC 3339
+`timestamp`), and checks the vendored files against `SHA256SUMS`; the
 Go tests hold the agent's output to the fixtures.
 
 ## What it does
 
-The card declares two extensions, neither required (each entry writes `"required": false`):
-
-- **A2UI v0.9.1**, `https://a2ui.org/a2a-extension/a2ui/v0.9.1`, with `params.supportedCatalogIds` the basic catalog,
-  `https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json`;
-- **the input schema**, `https://kontra.sh/ext/input-schema/v1` ([`spec/ext-input-schema.md`](../../../spec/ext-input-schema.md)):
-  `{"name": string, "guests": 1 to 6, "date": RFC 3339 date-time}`, all three required.
+The card declares one extension, not required (its entry writes `"required": false`): **A2UI v0.9.1**,
+`https://a2ui.org/a2a-extension/a2ui/v0.9.1`, with `params.supportedCatalogIds` the basic catalog,
+`https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json`. Its skill's `examples` ("a table, please", "book a
+table for two") suggest a first message, which a client shows as it likes; `/mcp` `describe` returns them. A first
+message is plain A2A: there is no typed first message (D350).
 
 A first message stops the task at `input-required`. What the agent asks depends on whether the client renders A2UI:
 
@@ -37,7 +37,8 @@ A first message stops the task at `input-required`. What the agent asks depends 
   `TextField`, a `ChoicePicker`, a `DateTimeInput` and a `Button` whose action `book` carries the three fields) and
   `updateDataModel` (two guests chosen). The part is marked `metadata.mimeType: "application/a2ui+json"`, as A2UI
   specifies, and `mediaType: "application/a2ui+json"`, A2A 1.0's own field for the same thing.
-- **It does not**: the question asks, in text, for a data part holding the input schema's booking.
+- **It does not**: the question asks, in text, for a data part holding the booking, `{"name": string, "guests": 1 to
+  6, "date": RFC 3339 date-time}`.
 
 Each task's form is a surface of its own, `booking-` and the task's id: A2UI refuses a `createSurface` for an id the
 client still shows, and one context (A2UI's session) holds as many forms as it has tasks. The messages' `version` is
@@ -55,8 +56,7 @@ nothing left to book. The agent reads the booking, never the action's `surfaceId
 to be corrected, naming what is wrong, in text alone: the client keeps its form and what the person typed in it (A2UI
 creates a surface once, and the agent sends a task's form once).
 
-A first message whose data part is the input schema's booking (a client that renders the input schema as a form sends
-one) is booked at once; one holding part of it gets the form with that part filled in. A data part without `name`,
+A first message whose data part already holds that booking is booked at once; one holding part of it gets the form with that part filled in. A data part without `name`,
 `guests` or `date` (A2UI's samples send `{"useStreaming": false}` beside each message) is not a booking. `CancelTask`
 ends a waiting task `canceled`, deleting its form as a booking does. Tasks live in memory, and a request body over 4
 MiB is refused, as the booking example's.
@@ -107,7 +107,7 @@ answer's data part and sends the action itself; the renderers ship no A2A client
 ([`../booking/README.md`](../booking/README.md#through-the-tunnel-m2)) with `a2ui` for `booking` and port 9995. The gate
 interprets no A2UI ([`spec/relay.md`](../../../spec/relay.md) §2.6):
 
-- the card's A2UI and input-schema entries are served as the agent wrote them;
+- the card's A2UI entry is served as the agent wrote it;
 - `A2A-Extensions: https://a2ui.org/a2a-extension/a2ui/v0.9.1` is echoed and reaches the agent, and so does message
   metadata (`a2uiClientCapabilities`); only `kontra.*` keys are removed;
 - the form and the action pass as data parts with their marks, equal under JCS to what was sent (the gate re-encodes
@@ -117,7 +117,7 @@ interprets no A2UI ([`spec/relay.md`](../../../spec/relay.md) §2.6):
 - the gate speaks A2A 1.0 only to callers, so a client on A2A 0.3 (A2UI's reference web clients use `@a2a-js/sdk` 0.3)
   cannot call it as it is; an agent on A2A 0.3 behind it must send one A2UI message per data part (D327);
 - `/mcp`'s `hire` and `reply` cannot activate the extension nor send message metadata, and the hire result drops a
-  part's marks (D328): this agent answers a `hire` in text, and `reply` with the input schema's data part books. A
+  part's marks (D328): this agent answers a `hire` in text, and `reply` with a data part holding the booking books. A
   part's own `metadata` and `mediaType` do reach it, so `reply` with the form's action in a part marked
   `application/a2ui+json` books too.
 

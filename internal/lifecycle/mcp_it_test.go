@@ -194,7 +194,7 @@ func TestMCPTaskActivities(t *testing.T) {
 	id := uuid.Must(uuid.NewV7())
 	exp := time.Now().Add(time.Hour)
 	nt, err := store.NewMCPTask(id, svc, buyer, store.StateQuoted, &exp, "https://pay.example/q/1",
-		map[string]any{"kontra.escrow.hold": "h-1", "caller.key": "x"}, map[string]any{"sh.kontra/price": "1 USD"})
+		map[string]any{"kontra.escrow.hold": "h-1", "caller.key": "x"}, map[string]any{"sh.kontra/note": "1 USD"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestMCPTaskActivities(t *testing.T) {
 		t.Fatal(err)
 	}
 	if row.State != store.StateSubmitted || store.MCPStatusText(row.Snapshot) != "" || store.MCPMeta(row.Snapshot)["sh.kontra/escrow"] != "held" ||
-		store.MCPMeta(row.Snapshot)["sh.kontra/price"] != "1 USD" || row.Snapshot.Metadata["kontra.escrow.approved"] != true {
+		store.MCPMeta(row.Snapshot)["sh.kontra/note"] != "1 USD" || row.Snapshot.Metadata["kontra.escrow.approved"] != true {
 		t.Fatalf("after submit: %s %+v", row.State, row.Snapshot)
 	}
 	var payload string
