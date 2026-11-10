@@ -8,7 +8,7 @@ import { $, fill, h } from "./dom.js";
 
 /** Every view of the page (index.html), each a <section> the router shows one at a time. */
 export const VIEWS = Object.freeze([
-  "#view-tasks", "#view-conversations", "#view-thread", "#view-traffic", "#view-calls", "#view-services",
+  "#view-tasks", "#view-conversations", "#view-thread", "#view-traffic", "#view-calls", "#view-cards",
 ]);
 
 /** The sections: [key, href, label, feature] (a section whose feature /v1/info leaves out is hidden). */
@@ -17,7 +17,7 @@ export const SECTIONS = Object.freeze([
   ["conversations", "#/conversations", "Conversations", "conversations"],
   ["traffic", "#/traffic", "Traffic", "traffic"],
   ["calls", "#/calls", "MCP calls", "calls"],
-  ["services", "#/services", "Services", null],
+  ["cards", "#/cards", "Cards", null],
 ]);
 
 /** The sections the backend offers. */

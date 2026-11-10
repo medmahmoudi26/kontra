@@ -44,8 +44,10 @@ the console shows its task as it happens. To stop: `kill %1 %2 %3` (or Ctrl-C ea
   the limit), with its outcome and a link to its task; nothing of a body or a header is kept
   ([`spec/relay.md`](../spec/relay.md) §13.6). A gap is never silent: dropped rows are counted on `/v1/info` and in
   `kontra_traffic_dropped_total`.
-- **MCP calls** of the MCP servers your node hosts (`--serve mcp:name=…`), and **Services** with whether an agent is
-  reachable now and how long their ended tasks are kept.
+- **MCP calls** of the MCP servers your node hosts (`--serve mcp:name=…`).
+- **Cards**: one card per service, as its agent card says (name, version, description, skills), with its URL,
+  whether an agent is reachable now and how long its ended tasks are kept. The arrow under a card opens the rest of
+  a long description and each skill's details (examples, input and output modes).
 - **Run a task**: start a task on a service from its card (its skills, examples and AgentStack initial form), answer
   it when it asks for input (text, a form, an A2UI action), cancel it, or continue its conversation. The console acts
   only on the tasks it started; a task another client started is watch-only.

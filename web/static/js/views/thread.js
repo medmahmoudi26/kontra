@@ -164,7 +164,7 @@ async function follow(taskId, after, signal, { onOpen, onEvent, onEnd, onTrouble
 export async function showRun(name, { prefill = null } = {}) {
   leaveThread();
   const mine = ++generation;
-  showView("#view-thread", "services", [typeof name === "string" ? name : "?"]);
+  showView("#view-thread", "cards", [typeof name === "string" ? name : "?"]);
   if (typeof name !== "string" || !NAME_RE.test(name)) {
     fill($("#thread"), [h("p", { class: "empty err", text: "That is not a service's address." })]);
     return () => {};
