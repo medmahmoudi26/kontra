@@ -21,7 +21,7 @@ const convHref = (c) => `#/c/${encodeURIComponent(c.service)}/${encodeURICompone
 function convRow(c) {
   return h("tr", { dataset: { context: c.context_id } }, [
     h("td", { text: c.service }),
-    h("td", { class: "muted", text: c.caller || "—" }),
+    h("td", { class: "muted", title: c.caller || "", text: c.principal || c.caller || "—" }),
     h("td", {}, [h("a", { href: convHref(c), title: c.context_id, text: shortId(c.context_id) })]),
     h("td", { class: "m", text: String(c.tasks ?? "—") }),
     h("td", {}, [chip(stateChip(c.state))]),
@@ -62,7 +62,7 @@ export async function showConversations() {
 /** #/c/<service>/<caller>/<context>. */
 export async function showConversation(service, caller, context) {
   showView("#view-conversations", "conversations", [shortId(context || "")]);
-  heading(`${service || "?"} · ${caller || "?"}`, `Context ${context || "?"}: its tasks, oldest first.`);
+  heading(`${service || "?"} · context ${shortId(context || "?")}`, `Caller ${caller || "?"}: its tasks in this context, oldest first.`);
   const root = $("#conversations");
   const mine = ++generation;
   if (!service || !caller || !context) {

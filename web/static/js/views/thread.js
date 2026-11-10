@@ -46,6 +46,7 @@ import { byCard, chipRow, enterSends, hm, hms, jsonBox, mss, oneLine, phone, pla
 import { VIA_WORDS, copyButton, failure, isTerminal, serviceAvatar, shortId, stateChip, when } from "./common.js";
 import { dataView, fileRow, sealedRow, textView } from "./outputs.js";
 import { requestCard, requestRow, requestRows } from "./request.js";
+import { ap2Card } from "./ap2.js";
 
 const TASK_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -1128,6 +1129,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
         ]);
       }
       if (part.file) return ctx.file(part.file);
+      if (part.ap2) return ap2Card(part.ap2, part.data);
       if (part.data !== undefined) return dataNode(part, role, ctx);
       return null;
     });

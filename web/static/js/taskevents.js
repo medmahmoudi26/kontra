@@ -3,6 +3,7 @@
 // results folded by artifact id as A2A folds them.
 
 import { a2uiMessages, isA2uiPart } from "./a2uiwire.js";
+import { ap2Of } from "./ap2.js";
 import { requestedForm } from "./agentstack.js";
 import { base64Size } from "./files.js";
 
@@ -146,6 +147,8 @@ export function partsOf(parts) {
       const acts = messages && messages.every((m) => isObj(m.action) || isObj(m.userAction))
         ? messages.map((m) => (isObj(m.action) ? m.action : m.userAction)) : null;
       out.push(acts ? { data: json(p.data), actions: acts } : { data: json(p.data), a2ui: messages });
+    } else if (p.data !== undefined && ap2Of(p.data)) {
+      out.push({ data: json(p.data), ap2: ap2Of(p.data) });
     } else if (p.data !== undefined) {
       const form = formOf(p);
       const invalid = form ? null : validationOf(p);

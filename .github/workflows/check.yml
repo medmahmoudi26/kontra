@@ -37,6 +37,15 @@ jobs:
         with:
           go-version: "1.26.10"
       - run: make check-go
+  # The console's renderer: node:test over web/ (the rendering-safety lint included).
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22.22.2"
+      - run: make check-web
   # Integration tests (no -short) on Postgres 16 and 17: every package but test/e2e (`make test-integration`).
   # The pinned Temporal CLI (spec/relay.md §0: CLI 1.9.1, Server 1.32.0) is installed for the tests that
   # start a dev server; they read its path from KONTRA_TEMPORAL_CLI. Pebble likewise, KONTRA_TEST_PEBBLE. uv

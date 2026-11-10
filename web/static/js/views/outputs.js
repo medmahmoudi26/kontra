@@ -11,6 +11,8 @@ import { errorText, h, icon } from "../dom.js";
 import { httpsHost, isTextual, piecesOf, piecesSize, previewOf, readPieces, saveBytes, sizeText } from "../files.js";
 import { cellText, isMarkdown, markdownNodes, shapeOf } from "../results.js";
 import { clamped, jsonBox, phone, rawToggle } from "./cards.js";
+import { ap2Of } from "../ap2.js";
+import { ap2Card } from "./ap2.js";
 
 /** One file as one row: its icon, name, size and type; Open (text) and Download. `ctx`: { taskId,
  * signal }; `extra`: nodes at the row's end (its "{}"). */
@@ -148,6 +150,8 @@ export function dataView(json) {
   } catch {
     return jsonBox(json);
   }
+  const ap2 = ap2Of(data);
+  if (ap2) return ap2Card(ap2, json);
   const shape = shapeOf(data);
   const nodes = shape.tables.map(table);
   const tiles = shape.scalars.filter(([, v]) => typeof v === "number" || typeof v === "boolean");

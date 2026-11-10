@@ -5,6 +5,7 @@
 // (`Content-Type: application/json`), which a page on another site cannot send without a preflight
 // the API never answers. Errors are the API's error body as a GateError.
 
+import { normalizeForm } from "./agentstack.js";
 import { ROUTES, routePath } from "./routes.js";
 
 export class GateError extends Error {
@@ -105,7 +106,16 @@ export class Gate {
   startTask(body) { return this.call("start_task", { body }); }
   /** What starting a task on service `name` takes, read from its card: { name, description,
    * skills (with their examples), accepts_json, a2ui, initial_form, unsupported_extensions }. */
-  startForm(name) { return this.call("start_form", { path: { name } }); }
+  async startForm(name) {
+    const f = await this.call("start_form", { path: { name } });
+    // The gate returns the card's AgentStack initial form as the card has it; the console draws it normalised.
+    if (f && f.initial_form) {
+      const { form, note } = normalizeForm(f.initial_form);
+      f.initial_form = form;
+      f.initial_form_note = note;
+    }
+    return f;
+  }
   /** Answer a task that waits for input (reply offered): `{text}`, an A2UI action (`a2ui`), a form's
    * answer (`data`, with `structured_input` for a Structured Input request) or an AgentStack form's
    * answer (`form_response: {values}`), each with the catalogs the console draws (`a2ui_catalogs`,
