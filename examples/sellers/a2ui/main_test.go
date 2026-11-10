@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"log/slog"
@@ -356,11 +357,7 @@ func TestSurfacePerTask(t *testing.T) {
 	}
 	// The action carries no capabilities: the form's version is the one the task sent it in.
 	closed(t, send(t, c, actionMessage(t, "messages/action.json"), first), a2a.TaskStateCompleted, booked, a, v09)
-	canceled, err := c.CancelTask(ctxT(t), &a2a.CancelTaskRequest{ID: second.ID})
-	if err != nil {
-		t.Fatal(err)
-	}
-	closed(t, canceled, a2a.TaskStateCanceled, "The booking was canceled.", b, v09)
+	closed(t, cancelTask(t, c, second.ID), a2a.TaskStateCanceled, "The booking was canceled.", b, v09)
 }
 
 // A client renders the form when its a2uiClientCapabilities list the basic catalog under v0.9.1 or v0.9 (message
@@ -591,5 +588,23 @@ func TestRun(t *testing.T) {
 		if c := run(context.Background(), args, io.Discard, io.Discard); c != 2 {
 			t.Errorf("run %v: exit %d, want 2", args, c)
 		}
+	}
+}
+
+// cancelTask cancels a task that just answered input-required. a2a-go v2.7.0 answers the message before it drops the
+// finished execution, and a CancelTask in that gap joins it and is refused ErrTaskNotCancelable with the task still
+// input-required; retried, it reaches the idle task.
+func cancelTask(t *testing.T, c *a2aclient.Client, id a2a.TaskID) *a2a.Task {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		task, err := c.CancelTask(ctxT(t), &a2a.CancelTaskRequest{ID: id})
+		if err == nil {
+			return task
+		}
+		if !errors.Is(err, a2a.ErrTaskNotCancelable) || time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

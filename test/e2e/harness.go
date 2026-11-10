@@ -1279,7 +1279,7 @@ func startPostgres(ctx context.Context, image, run string) (*postgres, error) {
 		return nil, fmt.Errorf("e2e: docker run %s (or set %s): %v\n%s", image, PostgresEnv, err, out)
 	}
 	pg := &postgres{remove: func() error {
-		if out, err := exec.Command("docker", "rm", "-f", name).CombinedOutput(); err != nil {
+		if out, err := exec.Command("docker", "rm", "-f", "-v", name).CombinedOutput(); err != nil {
 			return fmt.Errorf("e2e: docker rm -f %s: %v\n%s", name, err, out)
 		}
 		return nil

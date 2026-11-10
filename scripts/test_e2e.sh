@@ -31,8 +31,25 @@ fi
 # This run's processes and containers carry this session id (the harness passes it on), so a check never
 # touches another run's.
 export KONTRA_E2E_SESSION="e2e-$$-$RANDOM"
+# KONTRA_E2E_SHARD=i/n runs the i-th of n slices of the tests (0-based), so CI can spread them over n jobs; unset,
+# every test runs, and it is ignored when the arguments carry their own -run. The slices are balanced by the seconds
+# test/e2e/durations.txt records (longest first, each to the lightest slice; a test not listed counts 30 s), so every
+# test lands in exactly one slice whatever the table says.
+shard=()
+if [[ -n "${KONTRA_E2E_SHARD:-}" && " $* " != *" -run"* ]]; then
+  [[ "$KONTRA_E2E_SHARD" =~ ^([0-9]+)/([1-9][0-9]*)$ ]] || { echo "test-e2e: KONTRA_E2E_SHARD $KONTRA_E2E_SHARD is not i/n" >&2; exit 2; }
+  i="${BASH_REMATCH[1]}" n="${BASH_REMATCH[2]}"
+  (( i < n )) || { echo "test-e2e: KONTRA_E2E_SHARD $KONTRA_E2E_SHARD: i must be below n" >&2; exit 2; }
+  mapfile -t pick < <("$GO" test -list '^Test' ./test/e2e/ | grep '^Test' |
+    awk -v i="$i" -v n="$n" 'NR == FNR { if ($1 !~ /^#/ && NF == 2) s[$1] = $2; next } { print (($1 in s) ? s[$1] : 30), $1 }' \
+      test/e2e/durations.txt - | sort -k1,1nr -k2,2 |
+    awk -v i="$i" -v n="$n" '{ m = 0; for (k = 1; k < n; k++) if (b[k] < b[m]) m = k; b[m] += $1; if (m == i) print $2 }')
+  (( ${#pick[@]} > 0 )) || { echo "test-e2e: shard $KONTRA_E2E_SHARD has no tests" >&2; exit 2; }
+  echo "test-e2e: shard $KONTRA_E2E_SHARD runs ${#pick[@]} tests: ${pick[*]}" >&2
+  shard=(-run "^($(IFS='|'; echo "${pick[*]}"))\$")
+fi
 status=0
-"$GO" test -p 1 -count=1 -timeout "${KONTRA_E2E_TIMEOUT:-60m}" "$@" ./test/e2e/... || status=$?
+"$GO" test -p 1 -count=1 -timeout "${KONTRA_E2E_TIMEOUT:-60m}" "${shard[@]}" "$@" ./test/e2e/... || status=$?
 
 leaked=0
 dir="${TMPDIR:-/tmp}/kontra-e2e-$KONTRA_E2E_SESSION"
@@ -91,7 +108,7 @@ if command -v docker >/dev/null 2>&1; then
   while read -r name; do
     [[ -z "$name" ]] && continue
     echo "test-e2e: container $name outlived the run" >&2
-    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker rm -f -v "$name" >/dev/null 2>&1 || true
     leaked=1
   done < <(docker ps -a --filter "label=kontra-e2e-session=$KONTRA_E2E_SESSION" --format '{{.Names}}' 2>/dev/null || true)
 fi
