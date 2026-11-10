@@ -34,6 +34,7 @@ import (
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/card"
 	"kontra.sh/kontra/internal/config"
+	"kontra.sh/kontra/internal/console"
 	"kontra.sh/kontra/internal/edge"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/gatemcp"
@@ -578,6 +579,10 @@ func (r *Replica) assemble() error {
 		return err
 	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))
+	// The local development profile's console (relay.md §18): the page at / and the console API under /v1/. On any
+	// other gate none of it is registered, and those paths stay the closed router's empty 404.
+	mountConsole(cfg, routes, console.Deps{Config: cfg, DB: r.pool, Log: r.storeLog, Waker: r.listener, Blobs: r.blobs,
+		Dropped: r.traffic.Dropped, Logger: log.With("component", "console")})
 	// GET /.well-known/jwks.json (spec §2.1, D166): the card-signing public keys, every key of the file.
 	if r.signingKeys != nil {
 		jwks, err := card.JWKSHandler(r.signingKeys)
