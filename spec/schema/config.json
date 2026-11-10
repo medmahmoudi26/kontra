@@ -6,7 +6,11 @@
   "additionalProperties": false,
   "required": ["public_url", "postgres"],
   "properties": {
-    "listen": { "$ref": "#/$defs/hostPort", "default": ":8080", "description": "The public listener." },
+    "profile": {
+      "enum": ["local"],
+      "description": "The local development profile (relay.md §18): plain HTTP on loopback, every client the shared anonymous caller, nodes served without enrollment, traffic recorded, the console at /. Absent: a team gate."
+    },
+    "listen": { "$ref": "#/$defs/hostPort", "default": ":8080", "description": "The public listener (127.0.0.1:8080 in the local development profile)." },
     "public_url": {
       "type": "string",
       "pattern": "^https?://[^/?#@]+(/[^?#]*)?$",
@@ -182,6 +186,15 @@
         "reattach_grace": { "$ref": "#/$defs/duration", "default": "15m", "description": "How long a task whose node lost its tunnel session after the first upstream task id waits for the node to reconnect, never past the task's deadline; then failed: tunnel_lost (relay.md §6.4, D345). 1s to 24h." }
       }
     },
+    "traffic": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The A2A traffic record (relay.md §13.6): one metadata-only exchange per A2A call, in a2a_exchanges.",
+      "properties": {
+        "record": { "type": "boolean", "description": "Record exchanges. Default false, true in the local development profile." },
+        "retention": { "$ref": "#/$defs/retention", "default": "7d", "description": "Exchanges older than this are deleted; 0 keeps them forever." }
+      }
+    },
     "tunnel": {
       "type": "object",
       "additionalProperties": false,
@@ -225,6 +238,10 @@
     "duration": {
       "type": "string",
       "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h|d))+$"
+    },
+    "retention": {
+      "description": "0 (keep forever) or a positive duration.",
+      "oneOf": [{ "const": 0 }, { "const": "0" }, { "$ref": "#/$defs/duration" }]
     },
     "byteSize": {
       "oneOf": [
@@ -316,7 +333,7 @@
           "properties": {
             "timeout": { "$ref": "#/$defs/duration", "default": "1h" },
             "retries": { "type": "integer", "minimum": 0, "maximum": 10, "default": 2 },
-            "retention": { "$ref": "#/$defs/duration", "default": "7d" }
+            "retention": { "$ref": "#/$defs/retention", "default": "7d", "description": "How long a terminal task is kept; 0 keeps it forever (relay.md §5.4)." }
           }
         },
         "listed": { "type": "boolean", "default": false },

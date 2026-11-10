@@ -725,15 +725,23 @@ func (k *APIKeys) inTx(ctx context.Context, fn func(pgx.Tx) error) error {
 // JWT of the MCP authorization server (AuthenticateMCP, mcp_oauth.go; M4 WP-06); on the A2A routes, with auth.oidc, a
 // JWT of the configured issuer (AuthenticateA2A, oidc_a2a.go; M5, D314).
 type Authenticator struct {
-	keys *APIKeys
-	mcp  MCPResourceServer // nil without auth.mcp_oauth
-	a2a  A2AVerifier       // nil without auth.oidc
+	local bool // the local development profile: every request is the anonymous caller (NewLocalAuthenticator)
+	keys  *APIKeys
+	mcp   MCPResourceServer // nil without auth.mcp_oauth
+	a2a   A2AVerifier       // nil without auth.oidc
 }
 
 // NewAuthenticator returns the edge's authenticator. keys nil (auth.api_keys: false) refuses every bearer
 // credential with ErrUnauthenticated.
 func NewAuthenticator(keys *APIKeys) *Authenticator {
 	return &Authenticator{keys: keys}
+}
+
+// NewLocalAuthenticator is the local development profile's authenticator: every request, with a credential or
+// without, a request a node opened included, is the anonymous caller with the given buyer, authenticated=false. No
+// header is read, so no credential is checked, refused or kept. The profile's services all admit anonymous.
+func NewLocalAuthenticator() *Authenticator {
+	return &Authenticator{local: true}
 }
 
 // Authenticate reads Authorization as an API key. No credential returns the anonymous principal with the given
@@ -748,6 +756,9 @@ func NewAuthenticator(keys *APIKeys) *Authenticator {
 // the gate never lets a node's request choose its principal), and a session whose hiring API key was revoked is
 // ErrUnauthenticated, the 401 of every later stream it opens (§12).
 func (a *Authenticator) Authenticate(r *http.Request, anonymousBuyer uuid.UUID) (p Principal, authenticated bool, err error) {
+	if a.local {
+		return Anonymous(anonymousBuyer), false, nil
+	}
 	if src, ok := HireSourceFrom(r.Context()); ok {
 		p, err := src.HirePrincipal(r.Context())
 		if err != nil {

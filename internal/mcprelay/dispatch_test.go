@@ -153,11 +153,20 @@ func TestTTL(t *testing.T) {
 	c := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
 	pol := store.ServiceRef{Timeout: time.Hour, Retention: 24 * time.Hour}
 	dl := c.Add(time.Hour)
-	if got := ttlOf(&store.TaskRow{CreatedAt: c, Deadline: &dl}, pol); got != (25 * time.Hour).Milliseconds() {
-		t.Errorf("submitted: %d", got)
+	if got := ttlOf(&store.TaskRow{CreatedAt: c, Deadline: &dl}, pol); got == nil || *got != (25*time.Hour).Milliseconds() {
+		t.Errorf("submitted: %v", got)
 	}
-	if got := ttlOf(&store.TaskRow{CreatedAt: c}, pol); got != (25 * time.Hour).Milliseconds() {
-		t.Errorf("no deadline: %d", got)
+	if got := ttlOf(&store.TaskRow{CreatedAt: c}, pol); got == nil || *got != (25*time.Hour).Milliseconds() {
+		t.Errorf("no deadline: %v", got)
+	}
+	// task.retention: 0 keeps the task forever: ttl is null (unlimited), before the end and after it.
+	forever := store.ServiceRef{Timeout: time.Hour}
+	if got := ttlOf(&store.TaskRow{CreatedAt: c, Deadline: &dl}, forever); got != nil {
+		t.Errorf("kept forever, running: %d", *got)
+	}
+	end := c.Add(time.Minute)
+	if got := ttlOf(&store.TaskRow{CreatedAt: c, Deadline: &dl, TerminalAt: &end}, forever); got != nil {
+		t.Errorf("kept forever, ended: %d", *got)
 	}
 }
 

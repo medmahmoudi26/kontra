@@ -80,6 +80,7 @@ The gate's public listener serves these routes and nothing else (closed default 
 | `GET /.well-known/jwks.json` | The gate's card-signing public keys. |
 | `GET /.well-known/oauth-protected-resource/mcp[/{svc}]` | RFC 9728 metadata for the MCP endpoints, when the operator configures an authorization server (§12.1). |
 | `GET /healthz` | `200` when this replica's Postgres and Temporal connections are up and it is not draining; `503` otherwise. |
+| `GET /`, `GET /console.css`, `GET /favicon.svg`, `GET /js/…`, `GET /vendor/…`; the console API under `/v1/` (§18.2) | **The local development profile only** (`profile: local`, §18, D352): the console's page, embedded in the binary, and its API. On any other gate these paths are the closed default route's empty `404`. |
 
 `{svc}` is `/agents/{name}` on a single-tenant gate and `/agents/{tenant}/{name}` on a multi-tenant gate
 (Cloud). `name` and `tenant` match `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`. The MCP routes use the same
@@ -589,7 +590,12 @@ credentials or request headers. The work queue's payload is not in Temporal: it 
 ### 5.4 Retention
 
 Every terminal task, with its `task_events`, `attempts`, `work_items`, `push_configs` and bucket objects, is
-deleted at `retention_until` (`services.<name>.task.retention`, default 7 days after the terminal event). A sweep on any replica does it every 10
+deleted at `retention_until` (`services.<name>.task.retention`, default 7 days after the terminal event). A
+retention of `0` keeps the service's tasks forever (D354): a task that ends under it gets no `retention_until`, so no
+sweep selects it, and its service's closed `mcp_sessions` are kept too. Changing the retention back to a duration does
+not reach a task that ended while it was `0`: its `retention_until` stays null (an operator expires such tasks with
+`update kontra.tasks set retention_until = now() where service = … and terminal_at is not null and retention_until is
+null`). An MCP task kept forever has `ttl: null` (§11.6). A sweep on any replica does it every 10
 minutes. `mcp_sessions` closed for longer than the retention go the same way (a session of the gate's own
 `/mcp`, which names no service, after the default 7 days, D95); `calls` rows are the
 operator's to delete (§13.5). Parts sealed to a key are only as safe as that key ([`tunnel.md`](tunnel.md)
@@ -2034,7 +2040,9 @@ No protocol surface lists tasks across buyers: A2A `ListTasks`, MCP `tasks/list`
 are scoped to the caller's own `buyer_id` (PRD §12). The **owner of a service** is different: the operator's
 own API may show a tenant the tasks and calls of the services it owns (who called, when, state, metadata;
 never content), which is what "served by my nodes" needs (D39). That is the operator's read of the gate's
-tables, not a gate route.
+tables, not a gate route, with one exception: in the local development profile (§18) the gate serves the operator's
+read itself, on its console API, over the same tables and `a2a_exchanges` (§13.6), and under the same "never" list:
+no console read names `push_configs` or `work_items` (D352).
 
 The indexes an operator's reads use (D319): a service's tasks newest first, `tasks_by_service` (`tenant_id, service,
 status_at desc, id desc`); a buyer's tasks across services newest first, `tasks_by_buyer` (`buyer_id, id desc`); a
@@ -2057,6 +2065,30 @@ chain. It runs as its owner (the role that migrates the gate), so the operator's
 `services:` block refuses to start, and a `services:` entry naming a row the operator wrote is refused (D116). A
 service removed or disabled answers as an unknown service at once, and its tasks in flight fail
 `service_unavailable` at their next dispatch or `forward_cancel` (D117).
+
+### 13.6 The A2A traffic record
+
+With `traffic.record` on (off by default, on in the local development profile, D353), the gate keeps one row of
+`a2a_exchanges` (migration 0006) per A2A call it receives: every JSON-RPC or HTTP+JSON method call, every card fetch,
+and every stream (`SendStreamingMessage`, `SubscribeToTask`), once, when it ends, with its whole duration. Calls
+refused before any handler runs are recorded too: the edge's `413`, `429` and `408` (§2.2) with method `unknown`,
+since their body was never read. Requests to `/mcp…`, `/v1/tunnel`, `/healthz` and the console are not exchanges.
+
+An exchange holds the time the call arrived, the service as the path names it (it may name none), the method (one of
+A2A's, `card`, `upstream_card`, `seller_jwks`, or `unknown`: never a string the caller chose), the binding, the
+caller's principal and `via` once authenticated, the task and context ids the call names or creates, the request's
+and the answer's sizes in bytes, the duration, the HTTP status, the JSON-RPC error code when one was answered, and the
+gate's reason for a refusal (`unauthenticated`, `unknown_service`, `allow_denied`, `invalid_request`,
+`version_unsupported`, `extension_required`, `admission_denied`, `rate_limited`, `body_too_large`, `body_timeout`,
+`cross_site`). It
+never holds a body, a header, a part, a credential or a credential's hash. The table has no foreign key: a call to an
+unknown service is recorded with the name it asked for, and deleting an exchange never depends on its task.
+
+Recording never delays, fails or changes an answer. Each replica queues exchanges in a bounded channel (4096) and one
+goroutine writes them with `COPY` every 250 ms or 512 rows; a full channel, or a batch the database refuses, is dropped
+and counted in `kontra_traffic_dropped_total{replica}` on the metrics listener. Exchanges older than
+`traffic.retention` (default 7 days, `0` keeps them forever) are deleted by the retention sweep (§5.4), batched by
+`at`, whether or not recording is on now.
 
 ## 14. `TaskLifecycle`
 
@@ -2309,5 +2341,80 @@ met, are D297.
 | `tunnel.channel_binding` | `tls-exporter` when the gate terminates TLS, else `none` | [`tunnel.md`](tunnel.md) §4 |
 | `tunnel.anonymous` | `false`; `true`, or `{enabled, ttl, tenants_per_network, services, tasks, calls, streams, hiring_streams, parts_bytes, purge_after, max_tenants}` with [`tunnel.md`](tunnel.md) §6.2's defaults, on unless `enabled: false`, which keeps the limits for the anonymous tenants that live (D309); on, needs `tenancy: multi` (D277, D287, D308) | [`tunnel.md`](tunnel.md) §6 |
 | `tunnel.enroll_with_api_key` | `false` | [`tunnel.md`](tunnel.md) §5 |
+| `profile` | none (a team or Cloud gate); `local`: the local development profile | §18 (D352) |
+| `traffic.record` | `false`; `true` in the local development profile | §13.6 (D353) |
+| `traffic.retention` | `7d`; `0` keeps exchanges forever | §13.6 (D353) |
+
+`services.<name>.task.retention` also takes `0`, which keeps the service's tasks forever (§5.4, D354).
 
 The config's JSON Schema (`kontra.sh/schema/config/v1`, PRD §11) is published with the first gate code (M1).
+
+## 18. The local development profile and its console
+
+`profile: local` makes the gate a developer's own, on their machine, with nothing to set up but Postgres and Temporal
+(`compose.dev.yaml`), and the console Kontra Cloud serves (D352). It is explicit: without the key nothing in this
+section applies. [`docs/local.md`](../docs/local.md) is the walk-through.
+
+### 18.1 What the profile changes
+
+- **Loopback only.** `listen` defaults to `127.0.0.1:8080`, `metrics.listen` to `127.0.0.1:9090`, `public_url` to
+  `http://` and `listen`'s address. Every listener (public, metrics, peer) must bind a loopback address or
+  `localhost` (an empty host, `0.0.0.0` and `::` are refused, naming the key), and `public_url` must be an `http`
+  loopback origin. The public listener answers `421` to a request whose `Host` is not `127.0.0.1`, `localhost` or
+  `[::1]` with the listener's port, before any route: a page that rebinds its own name to loopback cannot reach it.
+  A browser's cross-site request to an A2A route (an `Origin` that is not the gate's own, `null` included, or
+  `Sec-Fetch-Site: cross-site` or `same-site`) is `403` before any handler (recorded with the reason `cross_site`):
+  a web page the developer has open cannot prompt their agents with a simple request. A client that is not a browser
+  sends neither header. `/mcp…` keeps `mcp.allowed_origins` (§11.1), and the tunnel's upgrade refuses another origin.
+- **Plain HTTP, no sealing, one tenant.** `tls`, a `sealed` service, `tunnel.anonymous` and `tenancy: multi` are
+  refused at load.
+- **One shared caller.** Every request on the A2A and MCP routes, a request a node opened included, is the
+  `anonymous` principal with the team gate's one anonymous buyer (§2.3), whatever credential it carries: no header is
+  read. Every service admits it (its `allow:` is `[anonymous]`). The relay's own refusals for anonymous callers
+  (`ListTasks`, push configurations) stay.
+- **Nodes without enrollment.** A hello with no token and no credential (a node with nothing for this gate asks for an
+  anonymous session, [`tunnel.md`](tunnel.md) §6) is admitted on the team tenant for every service it declares: a
+  service that does not exist is created as a tunnel service with `allow: [anonymous]`, a configured one is served with
+  its own settings, another key may serve a service that already has one, and a node that declares nothing is admitted
+  to call agents. No anonymous tenant, no expiry, no purge. When the last session of a service leaves, the service
+  stays enabled: new tasks fail `no_session` (§6.4) and the earlier tasks stay.
+- **One address.** Every client is on `127.0.0.1`, so `limits.rps_per_ip` (§2.2), which they share, defaults to
+  `2000` rather than `50`.
+- **Traffic recorded** (§13.6), unless `traffic.record: false`.
+- **Announced.** At start the gate logs, at warning level, that it serves every client without credentials and shows
+  every conversation on its console, with the console's URL.
+
+### 18.2 The console API
+
+The page at `/` (the `web/` files, embedded) calls the console API, whose paths and JSON shapes follow Kontra Cloud's
+control plane, so the same frontend serves both. Every read lists every caller's tasks, newest first, with keyset
+pages of at most 100 (`next` is the next page's `before`):
+
+| Route | What |
+|---|---|
+| `GET /v1/info` | `profile`, `features`, the retention of each service and of the traffic (seconds; `0` kept forever), and the traffic record's drop count since start. |
+| `GET /v1/tasks` | Tasks (`service`, `state`, `kind` filters): id, service, protocol, state, caller, `via` (`console` for the console's own), context, times, retention, the first words of the first message (not for a sealed service), and `actions`. |
+| `GET /v1/tasks/{id}` | One task, with its snapshot; `404` when unknown. |
+| `GET /v1/tasks/{id}/events` | Server-Sent Events of its log after `Last-Event-ID` (or `after`): `id` the seq, `event` the kind, `data` `{seq, kind, at, stored_apart, payload}`, woken by `NOTIFY kontra_task_events`, with no gap and no duplicate; an ended task's stream closes with `event: end` (`{state, version}`). |
+| `GET /v1/tasks/{id}/files/{ref}` | A part stored apart (§10.4), only for the task whose part it is. |
+| `GET /v1/conversations`, `GET /v1/conversations/{service}/{caller}/{context}` | Tasks grouped by service, caller (its buyer id) and context id, the scope of a context (§4), newest activity first; one conversation's tasks oldest first. |
+| `GET /v1/services`, `GET /v1/services/{name}`, `GET /v1/services/{name}/form`, `GET /v1/tunnels` | Services with their kind, backend, retention and whether a session serves them now; one with its served card; what starting a task on an A2A service takes, read from its card; the tunnel sessions. |
+| `GET /v1/exchanges`, `GET /v1/calls` | The traffic record (`service`, `method`, `task`, `failed` filters) and the MCP calls (`service`). |
+| `POST /v1/tasks`, `POST /v1/tasks/{id}/messages`, `/cancel`, `/continue` | Prompting: start a task, answer one waiting at `input-required`, cancel one that has not ended, continue one that has, in its context. |
+
+Prompting is a real A2A request to the gate's own `public_url` (HTTP+JSON, `A2A-Version: 1.0`, the A2UI, AP2,
+Structured Input and AgentStack form extensions the card declares in `A2A-Extensions`), so it passes the edge, the
+version and extension checks, Admission and the traffic record as any client's would. A task the console starts is
+recorded in `console_tasks` (migration 0006); the console replies to, cancels and continues only those, and only an
+A2A task of a service that is not sealed: every other task is watch-only, its questions shown and its forms inert
+(`403` on a write).
+
+The API sends no CORS header, answers `403` to a request whose `Origin` is not its own or that a browser marks
+cross-site, and `403` to a state-changing request that is not `application/json`. The page carries
+`Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self';
+connect-src 'self'; worker-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none';
+require-trusted-types-for 'script'; trusted-types lit-html`, `X-Content-Type-Options: nosniff`, `Referrer-Policy:
+no-referrer` and `X-Frame-Options: DENY`; it draws agent content with DOM APIs, never by parsing it as HTML.
+
+What the profile does not protect against: anything else that runs on the machine, or another user of it, can reach
+the console and act as the shared caller. It is a development profile, never a team gate.

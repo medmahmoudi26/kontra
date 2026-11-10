@@ -27,7 +27,7 @@ func (a *Authenticator) SetA2AVerifier(v A2AVerifier) { a.a2a = v }
 // is an API key, as on every route. Without one, a JWT is looked up as an API key and refused, as before M5. A request
 // a node opened takes its session's principal, as Authenticate gives it.
 func (a *Authenticator) AuthenticateA2A(r *http.Request, anonymousBuyer uuid.UUID) (p Principal, authenticated bool, err error) {
-	if a.a2a == nil {
+	if a.a2a == nil || a.local {
 		return a.Authenticate(r, anonymousBuyer)
 	}
 	if _, ok := HireSourceFrom(r.Context()); ok {

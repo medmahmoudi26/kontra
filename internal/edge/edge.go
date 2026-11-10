@@ -125,7 +125,13 @@ type Config struct {
 	TerminatedByProxy bool
 	Limits            Limits
 	ClientIP          ClientIP
-	Log               *slog.Logger
+	// LoopbackOnly is the local development profile's Host check (LoopbackHost): a request whose Host is not a
+	// loopback name with the listener's port is 421 before any route runs.
+	LoopbackOnly bool
+	// OnRefuse, when set, is told of every refusal the edge chain answers itself (413, 429, 408): the A2A traffic
+	// record's second point (relay.md §13.6). It must not block.
+	OnRefuse func(r *http.Request, status int, reason string)
+	Log      *slog.Logger
 }
 
 // FromConfig returns the listener configuration of a loaded kontra.yaml, with its TLS: a provided
@@ -143,6 +149,7 @@ func FromConfig(c *config.Config, log *slog.Logger) (Config, error) {
 		TerminatedByProxy: c.TLS.TerminatedByProxy,
 		Limits:            LimitsFrom(c.Limits),
 		ClientIP:          ClientIP{From: c.Edge.ClientIP.From, Trusted: c.Edge.ClientIP.TrustedPrefixes},
+		LoopbackOnly:      c.Local(),
 		Log:               log,
 	}, nil
 }
@@ -196,7 +203,8 @@ func New(cfg Config, routes *Router) (*Server, error) {
 		}
 		cfg.TLS = tlsCfg
 	}
-	h := Middleware(MiddlewareConfig{Limits: cfg.Limits, HSTS: cfg.TLS != nil, ClientIP: cfg.ClientIP}, routes)
+	h := Middleware(MiddlewareConfig{Limits: cfg.Limits, HSTS: cfg.TLS != nil, ClientIP: cfg.ClientIP,
+		LoopbackOnly: cfg.LoopbackOnly, OnRefuse: cfg.OnRefuse}, routes)
 	s := &Server{cfg: cfg}
 	s.srv = &http.Server{
 		Handler:           h,
@@ -370,6 +378,12 @@ type MiddlewareConfig struct {
 	Limits   Limits
 	HSTS     bool // the gate terminates TLS: send HSTS on requests that came over it
 	ClientIP ClientIP
+	// LoopbackOnly answers 421 to a request whose Host is not 127.0.0.1, localhost or [::1] with the port the
+	// connection arrived on (LoopbackHost), before anything else: a page that rebinds its own name to loopback
+	// cannot reach the gate (the local development profile, relay.md §18).
+	LoopbackOnly bool
+	// OnRefuse is told of each 413, 429 and 408 the chain answers (Config.OnRefuse).
+	OnRefuse func(r *http.Request, status int, reason string)
 	now      func() time.Time // tests
 }
 
@@ -410,7 +424,29 @@ const (
 	msgBodyTimeout = "request body timeout"
 )
 
+// Gate reasons of the edge's own refusals, as the traffic record names them.
+const (
+	ReasonRateLimited  = "rate_limited"
+	ReasonBodyTooLarge = "body_too_large"
+	ReasonBodyTimeout  = "body_timeout"
+	ReasonCrossSite    = "cross_site"
+)
+
+func (c *chain) refused(r *http.Request, status int, reason string) {
+	if c.cfg.OnRefuse != nil {
+		c.cfg.OnRefuse(r, status, reason)
+	}
+}
+
 func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if c.cfg.LoopbackOnly && !LoopbackHost(r) {
+		closeAfter(w, r)
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusMisdirectedRequest)
+		_, _ = io.WriteString(w, "this gate answers only 127.0.0.1, localhost and [::1] (the local development profile)\n")
+		return
+	}
 	// HSTS first: the closed default route's 404 is a response over TLS too (M3 WP-10 pentest finding F-2).
 	if c.cfg.HSTS && r.TLS != nil {
 		w.Header().Set("Strict-Transport-Security", HSTS)
@@ -420,10 +456,20 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		emptyNotFound(w)
 		return
 	}
+	// The local development profile serves its A2A routes with no credential, so a web page the developer has open
+	// must not reach them: a browser's cross-site request (another Origin, or Sec-Fetch-Site cross-site or same-site)
+	// is 403 before anything runs. A non-browser client sends neither header. /mcp keeps its own Origin rule
+	// (mcp.allowed_origins), the console API its own, and /v1/tunnel's WebSocket upgrade refuses another origin.
+	if c.cfg.LoopbackOnly && strings.HasPrefix(r.URL.Path, "/agents/") && CrossSite(r) {
+		c.refused(r, http.StatusForbidden, ReasonCrossSite)
+		refuse(w, rt, http.StatusForbidden, "a request from another site is refused (the local development profile)", "", nil)
+		return
+	}
 	addr := c.cfg.ClientIP.Addr(r)
 	r = r.WithContext(withClientAddr(r.Context(), addr))
 
 	if ok, wait := c.rates.allow(addr); !ok {
+		c.refused(r, http.StatusTooManyRequests, ReasonRateLimited)
 		refuse(w, rt, http.StatusTooManyRequests, msgRateLimited, retryAfter(wait), nil)
 		return
 	}
@@ -431,6 +477,7 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	if r.ContentLength > c.cfg.Limits.Body {
 		closeAfter(w, r)
+		c.refused(r, http.StatusRequestEntityTooLarge, ReasonBodyTooLarge)
 		refuse(w, rt, http.StatusRequestEntityTooLarge, msgTooLarge, "", nil)
 		return
 	}
@@ -439,10 +486,12 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, errTooLarge):
 			closeAfter(w, r)
+			c.refused(r, http.StatusRequestEntityTooLarge, ReasonBodyTooLarge)
 			refuse(w, rt, http.StatusRequestEntityTooLarge, msgTooLarge, "", nil)
 			return
 		case errors.Is(err, os.ErrDeadlineExceeded):
 			closeAfter(w, r)
+			c.refused(r, http.StatusRequestTimeout, ReasonBodyTimeout)
 			refuse(w, rt, http.StatusRequestTimeout, msgBodyTimeout, "", nil)
 			return
 		case err != nil:
@@ -460,6 +509,7 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if vals := r.Header.Values("Authorization"); len(vals) > 0 {
 		key := credentialKey(vals)
 		if !c.inflight.acquire(key) {
+			c.refused(r, http.StatusTooManyRequests, ReasonRateLimited)
 			refuse(w, rt, http.StatusTooManyRequests, msgRateLimited, "1", body)
 			return
 		}
@@ -469,6 +519,45 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 var errTooLarge = errors.New("edge: body over the limit")
+
+// CrossSite reports whether r is a browser's request from another site: Sec-Fetch-Site cross-site or same-site, or
+// an Origin (one value) that is not http://<the Host r was sent to>, "null" included.
+func CrossSite(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site", "same-site":
+		return true
+	}
+	o := r.Header.Values("Origin")
+	if len(o) == 0 {
+		return false
+	}
+	if len(o) > 1 {
+		return true
+	}
+	u, err := url.Parse(o[0])
+	return err != nil || u.Scheme != "http" || u.Path != "" || u.User != nil || !strings.EqualFold(u.Host, r.Host)
+}
+
+// LoopbackHost reports whether r's Host names 127.0.0.1, localhost or [::1] with the port of the connection it
+// arrived on (no port means 80). A request without a local address (a handler driven directly in a test) is
+// checked on the name only.
+func LoopbackHost(r *http.Request) bool {
+	host, port, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		host, port = r.Host, "80"
+	}
+	switch strings.ToLower(host) {
+	case "127.0.0.1", "localhost", "::1":
+	default:
+		return false
+	}
+	la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok {
+		return true
+	}
+	_, lport, err := net.SplitHostPort(la.String())
+	return err == nil && lport == port
+}
 
 // closeAfter ends an HTTP/1 connection after a refusal that leaves its body unread or half read, rather
 // than letting the server drain it. On HTTP/2 the stream alone ends (a Connection header there would

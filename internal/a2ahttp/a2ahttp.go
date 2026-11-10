@@ -51,6 +51,7 @@ import (
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/traffic"
 )
 
 // Service is what a route needs to know about one service.
@@ -99,6 +100,8 @@ type Deps struct {
 	Auth     Authenticator // *auth.Authenticator
 	Multi    bool          // multi-tenant paths
 	Logger   *slog.Logger
+	// Traffic, when set (traffic.record), records every request as an exchange (traffic.go).
+	Traffic *traffic.Recorder
 	// There is no body limit here: the server is mounted on the edge's router (Register), and the edge
 	// has read every body in full within limits.body before the route runs (spec §2.2), so every route
 	// answers an oversized body the same way, the edge's 413.
@@ -324,8 +327,8 @@ func taskRoute(rt route, method, rest string) (route, bool) {
 	return route{}, false
 }
 
-// ServeHTTP implements http.Handler.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// serve answers one request to the A2A routes (ServeHTTP records it, traffic.go).
+func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	rt, ok := parseRoute(r, s.deps.Multi)
 	if !ok {
 		emptyNotFound(w)
@@ -353,11 +356,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p, authenticated, err := s.deps.Auth.AuthenticateA2A(r, uuid.Nil)
 	switch {
 	case errors.Is(err, auth.ErrUnauthenticated):
+		traffic.SetReason(ctx, traffic.ReasonUnauthenticated)
 		unauthenticated(w, rt, id)
 		return
 	case err != nil:
 		s.internal(w, rt, id, "authenticate", err)
 		return
+	}
+	if authenticated {
+		traffic.SetCaller(ctx, p.ID, string(p.Via))
 	}
 	svc, err := s.lookup(ctx, rt)
 	if err != nil {
@@ -365,9 +372,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if svc == nil || svc.Disabled || svc.Ref.Kind != "a2a" {
+		traffic.SetReason(ctx, traffic.ReasonUnknownService)
 		unknownService(w, rt, id)
 		return
 	}
+	traffic.SetTenant(ctx, svc.Ref.TenantID)
 	if !authenticated {
 		buyerTenant := uuid.Nil // a team gate: one fixed buyer for every anonymous caller (spec §2.3)
 		if s.deps.Multi {
@@ -380,9 +389,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		p = auth.Anonymous(buyer)
 	}
+	traffic.SetCaller(ctx, p.ID, string(p.Via))
 	admitted := svc.Allow.Admits(p)
 	if rt.card() {
 		if !admitted && !svc.Allow.AdmitsAnonymous() && !svc.Listed {
+			traffic.SetReason(ctx, traffic.ReasonAllowDenied)
 			unknownService(w, rt, id)
 			return
 		}
@@ -401,6 +412,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !admitted {
+		traffic.SetReason(ctx, traffic.ReasonAllowDenied)
 		unknownService(w, rt, id)
 		return
 	}
@@ -415,6 +427,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if errors.As(refused, &ke) && len(ke.Path) == 0 {
 				sid = nil // the request object itself is ambiguous: no id was read unambiguously
 			}
+			traffic.SetReason(ctx, traffic.ReasonInvalidRequest)
 			sse.WriteError(w, sse.JSONRPC, sid, http.StatusBadRequest, a2a.NewError(a2a.ErrInvalidRequest, "invalid request"))
 			return
 		}
@@ -784,6 +797,7 @@ const Version = string(a2a.Version)
 func Versions(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := checkVersion(r); err != nil {
+			traffic.SetReason(r.Context(), traffic.ReasonVersionUnsupported)
 			ri := routeOf(r)
 			sse.WriteError(w, ri.binding, ri.id, 0, err)
 			return
@@ -889,6 +903,7 @@ func extensions(declared func(r *http.Request) *ExtensionSet, required bool, nex
 			if n > len(missing) {
 				named += fmt.Sprintf(" and %d more", n-len(missing))
 			}
+			traffic.SetReason(r.Context(), traffic.ReasonExtensionRequired)
 			ri := routeOf(r)
 			sse.WriteError(w, ri.binding, ri.id, 0, a2a.NewError(a2a.ErrExtensionSupportRequired,
 				"the service requires the extension"+plural(n)+" "+named+": send it in A2A-Extensions"))

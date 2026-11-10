@@ -1,0 +1,21 @@
+a2ui-0.15.0.js: the A2UI web renderer, as the Kontra console vendors it
+
+This file is an esbuild bundle (scripts/vendor-a2ui/build in the kontra-cloud repository) of,
+unmodified:
+
+  @a2ui/web_core 0.15.0  Copyright 2024-2026 Google LLC  Apache License 2.0 (LICENSE)
+  @a2ui/lit 0.15.0       Copyright 2024-2026 Google LLC  Apache License 2.0 (LICENSE)
+  https://github.com/a2ui-project/a2ui (https://a2ui.org)
+
+and of the packages they depend on, whose licences are in THIRD-PARTY-LICENSES:
+
+  lit-html 3.3.3, lit-element 4.2.2, @lit/reactive-element 2.1.2   BSD-3-Clause, Google LLC
+  zod 3.25.76                                                     MIT, Colin McDonnell
+  zod-to-json-schema 3.25.2                                       ISC, Stefan Terdell
+  @preact/signals-core 1.14.5                                     MIT, Preact Team
+  redos-detector 6.1.4                                            MIT, Tom Jenkinson
+  regjsparser 0.13.0 (in redos-detector's dist)                   BSD-2-Clause, Julian Viereck
+  tslib helpers (in redos-detector's dist)                        0BSD, Microsoft Corporation
+
+The upstream packages ship no NOTICE file of their own. Nothing in the bundle was changed: it
+holds a subset of their modules (README.md says which and why), bundled into one ES module.

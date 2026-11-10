@@ -33,8 +33,9 @@ import (
 
 // Config is the whole of kontra.yaml.
 type Config struct {
-	Listen    string `yaml:"listen"`     // public listener, default ":8080"
-	PublicURL string `yaml:"public_url"` // the URL callers use; the served card carries it (spec §3)
+	Profile   Profile `yaml:"profile"`    // "" or "local" (the local development profile; local.go)
+	Listen    string  `yaml:"listen"`     // public listener, default ":8080"
+	PublicURL string  `yaml:"public_url"` // the URL callers use; the served card carries it (spec §3)
 	// SigningKey is the card-signing key: file:<path> of a PEM file of ECDSA P-256 private keys, the first signs
 	// and every key is in the JWKS (spec §3, D166). Required off loopback when A2A services are configured.
 	SigningKey string   `yaml:"signing_key"`
@@ -56,6 +57,7 @@ type Config struct {
 	DrainTimeout             Duration `yaml:"drain_timeout"` // §14.3 and D76, default 10m
 	Task                     GateTask `yaml:"task"`          // the gate's own task policy (spec §6.4, §17)
 	Tunnel                   Tunnel   `yaml:"tunnel"`        // spec/tunnel.md; M2
+	Traffic                  Traffic  `yaml:"traffic"`       // the A2A traffic record (spec §13.6); local.go
 
 	Services map[string]Service `yaml:"services"`
 
@@ -507,9 +509,9 @@ type Sealed struct {
 
 // TaskPolicy is services.<name>.task (spec §5.4, §6.4, §6.5).
 type TaskPolicy struct {
-	Timeout   Duration `yaml:"timeout"`   // default 1h, wall clock from submission
-	Retries   *int     `yaml:"retries"`   // default 2; nil means the default, 0 is honoured; at most 10
-	Retention Duration `yaml:"retention"` // default 7d
+	Timeout   Duration  `yaml:"timeout"`   // default 1h, wall clock from submission
+	Retries   *int      `yaml:"retries"`   // default 2; nil means the default, 0 is honoured; at most 10
+	Retention Retention `yaml:"retention"` // default 7d; 0 keeps the service's tasks forever
 }
 
 // RetryCount is the number of retries, the default applied.
@@ -841,7 +843,8 @@ func Parse(b []byte, baseDir string, opts ...Option) (*Config, error) {
 	if root.Kind == 0 || len(root.Content) == 0 {
 		return nil, errors.New("empty configuration")
 	}
-	if top := root.Content[0]; top.Kind == yaml.MappingNode {
+	top := root.Content[0]
+	if top.Kind == yaml.MappingNode {
 		for i := 0; i+1 < len(top.Content); i += 2 {
 			if top.Content[i].Value == "agents" {
 				return nil, fmt.Errorf("line %d: agents: is now services:, each entry with a kind (note 1 §6)", top.Content[i].Line)
@@ -850,6 +853,7 @@ func Parse(b []byte, baseDir string, opts ...Option) (*Config, error) {
 	}
 
 	c := Defaults()
+	c.applyProfileDefaults(profileOf(top))
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
 	if err := dec.Decode(c); err != nil {
@@ -862,6 +866,7 @@ func Parse(b []byte, baseDir string, opts ...Option) (*Config, error) {
 	for _, o := range opts {
 		o(c)
 	}
+	c.applyLocalDerived()
 	c.applyDerivedDefaults()
 	if baseDir != "" {
 		c.resolvePaths(baseDir)
@@ -912,6 +917,7 @@ func (e *ValidationError) Error() string {
 func (c *Config) Validate() error {
 	v := &validator{}
 	c.Warnings = nil
+	c.validateProfile(v)
 	c.validateListeners(v)
 	pub := c.validatePublicURL(v)
 	c.validateTLS(v, pub)

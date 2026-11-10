@@ -163,6 +163,24 @@ fixed) and again after the M3 review rounds at `33f06a8` (no finding, D266);
 [`docs/pentest-m3.md`](docs/pentest-m3.md) records the second run's every probe, what changed since the first, and
 the findings and their fixes.
 
+## Local development
+
+A gate on your own machine is a durable A2A inspector: connect the A2A servers you are building to it, and see every
+task, conversation and A2A call in the same console as Kontra Cloud, each task's thread rendered live (A2UI surfaces,
+AP2 checkouts, mandates and receipts), and prompt your agents from it. It is the gate with `profile: local`: plain
+HTTP on loopback, no sign-in, no enrollment token, every client one shared caller of your callee agents.
+
+```sh
+docker compose -f compose.dev.yaml up -d --wait
+go run ./cmd/kontra-gate migrate -f examples/local/kontra.yaml
+go run ./cmd/kontra-gate serve -f examples/local/kontra.yaml &
+go run ./cmd/kontra connect --gate http://127.0.0.1:8080 --listen off --serve a2a:booking=http://127.0.0.1:9995 &
+# then open http://127.0.0.1:8080/
+```
+
+[`docs/local.md`](docs/local.md) walks through it, with an example agent to try, how to keep history forever, and
+what the profile does not protect against (anything else on your machine can reach it: never use it for a team).
+
 ## A team gate from source
 
 For working on the gate: Postgres and Temporal from `compose.dev.yaml`, the gate and the node built from this
@@ -377,7 +395,8 @@ cmd/kontra/        the CLI: connect, login, seal, publish, version
 cmd/kontra-gate/   the gate: serve, migrate, enroll, health, version
 internal/          relay, tunnel, gatemcp (/mcp), anon, store (Postgres), lifecycle (Temporal), sealing, …
 spec/              tunnel.md, relay.md, ext-sealed.md, schema/
-migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mcp_tools.sql (the gate's Postgres schema, embedded in kontra-gate)
+migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mcp_tools.sql,
+                   0006_local_console.sql (the gate's Postgres schema, embedded in kontra-gate)
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)
 compose.dev.yaml   Temporal + Postgres for working on the gate itself

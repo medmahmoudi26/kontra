@@ -16,6 +16,7 @@ import (
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/blob/blobtest"
+	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/pgtest"
@@ -481,5 +482,71 @@ func TestRetentionSurvivesAFailingTask(t *testing.T) {
 	}
 	if keys := bt.Keys(t); len(keys) != 1 || !strings.Contains(keys[0], ids[0].String()) {
 		t.Errorf("objects left %v, want only the failing task's", keys)
+	}
+}
+
+// task.retention: 0 keeps a service's tasks forever (spec §5.4): a task that ends under it gets no
+// retention_until and survives every sweep, also after the service goes back to a duration, while a task of
+// that service ending afterwards is swept as usual. Its MCP sessions are kept too.
+func TestRetentionZeroKeepsForever(t *testing.T) {
+	e := newSweepEnv(t)
+	ctx := context.Background()
+	e.exec(`update kontra.services set retention_s = 0 where name = 'hello'`)
+	forever := e.task(store.StateSubmitted, time.Hour)
+	if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: forever, State: store.StateCompleted, Text: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := e.row(forever); r.RetentionUntil != nil || r.TerminalAt == nil {
+		t.Fatalf("a task ended under retention 0: retention_until %v terminal_at %v", r.RetentionUntil, r.TerminalAt)
+	}
+	sess := uuid.New()
+	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+		values ($1, $2, 'hello', $3, 'anonymous', 'anonymous', '2025-11-25', now() - interval '400 days', 'deleted')`,
+		append(sess[:], sess[:]...), e.svc.TenantID, uuid.New())
+	if n, err := SweepRetention(ctx, e.log, time.Now().Add(10*365*24*time.Hour), nil); err != nil || n != 0 {
+		t.Fatalf("sweep ten years on: %d %v", n, err)
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.mcp_sessions`); c != 1 {
+		t.Fatalf("a closed session of a service kept forever was deleted")
+	}
+
+	e.exec(`update kontra.services set retention_s = 3600 where name = 'hello'`)
+	later := e.task(store.StateSubmitted, time.Hour)
+	if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: later, State: store.StateCompleted, Text: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := SweepRetention(ctx, e.log, time.Now().Add(2*time.Hour), nil); err != nil || n != 1 {
+		t.Fatalf("sweep after the change back: %d %v, want only the later task", n, err)
+	}
+	if r := e.row(forever); r.RetentionUntil != nil {
+		t.Fatalf("the task ended under 0 got retention_until %v", r.RetentionUntil)
+	}
+}
+
+// The traffic sweep (relay.md §13.6): exchanges older than traffic.retention go, newer stay, whatever their tasks; with
+// retention 0 none go. A task kept forever (retention_s 0) outlives its exchanges.
+func TestTrafficSweep(t *testing.T) {
+	e := newSweepEnv(t)
+	ctx := context.Background()
+	e.exec(`update kontra.services set retention_s = 0 where name = 'hello'`)
+	forever := e.task(store.StateSubmitted, 3*24*time.Hour)
+	if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: forever, State: store.StateCompleted, Text: "done"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, age := range []string{"2 days", "2 days", "1 hour"} {
+		e.exec(`insert into kontra.a2a_exchanges (id, at, service, method, binding, task_id, bytes_in, bytes_out, duration_ms, http_status)
+			values ($1, now() - $2::interval, 'hello', 'GetTask', 'jsonrpc', $3, 0, 0, 0, 200)`, uuid.Must(uuid.NewV7()), age, forever)
+	}
+	if n, err := SweepTraffic(ctx, e.pool, config.Forever, time.Now()); err != nil || n != 0 {
+		t.Fatalf("retention 0: deleted %d (%v)", n, err)
+	}
+	if n, err := SweepTraffic(ctx, e.pool, config.Retention(24*time.Hour), time.Now()); err != nil || n != 2 {
+		t.Fatalf("retention 1d: deleted %d (%v), want 2", n, err)
+	}
+	if c := scalar[int](t, e.pool, `select count(*) from kontra.a2a_exchanges`); c != 1 {
+		t.Fatalf("%d exchanges left, want 1", c)
+	}
+	if r := e.row(forever); r == nil || r.State != store.StateCompleted {
+		t.Fatal("the task kept forever went with its exchanges")
 	}
 }

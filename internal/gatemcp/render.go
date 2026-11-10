@@ -265,19 +265,23 @@ func Question(task *a2a.Task, rd Reader) (inputRequired bool, statusMessage stri
 // mcpTime is an MCP timestamp: ISO 8601 in UTC, to the millisecond.
 func mcpTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
-// ttlOf is a task's ttl in milliseconds (§11.6): retention_until − created_at once terminal; before, an upper bound:
-// the deadline plus the retention.
-func ttlOf(row *store.TaskRow, svc store.ServiceRef) int64 {
+// ttlOf is a task's ttl in milliseconds (§11.6): retention_until − created_at once terminal; before, an upper
+// bound: the deadline plus the retention. Nil (ttl null, unlimited) when the service keeps its tasks forever
+// (task.retention: 0: a task that ends under it gets no retention_until).
+func ttlOf(row *store.TaskRow, svc store.ServiceRef) *int64 {
 	var end time.Time
 	switch {
 	case row.RetentionUntil != nil:
 		end = *row.RetentionUntil
+	case svc.Retention <= 0:
+		return nil
 	case row.Deadline != nil:
 		end = row.Deadline.Add(svc.Retention)
 	default:
 		end = row.CreatedAt.Add(svc.Timeout + svc.Retention)
 	}
-	return max(end.Sub(row.CreatedAt).Milliseconds(), 0)
+	ms := max(end.Sub(row.CreatedAt).Milliseconds(), 0)
+	return &ms
 }
 
 // taskView is a hire task as an MCP reader sees it (§5.1, §12.2, §12.4): its status in MCP's vocabulary, its
@@ -335,7 +339,7 @@ type mcpTask struct {
 	StatusMessage string `json:"statusMessage,omitempty"`
 	CreatedAt     string `json:"createdAt"`
 	LastUpdatedAt string `json:"lastUpdatedAt"`
-	TTL           int64  `json:"ttl"`
+	TTL           *int64 `json:"ttl"`
 	PollInterval  int    `json:"pollInterval"`
 }
 

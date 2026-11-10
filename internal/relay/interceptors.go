@@ -26,6 +26,7 @@ import (
 	"kontra.sh/kontra/internal/push"
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/traffic"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -364,6 +365,7 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 	switch d.Outcome {
 	case hooks.Allow:
 	case hooks.Deny:
+		traffic.SetReason(ctx, traffic.ReasonAdmissionDenied)
 		return ctx, nil, denied(d.Refusal)
 	default:
 		return ctx, nil, admissionUnavailable()

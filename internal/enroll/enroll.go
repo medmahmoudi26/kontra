@@ -110,7 +110,11 @@ type Options struct {
 	// Anonymous is tunnel.anonymous's limits when the gate opens anonymous sessions (spec/tunnel.md §6; a
 	// multi-tenant gate only); nil answers a hello asking for one from an unknown key anonymous_unavailable.
 	Anonymous *anon.Limits
-	Logger    *slog.Logger
+	// Local is the local development profile (config profile: local): a hello with no token and no credential
+	// enrolls the node on the team tenant for every service it declares, creating missing ones as tunnel services with
+	// allow [anonymous]; services stay when the node leaves. No anonymous session is opened (Anonymous is ignored).
+	Local  bool
+	Logger *slog.Logger
 }
 
 // Store is the gate's enrollment tables.

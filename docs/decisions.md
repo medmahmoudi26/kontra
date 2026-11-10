@@ -6185,3 +6185,43 @@ caller-chosen identifier in history, the `contextId`. **D300 stays**, with a neu
 operator's `card_extensions` is the operator's, carried by its own Admission rather than by the seller, so `hire`
 activates it for the buyer; nothing about it was escrow's but its first use. Unchanged: tunnels, sealing, MCP hosting,
 `calls` metering, Admission as access control, keyed `hire` (D338). No table holds a price.
+
+## The owner's decisions of 10 Nov: the local development profile and its console
+
+### D352. A gate in the local development profile serves Kontra Cloud's console, every client as one caller — **decided by the owner, 10 Nov** (OpenSpec change `local-dev-console`)
+
+A developer runs their own gate and connects their A2A servers to it with `kontra connect`, and gets the same frontend
+as Kontra Cloud: the tasks, conversations and traffic of their agents, and a task's thread rendered live, A2UI and AP2
+included. It is not a separate product: it is the gate, with `profile: local` ([`relay.md`](../spec/relay.md) §18).
+
+- **Explicit.** `profile: local` turns it on; a loopback `public_url` alone does not (team gates built from source
+  already use `http://localhost:8080` with real credentials).
+- **No sign-in, no encryption.** Plain HTTP on loopback only, refused at load otherwise; no TLS, no sealed service. A
+  `Host` check (`421`) defeats DNS rebinding. Every client is the `anonymous` principal: authentication is
+  short-circuited rather than `allow:` rewritten, so services a node declares at runtime need nothing more.
+- **Nodes without enrollment**, on the team tenant, with no expiry; services stay when their node leaves, so history
+  keeps its foreign keys and new tasks fail `no_session`.
+- **The console is the gate's.** `internal/console` serves the page and an API shaped as Cloud's operations
+  (`hire_task` and `hire_form` become `start_task` and the service's form, in caller/callee words); the renderer is
+  `web/`, lifted from `kontra-cloud` `gate/static` at `8a54a12` without its money, keys and sign-in, Apache-2.0
+  ([`web/README.md`](../web/README.md)); Cloud will serve these files from this repository at a pinned commit.
+- **Interactive, never impersonating.** The console prompts agents through the gate's own A2A route as the shared
+  caller and acts only on the tasks it started (`console_tasks`); it watches every other.
+- **The operator's read, served** ([`relay.md`](../spec/relay.md) §13.5): in this profile only, and still never
+  `push_configs.config` or `work_items.payload` (a test fails the build if a console query names either table).
+
+### D353. One metadata-only exchange per A2A call, recorded without ever affecting the call — **decided by the owner, 10 Nov**
+
+The console's traffic view needs every A2A call, refused ones included, which no table held: refusals happen at the
+edge and in `a2ahttp` before any task row. `a2a_exchanges` (migration 0006, [`relay.md`](../spec/relay.md) §13.6)
+holds one row per call, at the exchange level (no request bodies or headers in v1), written by a bounded, batched
+writer that drops and counts rather than waits. It is off by default and on in the local development profile, with
+its own retention (`traffic.retention`, default 7 days, `0` forever), independent of the tasks'.
+
+### D354. A task retention of `0` keeps a service's tasks forever — **decided by the owner, 10 Nov**
+
+A developer's inspector is worth more when its history stays. `services.<name>.task.retention: 0` is now a value of
+its own, distinct from an absent key (7 days): a task that ends under it has no `retention_until`, so the existing
+sweep never selects it ([`relay.md`](../spec/relay.md) §5.4). It is opt-in per service; the console shows "kept
+forever". `services.retention_s` admits `0` (migration 0006).
+

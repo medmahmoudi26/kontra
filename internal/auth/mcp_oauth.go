@@ -57,7 +57,7 @@ func (a *Authenticator) MCPOAuth() bool { return a.mcp != nil }
 // canonical URI and stands for oidc:sub:<sub> with via mcp (spec §2.3, §12.1); any other bearer is an API key, as on
 // every route. A request a node opened takes its session's principal, as Authenticate gives it.
 func (a *Authenticator) AuthenticateMCP(r *http.Request, anonymousBuyer uuid.UUID, svc string) (p Principal, authenticated bool, err error) {
-	if a.mcp == nil {
+	if a.mcp == nil || a.local {
 		return a.Authenticate(r, anonymousBuyer)
 	}
 	if _, ok := HireSourceFrom(r.Context()); ok {

@@ -218,7 +218,8 @@ type Write struct {
 	// AfterTerminalOK is set only by apply_metadata, the one writer allowed after a terminal event (spec §5.1).
 	AfterTerminalOK bool
 	// Timeout and Retention fix tasks.deadline at the transition into submitted and
-	// tasks.retention_until at the terminal event. Zero takes the services row's timeout_s / retention_s.
+	// tasks.retention_until at the terminal event. Zero takes the services row's timeout_s / retention_s; a
+	// retention_s of 0 keeps the task forever (retention_until stays null, spec §5.4).
 	Timeout   time.Duration
 	Retention time.Duration
 	// Scope, when set, confines the write to the caller's tasks (Store); a task outside it is
@@ -306,7 +307,7 @@ with u as (
 			then now() else t.terminal_at end,
 		retention_until = case when $4::text in ('completed', 'failed', 'canceled', 'rejected') and t.retention_until is null
 			then now() + coalesce($11::bigint * interval '1 microsecond',
-				(select s.retention_s * interval '1 second' from kontra.services s where s.tenant_id = t.tenant_id and s.name = t.service))
+				(select nullif(s.retention_s, 0) * interval '1 second' from kontra.services s where s.tenant_id = t.tenant_id and s.name = t.service))
 			else t.retention_until end
 	where t.id = $1 and t.version = $2
 	  and ($12::uuid is null or (t.tenant_id = $12::uuid and t.service = $13::text and t.buyer_id = $14::uuid))
@@ -594,7 +595,7 @@ with t as (
 		now(),
 		case when $11::text in ('completed', 'failed', 'canceled', 'rejected') then now() end,
 		case when $11::text in ('completed', 'failed', 'canceled', 'rejected')
-			then now() + coalesce($15::bigint * interval '1 microsecond', s.retention_s * interval '1 second') end
+			then now() + coalesce($15::bigint * interval '1 microsecond', nullif(s.retention_s, 0) * interval '1 second') end
 	  from kontra.services s where s.tenant_id = $2::uuid and s.name = $3::text
 	returning id, deadline
 ), e as (

@@ -138,7 +138,8 @@ func (l *Log) DeleteExpired(ctx context.Context, now time.Time, limit int, objec
 
 // DeleteClosedSessions deletes up to limit mcp_sessions rows closed for longer than the retention of their
 // service (spec §5.4: "mcp_sessions closed for longer than the retention go the same way"). A session of the
-// gate's own /mcp names no service and keeps defaultRetention. It returns how many it deleted.
+// gate's own /mcp names no service and keeps defaultRetention; a service kept forever (retention_s 0) keeps its
+// sessions too. It returns how many it deleted.
 func (l *Log) DeleteClosedSessions(ctx context.Context, now time.Time, defaultRetention time.Duration, limit int) (int, error) {
 	if limit <= 0 {
 		return 0, nil
@@ -146,7 +147,7 @@ func (l *Log) DeleteClosedSessions(ctx context.Context, now time.Time, defaultRe
 	tag, err := l.db.Exec(ctx, `delete from kontra.mcp_sessions m
 		 using (select m2.client_sid_hash from kontra.mcp_sessions m2
 		          left join kontra.services s on s.tenant_id = m2.tenant_id and s.name = m2.service
-		         where m2.closed_at is not null
+		         where m2.closed_at is not null and coalesce(s.retention_s, -1) <> 0
 		           and m2.closed_at + coalesce(s.retention_s * interval '1 second', $2::bigint * interval '1 microsecond') <= $1
 		         limit $3
 		         for update of m2 skip locked) x

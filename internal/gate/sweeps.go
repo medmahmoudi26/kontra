@@ -9,12 +9,14 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/gatemcp"
 	"kontra.sh/kontra/internal/mcprelay"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/traffic"
 )
 
 // Sweep intervals: orphans once a minute (spec §14.5, tasks older than 2 minutes in submitted, or left quoted by an
@@ -210,6 +212,28 @@ func (r *Replica) sweepRetention(ctx context.Context) {
 	} else if n > 0 {
 		r.log.Info("retention sweep: tasks past retention_until deleted with their rows", "deleted", n)
 	}
+	// The A2A traffic record (relay.md §13.6): exchanges older than traffic.retention, whatever became of their tasks;
+	// swept whether or not recording is on now, so turning it off leaves existing exchanges to their retention.
+	if r.cfg == nil || r.pool == nil {
+		return // a replica built by a test with no configuration or pool of its own
+	}
+	n, err = SweepTraffic(ctx, r.pool, r.cfg.Traffic.Retention, time.Now())
+	if err != nil && ctx.Err() == nil {
+		r.log.Warn("traffic retention sweep", "error", err, "deleted", n)
+	} else if n > 0 {
+		r.log.Info("traffic retention sweep: exchanges past traffic.retention deleted", "deleted", n)
+	}
+}
+
+// trafficBatch is how many exchanges one statement of the traffic sweep deletes.
+const trafficBatch = 5000
+
+// SweepTraffic deletes the exchanges older than retention at now; a retention of 0 (config.Forever) keeps them all.
+func SweepTraffic(ctx context.Context, db *pgxpool.Pool, retention config.Retention, now time.Time) (int, error) {
+	if retention.IsForever() || retention.D() <= 0 {
+		return 0, nil
+	}
+	return traffic.Sweep(ctx, db, now.Add(-retention.D()), trafficBatch)
 }
 
 // SweepOrphans is one pass of the orphan sweep (spec §14.5, D63): every task in submitted (or a row an earlier release

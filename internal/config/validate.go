@@ -724,7 +724,9 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 		}
 	}
 	checkSeconds("timeout", s.Task.Timeout)
-	checkSeconds("retention", s.Task.Retention)
+	if err := retentionSecondsOK(s.Task.Retention); err != nil {
+		v.add("%s.task.retention %s: %v", at, s.Task.Retention, err)
+	}
 	if r := s.Task.RetryCount(); r < 0 || r > MaxTaskRetries {
 		v.add("%s.task.retries %d: want 0 to %d", at, r, MaxTaskRetries)
 	}

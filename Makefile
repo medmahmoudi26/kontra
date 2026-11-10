@@ -1,5 +1,5 @@
 # `make check` is what CI runs and what runs before every PR.
-.PHONY: check check-specs check-migrations check-go test-integration test-race test-e2e tck test-kits pentest-image pentest
+.PHONY: check check-specs check-migrations check-go check-web test-browser test-integration test-race test-e2e tck test-kits pentest-image pentest
 
 # The system Go may be older than the module's toolchain (go 1.26, a2a-go v2.7.0 needs it); pin the one
 # the module names so every go command, and gofmt, come from the same toolchain.
@@ -7,7 +7,7 @@ GOTOOLCHAIN ?= go1.26.10
 export GOTOOLCHAIN
 GO ?= go
 
-check: check-specs check-migrations check-go
+check: check-specs check-migrations check-go check-web
 
 # Schemas are valid JSON Schema 2020-12, fixtures validate, links and decision references resolve.
 check-specs:
@@ -26,6 +26,19 @@ check-go:
 	$(GO) vet ./...
 	$(GO) build ./...
 	$(GO) test -short ./...
+
+# The console's renderer (web/, the local development profile's console): node:test, no dependencies (Node 22). It
+# includes the rendering-safety lint: no module parses a string as HTML (innerHTML, insertAdjacentHTML, outerHTML,
+# DOMParser, document.write, eval) or reaches another origin (web/test/static.test.mjs).
+check-web:
+	node --test web/test/*.test.mjs
+
+# The console in a browser (test/browser, Playwright for Python under uv): a gate in the local development profile
+# built from ./cmd/kontra-gate, the example agents and kontra connect as processes, a Temporal development server
+# from $KONTRA_TEMPORAL_CLI and a fresh database on $KONTRA_TEST_PG. Chromium must be installed
+# (`uv run --with playwright==1.64.0 playwright install chromium`). Extra arguments go to pytest.
+test-browser:
+	GO="$(GO)" scripts/test_browser.sh $(ARGS)
 
 # Integration tests (no -short): every package but test/e2e, one at a time (-p 1), against $KONTRA_TEST_PG
 # or, when it is unset, one throwaway postgres:17-alpine container (KONTRA_TEST_PG_IMAGE=postgres:16-alpine
