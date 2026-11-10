@@ -2079,7 +2079,8 @@ A2A's, `card`, `upstream_card`, `seller_jwks`, or `unknown`: never a string the 
 caller's principal and `via` once authenticated, the task and context ids the call names or creates, the request's
 and the answer's sizes in bytes, the duration, the HTTP status, the JSON-RPC error code when one was answered, and the
 gate's reason for a refusal (`unauthenticated`, `unknown_service`, `allow_denied`, `invalid_request`,
-`version_unsupported`, `extension_required`, `admission_denied`, `rate_limited`, `body_too_large`, `body_timeout`). It
+`version_unsupported`, `extension_required`, `admission_denied`, `rate_limited`, `body_too_large`, `body_timeout`,
+`cross_site`). It
 never holds a body, a header, a part, a credential or a credential's hash. The table has no foreign key: a call to an
 unknown service is recorded with the name it asked for, and deleting an exchange never depends on its task.
 
@@ -2361,6 +2362,10 @@ section applies. [`docs/local.md`](../docs/local.md) is the walk-through.
   `localhost` (an empty host, `0.0.0.0` and `::` are refused, naming the key), and `public_url` must be an `http`
   loopback origin. The public listener answers `421` to a request whose `Host` is not `127.0.0.1`, `localhost` or
   `[::1]` with the listener's port, before any route: a page that rebinds its own name to loopback cannot reach it.
+  A browser's cross-site request to an A2A route (an `Origin` that is not the gate's own, `null` included, or
+  `Sec-Fetch-Site: cross-site` or `same-site`) is `403` before any handler (recorded with the reason `cross_site`):
+  a web page the developer has open cannot prompt their agents with a simple request. A client that is not a browser
+  sends neither header. `/mcp…` keeps `mcp.allowed_origins` (§11.1), and the tunnel's upgrade refuses another origin.
 - **Plain HTTP, no sealing, one tenant.** `tls`, a `sealed` service, `tunnel.anonymous` and `tenancy: multi` are
   refused at load.
 - **One shared caller.** Every request on the A2A and MCP routes, a request a node opened included, is the

@@ -183,3 +183,19 @@ def test_end_to_end_across_a_restart(stack: Stack, page: Page) -> None:
     if stack.mcp:
         expect(page.locator("#callscard")).to_contain_text("list_allowed_directories", timeout=15000)
     no_trouble(page)
+
+
+def test_another_site_cannot_prompt_agents(stack: Stack, page: Page) -> None:
+    """A page of another site in the developer's browser cannot start a task on a local agent: its simple request (a
+    text/plain POST with A2A-Version in the query, no preflight) is refused 403 by the profile's edge, and shows in
+    traffic as cross_site."""
+    before = {t["task_id"] for t in stack.api("GET", "/v1/tasks?limit=100")["items"]}
+    page.goto("about:blank")
+    body = '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"csrf","role":"ROLE_USER","parts":[{"text":"pwn"}]}}}'
+    page.evaluate("""([url, body]) => fetch(url, {method: 'POST', mode: 'no-cors', headers: {'Content-Type': 'text/plain'}, body})
+        .catch(() => null)""", [stack.base + "/agents/notes?A2A-Version=1.0", body])
+    page.wait_for_timeout(1500)
+    after = {t["task_id"] for t in stack.api("GET", "/v1/tasks?limit=100")["items"]}
+    assert after == before, "a cross-site page started a task"
+    ex = stack.api("GET", "/v1/exchanges?failed=1&limit=100")["items"]
+    assert any(x["reason"] == "cross_site" and x["http_status"] == 403 and x["service"] == "notes" for x in ex), ex[:3]

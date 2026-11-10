@@ -88,8 +88,9 @@ retention sweep every 10 minutes, whatever became of their tasks.
 ## What the profile does not protect against
 
 The gate listens on loopback only (it refuses to start otherwise), answers `421` to a request whose `Host` is not
-`127.0.0.1`, `localhost` or `[::1]` (a web page that rebinds its own name to your machine cannot reach it), and its
-console API refuses another site's page (`403`) and sends no CORS header. But **anything that runs on your machine, and
+`127.0.0.1`, `localhost` or `[::1]` (a web page that rebinds its own name to your machine cannot reach it), refuses a
+browser's cross-site request to your agents (`403`: a page you have open cannot prompt them), and its console API
+refuses another site's page and sends no CORS header. But **anything that runs on your machine, and
 any other user of it, can reach the gate: read every conversation, call your agents and act as the shared caller.**
 Every client is the same caller, so there is no isolation between clients either. Do not use the profile on a shared
 machine, never put a proxy in front of it, and never use it for a team: that is a team gate

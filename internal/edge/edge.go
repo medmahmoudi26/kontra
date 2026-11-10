@@ -429,6 +429,7 @@ const (
 	ReasonRateLimited  = "rate_limited"
 	ReasonBodyTooLarge = "body_too_large"
 	ReasonBodyTimeout  = "body_timeout"
+	ReasonCrossSite    = "cross_site"
 )
 
 func (c *chain) refused(r *http.Request, status int, reason string) {
@@ -453,6 +454,15 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rt, ok := c.routes.match(r)
 	if !ok {
 		emptyNotFound(w)
+		return
+	}
+	// The local development profile serves its A2A routes with no credential, so a web page the developer has open
+	// must not reach them: a browser's cross-site request (another Origin, or Sec-Fetch-Site cross-site or same-site)
+	// is 403 before anything runs. A non-browser client sends neither header. /mcp keeps its own Origin rule
+	// (mcp.allowed_origins), the console API its own, and /v1/tunnel's WebSocket upgrade refuses another origin.
+	if c.cfg.LoopbackOnly && strings.HasPrefix(r.URL.Path, "/agents/") && CrossSite(r) {
+		c.refused(r, http.StatusForbidden, ReasonCrossSite)
+		refuse(w, rt, http.StatusForbidden, "a request from another site is refused (the local development profile)", "", nil)
 		return
 	}
 	addr := c.cfg.ClientIP.Addr(r)
@@ -509,6 +519,24 @@ func (c *chain) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 var errTooLarge = errors.New("edge: body over the limit")
+
+// CrossSite reports whether r is a browser's request from another site: Sec-Fetch-Site cross-site or same-site, or
+// an Origin (one value) that is not http://<the Host r was sent to>, "null" included.
+func CrossSite(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "cross-site", "same-site":
+		return true
+	}
+	o := r.Header.Values("Origin")
+	if len(o) == 0 {
+		return false
+	}
+	if len(o) > 1 {
+		return true
+	}
+	u, err := url.Parse(o[0])
+	return err != nil || u.Scheme != "http" || u.Path != "" || u.User != nil || !strings.EqualFold(u.Host, r.Host)
+}
 
 // LoopbackHost reports whether r's Host names 127.0.0.1, localhost or [::1] with the port of the connection it
 // arrived on (no port means 80). A request without a local address (a handler driven directly in a test) is
