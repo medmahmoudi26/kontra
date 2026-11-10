@@ -16,6 +16,19 @@ from playwright.sync_api import Page, expect
 from conftest import Stack, eventually
 
 
+def book(page: Page, name: str, guests: str, when: str) -> None:
+    """Fill the A2UI booking form and press Book once what was filled in has held (a surface the thread draws again,
+    on a reconnect, starts empty)."""
+    for _ in range(5):
+        page.get_by_label("Name for the booking").fill(name)
+        page.get_by_label("Guests").select_option(label=guests)
+        page.get_by_label("Date and time").fill(when)
+        page.wait_for_timeout(300)
+        if page.get_by_label("Name for the booking").input_value() == name and page.get_by_label("Date and time").input_value() == when:
+            break
+    page.get_by_role("button", name="Book").click()
+
+
 def no_trouble(page: Page) -> None:
     assert page.errors == [], page.errors
     assert page.evaluate("window.__csp") == [], page.evaluate("window.__csp")
@@ -38,10 +51,7 @@ def test_console_task_a2ui_form_submits(stack: Stack, page: Page) -> None:
     page.locator("#startsend").click()
     expect(page.get_by_label("Name for the booking")).to_be_visible(timeout=20000)
     task = re.search(r"#/t/([0-9a-f-]{36})", page.url).group(1)
-    page.get_by_label("Name for the booking").fill("Ada Lovelace")
-    page.get_by_label("Guests").select_option(label="2 guests")
-    page.get_by_label("Date and time").fill("2026-12-01T19:30")
-    page.get_by_role("button", name="Book").click()
+    book(page, "Ada Lovelace", "2 guests", "2026-12-01T19:30")
     eventually("the console's task completes", lambda: stack.state(task) == "completed")
     expect(page.locator("#thread")).to_contain_text("Ada Lovelace", timeout=15000)
     view = stack.api("GET", f"/v1/tasks/{task}")
@@ -154,10 +164,7 @@ def test_end_to_end_across_a_restart(stack: Stack, page: Page) -> None:
     page.locator("#startsend").click()
     expect(page.get_by_label("Name for the booking")).to_be_visible(timeout=20000)
     booking = re.search(r"#/t/([0-9a-f-]{36})", page.url).group(1)
-    page.get_by_label("Name for the booking").fill("Grace Hopper")
-    page.get_by_label("Guests").select_option(label="3 guests")
-    page.get_by_label("Date and time").fill("2026-12-02T20:00")
-    page.get_by_role("button", name="Book").click()
+    book(page, "Grace Hopper", "3 guests", "2026-12-02T20:00")
     eventually("the booking completes", lambda: stack.state(booking) == "completed")
 
     def check() -> None:

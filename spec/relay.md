@@ -2378,6 +2378,8 @@ section applies. [`docs/local.md`](../docs/local.md) is the walk-through.
   its own settings, another key may serve a service that already has one, and a node that declares nothing is admitted
   to call agents. No anonymous tenant, no expiry, no purge. When the last session of a service leaves, the service
   stays enabled: new tasks fail `no_session` (§6.4) and the earlier tasks stay.
+- **One address.** Every client is on `127.0.0.1`, so `limits.rps_per_ip` (§2.2), which they share, defaults to
+  `2000` rather than `50`.
 - **Traffic recorded** (§13.6), unless `traffic.record: false`.
 - **Announced.** At start the gate logs, at warning level, that it serves every client without credentials and shows
   every conversation on its console, with the console's URL.

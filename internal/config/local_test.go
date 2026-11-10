@@ -31,6 +31,7 @@ func TestLocalDefaults(t *testing.T) {
 		{"traffic.record", c.Traffic.Recording(), true},
 		{"traffic.retention", c.Traffic.Retention.D(), 7 * 24 * time.Hour},
 		{"tenancy", c.Tenancy, TenancySingle},
+		{"limits.rps_per_ip", c.Limits.RPSPerIP, float64(LocalRPSPerIP)},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.key, tc.got, tc.want)
@@ -96,6 +97,12 @@ func TestNoProfileUnchanged(t *testing.T) {
 	}
 	if c.Traffic.Retention.D() != 7*24*time.Hour {
 		t.Errorf("traffic.retention = %s", c.Traffic.Retention)
+	}
+	if c.Limits.RPSPerIP != DefaultRPSPerIP {
+		t.Errorf("limits.rps_per_ip = %v", c.Limits.RPSPerIP)
+	}
+	if c := parse(t, localMinimal+"limits: { rps_per_ip: 10 }\n"); c.Limits.RPSPerIP != 10 {
+		t.Errorf("an explicit limits.rps_per_ip in the profile: %v", c.Limits.RPSPerIP)
 	}
 }
 

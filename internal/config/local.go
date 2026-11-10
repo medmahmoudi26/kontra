@@ -106,7 +106,13 @@ func (c *Config) applyProfileDefaults(p Profile) {
 	}
 	c.Listen = LocalListen
 	c.Metrics.Listen = LocalMetricsListen
+	// Every client of the profile is on 127.0.0.1 (the console's page, its own prompting, the developer's clients and
+	// tests): the per-address rate is theirs together, so its default is far above a team gate's.
+	c.Limits.RPSPerIP = LocalRPSPerIP
 }
+
+// LocalRPSPerIP is limits.rps_per_ip's default in the local development profile.
+const LocalRPSPerIP = 2000
 
 // applyLocalDerived fills the profile's defaults that depend on other keys: public_url from listen, traffic on.
 func (c *Config) applyLocalDerived() {
