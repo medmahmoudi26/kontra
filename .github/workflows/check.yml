@@ -3,9 +3,34 @@ on:
   pull_request:
   push:
     branches: [main]
+# A newer push to the same pull request cancels the run it supersedes; pushes to main all run.
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
+  # Whether the change touches more than docs/ (no Go code or test reads it): a pull request that changes only
+  # docs/ runs the spec checks (check) and skips the Go jobs. A push to main runs everything.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ] && ! git diff --name-only "$BASE...$HEAD" | grep -qv '^docs/'; then
+            code=false
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
   check:
     runs-on: ubuntu-24.04
     strategy:
@@ -30,6 +55,8 @@ jobs:
       - run: make check-specs
       - run: scripts/check_migrations.sh
   go:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -46,19 +73,21 @@ jobs:
         with:
           node-version: "22.22.2"
       - run: make check-web
-  # Integration tests (no -short) on Postgres 16 and 17: every package but test/e2e (`make test-integration`).
+  # Integration tests (no -short) on Postgres 16, which Cloud runs: every package but test/e2e
+  # (`make test-integration`), four packages at a time. The race job runs the same tests on 17, and the check job the
+  # migrations on both.
   # The pinned Temporal CLI (spec/relay.md §0: CLI 1.9.1, Server 1.32.0) is installed for the tests that
   # start a dev server; they read its path from KONTRA_TEMPORAL_CLI. Pebble likewise, KONTRA_TEST_PEBBLE. uv
   # and a2a-samples at the commit run.sh pins (KONTRA_A2A_SAMPLES) are for run.sh's guards
   # (examples/sellers/helloworld), which KONTRA_REQUIRE_HELLOWORLD keeps from skipping.
   integration:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        postgres: ["16-alpine", "17-alpine"]
+    timeout-minutes: 45
     services:
       postgres:
-        image: postgres:${{ matrix.postgres }}
+        image: postgres:16-alpine
         env: { POSTGRES_USER: kontra, POSTGRES_PASSWORD: kontra, POSTGRES_DB: kontra }
         ports: ["5432:5432"]
         options: >-
@@ -126,6 +155,8 @@ jobs:
   # The race detector over the same packages (make test-race: test-integration with -race), on Postgres 17:
   # the relay, the store, the lifecycle and the push worker are concurrent code.
   race:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:

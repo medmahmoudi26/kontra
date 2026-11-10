@@ -122,7 +122,7 @@ cleanup() {
       { echo "tck: could not drop the database $db_drop" >&2; status=1; }
   fi
   if [[ -n "$container" ]]; then
-    docker rm -f "$container" >/dev/null 2>&1 || { echo "tck: could not remove the container $container" >&2; status=1; }
+    docker rm -f -v "$container" >/dev/null 2>&1 || { echo "tck: could not remove the container $container" >&2; status=1; }
   fi
   local left
   left="$(pgrep -af -- "$run/" || true)"

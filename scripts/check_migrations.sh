@@ -12,7 +12,7 @@ if [[ -n "${KONTRA_TEST_PG:-}" ]]; then
 else
   name="kontra-migrate-check-$$"
   docker run -d --rm --name "$name" -e POSTGRES_USER=kontra -e POSTGRES_PASSWORD=kontra -e POSTGRES_DB=kontra "${KONTRA_TEST_PG_IMAGE:-postgres:17-alpine}" >/dev/null
-  trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+  trap 'docker rm -f -v "$name" >/dev/null 2>&1 || true' EXIT
   for _ in $(seq 1 60); do docker exec "$name" pg_isready -U kontra -q 2>/dev/null && break; sleep 0.5; done
   sleep 1
   psql_() { docker exec -i "$name" psql -U kontra -d kontra -v ON_ERROR_STOP=1 -q --single-transaction "$@"; }

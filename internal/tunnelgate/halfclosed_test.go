@@ -154,9 +154,10 @@ func TestHalfClosedStreamsAreCapped(t *testing.T) {
 				t.Fatalf("exchange %d: %v", i, err)
 			}
 		}
-		eventually(t, 5*time.Second, "no stream half-closed", func() bool { return s.HalfClosed() == 0 })
-		if s.Mux().IsClosed() || s.InFlight() != 0 {
-			t.Fatalf("closed %v, in flight %d", s.Mux().IsClosed(), s.InFlight())
+		// The last exchange's stream is released just after its body is read: wait for it as for the halves.
+		eventually(t, 5*time.Second, "no stream half-closed or in flight", func() bool { return s.HalfClosed() == 0 && s.InFlight() == 0 })
+		if s.Mux().IsClosed() {
+			t.Fatal("the session closed")
 		}
 	})
 }

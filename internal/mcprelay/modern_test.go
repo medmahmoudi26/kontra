@@ -843,12 +843,16 @@ func modernResearch(task *mcptest.Task) {
 	}
 	_ = json.Unmarshal(ans, &a)
 	task.Status("working", "Continuing...")
+	if p.Name == "reattach" {
+		// Held past the answer, so a dispatch cancelled once the answer is upstream is still mid-task (D42).
+		time.Sleep(2 * time.Second)
+	}
 	task.Complete(text(fmt.Sprintf("report: %v", a.Content["answer"]), false))
 }
 
 // modernTaskDouble is the dual-era double with the tasks extension and the tools of modernResearch, on 127.0.0.1.
 func modernTaskDouble(t *testing.T) (*mcptest.Server, string) {
-	up, url := dualEra(t, toolWith("research", ""), toolWith("broken", ""), toolWith("quick", ""), toolWith("slow", ""), toolWith("long", ""))
+	up, url := dualEra(t, toolWith("research", ""), toolWith("broken", ""), toolWith("quick", ""), toolWith("slow", ""), toolWith("long", ""), toolWith("reattach", ""))
 	up.ModernTaskRun = modernResearch
 	return up, url
 }
@@ -1416,7 +1420,7 @@ func TestModernDispatchReattach(t *testing.T) {
 	up, url := modernTaskDouble(t)
 	e.service("research", url, nil)
 	log := store.NewLog(e.pool)
-	id, wid, owner := directModernTask(t, e, log, "research")
+	id, wid, owner := directModernTask(t, e, log, "reattach")
 	d1 := &Dispatcher{ReplicaID: "r1", Log: log, Registry: relay.NewRegistry(), Services: e.svcs, minPoll: 50 * time.Millisecond}
 	ctx1, cancel1 := context.WithCancel(ctx)
 	defer cancel1()
@@ -1450,8 +1454,8 @@ func TestModernDispatchReattach(t *testing.T) {
 	if err != nil || row.State != store.StateCompleted {
 		t.Fatalf("the task: %v %v", row.State, err)
 	}
-	if up.Calls("research") != 1 || up.Count("tasks/update") != 1 || len(up.ModernTasks()) != 1 {
-		t.Fatalf("the upstream got %d calls, %d tasks/update, %d tasks", up.Calls("research"), up.Count("tasks/update"), len(up.ModernTasks()))
+	if up.Calls("reattach") != 1 || up.Count("tasks/update") != 1 || len(up.ModernTasks()) != 1 {
+		t.Fatalf("the upstream got %d calls, %d tasks/update, %d tasks", up.Calls("reattach"), up.Count("tasks/update"), len(up.ModernTasks()))
 	}
 	if up.HeaderMismatches() != 0 {
 		t.Errorf("%d mismatched requests", up.HeaderMismatches())

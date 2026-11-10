@@ -21,6 +21,8 @@ on:
       - "internal/**"
       - "migrations/**"
       - "test/e2e/**"
+      - "examples/sellers/a2ui/**"
+      - "examples/sellers/ap2-merchant/**"
       - "examples/sellers/helloworld/**"
       - "examples/sellers/tck/**"
       - "examples/sellers/booking/**"
@@ -36,9 +38,14 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  # Four jobs, each a quarter of the tests balanced by test/e2e/durations.txt (KONTRA_E2E_SHARD, scripts/test_e2e.sh).
   e2e:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     services:
       postgres:
         image: postgres:17-alpine
@@ -48,6 +55,7 @@ jobs:
           --health-cmd "pg_isready -U kontra" --health-interval 2s --health-timeout 2s --health-retries 30
     env:
       KONTRA_TEST_PG: postgres://kontra:kontra@localhost:5432/kontra?sslmode=disable
+      KONTRA_E2E_SHARD: ${{ matrix.shard }}/4
       KONTRA_REQUIRE_HELLOWORLD: "1"
       KONTRA_REQUIRE_NODE24: "1"
       A2A_SAMPLES_PIN: 6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3
