@@ -17,6 +17,7 @@ import (
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/pg"
+	"kontra.sh/kontra/internal/tenant"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -46,6 +47,9 @@ const (
 	viaServiceToken = "service_token"
 	viaTenantToken  = "tenant_token"
 	viaAPIKey       = "api_key"
+	// viaLocal is the local development profile's authority (Options.Local): it enrolls every declared service of
+	// a node on the gate's own tenant, creating those that do not exist, with no token and no credential.
+	viaLocal = "local_profile"
 )
 
 // Admit decides a proven hello in one transaction (§4, §5, §12): the key's lookup (a known key's stored
@@ -298,8 +302,10 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 
 	// An anonymous session (spec/tunnel.md §6): opened or resumed here, or the key of an anonymous tenant handed to
 	// §5's rules below as a key to move.
-	if d, err := a.anonymousSession(ctx); d != nil || err != nil {
-		return d, err
+	if !a.s.opts.Local {
+		if d, err := a.anonymousSession(ctx); d != nil || err != nil {
+			return d, err
+		}
 	}
 
 	// 5. The tokens, and the tenant they and the key name.
@@ -335,6 +341,15 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 					"an enrollment token binds none of the declared services (it may bind %v)", t.bind)
 			}
 		}
+	}
+
+	// The local development profile: a key nothing else names is the gate's own tenant's (the team tenant).
+	if a.s.opts.Local && a.tenant == uuid.Nil {
+		id, err := tenant.EnsureTeam(ctx, a.tx)
+		if err != nil {
+			return nil, err
+		}
+		a.tenant = id
 	}
 
 	// The key's bindings: its own, or the old key's on a rotation (every row is copied with its revoked_at,
@@ -381,6 +396,9 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 			if t := tenantToken(toks, d.Name); t != nil {
 				p.via, p.token = viaTenantToken, t
 			}
+		}
+		if p.via == "" && a.s.opts.Local {
+			p.via = viaLocal
 		}
 		if p.via != "" {
 			enrolls = true
@@ -432,14 +450,17 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	// the option's default (false on self-hosted gates) a node could otherwise never hire through such a gate
 	// without hosting a service. §5's "a key without an enroll: scope only hires" is read as that key's whole
 	// authority. §5 now names this admission, without the option (D206).
-	if a.key == nil && a.old == nil && !enrolls {
+	if a.key == nil && a.old == nil && !enrolls && a.s.opts.Local && len(h.Services) == 0 {
+		a.hireOnly = true // the local development profile: a node that only calls agents needs no credential either
+	} else if a.key == nil && a.old == nil && !enrolls {
 		if len(h.Services) > 0 || a.principal == nil || !a.principal.MayHire() || a.principal.TenantID == nil {
 			return nil, tunnel.Refuse(tunnel.CodeUnknownKey, "the key %s is not enrolled at this gate, and nothing in this hello enrolls it", h.KID)
 		}
 		a.hireOnly = true
 		a.tenant = *a.principal.TenantID
 	}
-	if (a.key != nil || a.old != nil) && len(h.Services) == 0 && len(bindings) == 0 && (a.principal == nil || !a.principal.MayHire()) {
+	if (a.key != nil || a.old != nil) && len(h.Services) == 0 && len(bindings) == 0 && (a.principal == nil || !a.principal.MayHire()) &&
+		!a.s.opts.Local {
 		return nil, tunnel.Refuse(tunnel.CodeUnknownKey,
 			"the key %s only hires (no service is bound to it): its hello must carry an API key with the hire scope", h.KID)
 	}
@@ -468,7 +489,7 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 			if !p.revoked {
 				denied = append(denied, p.svc.Name+": the key is not enrolled for it")
 			}
-		case !p.exists && p.via == viaTenantToken:
+		case !p.exists && (p.via == viaTenantToken || p.via == viaLocal):
 			p.create = true
 		case !p.exists && p.via == viaAPIKey && a.converting && a.anonServes[p.svc.Name] == p.svc.Kind:
 			// §6.3 (D278, D296): a conversion creates the services the anonymous session serves that the account
@@ -822,7 +843,7 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			"session_id": a.req.SessionID,
 			"replica_id": a.req.ReplicaID,
 		}
-		if apiKeyUse || a.hireOnly {
+		if (apiKeyUse || a.hireOnly) && a.principal != nil {
 			f["api_key"] = a.principal.ID
 		}
 		if a.hireOnly {
@@ -912,6 +933,9 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 // bindings). A row inserted meanwhile (the sync, the operator) runs the transaction again.
 func (a *admission) createService(ctx context.Context, d tunnel.Service) error {
 	allow := []string{"org:" + a.slug}
+	if a.s.opts.Local {
+		allow = []string{"anonymous"} // the local development profile: every client is the one anonymous caller
+	}
 	tag, err := a.tx.Exec(ctx, `
 		insert into kontra.services (tenant_id, name, kind, backend, allow, source)
 		values ($1, $2, $3, '{"tunnel": {}}', $4, 'db')

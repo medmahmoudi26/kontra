@@ -11,6 +11,9 @@
 -- anonymous caller, so the caller id cannot tell the console's tasks from another client's; the console replies
 -- to, cancels and continues only the tasks listed here, and watches every other one.
 --
+-- services.retention_s may be 0: `task.retention: 0` keeps the service's tasks forever, and a task that ends
+-- under it gets no retention_until, so the retention sweep never selects it (spec/relay.md §5.4).
+--
 -- The console's conversations are read through tasks_by_context (0001): a context is scoped by
 -- (tenant_id, service, buyer_id, context_id) (spec/relay.md §4), so no new index on tasks is needed.
 
@@ -45,9 +48,16 @@ create table console_tasks (
     created_at  timestamptz not null default now()
 );
 
+alter table services drop constraint services_retention_s_check,
+    add constraint services_retention_s_check check (retention_s >= 0);
+
 -- +goose Down
 -- Drops the traffic record and the console's list of its tasks: the console then watches every task and acts on
 -- none, as on a gate before 0006.
+-- A service kept forever goes back to the default retention; its tasks that ended under 0 keep retention_until null.
 set local search_path to kontra;
+update services set retention_s = 604800 where retention_s = 0;
+alter table services drop constraint services_retention_s_check,
+    add constraint services_retention_s_check check (retention_s > 0);
 drop table console_tasks;
 drop table a2a_exchanges;

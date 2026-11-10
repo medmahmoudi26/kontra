@@ -52,6 +52,7 @@ import (
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/tunnel"
+	"kontra.sh/kontra/internal/traffic"
 	"kontra.sh/kontra/internal/tunnelgate"
 	"kontra.sh/kontra/internal/version"
 )
@@ -168,7 +169,9 @@ func WithSIGHUP(ch <-chan os.Signal) Option {
 // gate_replicas before any worker polls, upserted every 10 s, and every 10 s each replica deletes the rows
 // of replicas silent for more than 30 s (spec/tunnel.md §11).
 type Replica struct {
-	cfg  *config.Config
+	// traffic is the A2A traffic record's writer (traffic.record; nil when off).
+	traffic *traffic.Recorder
+	cfg     *config.Config
 	id   string
 	log  *slog.Logger
 	opts options
@@ -363,6 +366,9 @@ func (r *Replica) assemble() error {
 		r.keys = auth.NewAPIKeys(r.pool, r.revoked)
 	}
 	authn := auth.NewAuthenticator(r.keys) // nil keys: every bearer credential is refused (auth.api_keys false)
+	if cfg.Local() {
+		authn = auth.NewLocalAuthenticator() // every request is the one anonymous caller (relay.md §18)
+	}
 	r.lifecycle = lifecycle.NewClient(r.temporal)
 
 	// The tunnel (spec/tunnel.md §11–§13): node-key and binding revocations reach the registry by NOTIFY
@@ -399,7 +405,7 @@ func (r *Replica) assemble() error {
 	}
 	r.enroll = enroll.NewStore(r.pool, enroll.Options{
 		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti,
-		EnrollWithAPIKey: cfg.Tunnel.EnrollWithAPIKey, Keys: r.keys, Logger: log, Anonymous: anonLimits,
+		EnrollWithAPIKey: cfg.Tunnel.EnrollWithAPIKey, Keys: r.keys, Logger: log, Anonymous: anonLimits, Local: cfg.Local(),
 	})
 
 	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, Resolver: pushResolver(log)}
@@ -535,9 +541,12 @@ func (r *Replica) assemble() error {
 	if err := r.assembleOIDC(routes, authn); err != nil {
 		return err
 	}
+	if cfg.Traffic.Recording() {
+		r.traffic = traffic.New(r.pool, log.With("component", "traffic"))
+	}
 	a2aRoutes := a2ahttp.New(a2ahttp.Deps{
 		Services: r.services, Handlers: handlers, SSE: writer, Auth: authn,
-		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log,
+		Multi: cfg.Tenancy == config.TenancyMulti, Logger: log, Traffic: r.traffic,
 	})
 	a2aRoutes.Register(routes)
 	// /mcp/{svc} (spec §11; M3 WP-04): plain MCP requests, sessions pinned to a tunnel session or a direct backend,
@@ -580,6 +589,9 @@ func (r *Replica) assemble() error {
 	ecfg, err := edge.FromConfig(cfg, log)
 	if err != nil {
 		return err
+	}
+	if r.traffic != nil {
+		ecfg.OnRefuse = a2aRoutes.RecordRefusal // the edge's own 413, 429 and 408 on A2A paths (relay.md §13.6)
 	}
 	// The streams nodes open (tunnel.md §9, §8.3; D34): hiring requests are served by the same routes as the
 	// network's, behind an edge of their own whose per-address counts are per session (the session is the
@@ -856,6 +868,9 @@ func (r *Replica) Run(ctx context.Context) error {
 	r.checkHealth(bg)
 	goLoop("health", r.healthLoop)
 	goLoop("sweeps", r.RunSweeps)
+	if r.traffic != nil {
+		goLoop("traffic", r.traffic.Run)
+	}
 	goLoop("peer", r.servePeer)
 	if r.opts.hup {
 		goLoop("sighup", r.hupLoop)
@@ -882,6 +897,9 @@ func (r *Replica) Run(ctx context.Context) error {
 	go func() { serveErr <- r.server.Serve(bg) }()
 	go func() { serveErr <- r.metrics.Serve(bg) }()
 	r.log.Info("serving", "addr", r.Addr().String(), "metrics", r.MetricsAddr().String())
+	if r.cfg.Local() {
+		LocalBanner(r.log, r.cfg.PublicURL)
+	}
 
 	var failed error
 	select {
@@ -1221,6 +1239,8 @@ func (r *Replica) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 	gauge("kontra_gate_dispatches_in_flight", "Dispatches running on this replica.", r.InFlight())
 	gauge("kontra_gate_services", "Enabled services in the registry.", r.services.Count())
 	gauge("kontra_gate_tunnel_sessions", "Tunnel sessions this replica holds.", r.tunnels.Count())
+	_, _ = fmt.Fprintf(w, "# HELP kontra_traffic_dropped_total A2A exchanges this replica dropped instead of storing (relay.md §13.6).\n"+
+		"# TYPE kontra_traffic_dropped_total counter\nkontra_traffic_dropped_total{replica=%q} %d\n", r.id, r.traffic.Dropped())
 	writePatchRefusals(w, r.id, &r.refusals)
 	writeFeeds(w, r.id, r.feeds)
 }

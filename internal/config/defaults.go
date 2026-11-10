@@ -169,7 +169,7 @@ func (c *Config) applyDerivedDefaults() {
 			s.Task.Retries = &r
 		}
 		if s.Task.Retention == 0 {
-			s.Task.Retention = Duration(DefaultTaskRetention)
+			s.Task.Retention = Retention(DefaultTaskRetention)
 		}
 		if s.Kind == KindMCP && s.Tasks == "" {
 			s.Tasks = DefaultTasksMode

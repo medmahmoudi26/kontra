@@ -358,18 +358,22 @@ func notCancelable(s store.State) *mcpwire.Error {
 func mcpTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }
 
 // ttlOf is a task's ttl in milliseconds (§11.6): retention_until − created_at once terminal; before, an upper
-// bound: the deadline plus the retention.
-func ttlOf(row *store.TaskRow, pol store.ServiceRef) int64 {
+// bound: the deadline plus the retention. Nil (ttl null, unlimited) when the service keeps its tasks forever
+// (task.retention: 0, so a terminal task has no retention_until).
+func ttlOf(row *store.TaskRow, pol store.ServiceRef) *int64 {
 	var end time.Time
 	switch {
 	case row.RetentionUntil != nil:
 		end = *row.RetentionUntil
+	case row.TerminalAt != nil || pol.Retention <= 0:
+		return nil
 	case row.Deadline != nil:
 		end = row.Deadline.Add(pol.Retention)
 	default:
 		end = row.CreatedAt.Add(pol.Timeout + pol.Retention)
 	}
-	return max(end.Sub(row.CreatedAt).Milliseconds(), 0)
+	ms := max(end.Sub(row.CreatedAt).Milliseconds(), 0)
+	return &ms
 }
 
 // taskObject is an MCP 2025-11-25 Task as the gate shows its task (§11.6): taskId, status (§5.1's mapping),
@@ -382,7 +386,7 @@ func taskObject(row *store.TaskRow, pol store.ServiceRef) (json.RawMessage, erro
 		StatusMessage string `json:"statusMessage,omitempty"`
 		CreatedAt     string `json:"createdAt"`
 		LastUpdatedAt string `json:"lastUpdatedAt"`
-		TTL           int64  `json:"ttl"`
+		TTL           *int64 `json:"ttl"`
 		PollInterval  int    `json:"pollInterval"`
 	}
 	return json.Marshal(task{

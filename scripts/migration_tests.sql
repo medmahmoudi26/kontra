@@ -404,4 +404,16 @@ do $$ begin
     raise exception 'FAIL: console_tasks accepted a task that does not exist';
 exception when foreign_key_violation then null; end $$;
 
+-- 0006: a service may keep its tasks forever (retention_s 0), never a negative retention.
+do $$
+declare s_name text;
+begin
+    select name into s_name from services order by name limit 1;
+    update services set retention_s = 0 where name = s_name;
+    begin
+        update services set retention_s = -1 where name = s_name;
+        raise exception 'FAIL: a negative retention_s was accepted';
+    exception when check_violation then null; end;
+end $$;
+
 select 'migration behaviour: ok';
