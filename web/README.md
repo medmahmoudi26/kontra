@@ -28,10 +28,14 @@ module of sign-in, keys, billing, disputes and the catalog. `js/agentschema.js` 
 that draws and answers an agent's own form on the thread (the A2A samples' form part, Structured Input's
 `input_schema`); a first message is text, or the card's AgentStack initial form. `api.js`, `app.js`, `main.js`,
 `nav.js` and `routes.js` were rewritten for the gate's console API, and `views/{tasks,conversations,traffic,calls,
-services}.js` are this repository's own list views.
+services}.js` are this repository's own list views. `js/ap2.js` (AP2 v0.2.0 data parts, classified by the keys
+`examples/sellers/ap2-merchant` emits and decoded for display, never verified) and `views/ap2.js` (their cards) are
+new here too.
 
 ## Tests
 
 `node --test web/test/*.test.mjs` (node:test, no dependencies): the module graph is closed, the console's code
 never parses a string as HTML and calls only the operations of `routes.js`, and the DOM-free modules behave as
-Kontra Cloud's console tests say (`sse`, `taskevents`, `files`, `a2uiwire`, `agentschema`, `agentstack`).
+Kontra Cloud's console tests say (`sse`, `taskevents`, `files`, `a2uiwire`, `agentschema`, `agentstack`, and `ap2`).
+`make check-web` runs them. In a browser, against a gate in the local development profile: `make test-browser`
+(test/browser, Playwright).

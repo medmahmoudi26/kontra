@@ -24,8 +24,17 @@ import (
 // its kontra.yaml. Close (registered on t) stops everything.
 func startLocal(t *testing.T, extra string) (*Harness, *Gate) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("e2e: needs Postgres, the temporal CLI and a gate; skipped under -short")
+	}
 	ctx := ctxFor(t, 3*time.Minute)
 	h := &Harness{run: randomHex(6), Upstreams: map[string]*slowagent.Agent{}}
+	// Before the harness stops them: nothing it started listens off loopback (D185).
+	t.Cleanup(func() {
+		if err := h.CheckLoopback(); err != nil {
+			t.Error(err)
+		}
+	})
 	t.Cleanup(func() {
 		if t.Failed() && h.Gates[0] != nil {
 			t.Logf("gate log:\n%s", tail(h.Gates[0].LogPath, 60))
