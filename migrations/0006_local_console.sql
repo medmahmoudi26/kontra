@@ -1,4 +1,5 @@
--- Kontra gate schema, revision 0006 (the local development profile's console and the A2A traffic record).
+-- Kontra gate schema, revision 0006 (the local development profile's console and the A2A traffic record; D352, D353,
+-- D354).
 --
 -- a2a_exchanges: one row per A2A call the gate received, refused calls included (the a2a-traffic capability).
 -- Metadata only: never a body, a header, a part, a credential or a credential's hash; the caller is its principal

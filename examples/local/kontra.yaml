@@ -1,0 +1,5 @@
+# A gate in the local development profile (docs/local.md, spec/relay.md §18): Postgres and Temporal from
+# compose.dev.yaml, everything else the profile's defaults (127.0.0.1:8080, plain HTTP, no credentials, the console at
+# http://127.0.0.1:8080/). Loopback only: the gate refuses to start bound anywhere else.
+profile: local
+postgres: postgres://kontra:kontra@127.0.0.1:5432/kontra?sslmode=disable
