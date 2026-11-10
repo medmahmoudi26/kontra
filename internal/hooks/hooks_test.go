@@ -14,7 +14,7 @@ func TestBuiltinAdmissionAllows(t *testing.T) {
 		Operation: OpTask, TaskID: "0192f0b4-0000-7000-8000-000000000001", Protocol: "a2a",
 		Principal: Principal{Kind: "key", ID: "key:kk_a_00000001", BuyerID: "b", Via: "api_key"},
 	})
-	if err != nil || d.Outcome != Allow || d.Refusal != nil || d.Quote != nil || d.Metadata != nil {
+	if err != nil || d.Outcome != Allow || d.Refusal != nil || d.Metadata != nil {
 		t.Errorf("built-in admission: %+v %v", d, err)
 	}
 	if _, err := (BuiltinAdmission{}).Admit(context.Background(), AdmitRequest{}); err == nil {
@@ -41,10 +41,10 @@ func TestAdmittedContext(t *testing.T) {
 }
 
 func TestCheckOperatorMaps(t *testing.T) {
-	r := KeyRules{OperatorPrefixes: []string{"kontra.escrow.", "acme."}}
+	r := KeyRules{OperatorPrefixes: []string{"kontra.op.", "acme."}}
 	ok := []struct{ md, meta map[string]any }{
 		{nil, nil},
-		{map[string]any{"kontra.escrow.state": "held", "acme.x": 1, KeyRetainUntil: "2026-10-26T00:00:00Z"}, map[string]any{"sh.kontra/escrow": map[string]any{"s": 1}}},
+		{map[string]any{"kontra.op.state": "held", "acme.x": 1}, map[string]any{"sh.kontra/note": map[string]any{"s": 1}}},
 	}
 	for _, c := range ok {
 		if err := r.CheckOperatorMaps(c.md, c.meta); err != nil {
@@ -57,7 +57,8 @@ func TestCheckOperatorMaps(t *testing.T) {
 	}{
 		{map[string]any{"kontra.approve.url": "x"}, nil, ErrForbiddenKey},
 		{map[string]any{"note": "x"}, nil, ErrForbiddenKey},
-		{map[string]any{"kontra.escrowX": "x"}, nil, ErrForbiddenKey},
+		{map[string]any{"kontra.opX": "x"}, nil, ErrForbiddenKey},
+		{map[string]any{"kontra.keyRetainUntil": "2026-10-26T00:00:00Z"}, nil, ErrForbiddenKey}, // retired (D351)
 		{nil, map[string]any{"price": 1}, ErrForbiddenKey},
 		{map[string]any{"acme.big": strings.Repeat("x", MaxMapBytes)}, nil, ErrMapTooLarge},
 		{nil, map[string]any{"sh.kontra/big": strings.Repeat("x", MaxMapBytes)}, ErrMapTooLarge},
@@ -67,14 +68,14 @@ func TestCheckOperatorMaps(t *testing.T) {
 			t.Errorf("%v %v: %v, want %v", c.md, c.meta, err, c.want)
 		}
 	}
-	// No prefixes configured (open source): only kontra.keyRetainUntil.
+	// No prefixes configured (open source): no operator key.
 	if err := (KeyRules{}).CheckOperatorMaps(map[string]any{"anything": 1}, nil); !errors.Is(err, ErrForbiddenKey) {
 		t.Errorf("no prefixes: %v", err)
 	}
 }
 
 func TestStripCaller(t *testing.T) {
-	r := KeyRules{CallerMetadata: []string{"kontra.escrow.dispute"}}
+	r := KeyRules{}
 	in := map[string]any{
 		"kontra.approve.url": "https://evil", "Kontra.Escrow.State": "released", "kontra.failure": "x",
 		KeySealed: map[string]any{"original": "text/plain"}, KeySealedReplyTo: "k1_x", "kontra.escrow.dispute": true,
@@ -86,7 +87,7 @@ func TestStripCaller(t *testing.T) {
 	}
 	got := r.StripCaller(in)
 	want := map[string]any{
-		KeySealed: map[string]any{"original": "text/plain"}, KeySealedReplyTo: "k1_x", "kontra.escrow.dispute": true,
+		KeySealed: map[string]any{"original": "text/plain"}, KeySealedReplyTo: "k1_x",
 		"user.note": "kept", "kontraX": "not a kontra. key",
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -97,9 +98,6 @@ func TestStripCaller(t *testing.T) {
 	}
 	if got := r.StripCaller(map[string]any{"kontra.approve.url": "x"}); got != nil {
 		t.Errorf("all keys stripped: %v, want nil", got)
-	}
-	if got := r.CallerMetadataOnly(in); !reflect.DeepEqual(got, map[string]any{"kontra.escrow.dispute": true}) {
-		t.Errorf("caller_metadata only: %v", got)
 	}
 }
 

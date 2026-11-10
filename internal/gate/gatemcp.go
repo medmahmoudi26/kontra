@@ -37,7 +37,7 @@ func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator
 	r.hireTasks = tasks
 	h, err := gatemcp.NewHandler(gatemcp.Deps{
 		PublicURL: cfg.PublicURL, Multi: multi, Auth: authn, Sessions: mcprelay.NewSessions(r.pool), Catalog: catalog,
-		Hirer: hirer, Tasks: tasks, Elicitations: gatemcp.NewElicitations(r.storeLog, r.listener, r.log), Log: r.storeLog,
+		Hirer: hirer, Tasks: tasks, Log: r.storeLog,
 		Waker: r.listener, Render: r.render, Served: r.servedService, AllowedOrigins: cfg.MCP.AllowedOrigins, Logger: r.log,
 		PlainWait: r.opts.plainWait, Push: pushes,
 	})

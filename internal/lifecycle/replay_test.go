@@ -111,6 +111,33 @@ func TestReplayReconnectHistories(t *testing.T) {
 	}
 }
 
+// TestReplayReviewWindowRetired checks the histories on both sides of changeNoReviewWindow (D351): the one recorded
+// after it carries the marker and schedules no kontra.lifecycle.ReviewWindow, and every history that schedules it
+// carries no marker, so TestReplayRecordedHistories replays both branches of terminalHooks.
+func TestReplayReviewWindowRetired(t *testing.T) {
+	files, _ := filepath.Glob(filepath.Join("testdata", "histories", "*.json"))
+	var before, after int
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		marked := slices.Contains(changeIDs(t, b), changeNoReviewWindow)
+		asks := strings.Contains(string(b), HookReviewWindow)
+		switch {
+		case marked && asks:
+			t.Errorf("%s carries the %s marker and still schedules ReviewWindow", f, changeNoReviewWindow)
+		case marked:
+			after++
+		case asks:
+			before++
+		}
+	}
+	if before == 0 || after == 0 {
+		t.Fatalf("histories before the change %d, after it %d: want both", before, after)
+	}
+}
+
 // changeIDs are the GetVersion change ids a JSON history's markers record.
 func changeIDs(t *testing.T, history []byte) []string {
 	t.Helper()

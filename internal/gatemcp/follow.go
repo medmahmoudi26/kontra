@@ -99,9 +99,9 @@ func (h *Handler) loadTool(rq *request, id uuid.UUID) (*store.TaskRow, error) {
 }
 
 // answerOf is the CallToolResult of a hire task as row has it, as a plain hire, reply, status and cancel answer it
-// (§12.2): an ended task as tasks/result renders it; input-required as §12.4's reply-tool text; quoted as the approve
-// URL; a task still running with the text saying how to follow it. Its structuredContent is the hire result, with the
-// task's contextId and service ref (D336).
+// (§12.2): an ended task as tasks/result renders it; input-required as §12.4's reply-tool text; a task still running
+// with the text saying how to follow it. Its structuredContent is the hire result, with the task's contextId and
+// service ref (D336).
 func (h *Handler) answerOf(ctx context.Context, row *store.TaskRow, p auth.Principal) callToolResult {
 	return h.answerFrom(ctx, row, p, 0)
 }
@@ -120,12 +120,10 @@ func (h *Handler) answerFrom(ctx context.Context, row *store.TaskRow, p auth.Pri
 			}
 		}
 		res = render(task, row.State)
-	case row.State == store.StateQuoted:
-		res = quotedCTR(row)
 	case row.State == store.StateInputRequired:
 		_, text, _ := Question(row.Snapshot, Reader{Principal: p, Era: mcpwire.EraLegacy})
 		res = callToolResult{Content: []content{{Type: "text", Text: text}},
-			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text},
+			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), Text: text},
 			Meta:              map[string]any{MetaInputRequired: true}}
 	default:
 		a2aURL := strings.TrimRight(h.deps.PublicURL, "/") + "/agents/" + h.serviceRef(row)
@@ -133,7 +131,7 @@ func (h *Handler) answerFrom(ctx context.Context, row *store.TaskRow, p auth.Pri
 			"{taskId: \"" + row.ID.String() + "\", after: " + strconv.FormatInt(follow, 10) + ", wait: 25}, or with GetTask at " + a2aURL +
 			" (the same credential); call reply when it asks a question."
 		res = callToolResult{Content: []content{{Type: "text", Text: text}},
-			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), URL: threadURL(row.Snapshot), Text: text}}
+			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), Text: text}}
 	}
 	if hr, ok := res.StructuredContent.(HireResult); ok {
 		hr.ContextID, hr.Service = row.ContextID, h.serviceRef(row)
@@ -457,9 +455,6 @@ func (h *Handler) tasksTool(rq *request, args json.RawMessage) {
 			refs[k] = ref
 		}
 		text := statusText(r.Snapshot)
-		if r.State == store.StateQuoted {
-			text = "waiting for a person to approve its quote at " + approveURL(r.Snapshot)
-		}
 		out.Tasks = append(out.Tasks, TaskEntry{TaskID: r.ID.String(), Service: ref, ContextID: r.ContextID,
 			State: string(r.State.A2A()), StatusAt: mcpTime(r.StatusAt), Text: truncateRunes(text, TaskTextMax)})
 	}
@@ -477,8 +472,7 @@ func truncateRunes(s string, n int) string {
 }
 
 // cancelTool answers the cancel tool (§12.2, D334): MCP tasks/cancel's legacy semantics (§11.6, D57: kontra.cancel in
-// MCP mode, the task canceled within 10 s, the upstream receiving §8's CancelTask; a quoted task is canceled by the
-// client), awaited, and the task after it as hire answers it (a canceled task's hire result, which is no error here:
+// MCP mode, the task canceled within 10 s, the upstream receiving §8's CancelTask), awaited, and the task after it as hire answers it (a canceled task's hire result, which is no error here:
 // the cancel did what was asked). A task that has ended is isError "the task already ended (<state>)".
 func (h *Handler) cancelTool(rq *request, args json.RawMessage) {
 	id, err := parseTaskOnly(args)

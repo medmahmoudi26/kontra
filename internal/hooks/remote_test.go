@@ -76,7 +76,7 @@ func (h *hookDouble) requests() []recorded {
 func (h *hookDouble) remote(t *testing.T, mod func(*RemoteAdmissionConfig)) *RemoteAdmission {
 	t.Helper()
 	cfg := RemoteAdmissionConfig{URL: h.srv.URL + "/admit", Secret: testSecret, Timeout: 2 * time.Second,
-		Operations: []Operation{OpTask, OpSession, OpCall}, Rules: KeyRules{OperatorPrefixes: []string{"kontra.escrow."}}}
+		Operations: []Operation{OpTask, OpSession, OpCall}, Rules: KeyRules{OperatorPrefixes: []string{"kontra.op."}}}
 	if mod != nil {
 		mod(&cfg)
 	}
@@ -99,16 +99,16 @@ func taskRequest() AdmitRequest {
 
 func future() string { return time.Now().Add(time.Hour).UTC().Format(time.RFC3339) }
 
-// allow, deny with the operator's refusal, and quote are read as the hook answered them; the request is the
+// allow and deny with the operator's refusal are read as the hook answered them; the request is the
 // AdmitRequest in hooks.json's camelCase, POSTed with the bearer secret.
 func TestRemoteAdmissionDecisions(t *testing.T) {
 	h := newHook(t)
 	r := h.remote(t, nil)
 	ctx := context.Background()
 
-	h.answer(200, `{"outcome":"allow","metadata":{"kontra.escrow.note":"ok"},"mcpMeta":{"sh.kontra/note":"1 EUR"}}`)
+	h.answer(200, `{"outcome":"allow","metadata":{"kontra.op.note":"ok"},"mcpMeta":{"sh.kontra/note":"1 EUR"}}`)
 	d, err := r.Admit(ctx, taskRequest())
-	if err != nil || d.Outcome != Allow || d.Metadata["kontra.escrow.note"] != "ok" || d.MCPMeta["sh.kontra/note"] != "1 EUR" {
+	if err != nil || d.Outcome != Allow || d.Metadata["kontra.op.note"] != "ok" || d.MCPMeta["sh.kontra/note"] != "1 EUR" {
 		t.Fatalf("allow: %+v, %v", d, err)
 	}
 	reqs := h.requests()
@@ -136,25 +136,11 @@ func TestRemoteAdmissionDecisions(t *testing.T) {
 	if err != nil || d.Outcome != Deny || d.Refusal == nil || d.Refusal.Code != -32602 || d.Refusal.Message != "over budget" {
 		t.Errorf("deny: %+v, %v", d, err)
 	}
-
-	approve := "https://app.kontra.sh/#/t/0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11"
-	exp := future()
-	h.answer(200, fmt.Sprintf(`{"outcome":"quote","metadata":{"kontra.escrow.quote":{"amount":"15.00"}},"quote":{"approveUrl":%q,"expiresAt":%q}}`, approve, exp))
-	d, err = r.Admit(ctx, taskRequest())
-	if err != nil || d.Outcome != Quote || d.Quote == nil || d.Quote.ApproveURL != approve || d.Quote.ExpiresAt != exp {
-		t.Errorf("quote: %+v, %v", d, err)
-	}
-	// A team gate's own approve page is passed through as well (D188).
-	team := "https://gate.team.example/approve/0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11?x=1"
-	h.answer(200, fmt.Sprintf(`{"outcome":"quote","quote":{"approveUrl":%q,"expiresAt":%q}}`, team, exp))
-	if d, err = r.Admit(ctx, taskRequest()); err != nil || d.Quote == nil || d.Quote.ApproveURL != team {
-		t.Errorf("a team gate's quote: %+v, %v", d, err)
-	}
 }
 
 // Every way the hook can fail is ErrAdmissionUnavailable (the callers' -32603 "admission unavailable", 503): a
 // timeout, a non-2xx, a 3xx (not followed), an unparsable or invalid answer, a metadata key outside the operator
-// prefixes, an mcpMeta key outside sh.kontra/, a map over 16 KiB, an answer over 64 KiB, a malformed or expired quote.
+// prefixes, an mcpMeta key outside sh.kontra/, a map over 16 KiB, an answer over 64 KiB, the retired outcome quote (D351).
 // None of the errors carries the secret.
 func TestRemoteAdmissionFailsClosed(t *testing.T) {
 	h := newHook(t)
@@ -190,6 +176,7 @@ func TestRemoteAdmissionFailsClosed(t *testing.T) {
 		{"repeated member", 200, `{"outcome":"deny","outcome":"allow"}`},
 		{"case-variant pair", 200, `{"outcome":"allow","OUTCOME":"allow"}`},
 		{"unknown member", 200, `{"outcome":"allow","approve":true}`},
+		{"quote (retired, D351)", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"` + future() + `"}}`},
 		{"deny without refusal", 200, `{"outcome":"deny"}`},
 		{"refusal without code", 200, `{"outcome":"deny","refusal":{"message":"no"}}`},
 		{"refusal code not an integer", 200, `{"outcome":"deny","refusal":{"code":1.5,"message":"no"}}`},
@@ -199,36 +186,15 @@ func TestRemoteAdmissionFailsClosed(t *testing.T) {
 		{"refusal code beyond 2^53", 200, `{"outcome":"deny","refusal":{"code":1e300,"message":"no"}}`},
 		{"refusal message null", 200, `{"outcome":"deny","refusal":{"code":1,"message":null}}`},
 		{"refusal with an extra member", 200, `{"outcome":"deny","refusal":{"code":1,"message":"no","http":403}}`},
-		{"quote without terms", 200, `{"outcome":"quote"}`},
-		{"quote terms not an object", 200, `{"outcome":"quote","quote":"https://x.example"}`},
-		{"quote without expiresAt", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1"}}`},
-		{"quote with an extra member", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"` + future() + `","amount":1}}`},
 		{"metadata not an object", 200, `{"outcome":"allow","metadata":[1]}`},
 		{"metadata null", 200, `{"outcome":"allow","metadata":null}`},
-		{"metadata key outside the prefixes", 200, `{"outcome":"allow","metadata":{"kontra.approve.url":"https://evil.example"}}`},
-		{"metadata repeated key", 200, `{"outcome":"allow","metadata":{"kontra.escrow.a":1,"kontra.escrow.a":2}}`},
+		{"metadata key outside the prefixes", 200, `{"outcome":"allow","metadata":{"kontra.other":"https://evil.example"}}`},
+		{"metadata repeated key", 200, `{"outcome":"allow","metadata":{"kontra.op.a":1,"kontra.op.a":2}}`},
 		{"mcpMeta key outside sh.kontra/", 200, `{"outcome":"allow","mcpMeta":{"price":"1"}}`},
-		{"metadata over 16 KiB", 200, `{"outcome":"allow","metadata":{"kontra.escrow.blob":"` + big + `"}}`},
+		{"metadata over 16 KiB", 200, `{"outcome":"allow","metadata":{"kontra.op.blob":"` + big + `"}}`},
 		{"mcpMeta over 16 KiB", 200, `{"outcome":"allow","mcpMeta":{"sh.kontra/blob":"` + big + `"}}`},
-		{"answer over 64 KiB", 200, `{"outcome":"allow","metadata":{"kontra.escrow.a":"` + strings.Repeat("y", 65<<10) + `"}}`},
-		{"approveUrl http", 200, `{"outcome":"quote","quote":{"approveUrl":"http://app.kontra.sh/#/t/1","expiresAt":"` + future() + `"}}`},
-		{"approveUrl upper-case scheme", 200, `{"outcome":"quote","quote":{"approveUrl":"HTTPS://app.kontra.sh/#/t/1","expiresAt":"` + future() + `"}}`},
-		{"approveUrl relative", 200, `{"outcome":"quote","quote":{"approveUrl":"/#/t/1","expiresAt":"` + future() + `"}}`},
-		{"approveUrl without a host", 200, `{"outcome":"quote","quote":{"approveUrl":"https:///t/1","expiresAt":"` + future() + `"}}`},
-		{"approveUrl with userinfo", 200, `{"outcome":"quote","quote":{"approveUrl":"https://u:p@app.kontra.sh/#/t/1","expiresAt":"` + future() + `"}}`},
-		{"approveUrl with a space", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/t 1","expiresAt":"` + future() + `"}}`},
-		{"approveUrl javascript", 200, `{"outcome":"quote","quote":{"approveUrl":"javascript:alert(1)","expiresAt":"` + future() + `"}}`},
-		{"expiresAt unparsable", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"soon"}}`},
-		{"expiresAt without a zone", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"2030-01-01T00:00:00"}}`},
-		{"expiresAt past", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"2020-01-01T00:00:00Z"}}`},
-		{"expiresAt empty", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":""}}`},
+		{"answer over 64 KiB", 200, `{"outcome":"allow","metadata":{"kontra.op.a":"` + strings.Repeat("y", 65<<10) + `"}}`},
 		// What time.Parse(time.RFC3339) takes and RFC 3339 (format date-time) does not.
-		{"expiresAt with a comma fraction", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"2030-01-01T00:00:00,5Z"}}`},
-		{"expiresAt with a one-digit hour", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"2030-01-01T0:00:00Z"}}`},
-		{"expiresAt with offset hour 24", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"2030-01-01T00:00:00+24:00"}}`},
-		{"expiresAt with offset minute 60", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"2030-01-01T00:00:00+00:60"}}`},
-		{"expiresAt with a fraction but no digit", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"2030-01-01T00:00:00.Z"}}`},
-		{"expiresAt null", 200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":null}}`},
 		{"a key quoting the secret", 200, `{"outcome":"allow","` + testSecret + `":1}`},
 		{"a metadata key quoting the secret", 200, `{"outcome":"allow","metadata":{"` + testSecret[3:] + `":1}}`},
 	}
@@ -289,28 +255,6 @@ func TestRemoteAdmissionFailsClosed(t *testing.T) {
 	}
 	if _, err := rd.Admit(context.Background(), taskRequest()); !errors.Is(err, ErrAdmissionUnavailable) || strings.Contains(err.Error(), testSecret) {
 		t.Errorf("a hook that is down: %v", err)
-	}
-}
-
-// A quote is valid only for operation task on a gate-owned A2A task (spec §13.1): for an MCP task, call or session it
-// is the deny "MCP services are not priced", -32603 (D350); an A2A task's quote stands.
-func TestRemoteAdmissionQuoteOutsideTask(t *testing.T) {
-	h := newHook(t)
-	r := h.remote(t, nil)
-	h.answer(200, `{"outcome":"quote","quote":{"approveUrl":"https://app.kontra.sh/#/t/1","expiresAt":"`+future()+`"}}`)
-	for _, op := range []Operation{OpCall, OpSession, OpTask} {
-		req := taskRequest()
-		req.Operation, req.Protocol, req.Tool = op, ProtocolMCP, "echo"
-		if op != OpTask {
-			req.TaskID = ""
-		}
-		d, err := r.Admit(context.Background(), req)
-		if err != nil || d.Outcome != Deny || d.Refusal == nil || d.Refusal.Code != -32603 || d.Refusal.Message != MsgNotPriced || d.Quote != nil {
-			t.Errorf("a quote for an MCP %s: %+v, %v", op, d, err)
-		}
-	}
-	if d, err := r.Admit(context.Background(), taskRequest()); err != nil || d.Outcome != Quote || d.Quote == nil {
-		t.Errorf("a quote for an A2A task: %+v, %v", d, err)
 	}
 }
 
@@ -393,16 +337,21 @@ func TestNewRemoteAdmission(t *testing.T) {
 	}
 }
 
-// ParseDecision drops what an outcome does not carry, and CheckQuote takes the quotes D188's thread URL and a team
-// gate's page are.
-func TestParseDecisionAndCheckQuote(t *testing.T) {
-	d, err := ParseDecision([]byte(`{"outcome":"allow","refusal":{"code":1,"message":"x"},"quote":{"approveUrl":"https://a.example","expiresAt":"x"}}`))
-	if err != nil || d.Outcome != Allow || d.Refusal != nil || d.Quote != nil {
-		t.Errorf("allow with extras: %+v, %v", d, err)
+// ParseDecision drops what an outcome does not carry, and refuses the retired member quote (D351).
+func TestParseDecision(t *testing.T) {
+	d, err := ParseDecision([]byte(`{"outcome":"allow","refusal":{"code":1,"message":"x"}}`))
+	if err != nil || d.Outcome != Allow || d.Refusal != nil {
+		t.Errorf("allow with a refusal: %+v, %v", d, err)
 	}
-	d, err = ParseDecision([]byte(` {"outcome": "deny", "refusal": {"code": -32001, "message": "no"}, "quote": {"approveUrl": "https://a.example", "expiresAt": "x"}} `))
-	if err != nil || d.Outcome != Deny || d.Quote != nil || d.Refusal.Code != -32001 {
-		t.Errorf("deny with a quote: %+v, %v", d, err)
+	d, err = ParseDecision([]byte(` {"outcome": "deny", "refusal": {"code": -32001, "message": "no"}} `))
+	if err != nil || d.Outcome != Deny || d.Refusal.Code != -32001 {
+		t.Errorf("deny: %+v, %v", d, err)
+	}
+	for _, raw := range []string{`{"outcome":"quote","quote":{"approveUrl":"https://a.example","expiresAt":"2030-01-01T00:00:00Z"}}`,
+		`{"outcome":"allow","quote":{"approveUrl":"https://a.example","expiresAt":"x"}}`} {
+		if d, err := ParseDecision([]byte(raw)); !errors.Is(err, ErrInvalidDecision) {
+			t.Errorf("%s: %+v, %v; want ErrInvalidDecision", raw, d, err)
+		}
 	}
 	// hooks.json's code is a JSON Schema 2020-12 integer: a number with no fractional part, however it is written.
 	for raw, want := range map[string]int{"-32001.0": -32001, "1e2": 100, "2.50E+1": 25, "10e-1": 1, "-0": 0, "0.0e9": 0,
@@ -418,51 +367,12 @@ func TestParseDecisionAndCheckQuote(t *testing.T) {
 			t.Errorf("refusal code %s: %+v, %v; want ErrInvalidDecision", raw, d, err)
 		}
 	}
-	b, err := json.Marshal(map[string]any{"outcome": "quote", "quote": map[string]any{"approveUrl": "https://app.kontra.sh/#/t/x", "expiresAt": "2030-01-01T00:00:00+02:00"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if d, err = ParseDecision(b); err != nil || d.Quote == nil {
-		t.Fatalf("quote: %+v, %v", d, err)
-	}
-	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
-	for _, u := range []string{"https://app.kontra.sh/#/t/0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11", "https://gate.team.example:8443/approve/1?a=b",
-		"https://10.0.0.7/approve"} {
-		if err := CheckQuote(&QuoteTerms{ApproveURL: u, ExpiresAt: "2026-10-28T12:00:01Z"}, now); err != nil {
-			t.Errorf("CheckQuote(%s): %v", u, err)
-		}
-	}
-	// RFC 3339's date-time as every reader of the terms parses it (time.RFC3339): a period fraction of any length, Z
-	// or an offset up to ±23:59.
-	for _, exp := range []string{"2026-10-28T12:00:00.000000001Z", "2026-10-28T12:00:00.5000000000001Z", "2026-10-28T14:00:00+01:59",
-		"2026-10-28T12:00:01-00:00", "2026-10-28T00:00:00-23:59"} {
-		if err := CheckQuote(&QuoteTerms{ApproveURL: "https://a.example/", ExpiresAt: exp}, now); err != nil {
-			t.Errorf("CheckQuote(expiresAt %s): %v", exp, err)
-		}
-	}
-	// Refused: what time.Parse(time.RFC3339) takes and RFC 3339 does not (a comma fraction, a one-digit hour, offset
-	// hour 24 or minute 60), and lower-case t and z, which RFC 3339 allows and no reader of the terms parses (failing
-	// closed).
-	for _, exp := range []string{"2030-01-01T00:00:00,5Z", "2030-01-01T0:00:00Z", "2030-01-01T00:00:00+24:00", "2030-01-01T00:00:00+00:60",
-		"2030-01-01t00:00:00z", "2030-01-01 00:00:00Z", "2030-01-01T00:00:00+0100", "2030-02-30T00:00:00Z", "2030-01-01T00:00:60Z",
-		"+2030-01-01T00:00:00Z", "2030-01-01T00:00:00Z ", "２030-01-01T00:00:00Z"} {
-		if err := CheckQuote(&QuoteTerms{ApproveURL: "https://a.example/", ExpiresAt: exp}, now); !errors.Is(err, ErrBadQuote) {
-			t.Errorf("CheckQuote(expiresAt %q) = %v, want ErrBadQuote", exp, err)
-		}
-	}
-	for _, q := range []*QuoteTerms{nil, {ApproveURL: "https://a.example", ExpiresAt: "2026-10-28T12:00:00Z"},
-		{ApproveURL: "https://a.example", ExpiresAt: "2026-10-28T11:00:00Z"}, {ApproveURL: "https://a.example:99999/", ExpiresAt: "2027-01-01T00:00:00Z"},
-		{ApproveURL: "https://ä.example/", ExpiresAt: "2027-01-01T00:00:00Z"}} {
-		if err := CheckQuote(q, now); !errors.Is(err, ErrBadQuote) {
-			t.Errorf("CheckQuote(%+v) = %v, want ErrBadQuote", q, err)
-		}
-	}
 }
 
 // An error that does not quote the secret keeps its detail; one that might is withheld.
 func TestUnavailableWithholdsOnlyWhatMayQuoteTheSecret(t *testing.T) {
 	r := &RemoteAdmission{secret: testSecret}
-	if err := r.unavailable("the answer", errors.New(`outcome "maybe" is not allow, deny or quote`)); !strings.Contains(err.Error(), `"maybe"`) {
+	if err := r.unavailable("the answer", errors.New(`outcome "maybe" is not allow or deny`)); !strings.Contains(err.Error(), `"maybe"`) {
 		t.Errorf("an ordinary cause lost its detail: %v", err)
 	}
 	if err := r.unavailable("the answer", errors.New(`unknown member "`+testSecret[5:30]+`…"`)); strings.Contains(err.Error(), testSecret[5:13]) ||

@@ -34,16 +34,6 @@ type Canceller interface {
 	Cancel(ctx context.Context, taskID a2a.TaskID) (lifecycle.CancelResult, bool, error)
 }
 
-// ReviewMessenger sends the kontra.review_message Update and waits for its result (spec §7, §14.1);
-// lifecycle.Client implements it. A refusal (the validator refused: no window open, the workItemId already
-// accepted; or the workflow is closed) is an error wrapping a2a.ErrUnsupportedOperation, and the
-// interceptor deletes the work item. Any other error is an Update not accepted, or not completed, within
-// 10 s: the caller gets -32603 (HTTP 503) and the work item is kept, because the workflow may still accept
-// it (D66).
-type ReviewMessenger interface {
-	ReviewMessage(ctx context.Context, taskID a2a.TaskID, u lifecycle.ReviewMessageUpdate) (lifecycle.ReviewMessageResult, error)
-}
-
 // Interceptors builds the call interceptors of one service, in order (spec §15):
 //
 //  0. Egress rendering (spec §10.4, D167, D181): on the way out, every answer's kontra-blob:<ref> parts become
@@ -55,7 +45,7 @@ type ReviewMessenger interface {
 //  2. Anonymous refusals (spec §2.3): ListTasks and push configs (inline ones included) are
 //     UnsupportedOperationError for the anonymous principal.
 //  3. Caller keys (spec §2.5): every kontra. key leaves message, part and request metadata, except the
-//     sealing keys and caller_metadata. A url part in the gate's reserved kontra-blob: scheme is
+//     sealing keys. A url part in the gate's reserved kontra-blob: scheme is
 //     InvalidRequest (D181), and so is a part claiming the sealed envelope type in another form than raw
 //     (ext-sealed.md §3); a sealed: required service refuses an unsealed part with InvalidRequest
 //     (sealed_unsealed_part), and an optional one marks it metadata["kontra.sealed"] = false (§5). Without a bucket a part over 256 KiB is InvalidParams ("part too large: configure
@@ -64,23 +54,21 @@ type ReviewMessenger interface {
 //     tenant's service whose encoding would take what the tenant stores past parts_bytes is InvalidParams
 //     "anonymous storage limit", before Admission and any task row.
 //  4. Admission (spec §13.1) on SendMessage for a new task: the built-in allow, or the remote hook
-//     (hooks.RemoteAdmission, M4 D275). It fails closed: a hook error, a decision whose maps break §13.2's rules,
-//     and a quote whose approveUrl is not an absolute https:// URL or whose expiresAt is not in the future
-//     (hooks.CheckQuote, D284) are -32603 "admission unavailable", HTTP 503 on HTTP+JSON. The pre-minted task id
+//     (hooks.RemoteAdmission, M4 D275). It fails closed: a hook error, a decision whose maps break §13.1's rules,
+//     and any outcome but allow or deny (D351: there is no quote) are -32603 "admission unavailable", HTTP 503 on
+//     HTTP+JSON. The pre-minted task id
 //     and the decision travel to the work queue's Write on the context (hooks.AdmittedFrom).
 //  5. Follow-up checks (spec §7): a message with a taskId is refused UnsupportedOperationError unless the
 //     task is input-required; a taskId/contextId disagreement is InvalidParams; a terminal task is
-//     UnsupportedOperationError (a2a-go itself answers InvalidParams there); a review-window message is
-//     stored as a work item and sent as kontra.review_message, answered here as an early response (its large
-//     parts are stored with its work item, and deleted again when the window does not take it).
+//     UnsupportedOperationError (a2a-go itself answers InvalidParams there), a completed one included (D351:
+//     there is no review window).
 //  6. Push URLs (spec §10.1): an inline config's URL, and a CreateTaskPushNotificationConfig's, is
 //     checked now (push.CheckURL), so a refused URL is a synchronous InvalidParams and nothing is stored;
 //     the work queue saves an inline config with the task. A follow-up's inline config is checked only
 //     when its URL is new for the task (push.CheckSet): a follow-up that sends its unchanged config again
 //     is never refused for a DNS change.
 //     Then resends (spec §9, §15; resendAnswer, D290): a blocking SendMessage that repeats a request whose
-//     task stands at input-required, quoted or auth-required is answered with that task as an early response (a
-//     quoted task's start re-issued first, through Starts).
+//     task stands at input-required or auth-required is answered with that task as an early response.
 //  7. Large parts (spec §10.4, D167; largeParts): with a bucket, each part over 256 KiB of a new task's first
 //     message (an object of the pre-minted task) or of an input-required task's follow-up is stored and replaced
 //     by its url part kontra-blob:<ref>; the rows are pending on the context for the transaction that creates
@@ -99,9 +87,6 @@ type Interceptors struct {
 	Rules    hooks.KeyRules
 	Admit    hooks.Admission
 	Canceler Canceller
-	// Reviews sends kontra.review_message; nil when no review window can open (a message to a completed
-	// task is then refused at once).
-	Reviews ReviewMessenger
 	// PushPolicy is push.allow_private: inline and created push config URLs are checked against it.
 	PushPolicy ssrf.Policy
 	// MaxPart is the largest caller part stored inline (256 KiB, §10.4); zero takes upstream.MaxPart.
@@ -113,10 +98,6 @@ type Interceptors struct {
 	Render *blob.Renderer
 	// Logger logs why Admission refused a message (the caller sees only "admission unavailable"); nil logs nothing.
 	Logger *slog.Logger
-	// Starts re-issues a resend's start before a resend of a quoted task is answered at once (resendAnswer,
-	// D290): the service's lifecycle.Queue. Nil leaves such a resend to the work queue, which waits for the end
-	// of the quote.
-	Starts StartReissuer
 	// Anon checks a message to an anonymous tenant's service against its parts_bytes (spec/tunnel.md §6.2;
 	// *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
 	Anon AnonStorage
@@ -129,8 +110,8 @@ type AnonStorage interface {
 	Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string, n int64) error
 }
 
-// StartReissuer re-issues the start of the task a resend repeats, with its first work item, as the work queue does
-// for a resend (spec §14.5): idempotent, and a task whose start was lost gets its workflow. lifecycle.Queue
+// StartReissuer re-issues the start of the task a keyed hire repeats, with its first work item, as the work queue does
+// for a resend (spec §14.5, D338): idempotent, and a task whose start was lost gets its workflow. lifecycle.Queue
 // implements it.
 type StartReissuer interface {
 	ReissueStart(ctx context.Context, prev *store.TaskRow) error
@@ -382,11 +363,6 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 	}
 	switch d.Outcome {
 	case hooks.Allow:
-	case hooks.Quote:
-		if err := hooks.CheckQuote(d.Quote, time.Now()); err != nil {
-			i.logRefusal("an Admission quote was refused; the message is refused", "service", i.Svc.Name, "error", err)
-			return ctx, nil, admissionUnavailable()
-		}
 	case hooks.Deny:
 		return ctx, nil, denied(d.Refusal)
 	default:
@@ -604,8 +580,7 @@ func (i *Interceptors) externalize(ctx context.Context, msg *a2a.Message, tenant
 
 // settle deletes the objects st holds that no record of their task names now that the request is over, with their
 // blobs rows (store.Log.DropUnnamedBlobs): those of a new task whose row was never written, or of a message whose
-// work item was deleted (refused). A message the work queue or the review window may still take keeps its work
-// item, and so its objects, which retention deletes with the task otherwise (D66).
+// work item was deleted (refused). A message the work queue may still take keeps its work item, and so its objects, which retention deletes with the task otherwise (D66).
 func (i *Interceptors) settle(ctx context.Context, st *storedParts) {
 	if st == nil || len(st.rows) == 0 {
 		return
@@ -666,91 +641,8 @@ func (i *Interceptors) followUp(ctx context.Context, cc *a2asrv.CallContext, req
 		return ctx, nil, unsupported("the task is running; it takes no input until it asks for some")
 	case store.StateAuthRequired:
 		return ctx, nil, unsupported("the task waits for credentials that arrive out of band, not for a message")
-	case store.StateQuoted:
-		return ctx, nil, unsupported("a quoted task is accepted on the operator's page, not in the protocol")
-	case store.StateCompleted:
-		task, err := i.reviewMessage(ctx, r, o, row)
-		if err != nil {
-			return ctx, nil, err
-		}
-		return ctx, task, nil
 	}
 	return ctx, nil, unsupported(fmt.Sprintf("the task is %s and takes no more messages", row.State))
-}
-
-// reviewMessage offers a message to a completed task to the operator's review window (spec §7): the
-// sanitized message is stored as a work item and sent as kontra.review_message; an accepted one is
-// appended by the workflow and the caller gets the task. It is never forwarded upstream.
-func (i *Interceptors) reviewMessage(ctx context.Context, r *a2a.SendMessageRequest, o store.Owner, row *store.TaskRow) (*a2a.Task, error) {
-	if i.Reviews == nil {
-		return nil, unsupported("the task is completed and no review window is open")
-	}
-	meta := i.Rules.CallerMetadataOnly(r.Message.Metadata)
-	if b, err := json.Marshal(meta); err != nil || len(b) > hooks.MaxMapBytes {
-		return nil, invalid("caller metadata over 16 KiB")
-	}
-	wid, err := ids.NewWorkItemID()
-	if err != nil {
-		return nil, err
-	}
-	stored := *r
-	msg := *r.Message
-	var parts *storedParts
-	if i.Bucket != nil && slices.ContainsFunc(msg.Parts, i.large) {
-		// The work item holds the message as the window's append will log it, so its large parts go to the bucket
-		// now, their rows with the item (spec §10.4, D167); a message the window does not take has them deleted
-		// with its item (settle).
-		var m *a2a.Message
-		if ctx, m, parts, err = i.externalize(ctx, &msg, row.TenantID, row.ID); err != nil {
-			return nil, err
-		}
-		msg = *m
-	}
-	msg.TaskID, msg.ContextID = a2a.TaskID(row.ID.String()), row.ContextID
-	stored.Message = &msg
-	if r.Config != nil && r.Config.PushConfig != nil {
-		// SPEC-CONFLICT (D110): spec §10.1 saves an inline push config before the work item is written, but a
-		// review-window message is to a task that has ended: a config set on it would deliver nothing (an
-		// ended task has no change left to push, internal/push insertSQL), and its webhook credentials must
-		// not be stored in work_items, which hold no credentials (0001). The closest faithful behaviour: the
-		// inline config is dropped from the stored request and not saved, and the message is not refused
-		// for it (a2a-go's client sends its default config with every message).
-		cfg := *r.Config
-		cfg.PushConfig = nil
-		stored.Config = &cfg
-	}
-	if err := i.Log.InsertWorkItem(ctx, nil, store.WorkItem{
-		ID: wid, TaskID: row.ID, Kind: store.WorkExecute, Payload: store.WorkPayload{Request: &stored, Owner: o},
-	}); err != nil {
-		i.settle(ctx, parts)
-		return nil, err
-	}
-	res, err := i.Reviews.ReviewMessage(ctx, a2a.TaskID(row.ID.String()), lifecycle.ReviewMessageUpdate{
-		WorkItemID: wid.String(), MessageID: msg.ID, Metadata: meta,
-	})
-	switch {
-	case errors.Is(err, a2a.ErrUnsupportedOperation):
-		i.deleteItem(ctx, wid, row.ID)
-		i.settle(ctx, parts)
-		return nil, unsupported("the task is completed and no review window is open")
-	case err != nil:
-		// Not accepted (or not completed) within 10 s: the item is kept, the workflow may still take it (D66), and
-		// so are its objects.
-		return nil, notInTime("the review message was not accepted in time", err)
-	case !res.Accepted:
-		i.deleteItem(ctx, wid, row.ID)
-		i.settle(ctx, parts)
-		return nil, unsupported("the review message was not accepted")
-	}
-	after, err := i.Log.LoadScoped(ctx, i.Svc, o, row.ID)
-	if err != nil {
-		return nil, err
-	}
-	return after.Snapshot, nil
-}
-
-func (i *Interceptors) deleteItem(ctx context.Context, id, taskID uuid.UUID) {
-	_ = i.Log.DeleteWorkItem(ctx, id, taskID)
 }
 
 func (i *Interceptors) pushURLs(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
@@ -877,7 +769,7 @@ func upstreamText(e *lifecycle.UpstreamError, fallback string) string {
 // renderAnswers is egress rendering for a2a-go's answers (spec §10.4, D167, D181): on the way out, every
 // kontra-blob:<ref> part of a task, a message, a list of tasks or a streamed event becomes a presigned GET valid
 // 15 minutes, for the task its blobs row names only (blob.Renderer). It is first in the chain, so its After
-// runs last and sees every answer, the interceptors' early ones (a cancel's task, a review message's, the
+// runs last and sees every answer, the interceptors' early ones (a cancel's task, a resend's, the
 // stored task finishedTurn answers) included. A request that arrived on a hiring node's stream keeps the refs
 // (blob.WithKeepRefs, M3 WP-03).
 type renderAnswers struct {

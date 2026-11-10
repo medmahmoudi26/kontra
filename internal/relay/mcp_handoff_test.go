@@ -36,7 +36,7 @@ func TestMCPTasksAreHandedOver(t *testing.T) {
 	e.exec(`insert into kontra.services (tenant_id, name, kind, backend, source) values ($1, 'research', 'mcp', '{"mcp": {"url": "http://127.0.0.1:1"}}', 'config')`, e.svc.TenantID)
 	id := uuid.Must(uuid.NewV7())
 	nt, err := store.NewMCPTask(id, store.ServiceRef{TenantID: e.svc.TenantID, Name: "research"}, store.Owner{BuyerID: uuid.New(), Principal: "key:k", Via: store.ViaAPIKey},
-		store.StateSubmitted, nil, "", nil, nil)
+		nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

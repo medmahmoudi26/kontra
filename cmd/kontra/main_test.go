@@ -379,10 +379,10 @@ func TestConnectExitsWhenTheAnonymousSessionExpires(t *testing.T) {
 func TestPublishDryRun(t *testing.T) {
 	dir := t.TempDir()
 	good, bad := filepath.Join(dir, "listing.yaml"), filepath.Join(dir, "bad.yaml")
-	if err := os.WriteFile(good, []byte("service: hello\nprice:\n  model: per_task\n  amount: \"1.00\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(good, []byte("service: hello\ntaskTimeoutSeconds: 900\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bad, []byte("service: Hello\nprice: { model: per_call, amount: \"1\" }\n"), 0o600); err != nil {
+	if err := os.WriteFile(bad, []byte("service: Hello\nprice: { model: per_task, amount: \"1.00\" }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -392,7 +392,7 @@ func TestPublishDryRun(t *testing.T) {
 	}
 	stdout.Reset()
 	if code := run(context.Background(), []string{"publish", "--dry-run", bad}, &stdout, &stderr); code != 1 ||
-		!strings.Contains(stderr.String(), "service: \"Hello\"") || !strings.Contains(stderr.String(), `price.model: "per_call"`) {
+		!strings.Contains(stderr.String(), "service: \"Hello\"") || !strings.Contains(stderr.String(), `"price" is not a key`) {
 		t.Fatalf("an invalid listing: %d %s", code, stderr.String())
 	}
 }

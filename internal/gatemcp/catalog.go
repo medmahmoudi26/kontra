@@ -104,8 +104,6 @@ type service struct {
 	available   bool
 	card        json.RawMessage // the served card (A2A), nil when none is stored
 	description string          // search.description annotation
-	price       string          // search.price annotation
-	priceModel  string          // search.price_model annotation
 }
 
 // refString is the service's ref on this gate.
@@ -132,7 +130,6 @@ func AdmitsNamed(allow auth.AllowList, p auth.Principal) bool {
 const serviceColumns = `t.id, t.slug, s.name, s.kind, s.allow, s.listed, t.kind = 'anonymous', s.backend ? 'tunnel', s.timeout_s,
 	s.retries, s.retention_s,
 	s.sealed, s.card::text, coalesce(s.annotations -> 'search' ->> 'description', ''),
-	coalesce(s.annotations -> 'search' ->> 'price', ''), coalesce(s.annotations -> 'search' ->> 'price_model', ''),
 	not (s.backend ? 'tunnel') or exists (select 1 from kontra.tunnels tu
 		join kontra.tunnel_keys k on k.key_id = tu.key_id and k.revoked_at is null and k.revoked_reason is distinct from 'rotated'
 		join kontra.key_services ks on ks.key_id = tu.key_id and ks.service = s.name and ks.revoked_at is null
@@ -156,7 +153,7 @@ func scanService(row pgx.Row) (*service, error) {
 		card                 *string
 	)
 	err := row.Scan(&s.ref.TenantID, &s.ref.Tenant, &s.ref.Name, &s.ref.Kind, &allow, &s.listed, &s.anonymous, &s.tunnelled, &timeoutS,
-		&s.ref.Retries, &retentionS, &sealed, &card, &s.description, &s.price, &s.priceModel, &s.available)
+		&s.ref.Retries, &retentionS, &sealed, &card, &s.description, &s.available)
 	if err != nil {
 		return nil, err
 	}
@@ -262,9 +259,8 @@ const searchBatch = 200
 const SearchExamine = 1000
 
 // Search answers search for p (D271): the services visible to p whose ref, name or description contains query
-// (case-insensitively), of kind a2a, whose price_model annotation equals price ("free": none); ordered by ref (byte
-// order), PageSize a page, with an opaque keyset cursor; anonymous tenants and services hidden from search (D321)
-// never appear. One request reads at most SearchExamine rows: past them the page ends early, its nextCursor at the
+// (case-insensitively), of kind a2a; ordered by ref (byte order), PageSize a page, with an opaque keyset cursor;
+// anonymous tenants and services hidden from search (D321) never appear. One request reads at most SearchExamine rows: past them the page ends early, its nextCursor at the
 // last row read.
 func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs) (SearchResult, error) {
 	after := ""
@@ -314,7 +310,7 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 		}
 		for i, s := range batch {
 			after = refs[i]
-			if s == nil || !c.keep(ctx, s) || !visible(s, p) || !c.matches(s, query, args.Price) {
+			if s == nil || !c.keep(ctx, s) || !visible(s, p) || !c.matches(s, query) {
 				continue
 			}
 			if len(out.Services) == PageSize {
@@ -348,14 +344,8 @@ type scanTail struct {
 
 func (s scanTail) Scan(dest ...any) error { return s.rows.Scan(append(dest, s.extra)...) }
 
-// matches applies search's query and price filters (kind a2a is the query's).
-func (c *Catalog) matches(s *service, query, price string) bool {
-	switch {
-	case price == "free" && s.priceModel != "":
-		return false
-	case price != "" && price != "free" && s.priceModel != price:
-		return false
-	}
+// matches applies search's query filter (kind a2a is the query's).
+func (c *Catalog) matches(s *service, query string) bool {
 	if query == "" {
 		return true
 	}
@@ -409,7 +399,7 @@ func (c *Catalog) learnInfo(key mcprelay.ToolsKey, serverInfo json.RawMessage) {
 
 func (c *Catalog) entry(s *service) ServiceEntry {
 	return ServiceEntry{Ref: c.refString(s), Kind: s.ref.Kind, Name: s.ref.Name, Description: c.describe(s),
-		Available: s.available, Price: s.price}
+		Available: s.available}
 }
 
 // Describe answers describe for p: ErrUnknownService for a ref Search would not return to p; the served card (A2A)

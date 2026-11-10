@@ -110,7 +110,7 @@
             "type": "string",
             "format": "uri"
           },
-          "description": "The extensions the request activated: an A2A caller's A2A-Extensions that the served card declares, or, for a hire of the gate's own /mcp, the operator's required card_extensions entries the gate activated for the buyer (relay.md §12.2, D300)."
+          "description": "The extensions the request activated: an A2A caller's A2A-Extensions that the served card declares (AP2's https://github.com/google-agentic-commerce/ap2/v1 among them, relay.md §2.6), or, for a hire of the gate's own /mcp, the operator's required card_extensions entries the gate activated for the buyer (relay.md §12.2, D300). The gate keys on the URI only; it never reads an extension's data parts for the hook."
         },
         "contextId": {
           "type": "string"
@@ -199,8 +199,7 @@
         "outcome": {
           "enum": [
             "allow",
-            "deny",
-            "quote"
+            "deny"
           ]
         },
         "refusal": {
@@ -223,25 +222,6 @@
         "metadata": {
           "type": "object"
         },
-        "quote": {
-          "type": "object",
-          "required": [
-            "approveUrl",
-            "expiresAt"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "approveUrl": {
-              "type": "string",
-              "format": "uri",
-              "pattern": "^https://"
-            },
-            "expiresAt": {
-              "type": "string",
-              "format": "date-time"
-            }
-          }
-        },
         "mcpMeta": {
           "type": "object",
           "propertyNames": {
@@ -261,20 +241,6 @@
           "then": {
             "required": [
               "refusal"
-            ]
-          }
-        },
-        {
-          "if": {
-            "properties": {
-              "outcome": {
-                "const": "quote"
-              }
-            }
-          },
-          "then": {
-            "required": [
-              "quote"
             ]
           }
         }
@@ -340,7 +306,6 @@
         },
         "state": {
           "enum": [
-            "quoted",
             "submitted",
             "working",
             "input-required",
@@ -369,55 +334,13 @@
           "propertyNames": {
             "pattern": "^sh\\.kontra/"
           }
-        },
-        "holdOpenSeconds": {
-          "type": "integer",
-          "minimum": 0
-        }
-      }
-    },
-    "reviewWindow": {
-      "type": "object",
-      "required": [
-        "open"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "open": {
-          "type": "boolean"
-        },
-        "seconds": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 604800
-        }
-      }
-    },
-    "approval": {
-      "type": "object",
-      "required": [
-        "accepted"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "accepted": {
-          "type": "boolean"
-        },
-        "metadata": {
-          "type": "object"
-        },
-        "mcpMeta": {
-          "type": "object",
-          "propertyNames": {
-            "pattern": "^sh\\.kontra/"
-          }
         }
       }
     },
     "annotate": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Payload of the kontra.annotate Update and signal (relay.md §13.2)",
+      "description": "Payload of the kontra.annotate Update and signal (relay.md §13.3)",
       "properties": {
         "metadata": {
           "type": "object"
@@ -440,60 +363,6 @@
         "attempt": {
           "type": "integer",
           "minimum": 1
-        }
-      }
-    },
-    "reviewMessageArgs": {
-      "type": "object",
-      "required": [
-        "workItemId",
-        "messageId",
-        "metadata"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "workItemId": {
-          "type": "string",
-          "format": "uuid"
-        },
-        "messageId": {
-          "type": "string",
-          "minLength": 1
-        },
-        "metadata": {
-          "type": "object",
-          "description": "Only the message's caller_metadata keys (relay.md §2.5), at most 16 KiB"
-        }
-      }
-    },
-    "reviewMessageResult": {
-      "type": "object",
-      "required": [
-        "accept",
-        "dispute"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "accept": {
-          "type": "boolean"
-        },
-        "dispute": {
-          "type": "boolean"
-        },
-        "patch": {
-          "$ref": "#/$defs/patch"
-        }
-      }
-    },
-    "reviewClosedArgs": {
-      "type": "object",
-      "required": [
-        "disputed"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "disputed": {
-          "type": "boolean"
         }
       }
     }

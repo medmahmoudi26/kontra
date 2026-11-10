@@ -164,23 +164,26 @@ func TestQueueWriteRefusals(t *testing.T) {
 }
 
 func TestAdmittedDecision(t *testing.T) {
-	st, exp, meta, err := admitted(hooks.Decision{Outcome: hooks.Allow, Metadata: map[string]any{"kontra.escrow.status": "none"}})
-	if err != nil || st != store.StateSubmitted || exp != nil || meta["kontra.escrow.status"] != "none" {
-		t.Errorf("allow: %s %v %v %v", st, exp, meta, err)
+	md := map[string]any{"kontra.op.status": "none"}
+	meta := admitted(hooks.Decision{Outcome: hooks.Allow, Metadata: md})
+	if meta["kontra.op.status"] != "none" {
+		t.Errorf("allow: %v", meta)
 	}
-	st, exp, meta, err = admitted(hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ApproveURL: "https://pay.example/t/1", ExpiresAt: "2026-10-25T13:00:00Z"}})
-	if err != nil || st != store.StateQuoted || exp == nil || exp.Hour() != 13 || meta[MetaApproveURL] != "https://pay.example/t/1" {
-		t.Errorf("quote: %s %v %v %v", st, exp, meta, err)
+	meta["x"] = 1
+	if _, ok := md["x"]; ok {
+		t.Error("admitted shares the decision's map")
 	}
-	if _, _, _, err := admitted(hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ExpiresAt: "soon"}}); !errors.Is(err, a2a.ErrInternalError) {
-		t.Errorf("a quote without a valid expiry: %v", err)
+	if meta := admitted(hooks.Decision{Outcome: hooks.Allow}); meta != nil {
+		t.Errorf("allow without metadata: %v", meta)
 	}
 }
 
+// The built-in Lifecycle registers OnDispatched, OnTerminal and the retired ReviewWindow (D351: kept for runs recorded
+// before changeNoReviewWindow), which opens no window.
 func TestBuiltinHooksRegisterUnderTheirNames(t *testing.T) {
 	r := &recordingRegistry{}
 	RegisterBuiltinHooks(r, hooks.BuiltinLifecycle{})
-	want := []string{HookOnDispatched, HookOnTerminal, HookReviewWindow, HookOnReviewMessage, HookOnReviewClosed}
+	want := []string{HookOnDispatched, HookOnTerminal, HookReviewWindow}
 	if strings.Join(r.names, ",") != strings.Join(want, ",") {
 		t.Errorf("registered %v", r.names)
 	}
@@ -189,17 +192,11 @@ func TestBuiltinHooksRegisterUnderTheirNames(t *testing.T) {
 	if err := b.OnDispatched(ctx, hooks.TaskRef{}, hooks.DispatchedArgs{Attempt: 1}); err != nil {
 		t.Error(err)
 	}
-	if p, err := b.OnTerminal(ctx, hooks.TaskRef{}); err != nil || p.Metadata != nil || p.HoldOpenSeconds != 0 {
+	if p, err := b.OnTerminal(ctx, hooks.TaskRef{}); err != nil || p.Metadata != nil {
 		t.Errorf("OnTerminal %+v %v", p, err)
 	}
 	if w, err := b.ReviewWindow(ctx, hooks.TaskRef{}); err != nil || w.Open {
-		t.Errorf("ReviewWindow %+v %v: open source opens no window", w, err)
-	}
-	if r, err := b.OnReviewMessage(ctx, hooks.TaskRef{}, hooks.ReviewMessageArgs{}); err != nil || r.Accept {
-		t.Errorf("OnReviewMessage %+v %v", r, err)
-	}
-	if p, err := b.OnReviewClosed(ctx, hooks.TaskRef{}, hooks.ReviewClosedArgs{}); err != nil || p.Metadata != nil {
-		t.Errorf("OnReviewClosed %+v %v", p, err)
+		t.Errorf("ReviewWindow %+v %v: no window opens", w, err)
 	}
 }
 
@@ -237,7 +234,7 @@ func TestClassifyUpdateErrors(t *testing.T) {
 }
 
 // Admission is called before any task exists and fails closed (spec §13.1): a new task whose request
-// carries no admission decision, or one that is neither allow nor quote, is refused before anything is
+// carries no admission decision, or one that is not allow, is refused before anything is
 // written, never created with an id of Write's own.
 func TestQueueWriteNewTaskNeedsAnAdmission(t *testing.T) {
 	q := NewQueue(store.ServiceRef{}, nil, nil, QueueOptions{Owner: func(context.Context) (store.Owner, error) { return buyer, nil }})
@@ -246,7 +243,9 @@ func TestQueueWriteNewTaskNeedsAnAdmission(t *testing.T) {
 		"no admission": context.Background(),
 		"denied":       hooks.WithAdmitted(context.Background(), hooks.Admitted{TaskID: "01920000-0000-7000-8000-00000000000f", Decision: hooks.Decision{Outcome: hooks.Deny}}),
 		"no decision":  hooks.WithAdmitted(context.Background(), hooks.Admitted{TaskID: "01920000-0000-7000-8000-00000000000f"}),
-		"no task id":   hooks.WithAdmitted(context.Background(), hooks.Admitted{Decision: hooks.Decision{Outcome: hooks.Allow}}),
+		// The retired quote outcome (D351) never reaches Write (ParseDecision refuses it); were it to, it creates nothing.
+		"quote":      hooks.WithAdmitted(context.Background(), hooks.Admitted{TaskID: "01920000-0000-7000-8000-00000000000f", Decision: hooks.Decision{Outcome: "quote"}}),
+		"no task id": hooks.WithAdmitted(context.Background(), hooks.Admitted{Decision: hooks.Decision{Outcome: hooks.Allow}}),
 	} {
 		t.Run(name, func(t *testing.T) {
 			var err error

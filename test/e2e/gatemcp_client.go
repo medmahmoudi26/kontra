@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,8 +14,8 @@ import (
 )
 
 // M4 (WP-07): clients of the gate's own /mcp (spec/relay.md §12) through a replica, on raw JSON as the relay is: a
-// 2025-11-25 session declaring exactly the capabilities a test gives (GateSession: form and URL elicitation are what
-// §12.3 and §12.4 read), and 2026-07-28 requests with no session whose per-request capabilities a test gives
+// 2025-11-25 session declaring exactly the capabilities a test gives (GateSession: form elicitation is what §12.4
+// reads), and 2026-07-28 requests with no session whose per-request capabilities a test gives
 // (GateModern). The answers are read into the shapes §12.2, §12.3 and §12.5 define (ToolResult, ModernTask).
 
 // GateSession is a 2025-11-25 session of /mcp.
@@ -75,65 +74,6 @@ func (s *GateSession) Raw(body string) int {
 	return r.Status
 }
 
-// StreamCollector holds the messages a GET stream of a session received.
-type StreamCollector struct {
-	mu   sync.Mutex
-	msgs []string
-	ids  int // events that carried an id: (a /mcp GET stream carries none, §12.3)
-	stop context.CancelFunc
-	done chan struct{}
-}
-
-// Listen opens the session's GET stream on its replica and collects its messages until Stop.
-func (s *GateSession) Listen(ctx context.Context) *StreamCollector {
-	s.t.Helper()
-	cctx, cancel := context.WithCancel(ctx)
-	st, err := s.Open(cctx, http.MethodGet, "", map[string]string{"Accept": "text/event-stream"})
-	if err != nil || st.Status != http.StatusOK {
-		cancel()
-		s.t.Fatalf("the GET stream of /mcp: %v %v", st, err)
-	}
-	c := &StreamCollector{stop: cancel, done: make(chan struct{})}
-	go func() {
-		defer close(c.done)
-		for {
-			ev, err := st.Next(cctx)
-			if err != nil {
-				return
-			}
-			c.mu.Lock()
-			if ev.ID != "" {
-				c.ids++
-			}
-			if strings.TrimSpace(ev.Data) != "" {
-				c.msgs = append(c.msgs, ev.Data)
-			}
-			c.mu.Unlock()
-		}
-	}()
-	return c
-}
-
-// Messages are the messages received so far.
-func (c *StreamCollector) Messages() []string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]string(nil), c.msgs...)
-}
-
-// EventIDs is how many events carried an id.
-func (c *StreamCollector) EventIDs() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ids
-}
-
-// Stop closes the stream.
-func (c *StreamCollector) Stop() {
-	c.stop()
-	<-c.done
-}
-
 // GateModern sends 2026-07-28 requests to /mcp: no session; every request carries MCP-Protocol-Version, Mcp-Method,
 // Mcp-Name when the method has one, and the version and Caps in params._meta.
 type GateModern struct {
@@ -146,12 +86,10 @@ type GateModern struct {
 
 // Capabilities a modern request may declare.
 const (
-	CapsTasks      = `{"extensions":{"io.modelcontextprotocol/tasks":{}}}`
-	CapsTasksForm  = `{"extensions":{"io.modelcontextprotocol/tasks":{}},"elicitation":{"form":{}}}`
-	CapsTasksBoth  = `{"extensions":{"io.modelcontextprotocol/tasks":{}},"elicitation":{"form":{},"url":{}}}`
-	CapsNothing    = `{}`
-	CapsFormOnly   = `{"elicitation":{"form":{}}}`
-	CapsURLAndForm = `{"elicitation":{"url":{},"form":{}}}`
+	CapsTasks     = `{"extensions":{"io.modelcontextprotocol/tasks":{}}}`
+	CapsTasksForm = `{"extensions":{"io.modelcontextprotocol/tasks":{}},"elicitation":{"form":{}}}`
+	CapsNothing   = `{}`
+	CapsFormOnly  = `{"elicitation":{"form":{}}}`
 )
 
 // NewGateModern is a modern client of g's /mcp.
@@ -291,13 +229,8 @@ type ToolResult struct {
 	Structured *struct {
 		TaskID string `json:"taskId"`
 		State  string `json:"state"`
-		URL    string `json:"url"`
-		Quote  *struct {
-			ApproveURL string `json:"approveUrl"`
-			ExpiresAt  string `json:"expiresAt"`
-		} `json:"quote"`
-		Text string `json:"text"`
-		Data []any  `json:"data"`
+		Text   string `json:"text"`
+		Data   []any  `json:"data"`
 	} `json:"structuredContent"`
 	StructuredRaw json.RawMessage `json:"-"`
 	IsError       bool            `json:"isError"`

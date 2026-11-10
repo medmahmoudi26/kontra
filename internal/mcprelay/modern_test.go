@@ -1362,32 +1362,16 @@ func TestModernAdmissionSessionDeny(t *testing.T) {
 	}
 }
 
-// A quote for a modern task is a deny, -32603 "MCP services are not priced" (§11.12 step 2, D350): no task is
-// created and nothing is dispatched; and a service whose gate owns no modern tasks (passthrough) is shown no tasks
-// extension by server/discover.
-func TestModernTaskQuoteRefused(t *testing.T) {
+// A service whose gate owns no modern tasks (passthrough) is shown no tasks extension by server/discover.
+func TestPassthroughDiscoverShowsNoTasks(t *testing.T) {
 	e := newTaskEnv(t)
-	up, url := modernTaskDouble(t)
-	e.service("research", url, nil)
 	_, purl := modernTaskDouble(t)
 	e.service("pass", purl, func(s *Service) { s.Tasks = config.TasksPassthrough })
-	adm := &fakeAdmission{}
-	adm.set(hooks.Decision{Outcome: hooks.Quote, Quote: &hooks.QuoteTerms{ApproveURL: "https://app.example/#/t/approve",
-		ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339)}}, nil)
-	r := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpTask}})
+	r := e.replica("a", replicaOpts{})
 	key, _ := e.apiKey("buyer")
 	d := result(t, newModern(t, key, r.url+"/mcp/pass", true).req(1, "server/discover", nil))
 	if ext, _ := d["capabilities"].(map[string]any)["extensions"].(map[string]any); ext["io.modelcontextprotocol/tasks"] != nil {
 		t.Fatalf("a passthrough service shows the tasks extension: %v", d)
-	}
-	m := newModern(t, key, r.url+"/mcp/research", true)
-	result(t, m.req(1, "tools/list", nil))
-	rep := m.req(2, "tools/call", map[string]any{"name": "research", "arguments": map[string]any{}})
-	if rep.errCode(t) != -32603 || !strings.Contains(string(rep.body), hooks.MsgNotPriced) {
-		t.Fatalf("a quoted modern task: %s", rep.body)
-	}
-	if n := e.count(`select count(*) from kontra.tasks`); n != 0 || up.Calls("research") != 0 {
-		t.Fatalf("a quoted modern task: %d tasks, %d upstream calls", n, up.Calls("research"))
 	}
 }
 
@@ -1402,7 +1386,7 @@ func directModernTask(t *testing.T, e *env, log *store.Log, tool string) (uuid.U
 	}
 	id := uuid.Must(uuid.NewV7())
 	owner := store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
-	nt, err := store.NewMCPTask(id, svc, owner, store.StateSubmitted, nil, "", nil, nil)
+	nt, err := store.NewMCPTask(id, svc, owner, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

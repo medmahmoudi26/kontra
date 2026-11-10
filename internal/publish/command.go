@@ -43,12 +43,13 @@ var ErrUsage = errors.New("usage")
 const Usage = `usage: kontra publish [--gate <url>] [--control-plane <url>] [--version <n> | --replace] [--dry-run] [--no-browser] <listing.yaml>
 
 kontra publish sends a listing, how one of your A2A agents is sold, to the gate operator's control plane (Kontra
-Cloud): its visibility, sealing and price, free or per_task, in USD (spec/schema/listing.json). MCP servers are not
+Cloud): its visibility, sealing and task timeout (spec/schema/listing.json). A listing has no price: a seller that
+charges declares AP2 in its agent card. MCP servers are not
 listed: host one with kontra connect and it is free and private to your tenant. It checks the file first, then signs you in at the gate's authorization server for the
 control plane, in the browser as kontra login does: a publish is a person's act, never an API key's, and the sign-in
 it gets is used for this publish only and not kept. A listing is never replaced unseen: without --version or
 --replace, kontra publish publishes only a service's first listing, and for one that has a listing it prints that
-listing's version, price and state and publishes nothing. The control plane refuses a publish if another came in
+listing's version, visibility, sealing and state and publishes nothing. The control plane refuses a publish if another came in
 between.
   --gate URL           the gate whose operator lists the service (default https://gateway.kontra.sh); https:// except
                        on localhost
@@ -259,7 +260,7 @@ func Run(ctx context.Context, o Options) error {
 			return err
 		}
 		ver, endpoint = cur.Version, cur.Endpoint
-		// D323, kontra-cloud D-M5-63 and D-M5-111: a listing is never replaced unseen. The file may predate a price set
+		// D323, kontra-cloud D-M5-63 and D-M5-111: a listing is never replaced unseen. The file may predate a change made
 		// in the console or an unpublish by a teammate, which the version the CLI just read cannot tell.
 		switch {
 		case ver > 0 && !o.Replace:
@@ -282,8 +283,8 @@ func Run(ctx context.Context, o Options) error {
 	if !view.Published {
 		state = "unpublished (the gate answers it as unknown; the listing is kept)"
 	}
-	fmt.Fprintf(o.Out, "%s: %s is %s at version %d: %s, %s, on %s.\n", Name, tunnel.Printable(view.Service), state,
-		view.Version, describe(view), tunnel.Printable(view.Visibility), cp)
+	fmt.Fprintf(o.Out, "%s: %s is %s at version %d: %s, on %s.\n", Name, tunnel.Printable(view.Service), state,
+		view.Version, describe(view), cp)
 	if endpoint != "" && view.Published {
 		fmt.Fprintf(o.Out, "  %s\n", tunnel.Printable(endpoint))
 	}
@@ -303,31 +304,29 @@ func readFile(path string) ([]byte, error) {
 	return b, nil
 }
 
-// describe is a ListingView's price as the control plane wrote it back, for the terminal.
+// describe is a ListingView's visibility, sealing and task timeout as the control plane wrote them back, for the
+// terminal.
 func describe(v *ListingView) string {
-	p := v.Price
-	switch p.Model {
-	case ModelFree, "":
-		return "free"
-	case ModelPerTask:
-		return fmt.Sprintf("per_task %s %s", tunnel.Printable(p.Amount), tunnel.Printable(p.Currency))
-	default:
-		return fmt.Sprintf("%s %s %s", tunnel.Printable(p.Model), tunnel.Printable(p.Amount), tunnel.Printable(p.Currency))
+	sealed := v.Sealed
+	if sealed == "" {
+		sealed = "off"
 	}
+	out := fmt.Sprintf("%s, sealed %s", tunnel.Printable(v.Visibility), tunnel.Printable(sealed))
+	if v.TaskTimeoutSeconds > 0 {
+		out += fmt.Sprintf(", task timeout %ds", v.TaskTimeoutSeconds)
+	}
+	return out
 }
 
 // ListingView is what PUT /v1/services/{name} answers (Cloud's ListingView), the members kontra publish prints.
 type ListingView struct {
-	Service    string `json:"service"`
-	Version    int64  `json:"version"`
-	Kind       string `json:"kind"`
-	Visibility string `json:"visibility"`
-	Published  bool   `json:"published"`
-	Price      struct {
-		Model    string `json:"model"`
-		Amount   string `json:"amount"`
-		Currency string `json:"currency"`
-	} `json:"price"`
+	Service            string `json:"service"`
+	Version            int64  `json:"version"`
+	Kind               string `json:"kind"`
+	Visibility         string `json:"visibility"`
+	Sealed             string `json:"sealed"`
+	Published          bool   `json:"published"`
+	TaskTimeoutSeconds int64  `json:"taskTimeoutSeconds"` // 0: not said
 }
 
 // controlPlane is the operator's API, as a person's sign-in reaches it.
@@ -353,7 +352,8 @@ type current struct {
 	Published *bool // the gate serves it (Cloud's ServiceView.published); nil when not said
 }
 
-// describe is the current listing for the terminal: its price, visibility and whether it is published.
+// describe is the current listing for the terminal: its visibility, sealing, whether it is published and its task
+// timeout.
 func (c current) describe() string {
 	if c.Listing == nil {
 		return "no listing"
@@ -366,7 +366,7 @@ func (c current) describe() string {
 	if !published {
 		state = "unpublished"
 	}
-	return fmt.Sprintf("%s, %s, %s", describe(c.Listing), tunnel.Printable(c.Listing.Visibility), state)
+	return fmt.Sprintf("%s, %s", describe(c.Listing), state)
 }
 
 // current reads the service's listing (version 0: none) and its gate URL, GET /v1/services/{name}; a service the

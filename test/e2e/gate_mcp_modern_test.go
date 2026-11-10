@@ -16,16 +16,12 @@ import (
 
 // gate_mcp_modern (spec/relay.md §16; §12.5, §11.12; D24, D178, D269, D274, D295; the corrections' WP-05 rule).
 // Single tenant. 2026-07-28 requests (no session) to /mcp on alternating replicas; the sellers (the TCK seller, the
-// in-test seller's slow exec, booking, and paid behind a quoting Admission) hosted by a node whose tunnel is on replica
-// B. Asserted:
+// in-test seller's slow exec and booking) hosted by a node whose tunnel is on replica B. Asserted:
 //
 //   - server/discover lists [2026-07-28, 2025-11-25, 2025-06-18] and the tasks extension; the modern tools/list has no
 //     execution; both, and a task's tasks/get, are byte-identical from either replica;
 //   - a hire declaring the tasks extension is answered in line (resultType complete) when the task ends within 2 s,
 //     else with CreateTaskResult (resultType task, pollIntervalMs 1000);
-//   - a quoted hire is working with the URL in statusMessage and _meta sh.kontra/approve-url, never -32042, even to a
-//     client that declares URL elicitation; tasks/update on it, with the quoted event's gate key or any other, is the
-//     empty acknowledgement, forwards nothing and leaves it quoted;
 //   - booking's question, to a client declaring form elicitation, is input_required with exactly one inputRequests
 //     entry, keyed k.<task>.<seq>; tasks/update with keys that are not that one (a later seq, seq 0, a key that is no
 //     gate id) is the empty acknowledgement, forwards nothing and leaves the question outstanding; tasks/update answers
@@ -34,16 +30,11 @@ import (
 //     -32020; a legacy request without a session is 400 with -32000; a hire without the tasks extension is a plain
 //     call (a CallToolResult, never a CreateTaskResult);
 //   - a client that closes its stream during the wait gets no answer, and its task is canceled within 10 s with the
-//     seller receiving CancelTask; a quoted one stays quoted and the re-issued hire answers it;
+//     seller receiving CancelTask;
 //   - no modern request writes an mcp_sessions row.
 func TestGateMCPModern(t *testing.T) {
-	adm, err := StartAdmission("paid")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = adm.Close() })
-	seller, paid := StartSeller(t), StartSeller(t)
-	h := start(t, Options{Tunnel: map[string]TunnelService{"tck": {}, "booking": {}, "kinds": {}, "paid": {}}, Admission: adm})
+	seller := StartSeller(t)
+	h := start(t, Options{Tunnel: map[string]TunnelService{"tck": {}, "booking": {}, "kinds": {}}})
 	ctx := ctxFor(t, 10*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
 	tck, err := h.StartExampleSeller(ctx, "tck")
@@ -54,7 +45,7 @@ func TestGateMCPModern(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostOn(t, ctx, h, b, map[string]string{"tck": tck.URL, "booking": booking.URL, "kinds": seller.URL, "paid": paid.URL})
+	hostOn(t, ctx, h, b, map[string]string{"tck": tck.URL, "booking": booking.URL, "kinds": seller.URL})
 	ca := NewGateModern(t, a, h.APIKey, CapsTasks)
 	cb := ca.On(b)
 
@@ -96,43 +87,6 @@ func TestGateMCPModern(t *testing.T) {
 		t.Errorf("tasks/get of the slow task: %s / %s", ga.Text(), gb.Text())
 	}
 	_ = ca.Rpc("tasks/cancel", slow.TaskID, `"taskId":"`+slow.TaskID+`"`)
-
-	// A quoted hire: working with the URL, never -32042, even declaring URL elicitation.
-	cq := ca.With(CapsTasksBoth)
-	qr := cq.Tool("hire", `{"service":"paid","message":"hi"}`)
-	if code := ErrCode(t, qr); code != 0 {
-		t.Fatalf("a quoted modern hire answered the error %d: %s", code, qr.Text())
-	}
-	q := Task(t, qr)
-	approve := "https://app.kontra.sh/#/t/" + q.TaskID
-	if q.ResultType != "task" || q.Status != "working" || q.StatusMessage != approve || q.Meta["sh.kontra/approve-url"] != approve {
-		t.Fatalf("a quoted modern hire: %s", qr.Text())
-	}
-	quoted := func(what string) {
-		t.Helper()
-		if st := taskState(t, h, q.TaskID); st != "quoted" {
-			t.Fatalf("after %s the quoted task is %s", what, st)
-		}
-		if n := paid.Messages(); n != 0 {
-			t.Fatalf("after %s the seller received %d messages", what, n)
-		}
-	}
-	quoted("the hire")
-	qseq := scalar[int64](t, h, `select max(seq) from kontra.task_events where task_id::text = $1`, q.TaskID)
-	for _, responses := range []string{
-		fmt.Sprintf(`{"k.%s.%d":{"action":"accept","content":{"reply":"I accept"}}}`, q.TaskID, qseq),
-		fmt.Sprintf(`{"k.%s.%d":{"action":"accept"}}`, q.TaskID, qseq),
-		fmt.Sprintf(`{"k.%s.1":{"action":"accept","content":{"reply":"yes"}},"approve":{"action":"accept"}}`, q.TaskID),
-	} {
-		for _, c := range []*GateModern{cq, cq.On(b)} {
-			u := c.Rpc("tasks/update", q.TaskID, `"taskId":"`+q.TaskID+`","inputResponses":`+responses)
-			if u.Status != http.StatusOK || string(Answer(t, u).Result) != `{"resultType":"complete"}` {
-				t.Errorf("tasks/update %s on the quoted task: %d %s", responses, u.Status, u.Text())
-			}
-		}
-	}
-	time.Sleep(time.Second)
-	quoted("tasks/update on it")
 
 	// booking's question, to a client declaring form elicitation: one gate-keyed input request, answered once.
 	cf := ca.With(CapsTasksForm)
@@ -236,24 +190,8 @@ func TestGateMCPModern(t *testing.T) {
 		t.Logf("canceled %v after the client left", time.Since(left).Round(10*time.Millisecond))
 		eventually(t, 10*time.Second, "the seller received CancelTask", func() bool { return seller.Count("CancelTask") > cancels })
 	}
-	adm.SetDelay(1500 * time.Millisecond)
-	qargs := `{"service":"paid","message":"hi","contextId":"left"}`
-	left := leave(ca, qargs, 500*time.Millisecond)
-	adm.SetDelay(0)
-	eventually(t, 15*time.Second, "the left hire's task is quoted", func() bool { return taskState(t, h, left) == "quoted" })
-	time.Sleep(3 * time.Second)
-	if st := taskState(t, h, left); st != "quoted" {
-		t.Fatalf("the quoted task of a client that left is %s", st)
-	}
-	re := Task(t, ca.Tool("hire", qargs))
-	if re.TaskID != left || re.Status != "working" || re.Meta["sh.kontra/approve-url"] != "https://app.kontra.sh/#/t/"+left {
-		t.Errorf("the re-issued hire: %+v", re)
-	}
 
 	if n := count(t, h, `select count(*) from kontra.mcp_sessions`); n != 0 {
 		t.Errorf("modern /mcp requests wrote %d mcp_sessions rows", n)
-	}
-	if n := paid.Messages(); n != 0 {
-		t.Errorf("the quoting seller received %d messages", n)
 	}
 }

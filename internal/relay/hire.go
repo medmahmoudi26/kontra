@@ -32,32 +32,26 @@ type HireRequest struct {
 	Keyed *store.HireKey
 }
 
-// HireOutcome is the task a hire created, or the one an earlier hire of the same key created that it answers
-// (§12.3 Retries: Existing), as it is now.
+// HireOutcome is the task a hire created, or the one an earlier hire of the same idempotencyKey created that it
+// answers (§12.3 Idempotency: Existing), as it is now.
 type HireOutcome struct {
 	Task     *store.TaskRow
 	Existing bool
 }
 
-// HireRetryWindow is how long after a hire task left quoted a hire with the same resend key answers it (§12.3
-// Retries: the client's retry after its URL elicitation completed).
-const HireRetryWindow = 10 * time.Minute
-
 // Hirer creates and follows up the tasks of /mcp's hire through the A2A service's own handler (spec §12.2): the task
 // is an ordinary gate task (protocol a2a, dispatched as §6), created by the service's interceptors and work queue
 // exactly as an A2A SendMessage would create it, so the identity, §2.5's key stripping, the sealed and part checks,
 // an anonymous tenant's storage and task caps (spec/tunnel.md §6.2), Admission with operation task and the
-// principal's via (§13.1), CheckQuote and the quoted state (§13.2), large parts (§10.4) and the TaskLifecycle start
-// are the A2A route's own. What differs is carried to the work queue by lifecycle.WithHire: the task is marked hired,
-// its first_request is the hire's key, and a retry is matched on that key (§12.3). The thread, SubscribeToTask and
+// principal's via (§13.1), large parts (§10.4) and the TaskLifecycle start are the A2A route's own. What differs is
+// carried to the work queue by lifecycle.WithHire: the task is marked hired, its first_request is the hire's key, and
+// a keyed hire is matched on its idempotencyKey (§12.3, D338). The thread, SubscribeToTask and
 // /mcp's MCP Tasks then read one log.
 //
 // Nothing here answers the MCP client: internal/gatemcp renders the outcome.
 type Hirer struct {
 	Handlers *Handlers
 	Log      *store.Log
-	// RetryWindow is §12.3's retry window; zero is HireRetryWindow.
-	RetryWindow time.Duration
 	// Extensions reads what a service's served card requires, as the A2A route reads it for §2.4's check, and which of
 	// those URIs the operator's card_extensions entries assert (the gate wires a2ahttp.Server.Declared and
 	// a2ahttp.Service.OperatorExtensions); nil: the card requires none.
@@ -110,9 +104,8 @@ func (e *ExtensionsRequiredError) Error() string {
 func (e *ExtensionsRequiredError) Unwrap() error { return a2a.ErrExtensionSupportRequired }
 
 // activate is §2.4's check of a hire or a reply, whose tool call carries no A2A-Extensions (D294, D300). A required
-// URI that the operator's card_extensions entries assert is the operator's to carry, through its own hooks (Admission's
-// quote, its approve page, which every hire task goes through as an A2A task does): it is activated on the buyer's
-// behalf and returned, for Admission's extensions (§13.1). Any other required URI (the seller's own; the sealed
+// URI that the operator's card_extensions entries assert is the operator's to carry, through its own hooks (Admission,
+// which every hire task goes through as an A2A task does): it is activated on the buyer's behalf and returned, for Admission's extensions (§13.1). Any other required URI (the seller's own; the sealed
 // extension's, which a tool call cannot carry whoever asserts it) refuses the request with ExtensionsRequiredError,
 // before anything is stored or sent.
 func (h *Hirer) activate(svc store.ServiceRef) ([]string, error) {
@@ -153,13 +146,6 @@ func hireActivated(ctx context.Context) []string {
 	return uris
 }
 
-func (h *Hirer) window() time.Duration {
-	if h.RetryWindow > 0 {
-		return h.RetryWindow
-	}
-	return HireRetryWindow
-}
-
 // HireOwner is the owner a principal's hire tasks are created and found with: the buyer, the principal and its via,
 // as the identity interceptor puts them on the call context (CallerOwner).
 func HireOwner(p auth.Principal) store.Owner {
@@ -169,11 +155,8 @@ func HireOwner(p auth.Principal) store.Owner {
 // Hire answers a hire: ErrNotServed when this replica's A2A route would not serve the service to the principal
 // (Serves, D303); refused with ExtensionsRequiredError when the service's served card requires an extension a hire
 // cannot activate (§2.4, as the A2A route refuses a request that does not activate it, before anything else), the
-// operator's required entries being activated for the buyer and given to Admission (D300); the task of the same
-// resend key that is quoted, or left quoted less than the retry window ago, as it is (nothing is sent, Admission is
-// not asked again, and nothing changes its state: a retry never approves anything, §13.2), its start re-issued first
-// while it is quoted (§14.5: a task whose start was lost gets its workflow, as an A2A resend does); otherwise a new
-// task created through the service's handler. An error is the A2A error the interceptors or the work queue refused
+// operator's required entries being activated for the buyer and given to Admission (D300); for a hire with an
+// idempotencyKey, the task of that key (hireKeyed); otherwise a new task created through the service's handler. An error is the A2A error the interceptors or the work queue refused
 // it with (a2a-go's sentinels: Admission's refusal, "admission unavailable", "rate limited", "anonymous storage
 // limit", a sealed or part refusal, a lifecycle not accepting it in time), or the gate's own failure.
 func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) {
@@ -193,21 +176,6 @@ func (h *Hirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) 
 	owner := HireOwner(req.Principal)
 	if req.Keyed != nil {
 		return h.hireKeyed(ctx, req, owner, activated)
-	}
-	prev, err := h.Log.FindHireRetry(ctx, req.Service, owner, req.FirstRequest, h.window())
-	if err != nil {
-		return HireOutcome{}, err
-	}
-	if prev != nil {
-		// A retry of a quoted task (its first hire may have had its row committed and its start lost, and answered
-		// 503): re-issue the start, idempotent, so the person's approval has a workflow to reach (§14.5, D290). A task
-		// that left quoted had its workflow (kontra.approval, or the quote's expiry, came through it).
-		if prev.State == store.StateQuoted && h.Starts != nil {
-			if err := h.Starts(req.Service).ReissueStart(ctx, prev); err != nil {
-				return HireOutcome{}, err
-			}
-		}
-		return HireOutcome{Task: prev, Existing: true}, nil
 	}
 	return h.create(ctx, req, activated)
 }
@@ -241,13 +209,13 @@ func (h *Hirer) hireKeyed(ctx context.Context, req HireRequest, owner store.Owne
 }
 
 // create makes the hire's task through the service's handler, as an A2A SendMessage would (the work queue answers a
-// retry of the same key that it finds under the key's lock with the earlier task, Existing).
+// keyed hire whose key it finds under the key's lock with the earlier task, Existing).
 func (h *Hirer) create(ctx context.Context, req HireRequest, activated []string) (HireOutcome, error) {
 	sh, err := h.Handlers.For(ctx, req.Service)
 	if err != nil {
 		return HireOutcome{}, err
 	}
-	hctx := withHireActivated(lifecycle.WithHire(ctx, lifecycle.Hire{Key: req.FirstRequest, RetryWindow: h.window(), Keyed: req.Keyed}), activated)
+	hctx := withHireActivated(lifecycle.WithHire(ctx, lifecycle.Hire{Key: req.FirstRequest, Keyed: req.Keyed}), activated)
 	start, err := send(hctx, sh, req.Principal, &a2a.SendMessageRequest{Message: req.Message})
 	if err != nil {
 		return HireOutcome{}, err
@@ -264,8 +232,7 @@ func (h *Hirer) create(ctx context.Context, req HireRequest, activated []string)
 }
 
 // Reply sends parts as the §7 follow-up of a hire task of the principal's buyer, through the service's handler: the
-// followUp interceptor and the kontra.message Update decide (spec §7: refused unless the task is input-required; a
-// quoted task is refused, its quote being accepted on the operator's page and never in the protocol, §13.2; one
+// followUp interceptor and the kontra.message Update decide (spec §7: refused unless the task is input-required; one
 // follow-up per turn end); a service this replica's A2A route no longer serves to p (disabled, its allow: no longer
 // admitting p, a row the registry refused) is ErrNotServed, as that route answers the follow-up (D303); a service
 // whose served card now requires an extension a hire cannot activate refuses it as
@@ -278,10 +245,6 @@ func (h *Hirer) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow
 	}
 	if task == nil || task.Owner.BuyerID != p.BuyerID {
 		return 0, a2a.NewError(a2a.ErrTaskNotFound, "task not found")
-	}
-	if task.State == store.StateQuoted {
-		// Refused before anything is stored: the interceptor refuses it too (§7, §13.2).
-		return 0, a2a.NewError(a2a.ErrUnsupportedOperation, "the task is quoted: its quote is accepted on the operator's page, not in the protocol")
 	}
 	svc, err := h.Log.LoadService(ctx, task.TenantID, task.Service)
 	if err != nil {

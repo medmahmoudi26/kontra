@@ -13,9 +13,8 @@ import (
 // own /mcp, anonymous sessions, the MCP resource server and kontra login, through two gate replicas, Temporal and
 // Postgres, with the client on one replica and the tunnel on the other wherever the row allows. Each says its tenancy:
 //
-//   - single tenant (a services: block): gate_mcp_hire_test.go (TestGateMCPHire), gate_mcp_hire_quote_test.go
-//     (TestGateMCPHireQuote), gate_mcp_reply_test.go (TestGateMCPReply), gate_mcp_modern_test.go (TestGateMCPModern),
-//     gate_mcp_oauth_test.go (TestGateMCPOAuth);
+//   - single tenant (a services: block): gate_mcp_hire_test.go (TestGateMCPHire), gate_mcp_reply_test.go
+//     (TestGateMCPReply), gate_mcp_modern_test.go (TestGateMCPModern), gate_mcp_oauth_test.go (TestGateMCPOAuth);
 //   - multi-tenant (tenancy: multi; tenants, services and API keys as rows followed by NOTIFY kontra_services, D116;
 //     refs are <tenant>/<name>): gate_mcp_search_test.go (TestGateMCPSearch), anon_limits_test.go (TestAnonLimits),
 //     anon_lifecycle_test.go (TestAnonLifecycle), login_converts_test.go (TestLoginConverts).

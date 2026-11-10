@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"kontra.sh/kontra/internal/store"
 )
 
 // describe's capabilities (D339): the served card's capabilities, modes, skills (with their examples, the suggested
@@ -77,7 +79,7 @@ func TestToolArguments(t *testing.T) {
 			t.Errorf("%s accepted", args)
 		}
 	}
-	if got := statesOf("TASK_STATE_INPUT_REQUIRED"); len(got) != 2 {
-		t.Errorf("input-required selects %v, want quoted and input-required", got)
+	if got := statesOf("TASK_STATE_INPUT_REQUIRED"); len(got) != 1 || got[0] != store.StateInputRequired {
+		t.Errorf("input-required selects %v, want input-required alone (D351: no quoted)", got)
 	}
 }

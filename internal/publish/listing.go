@@ -3,8 +3,9 @@
 // plane, and sends the listing to the control plane's PUT /v1/services/{name} (Kontra Cloud's, kontra-cloud D-M5-62,
 // D-M5-95, D-M5-110), naming the version it replaces.
 //
-// It carries the operator's declared listing and nothing else: no amount is computed, converted, rounded or compared
-// with another here; the control plane decides what it accepts, and the gate holds no price (README, "no money code").
+// It carries the publisher's declared listing and nothing else: a listing has no price, and the control plane decides
+// what it accepts. Payment, when a seller charges, is the seller's own AP2, which neither the gate nor the CLI sees
+// (D351).
 package publish
 
 import (
@@ -25,41 +26,25 @@ import (
 // MaxFile bounds a listing file.
 const MaxFile = 64 << 10
 
-// Bounds a listing's values take (spec/schema/listing.json; Cloud's gate/listings: MAX_REVIEW_WINDOW,
-// MAX_TASK_TIMEOUT).
+// MaxTaskTimeoutSeconds bounds a listing's taskTimeoutSeconds (spec/schema/listing.json; Cloud's gate/listings:
+// MAX_TASK_TIMEOUT); the control plane's default is DefaultTaskTimeoutSeconds.
 const (
-	MaxWindowSeconds = 604800 // reviewWindowSeconds, taskTimeoutSeconds
-	maxAmountLen     = 24
+	MaxTaskTimeoutSeconds     = 604800
+	DefaultTaskTimeoutSeconds = 3600
 )
 
-// Price models: a listing is free or priced per task. Listings are A2A only, and MCP services are not priced (D350).
-const (
-	ModelFree    = "free"
-	ModelPerTask = "per_task"
-)
-
-var (
-	serviceRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	centsRE   = regexp.MustCompile(`^(0|[1-9][0-9]{0,11})(\.[0-9]{1,2})?$`)
-	zeroRE    = regexp.MustCompile(`^0(\.0+)?$`)
-)
+var serviceRE = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // Listing is a listing file as spec/schema/listing.json describes it, its defaults filled in. It lists an A2A service:
 // an MCP service is not listed (D350).
 type Listing struct {
 	Service    string
 	Visibility string // public (default), unlisted or private
-	Price      Price
 	Sealed     string // off (default), optional or required
 	Published  bool   // true unless the file says false
-}
-
-// Price is the listing's price, its members as the file writes them (nil: absent).
-type Price struct {
-	Model               string
-	Amount              *string
-	ReviewWindowSeconds *int64
-	TaskTimeoutSeconds  *int64
+	// TaskTimeoutSeconds is the service's task.timeout as the file writes it (nil: absent, the control plane's
+	// DefaultTaskTimeoutSeconds).
+	TaskTimeoutSeconds *int64
 }
 
 // Problems is a listing file the schema refuses: one line per problem, each naming where.
@@ -259,9 +244,8 @@ func (v *checker) str(m map[string]any, at, key string) (string, bool) {
 	s, isStr := x.(string)
 	if !isStr {
 		hint := ""
-		if _, num := x.(float64); num {
-			hint = ` (quote it: "1.00", not 1.00)`
-		} else if _, num := x.(int); num {
+		switch x.(type) {
+		case float64, int:
 			hint = ` (quote it)`
 		}
 		v.add(join(at, key), "want a string%s", hint)
@@ -332,8 +316,9 @@ func (v *checker) listing(doc any) *Listing {
 	if m == nil {
 		return nil
 	}
-	// kind, tools and tasks were an MCP listing's: listings are A2A only (D350), so they are unknown members.
-	v.unknown("the listing", m, "service", "visibility", "price", "sealed", "published")
+	// kind, tools and tasks were an MCP listing's: listings are A2A only (D350), so they are unknown members; price was
+	// escrow's, and a listing has none (D351).
+	v.unknown("the listing", m, "service", "visibility", "sealed", "published", "taskTimeoutSeconds")
 	l := &Listing{Published: true}
 	if s, ok := v.str(m, "", "service"); !ok {
 		if _, present := m["service"]; !present {
@@ -353,77 +338,24 @@ func (v *checker) listing(doc any) *Listing {
 		}
 		l.Published = !ok || b
 	}
-	if x, present := m["price"]; !present {
-		v.add("price", "required: {model: free | per_task, amount, …}")
-	} else if pm := v.object("price", x); pm != nil {
-		l.Price = v.price(pm)
-	}
+	l.TaskTimeoutSeconds = v.integer(m, "", "taskTimeoutSeconds", 1, MaxTaskTimeoutSeconds)
 	return l
 }
 
-// price reads the price mapping (spec/schema/listing.json $defs/price).
-func (v *checker) price(m map[string]any) Price {
-	v.unknown("price", m, "model", "amount", "currency", "reviewWindowSeconds", "taskTimeoutSeconds")
-	var p Price
-	if _, present := m["model"]; !present {
-		v.add("price.model", "required: free or per_task")
-	}
-	p.Model = v.enum(m, "price", "model", "", ModelFree, ModelPerTask)
-	if c, ok := v.str(m, "price", "currency"); ok && c != "USD" {
-		v.add("price.currency", "%q: listings are priced in USD", c)
-	}
-	if a, ok := v.str(m, "price", "amount"); ok {
-		if len(a) > maxAmountLen {
-			v.add("price.amount", "at most %d characters", maxAmountLen)
-		} else {
-			p.Amount = &a
-		}
-	}
-	p.ReviewWindowSeconds = v.integer(m, "price", "reviewWindowSeconds", 0, MaxWindowSeconds)
-	p.TaskTimeoutSeconds = v.integer(m, "price", "taskTimeoutSeconds", 1, MaxWindowSeconds)
-	_, amountWritten := m["amount"]
-	switch p.Model {
-	case ModelFree:
-		if p.Amount != nil && !contains([]string{"0", "0.0", "0.00"}, *p.Amount) {
-			v.add("price.amount", "%q: a free listing has no amount", *p.Amount)
-		}
-	case ModelPerTask:
-		switch {
-		case p.Amount == nil && !amountWritten:
-			v.add("price.amount", "required: a task's price in USD, e.g. \"1.00\"")
-		case p.Amount == nil:
-		case !centsRE.MatchString(*p.Amount) || zeroRE.MatchString(*p.Amount):
-			v.add("price.amount", "%q: want USD above 0 with at most 2 decimals (a task is charged in cents)", *p.Amount)
-		}
-	}
-	if p.Model != ModelPerTask && p.ReviewWindowSeconds != nil && *p.ReviewWindowSeconds != 0 {
-		v.add("price.reviewWindowSeconds", "a per_task price's")
-	}
-	return p
-}
-
 // Body is the request PUT /v1/services/{name} takes (Cloud's ListingPut, D-M5-95): the listing, whether the gate
-// serves it, and the version it replaces (0: none). Every key the file left out is the control plane's default, and
-// the keys it wrote are sent as written. kind is always "a2a": the file has none, and ListingPut still names it.
+// serves it, and the version it replaces (0: none). taskTimeoutSeconds is sent only when the file wrote it (the
+// control plane's default otherwise). kind is always "a2a": the file has none, and ListingPut still names it.
 func (l *Listing) Body(version int64) ([]byte, error) {
-	type price struct {
-		Model               string  `json:"model"`
-		Amount              *string `json:"amount,omitempty"`
-		Currency            string  `json:"currency"`
-		ReviewWindowSeconds *int64  `json:"reviewWindowSeconds,omitempty"`
-		TaskTimeoutSeconds  *int64  `json:"taskTimeoutSeconds,omitempty"`
-	}
 	body := struct {
-		Kind       string `json:"kind"`
-		Visibility string `json:"visibility"`
-		Price      price  `json:"price"`
-		Sealed     string `json:"sealed"`
-		Published  bool   `json:"published"`
-		Version    int64  `json:"version"`
+		Kind               string `json:"kind"`
+		Visibility         string `json:"visibility"`
+		Sealed             string `json:"sealed"`
+		Published          bool   `json:"published"`
+		TaskTimeoutSeconds *int64 `json:"taskTimeoutSeconds,omitempty"`
+		Version            int64  `json:"version"`
 	}{
-		Kind: "a2a", Visibility: l.Visibility, Sealed: l.Sealed, Published: l.Published, Version: version,
-		Price: price{Model: l.Price.Model, Amount: l.Price.Amount, Currency: "USD",
-			ReviewWindowSeconds: l.Price.ReviewWindowSeconds, TaskTimeoutSeconds: l.Price.TaskTimeoutSeconds},
+		Kind: "a2a", Visibility: l.Visibility, Sealed: l.Sealed, Published: l.Published,
+		TaskTimeoutSeconds: l.TaskTimeoutSeconds, Version: version,
 	}
 	return json.Marshal(body)
 }

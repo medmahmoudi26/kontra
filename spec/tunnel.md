@@ -10,7 +10,8 @@ an anonymous tenant may present, and the anonymous limits counted per tenant and
 D287). It was amended on 31 Oct after M4's review: what the `calls` limit counts, an anonymous key not rotated, the
 sweeps of a gate that stopped opening anonymous sessions, what anonymous tenants can keep stored (§6, §12; D304), and
 the resource an authorization server issues a key for (§6.3; D305). Revision 7 (1 Nov, M5) adds `kontra publish`
-(§6.4; D323), decided under the owner's standing instruction. Normative. RFC 2119 key words.
+(§6.4; D323), decided under the owner's standing instruction. Revision 8 (9 Nov, the owner's decision) withdraws
+escrow: a job key is deleted at terminal, and a listing has no price (§2.3, §6.4; D351). Normative. RFC 2119 key words.
 
 The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
 node, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the node sends
@@ -76,9 +77,8 @@ recipient would use the same rule).
 
 When the node hires a sealed service, it mints an X25519 key for that job (an A2A task, an MCP task, or an MCP
 session for plain calls) and keeps it at `~/.kontra/jobs/<gate host>/<job id>.key` (0600). It is what replies
-are sealed to ([`ext-sealed.md`](ext-sealed.md)). It is deleted when the job is terminal and, if the task's
-metadata carries the operator's `kontra.keyRetainUntil` (a review window, [`relay.md`](relay.md) §13.3), that
-time has passed; an MCP session's key when the session closes and every task created in it is done. The node
+are sealed to ([`ext-sealed.md`](ext-sealed.md)). It is deleted when the job is terminal (a
+`kontra.keyRetainUntil` that an earlier release let the operator write is ignored, D351); an MCP session's key when the session closes and every task created in it is done. The node
 learns that the gate closed a session from a `404` for it, and deletes the key of a session that has had no
 exchange for the service's `session_idle_s` once its tasks are done: the gate closes an idle session on its own, and
 states that bound in the `initialize` result's `_meta["sh.kontra/session_idle_s"]` ([`relay.md`](relay.md) §11.2,
@@ -456,12 +456,13 @@ converts into the team as an account's does; a gate that stopped opening anonymo
 ### 6.4 `kontra publish` (D323)
 
 `kontra publish [--gate URL] [--control-plane URL] [--version N | --replace] [--dry-run] [--no-browser] <listing.yaml>` sends a
-listing, how one of the person's A2A services is sold, to the gate operator's control plane. Its file is YAML (or
+listing, how one of the person's A2A services is offered, to the gate operator's control plane. Its file is YAML (or
 JSON), one document, at most 64 KiB, as [`schema/listing.json`](schema/listing.json) describes it: `service` (the name
-at the gate, under the person's tenant), `visibility` (`public`, `unlisted`, `private`), `price` (`free` or
-`per_task`, in USD, with ext-escrow.md's keys), `sealed` and `published`. Listings are A2A only: an MCP service is not
-listed, and the control plane refuses a listing for one (D350). The CLI carries the listing: it computes, converts and compares no
-amount, and the gate holds no price ([`relay.md`](relay.md) §13.5).
+at the gate, under the person's tenant), `visibility` (`public`, `unlisted`, `private`), `sealed`, `published` and
+`taskTimeoutSeconds` (1 to 604800, default 3600: the service's `task.timeout`, [`relay.md`](relay.md) §6.5). Listings
+are A2A only: an MCP service is not listed, and the control plane refuses a listing for one (D350). A listing has no
+price: Kontra runs no payment, and a seller that wants to be paid declares AP2 in its own card ([`relay.md`](relay.md)
+§2.6; D351). A file that still carries `price` is refused, naming it.
 
 1. It checks the file against the schema, and stops at a file it refuses, naming each problem. `--dry-run` stops
    there too, printing the request it would send.
@@ -474,14 +475,14 @@ amount, and the gate holds no price ([`relay.md`](relay.md) §13.5).
    Bearer` to the control plane only, following no redirect; it never stores or prints it. A publish is a person's change: an API key never publishes (kontra-cloud's `fresh` rule), so there is
    no `--api-key`, and a token is asked for each publish, which the person's consent confirms.
 4. Unless `--version` names one, it reads the service's listing, `GET {control plane}/v1/services/{service}`
-   (`listing`, its `version`, `price` and `visibility`, and the service's `published`; version 0 when the control
-   plane has no listing of it: `404` `service_not_found`). A listing is never replaced unseen: when the service has
-   one (version above 0) and neither `--version` nor `--replace` was given, the CLI prints its version, price,
-   visibility and whether it is published, names the `--version` to replace it with, sends nothing and exits 1; the
-   file may predate a price set in the console or a teammate's unpublish, which the version the CLI just read cannot
-   tell. With `--replace` it replaces the version it read, printing what that version was.
-5. It sends `PUT {control plane}/v1/services/{service}` with `{kind, visibility, price, tools?, tasks?, sealed,
-   published, version}` (Cloud's `ListingPut`): the version `--version` names, the one read under `--replace`, or 0.
+   (`listing`, its `version`, `visibility`, `sealed` and `taskTimeoutSeconds`, and the service's `published`; version
+   0 when the control plane has no listing of it: `404` `service_not_found`). A listing is never replaced unseen:
+   when the service has one (version above 0) and neither `--version` nor `--replace` was given, the CLI prints its
+   version, visibility, sealing, whether it is published and its task timeout, names the `--version` to replace it
+   with, sends nothing and exits 1; the file may predate a change made in the console or a teammate's unpublish,
+   which the version the CLI just read cannot tell. With `--replace` it replaces the version it read, printing what that version was.
+5. It sends `PUT {control plane}/v1/services/{service}` with `{kind: "a2a", visibility, sealed, published,
+   taskTimeoutSeconds?, version}` (Cloud's `ListingPut`; `taskTimeoutSeconds` only when the file writes it): the version `--version` names, the one read under `--replace`, or 0.
    A listing changed since that version is the control plane's `409` `stale_version`: nothing is published, and the
    CLI names the version the listing is at. Any other refusal is printed as the control plane wrote it (`code` and
    `message`, escaped), and exits 1.

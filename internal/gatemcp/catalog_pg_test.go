@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -94,8 +95,8 @@ func (w *countingWarmer) WarmTools(_ *mcprelay.Service, _ auth.Principal, info f
 // search and describe on a single-tenant gate (§12.2, D271): only the services whose allow: admits the principal by
 // an entry other than anonymous, plus listed ones, never a disabled one; ordered by ref, 50 a page, the cursor
 // granting nothing; query matches the ref, the name or the description (the served card's, else search.description)
-// case-insensitively; price filters (free: no price_model); an MCP service is never returned (D350); available is a direct backend or a session of a
-// live replica. describe of a ref search would not return is the unknown-service error; an MCP service's cold tools
+// case-insensitively; the operator's search.price annotations are not read (D351); an MCP service is never returned
+// (D350); available is a direct backend or a session of a live replica. describe of a ref search would not return is the unknown-service error; an MCP service's cold tools
 // cache answers toolsCached false and starts one drain per service per 10 minutes, a warm one its filtered tools.
 func TestCatalogSingleTenant(t *testing.T) {
 	e := newCatalogEnv(t)
@@ -155,8 +156,11 @@ func TestCatalogSingleTenant(t *testing.T) {
 	for _, s := range all {
 		byRef[s.Ref] = s
 	}
-	if h := byRef["hello"]; h.Kind != "a2a" || h.Description != "Says hello" || h.Price != "1 EUR a task" || !h.Available || h.Name != "hello" {
+	if h := byRef["hello"]; h.Kind != "a2a" || h.Description != "Says hello" || !h.Available || h.Name != "hello" {
 		t.Errorf("hello: %+v", h)
+	}
+	if b, _ := json.Marshal(byRef["hello"]); strings.Contains(string(b), "price") || strings.Contains(string(b), "EUR") {
+		t.Errorf("a search entry carries a price: %s", b)
 	}
 	if w, ok := byRef["web"]; ok {
 		t.Errorf("search returned an MCP service: %+v", w)
@@ -175,9 +179,7 @@ func TestCatalogSingleTenant(t *testing.T) {
 		{SearchArgs{Query: "HELLO"}, "[hello]"},
 		{SearchArgs{Query: "says"}, "[hello]"},
 		{SearchArgs{Query: "web t"}, "[]"},
-		{SearchArgs{Price: "per_task"}, "[hello]"},
-		{SearchArgs{Price: "per_call"}, "[]"},
-		{SearchArgs{Query: "s05", Price: "free"}, "[s050 s051 s052 s053 s054]"},
+		{SearchArgs{Query: "s05"}, "[s050 s051 s052 s053 s054]"},
 	} {
 		r, err := c.Search(ctx, p, tc.args)
 		if err != nil {

@@ -35,15 +35,13 @@ func structuredOnly(t *testing.T, what string, a rpcAnswer) gatemcp.HireResult {
 	return hr
 }
 
-// What a person needs, in structuredContent alone (spec §12.2, §12.3; D324), through a whole replica, from a 2026-07-28
-// client that declares URL and form elicitation and calls hire without the tasks extension, as Claude Code does, and
-// from 2025-11-25 sessions:
+// What a person needs, in structuredContent alone (spec §12.2, §12.3; D324, D351), through a whole replica, from a
+// 2026-07-28 client that declares URL and form elicitation and calls hire without the tasks extension, as Claude Code
+// does, and from 2025-11-25 sessions:
 //
-//   - a quoted hire: url and quote.approveUrl are the task's thread, byte for byte the URL the -32042 elicitation
-//     carries to a session that declared elicitation.url, and quote.expiresAt the quote's expiry; the text says so;
-//   - once a person accepts, the retried hire's structuredContent holds the agent's answer as text, with the url;
-//   - a free hire (Admission allows it): the answer's text beside data and the file links, and no url; a question is
+//   - a hire Admission allows: the answer's text beside data and the file links, and no url or quote; a question is
 //     its text with the reply-tool hint, and reply's structuredContent the answer to it;
+//   - a session that declared elicitation.url gets the same result, never -32042;
 //
 // and an operator's refusal code (spec §13.1, D325): Admission's -32060 reaches /mcp as -32060 with its message in
 // both eras, and the A2A bindings as PERMISSION_DENIED (JSON-RPC -31403, HTTP+JSON 403) with {"code": -32060} in the
@@ -61,72 +59,27 @@ func TestGateMCPHireStructured(t *testing.T) {
 	claude := newModernClient(t, a.url, key, `{"elicitation":{"form":{},"url":{}}}`)
 	tasks := func() int64 { return scalar[int64](t, e.pool, `select count(*) from kontra.tasks`) }
 
-	// The quoted hire: the thread URL and the quote's terms in structuredContent.
-	args := `{"service":"paid","message":"hi"}`
-	before := time.Now()
-	_, ans := claude.call("hire", args)
-	q := structuredOnly(t, "the quoted hire", ans)
-	thread := "https://app.kontra.sh/#/t/" + q.TaskID
-	expires, err := time.Parse(time.RFC3339, func() string {
-		if q.Quote == nil {
-			return ""
-		}
-		return q.Quote.ExpiresAt
-	}())
-	if q.State != "TASK_STATE_INPUT_REQUIRED" || q.URL != thread || q.Quote == nil || q.Quote.ApproveURL != thread || err != nil ||
-		expires.Before(before.Add(9*time.Minute)) || expires.After(time.Now().Add(11*time.Minute)) ||
-		!strings.Contains(q.Text, thread) || !strings.Contains(q.Text, "call hire again") {
-		t.Fatalf("the quoted hire's structuredContent: %+v (%s)", q, ans.raw)
+	// A hire: the answer's text, data and files (structuredOnly refuses a url or quote member: D351).
+	_, ans := claude.call("hire", `{"service":"kinds","message":"kinds"}`)
+	free := structuredOnly(t, "a hire", ans)
+	if free.State != "TASK_STATE_COMPLETED" || free.Text != "done\ntck artifact" ||
+		fmt.Sprint(free.Data) != "[map[total:4] map[key:value]]" || len(free.Files) != 2 ||
+		!strings.HasPrefix(free.Files[0].URI, "kontra:task/"+free.TaskID+"/") || free.Files[1].URI != "https://example.com/output.txt" {
+		t.Errorf("a hire's structuredContent: %+v", free)
 	}
-	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, q.TaskID); st != "quoted" {
-		t.Fatalf("the hired task is %s, want quoted", st)
-	}
-	// The same URL as the URL elicitation carries (a 2025-11-25 session that declared elicitation.url), and as the plain
-	// answer to one that did not.
+	// A legacy session that declared URL elicitation: the same result, never -32042.
 	s := newMCPClient(t, a.url, key)
 	s.initialize(`{"elicitation":{"url":{}}}`)
-	_, ans = s.call("hire", args)
-	var data struct {
-		Elicitations []struct{ URL string } `json:"elicitations"`
-	}
-	if ans.Error == nil || ans.Error.Code != gatemcp.CodeURLElicitationRequired || json.Unmarshal(ans.Error.Data, &data) != nil ||
-		len(data.Elicitations) != 1 || data.Elicitations[0].URL != q.URL {
-		t.Fatalf("the URL elicitation of the same hire: %s, want the url %s", ans.raw, q.URL)
+	_, ans = s.call("hire", `{"service":"kinds","message":"hi"}`)
+	if r := structuredOnly(t, "a legacy hire declaring URL elicitation", ans); r.State != "TASK_STATE_COMPLETED" || r.Text != "Hello World" {
+		t.Errorf("a legacy hire declaring URL elicitation: %+v", r)
 	}
 	p := newMCPClient(t, a.url, key)
 	p.initialize(`{}`)
-	_, ans = p.call("hire", args)
-	if pq := structuredOnly(t, "a plain legacy quoted hire", ans); pq.TaskID != q.TaskID || pq.URL != q.URL || !equalQuote(pq.Quote, q.Quote) {
-		t.Errorf("a legacy session's plain quoted hire: %+v", pq)
-	}
-	if n := hook.count(); n != 1 {
-		t.Errorf("Admission was asked %d times, want once (the retries ask nothing)", n)
-	}
-
-	// A person accepts on the thread; the retried hire's structuredContent is the agent's answer.
-	approve(t, q.TaskID, true)
-	eventually(t, 20*time.Second, "the approved task completes", func() bool {
-		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, q.TaskID) == "completed"
-	})
-	_, ans = claude.call("hire", args)
-	if done := structuredOnly(t, "the retried hire", ans); done.TaskID != q.TaskID || done.State != "TASK_STATE_COMPLETED" ||
-		done.Text != "Hello World" || done.URL != thread || done.Quote != nil {
-		t.Errorf("the retried hire after the approval: %+v", done)
-	}
-
-	// A free hire: the answer's text, data and files; no url, since the task has no thread the gate knows.
-	hook.set(func(h *hookServer) { h.raw = `{"outcome":"allow"}` })
-	_, ans = claude.call("hire", `{"service":"kinds","message":"kinds"}`)
-	free := structuredOnly(t, "a free hire", ans)
-	if free.State != "TASK_STATE_COMPLETED" || free.URL != "" || free.Quote != nil || free.Text != "done\ntck artifact" ||
-		fmt.Sprint(free.Data) != "[map[total:4] map[key:value]]" || len(free.Files) != 2 ||
-		!strings.HasPrefix(free.Files[0].URI, "kontra:task/"+free.TaskID+"/") || free.Files[1].URI != "https://example.com/output.txt" {
-		t.Errorf("a free hire's structuredContent: %+v", free)
-	}
 	// A question, and reply's answer.
 	_, ans = claude.call("hire", `{"service":"kinds","message":"ask"}`)
 	ask := structuredOnly(t, "a hire that asks", ans)
-	if ask.State != "TASK_STATE_INPUT_REQUIRED" || ask.Text != "Which date? (answer with the reply tool, taskId "+ask.TaskID+")" || ask.Quote != nil {
+	if ask.State != "TASK_STATE_INPUT_REQUIRED" || ask.Text != "Which date? (answer with the reply tool, taskId "+ask.TaskID+")" {
 		t.Errorf("a hire that asks: %+v", ask)
 	}
 	_, ans = claude.call("reply", `{"taskId":"`+ask.TaskID+`","message":"friday"}`)
@@ -185,10 +138,6 @@ func TestGateMCPHireStructured(t *testing.T) {
 	if m := tasks(); m != n {
 		t.Errorf("refused hires created %d tasks", m-n)
 	}
-}
-
-func equalQuote(a, b *gatemcp.QuoteTerms) bool {
-	return a != nil && b != nil && *a == *b
 }
 
 // hasCode reports whether an A2A error's details hold the google.protobuf.Struct {"code": code}.

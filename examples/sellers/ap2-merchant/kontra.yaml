@@ -1,0 +1,17 @@
+# A team gate on one machine, for the AP2 merchant hosted through the tunnel: `kontra connect`, next to the merchant,
+# dials the gate and forwards the gate's requests to it; the gate never dials the merchant. The gate relays AP2's
+# card entry, activation and data parts as it relays any extension's (spec/relay.md §2.6): it reads no checkout,
+# mandate or receipt. Plaintext is allowed only because public_url is a localhost origin (PRD §11). Postgres and
+# Temporal are the repository's compose.dev.yaml.
+listen: 127.0.0.1:8080
+public_url: http://localhost:8080 # a node's --gate must be this origin (spec/tunnel.md §4: bad_origin otherwise)
+postgres: postgres://kontra:kontra@localhost:5432/kontra
+temporal: { address: localhost:7233, namespace: kontra }
+auth: { api_keys: true }
+
+services:
+  ap2-merchant:
+    kind: a2a
+    backend: { tunnel: {} }          # hosted by the nodes enrolled for it; the node holds the merchant's URL
+    allow: ["org:default"]           # every API key of this gate's one tenant
+    task: { timeout: 10m, retries: 2 }

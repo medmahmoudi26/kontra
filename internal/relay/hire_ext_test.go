@@ -16,18 +16,18 @@ import (
 // others: the seller's own, and the sealed extension's whoever asserts it (spec §2.4, §12.2; D294, D300). What it
 // activates reaches Admission's extensions through the context, never a service parameter.
 func TestHireActivate(t *testing.T) {
-	const escrow, own, other = "https://operator.example.com/ext/escrow", "https://seller.example.com/ext/own", "https://operator.example.com/ext/other"
+	const opExt, own, other = "https://operator.example.com/ext/audit", "https://seller.example.com/ext/own", "https://operator.example.com/ext/other"
 	for _, tc := range []struct {
 		name      string
 		card      CardExtensions
 		on, unmet []string
 	}{
-		{"nothing required", CardExtensions{Operator: []string{escrow}}, nil, nil},
-		{"the operator's entry", CardExtensions{Required: []string{escrow}, Operator: []string{other, escrow}}, []string{escrow}, nil},
-		{"two of the operator's", CardExtensions{Required: []string{other, escrow}, Operator: []string{escrow, other}}, []string{other, escrow}, nil},
+		{"nothing required", CardExtensions{Operator: []string{opExt}}, nil, nil},
+		{"the operator's entry", CardExtensions{Required: []string{opExt}, Operator: []string{other, opExt}}, []string{opExt}, nil},
+		{"two of the operator's", CardExtensions{Required: []string{other, opExt}, Operator: []string{opExt, other}}, []string{other, opExt}, nil},
 		{"the seller's own", CardExtensions{Required: []string{own}}, nil, []string{own}},
-		{"the seller's beside the operator's", CardExtensions{Required: []string{escrow, own}, Operator: []string{escrow}}, nil, []string{own}},
-		{"sealed, as the operator's entry", CardExtensions{Required: []string{sealed.URI, escrow}, Operator: []string{sealed.URI, escrow}}, nil, []string{sealed.URI}},
+		{"the seller's beside the operator's", CardExtensions{Required: []string{opExt, own}, Operator: []string{opExt}}, nil, []string{own}},
+		{"sealed, as the operator's entry", CardExtensions{Required: []string{sealed.URI, opExt}, Operator: []string{sealed.URI, opExt}}, nil, []string{sealed.URI}},
 	} {
 		h := &Hirer{Extensions: func(store.ServiceRef) CardExtensions { return tc.card }}
 		on, err := h.activate(store.ServiceRef{Name: "svc"})
@@ -43,8 +43,8 @@ func TestHireActivate(t *testing.T) {
 		t.Errorf("a hirer that reads no card: %q, %v", on, err)
 	}
 
-	ctx := withHireActivated(context.Background(), []string{escrow})
-	if got := hireActivated(ctx); !slices.Equal(got, []string{escrow}) {
+	ctx := withHireActivated(context.Background(), []string{opExt})
+	if got := hireActivated(ctx); !slices.Equal(got, []string{opExt}) {
 		t.Errorf("hireActivated = %q", got)
 	}
 	if got := hireActivated(withHireActivated(context.Background(), nil)); got != nil {

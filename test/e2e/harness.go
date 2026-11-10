@@ -57,14 +57,13 @@
 // servers and every other server the harness starts listen on 127.0.0.1 only, which each test asserts at its end
 // (D185, CheckLoopback).
 //
-// M4's (D282, D297; m4_test.go lists them and each test's tenancy): the six gate_mcp_* tests and anon_limits,
+// M4's (D282, D297; m4_test.go lists them and each test's tenancy): the gate_mcp_* tests and anon_limits,
 // anon_lifecycle and login_converts. For them the harness also runs a multi-tenant gate (Options.Multi: no services:
 // block; tenants, services and API keys are rows it writes, followed by NOTIFY kontra_services, tenants.go, D116), with
 // tunnel.anonymous compressed in the test's own configuration (Options.Anonymous) and tunnel.enroll_with_api_key; the
 // Front as a PROXY v2 forwarder whose connections name the source address the test chooses (Options.ProxyProtocol,
-// Front.SetSource, proxyproto.go), so nodes come from chosen /24s and /48s; an Admission double on loopback whose
-// quotes name the pre-minted task id, with approvals sent as kontra.approval through the harness's Temporal client
-// (admission.go); internal/oidc/oidctest as auth.mcp_oauth's authorization server over HTTPS, trusted through
+// Front.SetSource, proxyproto.go), so nodes come from chosen /24s and /48s; an Admission double on loopback that allows,
+// denies or answers a raw decision and records each request (admission.go); internal/oidc/oidctest as auth.mcp_oauth's authorization server over HTTPS, trusted through
 // SSL_CERT_FILE by the replicas and kontra login (authserver.go, Harness.Login); clients of the gate's own /mcp in both
 // eras (gatemcp_client.go); a third replica configured otherwise on the same database (StartReplica); and the sellers
 // (sellers.go): examples/sellers/tck and booking built from this checkout and run unmodified, and an in-test a2a-go

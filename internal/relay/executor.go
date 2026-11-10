@@ -2,8 +2,7 @@
 //
 // One a2a-go handler per service, in cluster mode over the Postgres store, the Postgres puller and the
 // Temporal-backed work queue, with call interceptors for authentication, admission, the follow-up state
-// checks of §7, the quoted guard, cancel (§8), inline push configs (§10.1), review-window messages and
-// the anonymous refusals of §2.3. Its executor is the relay: it dispatches the caller's message upstream
+// checks of §7, cancel (§8), inline push configs (§10.1) and the anonymous refusals of §2.3. Its executor is the relay: it dispatches the caller's message upstream
 // and logs what comes back, with gate ids, through a2a-go's processor.
 package relay
 

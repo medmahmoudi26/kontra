@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 
 	"kontra.sh/kontra/internal/auth"
-	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/store"
 )
@@ -96,17 +95,17 @@ func TestModernToolsList(t *testing.T) {
 	}
 }
 
-// A hire task as a modern reader sees it (§12.4, §12.5, D274, §11.12's table): quoted is working with the approve
-// URL (D21); a text-only question is input_required for a reader whose request declared form elicitation, else
-// working with the reply-tool text; failed and rejected are completed (their result a CallToolResult with isError, the
+// A hire task as a modern reader sees it (§12.4, §12.5, D274, §11.12's table): submitted is working, and an earlier
+// release's approve URL in its metadata shows nowhere (D351); a text-only question is input_required for a reader
+// whose request declared form elicitation, else working with the reply-tool text; failed and rejected are completed (their result a CallToolResult with isError, the
 // tasks extension's "failed" being for JSON-RPC errors only) with sh.kontra/failure; canceled is cancelled.
 func TestModernView(t *testing.T) {
 	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	svc := store.ServiceRef{Timeout: time.Hour, Retention: 24 * time.Hour}
-	expires := now.Add(10 * time.Minute)
-	row := &store.TaskRow{ID: uuid.Must(uuid.NewV7()), State: store.StateQuoted, CreatedAt: now, StatusAt: now.Add(time.Second),
-		QuoteExpiresAt: &expires,
-		Snapshot:       taskWith(a2a.TaskStateInputRequired, nil, map[string]any{lifecycle.MetaApproveURL: "https://app.kontra.sh/#/t/x"})}
+	deadline := now.Add(time.Hour)
+	row := &store.TaskRow{ID: uuid.Must(uuid.NewV7()), State: store.StateSubmitted, CreatedAt: now, StatusAt: now.Add(time.Second),
+		Deadline: &deadline,
+		Snapshot: taskWith(a2a.TaskStateSubmitted, nil, map[string]any{"kontra.approve.url": "https://app.kontra.sh/#/t/x"})}
 	form := Reader{Era: mcpwire.EraModern, FormElicitation: true}
 
 	b, err := modernCreateTaskResult(row, svc, form)
@@ -116,11 +115,11 @@ func TestModernView(t *testing.T) {
 	var ct map[string]any
 	_ = json.Unmarshal(b, &ct)
 	want := map[string]any{"resultType": "task", "taskId": row.ID.String(), "status": "working",
-		"statusMessage": "https://app.kontra.sh/#/t/x", "createdAt": "2026-10-28T12:00:00.000Z",
-		"lastUpdatedAt": "2026-10-28T12:00:01.000Z", "ttlMs": float64((10*time.Minute + time.Hour + 24*time.Hour).Milliseconds()),
-		"pollIntervalMs": float64(1000), "_meta": map[string]any{MetaApproveURL: "https://app.kontra.sh/#/t/x"}}
+		"createdAt":     "2026-10-28T12:00:00.000Z",
+		"lastUpdatedAt": "2026-10-28T12:00:01.000Z", "ttlMs": float64((time.Hour + 24*time.Hour).Milliseconds()),
+		"pollIntervalMs": float64(1000)}
 	if !reflect.DeepEqual(ct, want) {
-		t.Errorf("a quoted task's CreateTaskResult\n%v\nwant\n%v", ct, want)
+		t.Errorf("a submitted task's CreateTaskResult\n%v\nwant\n%v", ct, want)
 	}
 
 	for _, tc := range []struct {

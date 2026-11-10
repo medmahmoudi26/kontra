@@ -24,6 +24,6 @@
     "admission": { "url": "https://api.example.com/v1/hooks/admission", "secret_env": "KONTRA_HOOK_SECRET", "operations": ["task", "session"] },
     "lifecycle": { "task_queue": "operator-lifecycle" }
   },
-  "operator_metadata_prefixes": ["kontra.escrow."],
+  "operator_metadata_prefixes": ["kontra.op."],
   "metrics": { "listen": ":9090" }
 }

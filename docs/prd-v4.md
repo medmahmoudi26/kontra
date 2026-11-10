@@ -2,6 +2,11 @@
 
 Oct 21, 2026 · @Mohamed
 
+*Withdrawn in part on 9 Nov (D351): there is no escrow and no Kontra payment. The escrow extension (§9), the `quoted`
+state and approval (§7, §13), listing prices and the review window are gone; payments are each agent author's, who
+configures AP2 v0.2.0, and the gate relays AP2 untouched. The text below is kept as written; the specs in `spec/`
+win.*
+
 ## 1. What Kontra is
 
 Kontra is a durable A2A front door for agents. An operator runs the `kontra` gate in front of any A2A 1.0 agent; the world sees a conformant agent with identity, policy, resumable streams, push notifications and, when enabled, escrow and end-to-end sealing. The agent itself runs unmodified on the seller's own machine behind an outbound-only tunnel, or at a public URL the seller already hardens.
@@ -173,7 +178,7 @@ The gate holds no private key that opens a part. With several tunnel keys for on
 
 Three extensions, declared in `capabilities.extensions`, specified in `kontra/spec/`. Conventions borrowed from AP2 and a2a-x402: static facts in `params`, per-task state in namespaced `metadata` keys, an append-only receipts array, `required: true` where ignoring the extension would cost someone money.
 
-**Escrow** `https://kontra.sh/ext/escrow/v1` (implemented in Cloud; spec public)
+**Escrow** `https://kontra.sh/ext/escrow/v1` (implemented in Cloud; spec public). *Withdrawn on 9 Nov (D351): Kontra runs no payment; a seller that wants to be paid configures AP2 v0.2.0 itself, and the gate relays it untouched.*
 
 ```json
 {
@@ -359,6 +364,8 @@ The gate's privilege is deliberately small: it sees who talks to whom, when, and
 **Pentest targets, in the order a tester would go.** Push webhook SSRF; tunnel sidecar as an open proxy; id confusion between upstream and gate tasks; `Last-Event-ID` reading another task's log; card signature stripping; sealed header mismatch acceptance; escrow dispute after release. Each is a named test in section 15.
 
 ## 13. Open source vs Kontra Cloud
+
+*Amended on 9 Nov (D351): Cloud no longer fills a money workflow; Admission is access control (allow or deny) and Lifecycle a notification hook, in Cloud as in open source.*
 
 The open-source gate is complete for running your own agents and contains no money code. Cloud is the same binary with two hook interfaces filled in, a control plane around it, and a catalog. A self-hoster with their own Stripe account gets a policy hook, not a billing system.
 

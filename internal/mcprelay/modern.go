@@ -744,8 +744,8 @@ func (h *Handler) ownsModernTask(rq *request) bool {
 	return ok && declaresTasks(caps)
 }
 
-// modernTaskCall creates a gate-owned task for a modern tools/call (§11.12 steps 2–4, D159): Admission task (a quote
-// is a deny, D350), the virtual session opened (its hash names the task's calls row, never a preamble,
+// modernTaskCall creates a gate-owned task for a modern tools/call (§11.12 steps 2–4, D159): Admission task, the
+// virtual session opened (its hash names the task's calls row, never a preamble,
 // D180), the gate task with the request as it came after §2.5 (params.task removed, the tasks extension kept: the
 // dispatch sends the call with the client's _meta) and its Mcp-Param-* headers, the TaskLifecycle start, then the
 // answer: in line when the task ends within 2 s, else a CreateTaskResult (Tasks.AnswerCall).

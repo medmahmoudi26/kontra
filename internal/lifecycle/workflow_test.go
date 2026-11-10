@@ -39,9 +39,7 @@ type world struct {
 	firstID    map[int]bool
 	replica    string
 	pushCfgs   [][]string // list_push_configs answers, in order; the last one repeats
-	reviewWin  hooks.ReviewWindow
 	onTerminal hooks.Patch
-	onClosed   hooks.Patch
 
 	prepareFn func(in PrepareInput) error // nil: every prepare succeeds
 	// prepareRes, when set, is prepare's answer (a tunnel attempt, NoSession); backend is attempt_state's
@@ -52,7 +50,6 @@ type world struct {
 	forwardFn  func(ctx context.Context, k int, queue string) (ForwardCancelResult, error)
 	abortErr   error
 	pushFn     func(ctx context.Context, in PushInput) (PushResult, error)
-	reviewFn   func(args hooks.ReviewMessageArgs) hooks.ReviewMessageResult
 	// reattachFn is reattach_session's answer (a reconnect wait, D342); nil: no session yet, every time.
 	reattachFn func(in ReattachInput) ReattachResult
 
@@ -73,8 +70,6 @@ type world struct {
 	pushQueues  []string
 	hookCalls   []string
 	lists       int
-	submits     []SubmitInput
-	appends     []ReviewAppendInput
 	waits       []ReconnectWaitInput // reconnect_wait calls
 	reattaches  []ReattachInput      // reattach_session calls
 	reattachAt  []time.Time
@@ -110,8 +105,7 @@ func (w *world) snapshot() world {
 		events: slices.Clone(w.events), prepares: slices.Clone(w.prepares), prepareAt: slices.Clone(w.prepareAt), dispatches: slices.Clone(w.dispatches),
 		terminals: slices.Clone(w.terminals), forwards: slices.Clone(w.forwards), aborts: slices.Clone(w.aborts),
 		patches: slices.Clone(w.patches), pushes: slices.Clone(w.pushes), pushQueues: slices.Clone(w.pushQueues),
-		hookCalls: slices.Clone(w.hookCalls), lists: w.lists, submits: slices.Clone(w.submits),
-		appends: slices.Clone(w.appends), state: w.state, waits: slices.Clone(w.waits), reattaches: slices.Clone(w.reattaches),
+		hookCalls: slices.Clone(w.hookCalls), lists: w.lists, state: w.state, waits: slices.Clone(w.waits), reattaches: slices.Clone(w.reattaches),
 		reattachAt: slices.Clone(w.reattachAt), forwardRefs: slices.Clone(w.forwardRefs),
 	}
 }
@@ -206,23 +200,6 @@ func (w *world) taskRef(ctx context.Context, taskID string) (hooks.TaskRef, erro
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return hooks.TaskRef{TaskID: taskID, State: w.state}, nil
-}
-
-func (w *world) submit(ctx context.Context, in SubmitInput) (SubmitResult, error) {
-	w.mu.Lock()
-	w.submits = append(w.submits, in)
-	w.state = string(store.StateSubmitted)
-	w.mu.Unlock()
-	w.event("submit")
-	return SubmitResult{Deadline: w.deadline}, nil
-}
-
-func (w *world) appendReview(ctx context.Context, in ReviewAppendInput) (int64, error) {
-	w.mu.Lock()
-	w.appends = append(w.appends, in)
-	w.mu.Unlock()
-	w.event("append:" + in.WorkItemID)
-	return 11, nil
 }
 
 func (w *world) reconnectWait(ctx context.Context, in ReconnectWaitInput) (ReconnectWaitResult, error) {
@@ -329,8 +306,6 @@ func (w *world) env() *testsuite.TestWorkflowEnvironment {
 	reg(w.writeTerminal, ActWriteTerminal)
 	reg(w.applyMetadata, ActApplyMetadata)
 	reg(w.taskRef, ActTaskRef)
-	reg(w.submit, ActSubmit)
-	reg(w.appendReview, ActAppendReviewMessage)
 	reg(w.dispatch, ActDispatch)
 	reg(w.abort, ActAbort)
 	reg(w.forwardCancel, ActForwardCancel)
@@ -345,21 +320,11 @@ func (w *world) env() *testsuite.TestWorkflowEnvironment {
 		w.hook(HookOnTerminal + ":" + t.State)
 		return w.onTerminal, nil
 	}, HookOnTerminal)
-	reg(func(ctx context.Context, t hooks.TaskRef) (hooks.ReviewWindow, error) {
+	// The retired ReviewWindow (D351): only a run recorded before changeNoReviewWindow asks it.
+	reg(func(ctx context.Context, t hooks.TaskRef) (hooks.RetiredReviewWindow, error) {
 		w.hook(HookReviewWindow)
-		return w.reviewWin, nil
+		return hooks.RetiredReviewWindow{Open: true, Seconds: 600}, nil
 	}, HookReviewWindow)
-	reg(func(ctx context.Context, t hooks.TaskRef, a hooks.ReviewMessageArgs) (hooks.ReviewMessageResult, error) {
-		w.hook(HookOnReviewMessage)
-		if w.reviewFn != nil {
-			return w.reviewFn(a), nil
-		}
-		return hooks.ReviewMessageResult{}, nil
-	}, HookOnReviewMessage)
-	reg(func(ctx context.Context, t hooks.TaskRef, a hooks.ReviewClosedArgs) (hooks.Patch, error) {
-		w.hook(fmt.Sprintf("%s:%v", HookOnReviewClosed, a.Disputed))
-		return w.onClosed, nil
-	}, HookOnReviewClosed)
 	return env
 }
 
@@ -931,12 +896,13 @@ func TestCancelAtInputRequired(t *testing.T) {
 
 func TestCancelOfTerminalTaskIsRefused(t *testing.T) {
 	w := newWorld(t)
-	w.reviewWin = hooks.ReviewWindow{Open: true, Seconds: 60} // keeps the workflow open after the end
 	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
 		w.setState(string(store.StateCompleted))
 		return DispatchResult{Outcome: DispatchTerminal}, nil
 	}
 	env := w.env()
+	// A slow OnTerminal keeps the workflow open after the end.
+	env.OnActivity(HookOnTerminal, mock.Anything, mock.Anything, mock.Anything).Return(hooks.Patch{}, nil).After(time.Minute)
 	u := newUpdates()
 	env.RegisterDelayedCallback(func() { env.UpdateWorkflow(UpdateCancel, "c1", u.cb("c1"), CancelUpdate{}) }, 10*time.Second)
 	start(env, u, input(2))
@@ -1043,72 +1009,6 @@ func TestTurnLimit(t *testing.T) {
 
 // --- hooks, pushes, patches (spec §10.2, §13.3) ---
 
-func TestReviewWindowClosedEnds(t *testing.T) {
-	w := newWorld(t)
-	w.onTerminal = hooks.Patch{Metadata: map[string]any{"kontra.escrow.status": "released"}}
-	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
-		w.setState(string(store.StateCompleted))
-		return DispatchResult{Outcome: DispatchTerminal}, nil
-	}
-	env := w.env()
-	start(env, newUpdates(), input(2))
-	done(t, env)
-	s := w.snapshot()
-	if !slices.Equal(s.hookCalls, []string{HookOnTerminal + ":completed", HookReviewWindow}) {
-		t.Fatalf("hooks %v: OnTerminal then ReviewWindow, and the end", s.hookCalls)
-	}
-	if len(s.patches) != 1 || s.patches[0].Source != HookOnTerminal {
-		t.Fatalf("patches %+v", s.patches)
-	}
-}
-
-func TestReviewWindowMessageAndDispute(t *testing.T) {
-	w := newWorld(t)
-	w.reviewWin = hooks.ReviewWindow{Open: true, Seconds: 3600}
-	w.reviewFn = func(a hooks.ReviewMessageArgs) hooks.ReviewMessageResult {
-		return hooks.ReviewMessageResult{Accept: true, Dispute: a.Metadata["kontra.escrow.dispute"] != nil,
-			Patch: &hooks.Patch{Metadata: map[string]any{"kontra.escrow.status": "disputed"}}}
-	}
-	// OnReviewClosed holds the workflow open until kontra.close.
-	w.onClosed = hooks.Patch{Metadata: map[string]any{"kontra.escrow.status": "disputed"}, HoldOpenSeconds: 86400}
-	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
-		w.setState(string(store.StateCompleted))
-		return DispatchResult{Outcome: DispatchTerminal}, nil
-	}
-	env := w.env()
-	u := newUpdates()
-	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateReviewMessage, "rv-1", u.cb("rv-1"), ReviewMessageUpdate{WorkItemID: "rv-1", MessageID: "m",
-			Metadata: map[string]any{"kontra.escrow.dispute": "late"}})
-	}, time.Minute)
-	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateReviewMessage, "rv-2", u.cb("rv-2"), ReviewMessageUpdate{WorkItemID: "rv-2", MessageID: "m2"})
-	}, 2*time.Minute)
-	env.RegisterDelayedCallback(func() { env.SignalWorkflow(SignalClose, struct{}{}) }, 3*time.Minute)
-	start(env, u, input(2))
-	done(t, env)
-	if end := env.Now(); end.After(t0.Add(time.Hour)) {
-		t.Errorf("the workflow ended at %v: kontra.close should have ended the hold at 3 min", end.Sub(t0))
-	}
-	r, err := u.result("rv-1")
-	if err != nil || !r.(ReviewMessageResult).Accepted || r.(ReviewMessageResult).Seq == nil || *r.(ReviewMessageResult).Seq != 11 {
-		t.Fatalf("review message %+v %v", r, err)
-	}
-	if !u.has("rv-2:rejected") {
-		t.Errorf("a review message after the dispute closed the window: %v", u.logs)
-	}
-	s := w.snapshot()
-	if len(s.appends) != 1 || s.appends[0].WorkItemID != "rv-1" {
-		t.Errorf("appends %+v", s.appends)
-	}
-	if !slices.Contains(s.hookCalls, HookOnReviewClosed+":true") {
-		t.Errorf("hooks %v: OnReviewClosed{disputed: true} after the dispute", s.hookCalls)
-	}
-	if i, j := eventIndex(t, s.events, "append:rv-1"), eventIndex(t, s.events, "patch:"+HookOnReviewMessage); j < i {
-		t.Errorf("the hook's patch applied before the append committed: %v", s.events)
-	}
-}
-
 func TestPushFanOutAndTheWorkflowOutlivesItsPushes(t *testing.T) {
 	w := newWorld(t)
 	w.pushCfgs = [][]string{{"c1"}, {"c1", "c2"}}
@@ -1172,13 +1072,13 @@ func TestAnnotationsHeldWhileADispatchRuns(t *testing.T) {
 	env := w.env()
 	u := newUpdates()
 	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateAnnotate, "a1", u.cb("a1"), AnnotateUpdate{Metadata: map[string]any{"kontra.escrow.note": "x"}})
+		env.UpdateWorkflow(UpdateAnnotate, "a1", u.cb("a1"), AnnotateUpdate{Metadata: map[string]any{"kontra.op.note": "x"}})
 		env.UpdateWorkflow(UpdateAnnotate, "a2", u.cb("a2"), AnnotateUpdate{Metadata: map[string]any{"caller.key": "x"}})
 		go func() { time.Sleep(300 * time.Millisecond); close(release) }()
 	}, 100*time.Millisecond)
 	env.RegisterDelayedCallback(func() { env.UpdateWorkflow(UpdateCancel, "c1", u.cb("c1"), CancelUpdate{}) }, time.Hour/2)
 	in := input(2)
-	in.Hooks.OperatorPrefixes = []string{"kontra.escrow."}
+	in.Hooks.OperatorPrefixes = []string{"kontra.op."}
 	start(env, u, in)
 	done(t, env)
 	if !u.has("a1:completed") || !u.has("a2:rejected") {
@@ -1187,6 +1087,41 @@ func TestAnnotationsHeldWhileADispatchRuns(t *testing.T) {
 	s := w.snapshot()
 	if i, j := eventIndex(t, s.events, "dispatched:1"), eventIndex(t, s.events, "patch:"+UpdateAnnotate); j < i {
 		t.Errorf("the annotation was applied while the dispatch ran: %v", s.events)
+	}
+}
+
+// A run started after changeNoReviewWindow ends after OnTerminal: the retired ReviewWindow is never asked (D351).
+func TestNoReviewWindowAfterOnTerminal(t *testing.T) {
+	w := newWorld(t)
+	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env := w.env()
+	start(env, newUpdates(), input(2))
+	done(t, env)
+	if calls := w.snapshot().hookCalls; !slices.Equal(calls, []string{HookOnTerminal + ":completed"}) {
+		t.Fatalf("hooks %v, want OnTerminal alone", calls)
+	}
+}
+
+// A run recorded before changeNoReviewWindow (GetVersion answers workflow.DefaultVersion) still asks ReviewWindow once
+// after OnTerminal, and ends whatever it answers: an open window keeps nothing open any more (D351).
+func TestRetiredReviewWindowBeforeTheChange(t *testing.T) {
+	w := newWorld(t)
+	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
+		w.setState(string(store.StateCompleted))
+		return DispatchResult{Outcome: DispatchTerminal}, nil
+	}
+	env := w.env()
+	env.OnGetVersion(changeNoReviewWindow, workflow.DefaultVersion, 1).Return(workflow.DefaultVersion)
+	start(env, newUpdates(), input(2))
+	done(t, env)
+	if calls := w.snapshot().hookCalls; !slices.Equal(calls, []string{HookOnTerminal + ":completed", HookReviewWindow}) {
+		t.Fatalf("hooks %v, want OnTerminal then ReviewWindow", calls)
+	}
+	if took := env.Now().Sub(t0); took >= 600*time.Second {
+		t.Errorf("the run stayed open %v: the retired window's answer opened it", took)
 	}
 }
 
@@ -1202,135 +1137,6 @@ func TestDispatchedSignalRunsOnDispatched(t *testing.T) {
 	done(t, env)
 	if !slices.Contains(w.snapshot().hookCalls, HookOnDispatched) {
 		t.Errorf("hooks %v", w.snapshot().hookCalls)
-	}
-}
-
-// --- quotes (spec §13.2) ---
-
-func quotedInput() Input {
-	in := input(2)
-	exp := t0.Add(10 * time.Minute)
-	in.QuoteExpiresAt = &exp
-	in.Hooks.OperatorPrefixes = []string{"kontra.escrow."}
-	return in
-}
-
-func TestQuoteApproved(t *testing.T) {
-	w := newWorld(t)
-	w.state = string(store.StateQuoted)
-	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
-		w.setState(string(store.StateCompleted))
-		return DispatchResult{Outcome: DispatchTerminal}, nil
-	}
-	env := w.env()
-	u := newUpdates()
-	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateApproval, "bad", u.cb("bad"), ApprovalUpdate{Accepted: true, Metadata: map[string]any{"x": 1}})
-		env.UpdateWorkflow(UpdateApproval, "ok", u.cb("ok"), ApprovalUpdate{Accepted: true, Metadata: map[string]any{"kontra.escrow.status": "held"}})
-	}, time.Minute)
-	start(env, u, quotedInput())
-	done(t, env)
-	if !u.has("bad:rejected") {
-		t.Errorf("an approval with a key outside the prefixes: %v", u.logs)
-	}
-	if r, err := u.result("ok"); err != nil || r.(ApprovalResult).State != "submitted" {
-		t.Fatalf("approval %+v %v", r, err)
-	}
-	s := w.snapshot()
-	if len(s.submits) != 1 || s.submits[0].Metadata["kontra.escrow.status"] != "held" {
-		t.Fatalf("submits %+v", s.submits)
-	}
-	if len(s.dispatches) != 1 || s.dispatches[0].at.Before(t0.Add(time.Minute)) {
-		t.Fatalf("dispatches %+v: nothing is dispatched before the approval", s.dispatches)
-	}
-}
-
-func TestQuoteExpires(t *testing.T) {
-	w := newWorld(t)
-	w.state = string(store.StateQuoted)
-	w.dispatchFn = outcome(DispatchTerminal, "")
-	env := w.env()
-	u := newUpdates()
-	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateApproval, "late", u.cb("late"), ApprovalUpdate{Accepted: true})
-	}, 11*time.Minute)
-	start(env, u, quotedInput())
-	done(t, env)
-	s := w.snapshot()
-	if len(s.terminals) != 1 || s.terminals[0].State != "canceled" || s.terminals[0].Canceled != store.CanceledQuoteExpired {
-		t.Fatalf("terminal writes %+v", s.terminals)
-	}
-	if len(s.dispatches) != 0 {
-		t.Errorf("dispatched an expired quote")
-	}
-	if u.has("late:completed") {
-		t.Error("an approval after the expiry was accepted")
-	}
-}
-
-func TestQuoteDeclined(t *testing.T) {
-	w := newWorld(t)
-	w.state = string(store.StateQuoted)
-	w.dispatchFn = outcome(DispatchTerminal, "")
-	env := w.env()
-	u := newUpdates()
-	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateApproval, "no", u.cb("no"), ApprovalUpdate{Accepted: false})
-	}, time.Minute)
-	start(env, u, quotedInput())
-	done(t, env)
-	s := w.snapshot()
-	if len(s.terminals) != 1 || s.terminals[0].Canceled != store.CanceledDeclined {
-		t.Fatalf("terminal writes %+v", s.terminals)
-	}
-	if r, _ := u.result("no"); r.(ApprovalResult).State != "canceled" {
-		t.Errorf("approval result %+v", r)
-	}
-}
-
-// A review message the caller sends as soon as it read completed from the log, before the workflow learned
-// that the turn ended: it waits for the window, and is accepted when it opens (spec §7).
-func TestReviewMessageBeforeTheWorkflowLearnsTheEnd(t *testing.T) {
-	for _, open := range []bool{true, false} {
-		t.Run(fmt.Sprintf("window open %v", open), func(t *testing.T) {
-			w := newWorld(t)
-			w.reviewWin = hooks.ReviewWindow{Open: open, Seconds: 60}
-			w.reviewFn = func(hooks.ReviewMessageArgs) hooks.ReviewMessageResult {
-				return hooks.ReviewMessageResult{Accept: true}
-			}
-			sent := make(chan struct{})
-			w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
-				w.setState(string(store.StateCompleted))
-				select {
-				case <-sent:
-				case <-w.release:
-				}
-				time.Sleep(100 * time.Millisecond)
-				return DispatchResult{Outcome: DispatchTerminal}, nil
-			}
-			env := w.env()
-			u := newUpdates()
-			env.RegisterDelayedCallback(func() {
-				env.UpdateWorkflow(UpdateReviewMessage, "rv-1", u.cb("rv-1"), ReviewMessageUpdate{WorkItemID: "rv-1", MessageID: "m"})
-				close(sent)
-			}, 100*time.Millisecond)
-			start(env, u, input(2))
-			done(t, env)
-			if !u.has("rv-1:accepted") {
-				t.Fatalf("the review message was refused while the workflow lagged the log: %v", u.logs)
-			}
-			r, err := u.result("rv-1")
-			if err != nil || r.(ReviewMessageResult).Accepted != open {
-				t.Fatalf("review message %+v %v, want accepted %v", r, err, open)
-			}
-			s := w.snapshot()
-			if open && (len(s.appends) != 1 || eventIndex(t, s.events, "hook:"+HookReviewWindow) > eventIndex(t, s.events, "append:rv-1")) {
-				t.Errorf("events %v: the append follows the window's opening", s.events)
-			}
-			if !open && len(s.appends) != 0 {
-				t.Errorf("appended %v with no window", s.appends)
-			}
-		})
 	}
 }
 
@@ -1367,28 +1173,11 @@ func TestCancelWhenTheReplicaIsGone(t *testing.T) {
 	}
 }
 
-func TestMessageRefusedWhileQuoted(t *testing.T) {
-	w := newWorld(t)
-	w.state = string(store.StateQuoted)
-	w.dispatchFn = outcome(DispatchTerminal, "")
-	env := w.env()
-	u := newUpdates()
-	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateMessage, "wi-2", u.cb("wi-2"), MessageUpdate{WorkItemID: "wi-2"})
-	}, time.Minute)
-	start(env, u, quotedInput())
-	done(t, env)
-	if !u.has("wi-1:completed") || !u.has("wi-2:rejected") {
-		t.Fatalf("updates %v: the quoted task's first message is accepted with the start; another is refused", u.logs)
-	}
-}
-
 // --- push listing at start (spec §10.2) ---
 
 // A new task's inline push config gets no kontra.push (Queue.Write saves it in the creating transaction):
 // the workflow lists the task's push configs at start, so a task that ends before its first prepare
-// succeeds still delivers its terminal snapshot, and a quoted task's webhook gets the quoted snapshot
-// before the quote is decided.
+// succeeds still delivers its terminal snapshot.
 func TestPushConfigsListedAtStart(t *testing.T) {
 	t.Run("prepare service_unavailable", func(t *testing.T) {
 		w := newWorld(t)
@@ -1406,43 +1195,6 @@ func TestPushConfigsListedAtStart(t *testing.T) {
 		}
 		if s.lists < 1 || !slices.Equal(s.pushes, []string{"c-inline"}) {
 			t.Fatalf("lists %d, pushes %v: the inline config's push_webhook never started", s.lists, s.pushes)
-		}
-	})
-	t.Run("quote declined", func(t *testing.T) {
-		w := newWorld(t)
-		w.state = string(store.StateQuoted)
-		w.pushCfgs = [][]string{{"c-inline"}}
-		w.dispatchFn = outcome(DispatchTerminal, "")
-		env := w.env()
-		u := newUpdates()
-		env.RegisterDelayedCallback(func() {
-			env.UpdateWorkflow(UpdateApproval, "no", u.cb("no"), ApprovalUpdate{Accepted: false})
-		}, time.Minute)
-		start(env, u, quotedInput())
-		done(t, env)
-		s := w.snapshot()
-		if len(s.terminals) != 1 || s.terminals[0].Canceled != store.CanceledDeclined {
-			t.Fatalf("terminal writes %+v", s.terminals)
-		}
-		if !slices.Equal(s.pushes, []string{"c-inline"}) {
-			t.Fatalf("pushes %v: the quoted task's webhook got nothing", s.pushes)
-		}
-		// The webhook was following the task while it was quoted, before the decline.
-		if i, j := eventIndex(t, s.events, "push:c-inline"), eventIndex(t, s.events, "terminal:canceled"); i > j {
-			t.Errorf("push_webhook started only after the decline: %v", s.events)
-		}
-	})
-	t.Run("quote expired", func(t *testing.T) {
-		w := newWorld(t)
-		w.state = string(store.StateQuoted)
-		w.pushCfgs = [][]string{{"c-inline"}}
-		w.dispatchFn = outcome(DispatchTerminal, "")
-		env := w.env()
-		start(env, newUpdates(), quotedInput())
-		done(t, env)
-		s := w.snapshot()
-		if len(s.terminals) != 1 || s.terminals[0].Canceled != store.CanceledQuoteExpired || !slices.Equal(s.pushes, []string{"c-inline"}) {
-			t.Fatalf("terminal writes %+v, pushes %v", s.terminals, s.pushes)
 		}
 	})
 }
@@ -1610,34 +1362,6 @@ func TestMessageRefusalSaysWhetherTheWorkflowIsBehind(t *testing.T) {
 		if !u.has(id+":rejected") || !isType(u.rej[id], want) {
 			t.Errorf("%s: %v, want a %s refusal (%v)", id, u.rej[id], want, u.logs)
 		}
-	}
-}
-
-// --- OnReviewMessage is bounded from its scheduling (spec §14.1) ---
-
-// A remote hook queue with no poller never starts OnReviewMessage: only a schedule-to-close bound turns
-// that into accept: false; without one the Update, and the workflow's end, wait forever.
-func TestReviewMessageHookHasAScheduleToCloseBound(t *testing.T) {
-	w := newWorld(t)
-	w.reviewWin = hooks.ReviewWindow{Open: true, Seconds: 60}
-	w.dispatchFn = func(context.Context, int, DispatchInput) (DispatchResult, error) {
-		w.setState(string(store.StateCompleted))
-		return DispatchResult{Outcome: DispatchTerminal}, nil
-	}
-	env := w.env()
-	var got time.Duration
-	env.RegisterActivityWithOptions(func(ctx context.Context, t hooks.TaskRef, a hooks.ReviewMessageArgs) (hooks.ReviewMessageResult, error) {
-		got = activity.GetInfo(ctx).ScheduleToCloseTimeout
-		return hooks.ReviewMessageResult{Accept: true}, nil
-	}, activity.RegisterOptions{Name: HookOnReviewMessage})
-	u := newUpdates()
-	env.RegisterDelayedCallback(func() {
-		env.UpdateWorkflow(UpdateReviewMessage, "rv-1", u.cb("rv-1"), ReviewMessageUpdate{WorkItemID: "rv-1", MessageID: "m"})
-	}, 10*time.Second)
-	start(env, u, input(2))
-	done(t, env)
-	if got != reviewMessageStartToClose {
-		t.Fatalf("OnReviewMessage schedule-to-close %v, want %v", got, reviewMessageStartToClose)
 	}
 }
 

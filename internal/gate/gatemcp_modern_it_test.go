@@ -180,9 +180,6 @@ hooks:
 //   - a hire declaring the tasks extension to a fast seller is answered in line (resultType complete); to a slow one
 //     with a CreateTaskResult (resultType task, pollIntervalMs 1000), whose tasks/get is the same from either replica,
 //     and whose tasks/cancel is acknowledged at once and cancels it within 10 s (the seller receives CancelTask);
-//   - a quoted hire is working with sh.kontra/approve-url and never -32042, even for a client that declares URL
-//     elicitation; tasks/update with the quoted event's gate key and with any other key is acknowledged, forwards
-//     nothing and leaves it quoted (D38, D45); a plain retry answers the URL;
 //   - the booking seller's question is input_required with exactly one inputRequests entry, k.<task>.<seq> of the event
 //     that asked; a wrong key is ignored; tasks/update answers it once and a second answer is ignored; the task
 //     completes with the first answer;
@@ -263,57 +260,8 @@ func TestGateMCPModern(t *testing.T) {
 		t.Errorf("tasks/get of the cancelled task: %s", ans.raw)
 	}
 
-	// A quoted hire: working with the approve URL, never -32042 (even declaring URL elicitation).
-	hook.set(func(h *hookServer) { h.raw = "" })
-	cq := ca.with(capsTasksForm)
-	_, ans = cq.call("hire", `{"service":"paid","message":"hi"}`)
-	if ans.Error != nil {
-		t.Fatalf("a quoted modern hire answered an error: %s", ans.raw)
-	}
-	q := ans.task(t)
-	approve := "https://app.kontra.sh/#/t/" + q.TaskID
-	if q.ResultType != "task" || q.Status != "working" || q.StatusMessage != approve || q.Meta["sh.kontra/approve-url"] != approve {
-		t.Fatalf("a quoted modern hire: %s", ans.raw)
-	}
-	hook.set(func(h *hookServer) { h.raw = `{"outcome":"allow"}` })
-	quoted := func(what string) {
-		t.Helper()
-		if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, q.TaskID); st != "quoted" {
-			t.Fatalf("after %s the quoted task is %s", what, st)
-		}
-		if n := paid.count("SendMessage") + paid.count("SendStreamingMessage"); n != 0 {
-			t.Fatalf("after %s the seller received %d messages", what, n)
-		}
-	}
-	quoted("the hire")
-	qseq := scalar[int64](t, e.pool, `select max(seq) from kontra.task_events where task_id = $1`, q.TaskID)
-	for _, responses := range []string{
-		fmt.Sprintf(`{"k.%s.%d":{"action":"accept","content":{"reply":"I accept"}}}`, q.TaskID, qseq),
-		fmt.Sprintf(`{"k.%s.%d":{"action":"accept"}}`, q.TaskID, qseq),
-		fmt.Sprintf(`{"k.%s.1":{"action":"accept","content":{"reply":"yes"}},"approve":{"action":"accept"}}`, q.TaskID),
-	} {
-		for _, c := range []*modernClient{cq, cq.on(b.url)} {
-			status, ans := c.rpc("tasks/update", q.TaskID, `"taskId":"`+q.TaskID+`","inputResponses":`+responses)
-			if status != http.StatusOK || ans.Error != nil || string(ans.Result) != `{"resultType":"complete"}` {
-				t.Errorf("tasks/update %s on the quoted task: %d %s", responses, status, ans.raw)
-			}
-		}
-	}
-	time.Sleep(time.Second)
-	quoted("tasks/update on it")
-	_, ans = cq.rpc("tasks/get", q.TaskID, `"taskId":"`+q.TaskID+`"`)
-	if g := ans.task(t); g.Status != "working" || g.StatusMessage != approve || len(g.InputRequests) != 0 {
-		t.Errorf("tasks/get of the quoted task: %s", ans.raw)
-	}
-	// A retry without the extension (a plain call): the same task's URL, at once, as text.
-	_, ans = ca.with(`{}`).call("hire", `{"service":"paid","message":"hi"}`)
-	if r := ans.tool(t); r.IsError || r.Structured.TaskID != q.TaskID || r.Meta["sh.kontra/approve-url"] != approve ||
-		!strings.Contains(r.text(), approve) || ans.resultType() != "complete" {
-		t.Errorf("a plain retry of the quoted hire: %s", ans.raw)
-	}
-	quoted("the retry")
-	if n := hook.count(); n != 3 { // the fast, the slow and the quoted hire; the retry asks nothing (§12.3)
-		t.Errorf("Admission asked %d times, want 3", n)
+	if n := hook.count(); n != 2 { // the fast and the slow hire
+		t.Errorf("Admission asked %d times, want 2", n)
 	}
 
 	// The booking seller's question, to a client declaring form elicitation.
@@ -455,8 +403,7 @@ func TestGateMCPModern(t *testing.T) {
 // A modern client that closes its response stream before its hire is answered has cancelled the request (2026-07-28
 // Streamable HTTP, "Cancellation"; §11.12 step 4, D178): it gets no answer, and the task it created ends canceled
 // within 10 s, the seller receiving CancelTask, whether it declared the tasks extension (the 2 s inline wait) or not
-// (the plain wait). A quoted task is left quoted (D295: it runs nothing until a person approves it), and the client's
-// re-issued hire answers it with its approve URL.
+// (the plain wait). A hire with an idempotencyKey is not cancelled (D338).
 func TestGateMCPModernClientLeaves(t *testing.T) {
 	e := newGateEnv(t)
 	kinds, paid := newHireSeller(t), newHireSeller(t)
@@ -527,26 +474,8 @@ func TestGateMCPModernClientLeaves(t *testing.T) {
 		t.Fatalf("cancel of the keyed task: %s", ans.raw)
 	}
 
-	// A quoted one, whose client left while Admission decided, is left quoted, and the re-issued hire answers it.
-	hook.set(func(h *hookServer) { h.raw = "" })
-	delay.Store(int64(time.Second))
-	c := newModernClient(t, a.url, key, capsTasks)
-	args := `{"service":"paid","message":"hi","contextId":"quoted"}`
-	id := leave(c, args, 300*time.Millisecond)
-	eventually(t, 10*time.Second, "the task is quoted", func() bool {
-		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id) == "quoted"
-	})
-	time.Sleep(3 * time.Second)
-	delay.Store(0)
-	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id); st != "quoted" {
-		t.Fatalf("the quoted task of a client that left is %s", st)
-	}
-	_, ans := c.call("hire", args)
-	if q := ans.task(t); q.TaskID != id || q.Status != "working" || q.Meta["sh.kontra/approve-url"] != "https://app.kontra.sh/#/t/"+id {
-		t.Errorf("the re-issued hire: %s", ans.raw)
-	}
-	if hook.count() != 4 {
-		t.Errorf("Admission asked %d times, want 4 (the keyed hire's and the quoted hire's re-issues are retries)", hook.count())
+	if hook.count() != 3 {
+		t.Errorf("Admission asked %d times, want 3 (the keyed hire's re-issue is a retry)", hook.count())
 	}
 }
 

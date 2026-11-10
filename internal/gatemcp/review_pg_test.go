@@ -310,8 +310,7 @@ func TestGateSessionInUseOutlivesTheIdleSweep(t *testing.T) {
 	t.Cleanup(func() { mcprelay.IdleWrite = saved })
 	e := newModernEnv(t)
 	sessions := mcprelay.NewSessions(e.pool)
-	el := NewElicitations(store.NewLog(e.pool), noWake{}, slog.New(slog.DiscardHandler))
-	h := &Handler{deps: Deps{PublicURL: "https://gate.example", Sessions: sessions, Elicitations: el, Tasks: e.tasks,
+	h := &Handler{deps: Deps{PublicURL: "https://gate.example", Sessions: sessions, Tasks: e.tasks,
 		Log: store.NewLog(e.pool), Waker: noWake{}, now: time.Now}, log: slog.New(slog.DiscardHandler)}
 	sid, _, err := mcprelay.MintID()
 	if err != nil {

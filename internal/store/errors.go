@@ -43,6 +43,6 @@ var (
 	// told apart (spec §14.1, D66).
 	ErrWorkItemNotFound = errors.New("store: work item not found for this task")
 
-	// ErrWorkItemConsumed is a work item already consumed by an earlier dispatch or review message.
+	// ErrWorkItemConsumed is a work item already consumed by an earlier dispatch.
 	ErrWorkItemConsumed = errors.New("store: work item already consumed")
 )

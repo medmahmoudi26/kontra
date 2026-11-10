@@ -15,16 +15,16 @@ import (
 
 // gate_mcp_search (spec/relay.md §16; §12.2; D271, D293). Multi-tenant: the services are rows (D116), refs are
 // <tenant>/<name>, and the caller is buyer A, an API key of the team tenant default (principal org:default). Seeded:
-// acme/pub (a2a, another tenant's, listed, annotations.search {price, price_model per_call}, §13.4), default/team (a2a, allow org:default), default/open
-// (a2a, allow anonymous only, not listed), default/fs (mcp, its tools cached on replica A by a client's tools/list
+// acme/pub (a2a, another tenant's, listed, with the retired annotations.search {price, price_model}, D351),
+// default/team (a2a, allow org:default), default/open (a2a, allow anonymous only, not listed), default/fs (mcp, its tools cached on replica A by a client's tools/list
 // through the relay), default/cold (mcp, nothing cached), 60 default/page-NN (a2a, one seller) for paging, an anonymous tenant's
 // service that every rule but the anonymous-tenant one would show (listed, allow anonymous, its own org and
 // org:default), and the harness's default/slow. Asserted:
 //
 //   - search with no arguments returns, in ref order and 50 a page, every A2A service but open and the anonymous
 //     tenant's, and no MCP service (D350); the cursor continues with no duplicate and no gap;
-//   - query matches a case-insensitive substring of the ref, the name or the description; price filters by equality
-//     (price=free: no price_model); kind is not an argument (a tool error); every answer is ordered by ref;
+//   - query matches a case-insensitive substring of the ref, the name or the description; kind and price are not
+//     arguments (a tool error naming each, D350, D351), and no service carries a price; every answer is ordered by ref;
 //   - describe of open and of the anonymous tenant's service is the unknown-service error; describe of an A2A ref
 //     answers the served card and the URLs to call it directly;
 //   - describe of fs answers the cached tools with no upstream request during the call; describe of cold answers
@@ -86,8 +86,8 @@ func TestGateMCPSearch(t *testing.T) {
 	sb := s.On(b)
 
 	type found struct {
-		Ref, Kind, Name, Description, Price string
-		Available                           bool
+		Ref, Kind, Name, Description string
+		Available                    bool
 	}
 	search := func(c *GateSession, args string) ([]found, string) {
 		t.Helper()
@@ -96,7 +96,7 @@ func TestGateMCPSearch(t *testing.T) {
 			Services   []found `json:"services"`
 			NextCursor string  `json:"nextCursor"`
 		}
-		if r.IsError || json.Unmarshal(r.StructuredRaw, &sc) != nil {
+		if r.IsError || json.Unmarshal(r.StructuredRaw, &sc) != nil || strings.Contains(string(r.StructuredRaw), `"price`) {
 			t.Fatalf("search %s: %+v", args, r)
 		}
 		if !strings.Contains(r.Text(), `"ref"`) && len(sc.Services) > 0 {
@@ -157,7 +157,7 @@ func TestGateMCPSearch(t *testing.T) {
 			t.Errorf("search: %s is not available (a direct backend)", f.Ref)
 		}
 	}
-	if first[0].Ref != "acme/pub" || first[0].Kind != "a2a" || first[0].Name != "pub" || first[0].Price != "0.05 USD a call" || first[0].Description == "" {
+	if first[0].Ref != "acme/pub" || first[0].Kind != "a2a" || first[0].Name != "pub" || first[0].Description == "" {
 		t.Errorf("search's acme/pub: %+v", first[0])
 	}
 	// Filters.
@@ -169,8 +169,6 @@ func TestGateMCPSearch(t *testing.T) {
 		{`{"query":"page-1"}`, visible[11:21]},
 		{`{"query":"default/fs"}`, nil}, // an MCP service is never returned (D350)
 		{`{"query":"cold"}`, nil},
-		{`{"price":"per_call"}`, []string{"acme/pub"}},
-		{`{"price":"free"}`, visible[1:]},
 	} {
 		if got := all(c.args); !slices.Equal(got, c.want) {
 			t.Errorf("search %s:\n got %v\nwant %v", c.args, got, c.want)
@@ -184,9 +182,11 @@ func TestGateMCPSearch(t *testing.T) {
 		}) {
 		t.Errorf("search {query: every kind}: %v", got)
 	}
-	// kind is not an argument: a tool error naming it, as for any argument search does not take (D350).
-	if r := Tool(t, s.Tool("search", `{"kind":"a2a"}`)); !r.IsError || !strings.Contains(r.Text(), `"kind"`) {
-		t.Errorf("search {kind: a2a}: %+v, want a tool error naming kind", r)
+	// kind and price are not arguments: a tool error naming each, as for any argument search does not take (D350, D351).
+	for _, c := range []struct{ args, name string }{{`{"kind":"a2a"}`, "kind"}, {`{"price":"free"}`, "price"}, {`{"price":"per_call"}`, "price"}} {
+		if r := Tool(t, s.Tool("search", c.args)); !r.IsError || !strings.Contains(r.Text(), `"`+c.name+`"`) {
+			t.Errorf("search %s: %+v, want a tool error naming %s", c.args, r, c.name)
+		}
 	}
 	for _, f := range append(all(`{}`), all(`{"query":"anon"}`)...) {
 		if f == "default/open" || strings.HasPrefix(f, "anon-") {

@@ -20,6 +20,7 @@ import (
 	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcpwire"
+	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/strictjson"
 	"kontra.sh/kontra/internal/upstream"
 )
@@ -889,9 +890,8 @@ func (h *Handler) auditSealed(ctx context.Context, rq *request, tool, reason str
 }
 
 // admit consults Admission for op when hooks.admission.operations lists it (§13.1): a refusal's error as it was
-// given (else -32603 "admission denied"); a quote for a session, a call or a passthrough task is a deny with -32603
-// "MCP services are not priced" (D350); a hook that fails or answers nothing usable is 503 with -32603 "admission
-// unavailable" (it fails closed).
+// given (else -32603 "admission denied"); a hook that fails or answers nothing usable (an outcome but allow or deny
+// included) is 503 with -32603 "admission unavailable" (it fails closed).
 func (h *Handler) admit(rq *request, op hooks.Operation, tool string) *mcpwire.Refusal {
 	return h.admitCtx(rq.ctx(), rq, op, tool)
 }
@@ -906,7 +906,7 @@ func (h *Handler) admitCtx(ctx context.Context, rq *request, op hooks.Operation,
 		Operation: op,
 		Service:   hooks.Service{TenantID: ref.TenantID.String(), Tenant: ref.Tenant, Name: ref.Name, Kind: config.KindMCP},
 		Principal: hooks.Principal{Kind: string(rq.p.Kind), ID: rq.p.ID, BuyerID: rq.p.BuyerID.String(), Via: string(rq.p.Via)},
-		Protocol:  hooks.ProtocolMCP,
+		Protocol:  string(store.ProtocolMCP),
 		Tool:      tool,
 	}
 	if rq.p.TenantID != nil {
@@ -927,8 +927,6 @@ func (h *Handler) admitCtx(ctx context.Context, rq *request, op hooks.Operation,
 	switch d.Outcome {
 	case hooks.Allow:
 		return nil
-	case hooks.Quote:
-		return refusal(http.StatusOK, rq.msg.ID, mcpwire.CodeInternal, hooks.MsgNotPriced)
 	case hooks.Deny:
 		code, msg := mcpwire.CodeInternal, "admission denied"
 		if d.Refusal != nil {

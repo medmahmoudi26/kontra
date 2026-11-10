@@ -16,7 +16,6 @@ import (
 
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/jcs"
-	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/mcpwire"
 	"kontra.sh/kontra/internal/store"
 )
@@ -270,8 +269,8 @@ func TestRender(t *testing.T) {
 	if err := json.Unmarshal(scb, &sc); err != nil {
 		t.Fatal(err)
 	}
-	// D324: the text beside data, and the file parts' links; no url, the task having none.
-	if len(r.StructuredContent) != 6 || sc.TaskID != string(task.ID) || sc.State != "TASK_STATE_COMPLETED" || sc.URL != "" ||
+	// D324: the text beside data, and the file parts' links.
+	if len(r.StructuredContent) != 6 || sc.TaskID != string(task.ID) || sc.State != "TASK_STATE_COMPLETED" ||
 		sc.Text != "here\nartifact text" ||
 		!reflect.DeepEqual(sc.Data, []any{map[string]any{"from": "message"}, map[string]any{"n": 1.0}, []any{"x"}}) ||
 		!reflect.DeepEqual(sc.Files, []FileRef{{URI: "kontra:task/019a0000-0000-7000-8000-000000000001/output.txt", Name: "output.txt", MediaType: "text/plain"},
@@ -285,10 +284,10 @@ func TestRender(t *testing.T) {
 		string(r.StructuredContent["text"]) != `"Hello World"` {
 		t.Errorf("a text-only result: %+v", r)
 	}
-	// A task that went through a quote keeps its thread URL: structuredContent.url (D324).
-	r = renderOf(t, taskWith(a2a.TaskStateCompleted, agentText("Hello World"), map[string]any{lifecycle.MetaApproveURL: "https://app.kontra.sh/#/t/1"}), store.StateCompleted)
-	if string(r.StructuredContent["url"]) != `"https://app.kontra.sh/#/t/1"` || r.Meta != nil {
-		t.Errorf("a quoted task's result: %+v", r)
+	// A task an earlier release quoted keeps kontra.approve.url in its metadata: the result shows no url (D351).
+	r = renderOf(t, taskWith(a2a.TaskStateCompleted, agentText("Hello World"), map[string]any{"kontra.approve.url": "https://app.kontra.sh/#/t/1"}), store.StateCompleted)
+	if _, ok := r.StructuredContent["url"]; ok || r.Meta != nil {
+		t.Errorf("an earlier release's quoted task's result: %+v", r)
 	}
 
 	for _, tc := range []struct {
@@ -302,8 +301,9 @@ func TestRender(t *testing.T) {
 	}{
 		{store.StateFailed, a2a.TaskStateFailed, map[string]any{store.MetaFailure: "timeout"}, agentText("the task timed out"), MetaFailure, "timeout", "the task timed out"},
 		{store.StateFailed, a2a.TaskStateFailed, map[string]any{store.MetaFailure: "upstream_error"}, nil, MetaFailure, "upstream_error", "the service returned an error"},
-		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "declined"}, agentText("the quote was declined"), MetaCanceled, "declined", "the quote was declined"},
-		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "quote_expired"}, nil, MetaCanceled, "quote_expired", "the quote expired before it was approved: the task was canceled and nothing was charged"},
+		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "client"}, nil, MetaCanceled, "client", "the task was canceled"},
+		// A row an earlier release canceled for its quote (D351) keeps its reason in _meta, and reads as any cancel.
+		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "quote_expired"}, nil, MetaCanceled, "quote_expired", "the task was canceled"},
 		// §12.2: a rejected hire task has sh.kontra/failure too (M4 WP-04 review): "rejected".
 		{store.StateRejected, a2a.TaskStateRejected, nil, agentText("no"), MetaFailure, "rejected", "no"},
 		{store.StateRejected, a2a.TaskStateRejected, nil, nil, MetaFailure, "rejected", "the task was rejected"},
@@ -346,16 +346,10 @@ func TestQuestion(t *testing.T) {
 	}
 }
 
-// view (§5.1, D21, §12.4): quoted is working with the approve URL; input-required follows Question, with
-// sh.kontra/input-required when it is shown working.
+// view (§5.1, §12.4): input-required follows Question, with sh.kontra/input-required when it is shown working.
 func TestView(t *testing.T) {
-	row := &store.TaskRow{ID: uuid.Must(uuid.NewV7()), State: store.StateQuoted,
-		Snapshot: taskWith(a2a.TaskStateInputRequired, nil, map[string]any{lifecycle.MetaApproveURL: "https://app.kontra.sh/#/t/x"})}
-	v := view(row, Reader{FormElicitation: true})
-	if v.status != "working" || v.statusMessage != "https://app.kontra.sh/#/t/x" || v.meta[MetaApproveURL] != "https://app.kontra.sh/#/t/x" {
-		t.Errorf("quoted: %+v", v)
-	}
-	row.State, row.Snapshot = store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil)
+	row := &store.TaskRow{ID: uuid.Must(uuid.NewV7()), State: store.StateInputRequired,
+		Snapshot: taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil)}
 	if v := view(row, Reader{FormElicitation: true}); v.status != "input_required" || v.statusMessage != "Which date?" || v.meta != nil {
 		t.Errorf("input-required, form: %+v", v)
 	}
@@ -432,15 +426,15 @@ func TestParseMessage(t *testing.T) {
 // The tools' arguments are read against their schemas: unknown members, wrong types and refs that do not match the
 // pattern are invalid-arguments errors (a tool execution error, never a protocol error).
 func TestArguments(t *testing.T) {
-	if a, err := parseSearchArgs(json.RawMessage(`{"query":"Hello","price":"free","cursor":"x"}`)); err != nil ||
-		a.Query != "Hello" || a.Price != "free" {
+	if a, err := parseSearchArgs(json.RawMessage(`{"query":"Hello","cursor":"x"}`)); err != nil ||
+		a.Query != "Hello" || a.Cursor != "x" {
 		t.Errorf("search: %+v %v", a, err)
 	}
 	if _, err := parseSearchArgs(nil); err != nil {
 		t.Errorf("search without arguments: %v", err)
 	}
-	// kind is not an argument: search returns A2A agents only (D350).
-	for _, bad := range []string{`{"kind":"a2a"}`, `{"kind":"x"}`, `{"query":1}`, `{"other":1}`, `{"query":"` + strings.Repeat("q", 257) + `"}`} {
+	// kind is not an argument: search returns A2A agents only (D350); nor is price: listings carry none (D351).
+	for _, bad := range []string{`{"kind":"a2a"}`, `{"kind":"x"}`, `{"price":"free"}`, `{"query":1}`, `{"other":1}`, `{"query":"` + strings.Repeat("q", 257) + `"}`} {
 		var ae *argError
 		if _, err := parseSearchArgs(json.RawMessage(bad)); !errors.As(err, &ae) {
 			t.Errorf("search %s: %v", bad, err)
@@ -462,22 +456,22 @@ func TestArguments(t *testing.T) {
 	}
 }
 
-// The client capabilities that decide -32042 and §12.4's form (MCP 2025-11-25: an empty elicitation object is form).
+// The client capabilities that decide §12.4's form (MCP 2025-11-25: an empty elicitation object is form).
 func TestElicitationCapabilities(t *testing.T) {
 	for _, tc := range []struct {
-		caps      string
-		form, url bool
+		caps string
+		form bool
 	}{
-		{`{}`, false, false},
-		{`{"elicitation":{}}`, true, false},
-		{`{"elicitation":{"form":{}}}`, true, false},
-		{`{"elicitation":{"url":{}}}`, false, true},
-		{`{"elicitation":{"form":{},"url":{}}}`, true, true},
-		{`{"elicitation":true}`, false, false},
-		{`{"elicitation":{"url":{},"URL":{}}}`, false, false},
+		{`{}`, false},
+		{`{"elicitation":{}}`, true},
+		{`{"elicitation":{"form":{}}}`, true},
+		{`{"elicitation":{"url":{}}}`, false},
+		{`{"elicitation":{"form":{},"url":{}}}`, true},
+		{`{"elicitation":true}`, false},
+		{`{"elicitation":{"url":{},"URL":{}}}`, false},
 	} {
-		if f, u := declaresForm(json.RawMessage(tc.caps)), declaresURL(json.RawMessage(tc.caps)); f != tc.form || u != tc.url {
-			t.Errorf("%s: form %v url %v, want %v %v", tc.caps, f, u, tc.form, tc.url)
+		if f := declaresForm(json.RawMessage(tc.caps)); f != tc.form {
+			t.Errorf("%s: form %v, want %v", tc.caps, f, tc.form)
 		}
 	}
 }

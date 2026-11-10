@@ -124,7 +124,6 @@ type envOptions struct {
 	push     a2apush.ConfigStore
 	opts     ExecutorOptions
 	canceler Canceller
-	reviews  ReviewMessenger
 	admit    hooks.Admission
 	rules    hooks.KeyRules
 	policy   ssrf.Policy
@@ -156,7 +155,7 @@ func newEnv(t *testing.T, o envOptions) *env {
 	e.queue = &fakeQueue{e: e, done: make(chan dispatchDone, 64)}
 	e.render = blob.NewRenderer(o.bucket, e.pool, nil)
 	o.opts.Bucket, o.opts.Render = o.bucket, e.render
-	e.intc = &Interceptors{Svc: e.svc, Log: e.log, Rules: o.rules, Admit: o.admit, Canceler: o.canceler, Reviews: o.reviews,
+	e.intc = &Interceptors{Svc: e.svc, Log: e.log, Rules: o.rules, Admit: o.admit, Canceler: o.canceler,
 		PushPolicy: o.policy, Bucket: o.bucket, Render: e.render}
 	e.handlers = NewHandlers(HandlerDeps{
 		Log: e.log, Puller: store.NewPullerProvider(e.log, listener), PushStore: o.push,

@@ -74,7 +74,6 @@ func (r Ref) String() string {
 // SearchArgs are search's arguments (mcp-tools.json#/$defs/search).
 type SearchArgs struct {
 	Query  string `json:"query,omitempty"`
-	Price  string `json:"price,omitempty"` // equality on the price_model annotation; "free": none (D271)
 	Cursor string `json:"cursor,omitempty"`
 }
 
@@ -84,8 +83,7 @@ type ServiceEntry struct {
 	Kind        string `json:"kind"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	Available   bool   `json:"available"`       // a connected session of a live replica, or a direct backend
-	Price       string `json:"price,omitempty"` // the operator's search.price annotation, verbatim (§13.4)
+	Available   bool   `json:"available"` // a connected session of a live replica, or a direct backend
 }
 
 // SearchResult is search's structuredContent (also sent as a text block).
@@ -193,9 +191,7 @@ type ReplyArgs struct {
 
 // HireResult is the structuredContent of every CallToolResult a hire or a reply answers, and of a hire task's
 // tasks/result (and a modern tasks/get's result): what a person needs, since a client may show its model and its user
-// nothing else (§12.2; D289, D324). taskId and state (the A2A state) always; url, the task's thread on the operator's
-// page (its approve URL, kontra.approve.url, exactly as the URL elicitation carries it), whenever the task has one;
-// quote, the quote's terms, while the task is quoted; text, the text the content's text blocks carry (the agent's
+// nothing else (§12.2; D289, D324, D351). taskId and state (the A2A state) always; text, the text the content's text blocks carry (the agent's
 // answer, its question, or what the gate says of the task), each of its parts bounded as the content's is (§10.4);
 // data, the values of the rendered data parts in order, message first, then each artifact's; files, the file parts'
 // links. The hire and reply tools declare it as their outputSchema (schemaHireResult).
@@ -205,19 +201,10 @@ type HireResult struct {
 	// ContextID is the task's A2A context: a hire with it continues the conversation as a new task (§4, §7, D336).
 	ContextID string `json:"contextId,omitempty"`
 	// Service is the task's service ref, what a hire that continues the conversation names (D336).
-	Service string      `json:"service,omitempty"`
-	URL     string      `json:"url,omitempty"`
-	Quote   *QuoteTerms `json:"quote,omitempty"`
-	Text    string      `json:"text,omitempty"`
-	Data    []any       `json:"data,omitempty"`
-	Files   []FileRef   `json:"files,omitempty"`
-}
-
-// QuoteTerms are a quoted task's terms as a HireResult shows them: the approve URL and the quote's expiry (RFC 3339,
-// UTC), hooks.json's QuoteTerms.
-type QuoteTerms struct {
-	ApproveURL string `json:"approveUrl"`
-	ExpiresAt  string `json:"expiresAt"`
+	Service string    `json:"service,omitempty"`
+	Text    string    `json:"text,omitempty"`
+	Data    []any     `json:"data,omitempty"`
+	Files   []FileRef `json:"files,omitempty"`
 }
 
 // FileRef is a rendered file part as a HireResult names it: the URI of its content block (an embedded resource's
@@ -239,7 +226,7 @@ const (
 	schemaMessage = `{"oneOf":[{"type":"string","minLength":1},{"type":"object","required":["parts"],"additionalProperties":false,` +
 		`"properties":{"parts":{"type":"array","minItems":1,"items":` + schemaPart + `}}}]}`
 	schemaSearch = `{"type":"object","additionalProperties":false,"properties":{"query":{"type":"string","maxLength":256},` +
-		`"price":{"type":"string","maxLength":32},"cursor":{"type":"string"}}}`
+		`"cursor":{"type":"string"}}}`
 	schemaDescribe = `{"type":"object","required":["service"],"additionalProperties":false,` +
 		`"properties":{"service":{"type":"string","pattern":"^([a-z0-9-]+/)?[a-z0-9-]+$"}}}`
 	schemaHire = `{"type":"object","required":["service","message"],"additionalProperties":false,` +
@@ -273,15 +260,11 @@ const (
 // read alike and names no $schema, since a client's validator may default to either (D324).
 const schemaHireResult = `{"type":"object","description":"A hire task as hire, reply, status and cancel answer it: taskId and ` +
 	`state always; contextId and service, which a hire that continues the conversation names; ` +
-	`url, the task's page on the operator's site, whenever the task has one; quote while a person must approve it there; ` +
 	`text, the agent's answer or question or what the gate says of the task; data and files from the agent's parts.",` +
 	`"required":["taskId","state"],"additionalProperties":false,"properties":{` +
 	`"taskId":{"type":"string","format":"uuid"},` +
 	`"state":` + schemaState + `,` +
 	`"contextId":{"type":"string"},"service":{"type":"string"},` +
-	`"url":{"type":"string","pattern":"^https://"},` +
-	`"quote":{"type":"object","required":["approveUrl","expiresAt"],"additionalProperties":false,` +
-	`"properties":{"approveUrl":{"type":"string","pattern":"^https://"},"expiresAt":{"type":"string","format":"date-time"}}},` +
 	`"text":{"type":"string"},` +
 	`"data":{"type":"array","minItems":1},` +
 	`"files":` + schemaFiles + `}}`
@@ -308,9 +291,6 @@ const (
 		`given the task's events after it (more when the answer was cut) and the cursor to ask from next.",` +
 		`"required":["taskId","state","cursor"],"additionalProperties":false,"properties":{` +
 		`"taskId":{"type":"string","format":"uuid"},"state":` + schemaState + `,"contextId":{"type":"string"},"service":{"type":"string"},` +
-		`"url":{"type":"string","pattern":"^https://"},` +
-		`"quote":{"type":"object","required":["approveUrl","expiresAt"],"additionalProperties":false,` +
-		`"properties":{"approveUrl":{"type":"string","pattern":"^https://"},"expiresAt":{"type":"string","format":"date-time"}}},` +
 		`"text":{"type":"string"},"data":{"type":"array","minItems":1},"files":` + schemaFiles + `,` +
 		`"events":{"type":"array","items":` + schemaEvent + `},"cursor":{"type":"integer","minimum":0},"more":{"type":"boolean"}}}`
 	// schemaTasksResult is tasks's structuredContent (mcp-tools.json#/$defs/tasksResult).
@@ -370,8 +350,7 @@ var tools = []tool{
 	{Name: ToolHire, Title: "Hire an agent",
 		Description: "Send a message to an A2A agent as a new task and answer its result, or its state after 25 s. " +
 			"Pass idempotencyKey to retry safely: the same key answers the same task. To continue a conversation, hire again " +
-			"with the contextId and service of an earlier result. Follow a running task with status. A priced task asks a " +
-			"person to approve its quote first, at the URL given.",
+			"with the contextId and service of an earlier result. Follow a running task with status.",
 		InputSchema: json.RawMessage(schemaHire), OutputSchema: json.RawMessage(schemaHireResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
 	{Name: ToolReply, Title: "Reply to a task",
@@ -499,15 +478,14 @@ var refPattern = regexp.MustCompile(`^([a-z0-9-]+/)?[a-z0-9-]+$`)
 
 // parseSearchArgs reads search's arguments against its schema.
 func parseSearchArgs(args json.RawMessage) (SearchArgs, error) {
-	m, err := members(args, "query", "price", "cursor") // no kind: search returns A2A agents only (D350)
+	// No kind (search returns A2A agents only, D350) and no price (listings carry none, D351): either is an unknown
+	// argument.
+	m, err := members(args, "query", "cursor")
 	if err != nil {
 		return SearchArgs{}, err
 	}
 	var a SearchArgs
 	if a.Query, _, err = stringArg(m, "query", 256); err != nil {
-		return a, err
-	}
-	if a.Price, _, err = stringArg(m, "price", 32); err != nil {
 		return a, err
 	}
 	if a.Cursor, _, err = stringArg(m, "cursor", 0); err != nil {
@@ -672,11 +650,11 @@ func parseTasksArgs(args json.RawMessage) (TasksArgs, error) {
 	return a, nil
 }
 
-// statesOf is the tasks rows' states the tasks tool's state argument selects: every state whose A2A state it is (a
-// quoted task is input-required on the wire, §5.1), the states that have not ended (active) or have (ended); nil for
+// statesOf is the tasks rows' states the tasks tool's state argument selects: every state whose A2A state it is, the
+// states that have not ended (active) or have (ended); nil for
 // anything else.
 func statesOf(s string) []store.State {
-	all := []store.State{store.StateQuoted, store.StateSubmitted, store.StateWorking, store.StateAuthRequired,
+	all := []store.State{store.StateSubmitted, store.StateWorking, store.StateAuthRequired,
 		store.StateInputRequired, store.StateCompleted, store.StateFailed, store.StateCanceled, store.StateRejected}
 	var out []store.State
 	for _, st := range all {

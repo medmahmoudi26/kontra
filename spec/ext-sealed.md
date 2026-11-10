@@ -46,7 +46,7 @@ under `capabilities.experimental["sh.kontra/sealed"]` (D27). It is not signed: a
 
 **A2A.** The content of every `Part` in messages and artifacts, both directions: the one field of `text`, `raw`,
 `url` or `data` that the part carries. Not sealed: task states, task and context ids, message and artifact ids,
-`metadata` (the lifecycle and escrow read it), a part's `filename` (PRD §8: the name stays outside; do not put
+`metadata` (the lifecycle and the operator read it), a part's `filename` (PRD §8: the name stays outside; do not put
 secrets in it). An artifact's `name` and `description` are not sealed either: on a sealed job the hosting node
 drops them, so they are not relayed at all (D220).
 
@@ -270,8 +270,9 @@ For each sealed part of an inbound message it decrypts with its identity keys, t
 
 1. `dir: "req"` and the message's parts exactly `0..parts-1`, each once (`bad_header`); its own key id in `kids`
    (`not_a_recipient`); `iat ≤ now + 300 s` and `now − iat ≤ max_age` (`replayed`), where `max_age` is
-   `--sealed-max-age`, default 25 h, which must cover the operator's longest quote expiry plus `task.timeout` (a
-   paid task waits for a person before it is dispatched); and `service` is the hosted service the preamble names,
+   `--sealed-max-age`, default 25 h, which must cover the longest a sealed message can wait at the gate before it
+   is dispatched (a follow-up held through a reconnect wait, at most `task.reattach_grace`, [`relay.md`](relay.md)
+   §6.4, §7; before D351 it also covered a quote's expiry); and `service` is the hosted service the preamble names,
    as the gate's URL path names it, which the node reads from its `welcome` (the service's `url`, and `tenant`,
    [`tunnel.md`](tunnel.md) §4): a header that names another service, or none, was sealed for another service's
    job (`wrong_job`, D221). This holds for every sealed request: a message's parts, a `tools/call`, an answer.

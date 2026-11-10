@@ -61,15 +61,11 @@ func DecodePageToken(tok string) (time.Time, uuid.UUID, error) {
 	return at, id, nil
 }
 
-// listStates is the tasks.state values a ListTasks status filter matches: the A2A state, and quoted for
-// input-required (a quoted task shows as input-required on A2A, spec §5.1).
+// listStates is the tasks.state values a ListTasks status filter matches: the A2A state's (spec §5.1).
 func listStates(ts a2a.TaskState) ([]string, error) {
 	st, err := StateFromA2A(ts)
 	if err != nil {
 		return nil, fmt.Errorf("store: status filter %q: %w", ts, a2a.ErrInvalidParams)
-	}
-	if st == StateInputRequired {
-		return []string{string(StateInputRequired), string(StateQuoted)}, nil
 	}
 	return []string{string(st)}, nil
 }

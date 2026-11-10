@@ -289,7 +289,7 @@ README/#59: `_meta["kontra.price"]`, `_meta["kontra.escrow"]`. Legal (an unprefi
 unprefixed space for its own keys and asks third parties for a reverse-DNS prefix. Decision:
 `sh.kontra/price`, `sh.kontra/escrow`, `sh.kontra/approve-url`, `sh.kontra/sealed` (the sealed capability
 under `capabilities.experimental`, since 2025-11-25 has no `extensions`). A2A metadata keys stay
-`kontra.*` as the PRD has them ([`ext-escrow.md`](../spec/ext-escrow.md) §6, [`ext-sealed.md`](../spec/ext-sealed.md) §1).
+`kontra.*` as the PRD has them (`ext-escrow.md` (withdrawn, D351) §6, [`ext-sealed.md`](../spec/ext-sealed.md) §1).
 
 ## Schema and tooling
 
@@ -408,7 +408,7 @@ PRD §5/§9: activating the escrow URI on `SendMessage` is the buyer's consent t
 later): an MCP or API-key session never approves a quote. Decision: the README rule, written into the
 extension spec — a task from an API key or an MCP session is always `quoted` until a person accepts on the
 operator's page, and (D45) every paid task, a person's included, is `quoted` first and held on acceptance
-([`ext-escrow.md`](../spec/ext-escrow.md) §1, §2). Consequence for A2A buyer agents: a paid task always
+(`ext-escrow.md` (withdrawn, D351) §1, §2). Consequence for A2A buyer agents: a paid task always
 waits for a person once.
 
 ### D39. A service's owner may see the tasks of its own services — **accepted by the owner, 25 Oct** (refines PRD §12)
@@ -483,7 +483,7 @@ that stops between the answer and the task row leaves a charge with no task and 
 Decision: Admission only decides; money moves on approval (the operator places the hold, then sends
 `kontra.approval`, refunding if the Update is refused) and in the Lifecycle hooks. A person hiring from the
 operator's page accepts in the same gesture ([`relay.md`](../spec/relay.md) §13.1–§13.2,
-[`ext-escrow.md`](../spec/ext-escrow.md) §2).
+`ext-escrow.md` (withdrawn, D351) §2).
 
 ### D46. Gate workers are unversioned; workflow changes are patched and replay-tested
 
@@ -671,7 +671,7 @@ to PRD §7's set ([`relay.md`](../spec/relay.md) §6.4, §14.5).
 
 PRD §9: `held`, `released`, `refunded`, `disputed`. Cloud already settles a dispute by a split between the parties
 (its ledger's `resolved`) and handles card chargebacks after release. Decision: `kontra.escrow.status` may be
-`resolved`, and a receipt's event may be `resolved` or `chargeback` ([`ext-escrow.md`](../spec/ext-escrow.md) §3).
+`resolved`, and a receipt's event may be `resolved` or `chargeback` (`ext-escrow.md` (withdrawn, D351) §3).
 
 ### D65. The MCP relay also accepts 2025-06-18, and refuses batches — **accepted by the owner, 25 Oct** (the goal says 2025-11-25 only)
 
@@ -4087,7 +4087,7 @@ activates them in `A2A-Extensions`; the required-sealed answer is the precedent.
 (§12.4) goes through `reply`'s path and is dropped the same way.
 
 Consequence, for the owner: Cloud's `per_task` services carry the escrow entry with `required: true`
-([`ext-escrow.md`](../spec/ext-escrow.md) §1), so they cannot be hired through `/mcp`: §12.3's quote flow on `/mcp` then
+(`ext-escrow.md` (withdrawn, D351) §1), so they cannot be hired through `/mcp`: §12.3's quote flow on `/mcp` then
 serves a quoting Admission on services without a required extension (a team gate's, or Cloud's if its escrow entry is
 not required). Proposal, not built: `hire` and `reply` take an optional `extensions: [uri]` argument that activates
 URIs as `A2A-Extensions` does (ignored unless declared, passed to Admission and the upstream as the A2A route passes
@@ -4456,7 +4456,7 @@ Decision:
 
 ## From M5's plan audit (31 Oct)
 
-### D300. `hire` activates the operator's required extensions for the buyer, and refuses only those it cannot carry — **decided under the owner's standing instruction, 31 Oct** (amends D294; carries out [`ext-escrow.md`](../spec/ext-escrow.md) §1 on `/mcp`)
+### D300. `hire` activates the operator's required extensions for the buyer, and refuses only those it cannot carry — **decided under the owner's standing instruction, 31 Oct** (amends D294; carries out `ext-escrow.md` (withdrawn, D351) §1 on `/mcp`)
 
 M5's plan audit (28 Oct) found that D294 refuses, before Admission, every `/mcp` `hire` of a service whose served card
 marks an extension `required: true`. ext-escrow §1 makes Cloud's escrow entry `required: true`, so every Cloud
@@ -5102,7 +5102,7 @@ bytes that are not UTF-8, both forks refused, `PUBLIC` without `EXECUTE`, `SECUR
 ### D318. A served card's required extensions are required of messages, not of a task's own methods — **decided under the owner's standing instruction, 1 Nov** (amends D9; completes D300)
 
 Cloud's `make e2e` at its PR-3 (its D-M5-90) saw the pinned gate refuse every A2A request to a `per_task` service that
-did not activate the escrow entry, `GetTask` included, not only the `SendMessage` [`ext-escrow.md`](../spec/ext-escrow.md)
+did not activate the escrow entry, `GetTask` included, not only the `SendMessage` `ext-escrow.md` (withdrawn, D351)
 §1 names: `a2ahttp.Extensions` ran on every A2A route. The question: per A2A 1.0's extension activation and
 [`relay.md`](../spec/relay.md), should `GetTask`, `CancelTask` and `SubscribeToTask` of a task that exists require it?
 
@@ -5176,7 +5176,7 @@ kontra#5 (Cloud's PR-2b): `kontra.escrow.receipts` entries are `{event, rail, re
 `["stripe"]` and `ref` "the rail's object id", so a development gate's play-money hold (no card network object) has no
 valid rail, and a `disputed` receipt, a message on the task, has no rail object for its `ref`. Its proposal: let
 `rail` be an operator's rail name, at least `ledger`, and define `ref` per event. Decision
-([`ext-escrow.md`](../spec/ext-escrow.md) §1, §3; `ext-escrow.params.json`, `ext-escrow.metadata.json`):
+(`ext-escrow.md` (withdrawn, D351) §1, §3; `ext-escrow.params.json`, `ext-escrow.metadata.json`):
 
 - **A rail is a name** `^[a-z][a-z0-9_-]{0,31}$`, in the card's `rails` and in each receipt: `stripe` (a card payment
   through Stripe), `ledger` (a hold in the operator's own ledger with no payment-network object), or the operator's
@@ -5233,7 +5233,7 @@ kontra#6 (Cloud's PR-3, its C42): `hooks.admission.operations` is gate-wide. Wit
 may be called plainly, so a per-task price is skipped by any client that does not augment its calls; with `call` added,
 every call of every service, free ones included, waits on the hook. Its two proposals: a per-service Admission setting
 for `call`, or a `tasks: required` mode. Decision, the second ([`relay.md`](../spec/relay.md) §11.5, §11.12, §13.1, §17;
-`config.json`; migration `0004_m5.sql`; [`ext-escrow.md`](../spec/ext-escrow.md) §6):
+`config.json`; migration `0004_m5.sql`; `ext-escrow.md` (withdrawn, D351) §6):
 
 - **`required` is `durable` that refuses a plain call.** The gate owns the service's tasks as for `durable` (§11.5,
   §11.6; `capabilities.tasks` as the upstream declares, plus `list` and `cancel`). On 2025-11-25, `tools/list` leaves
@@ -6120,3 +6120,68 @@ What stays: hosting MCP servers through the tunnel (`--serve mcp:…`, stdio, ro
 `sh.kontra/` keys. `tasks: required` (D322) stays as a hosting mode: its pricing reason is gone, but an operator can
 still want every call durable, and removing it would need a migration for no gain. An MCP service is free and private
 to its tenant or team gate, like an unlisted A2A service. No migration: no table holds a price.
+
+## The owner's decision of 9 Nov: no escrow; AP2 is the author's
+
+### D351. Kontra runs no payment: escrow is withdrawn, and a seller that wants to be paid configures AP2 itself — **decided by the owner, 9 Nov** (follows D350; supersedes the escrow extension, quotes, the review window and listing prices)
+
+Kontra is a framework of secure tunnels over the agent protocols A2A, A2UI and AP2, not a payment processor. Escrow
+(quotes, a person's approval, holds, a review window, disputes, listing prices) made the gate carry a money workflow
+that only Kontra Cloud filled, and it duplicates what AP2 v0.2.0 (github.com/google-agentic-commerce/ap2, released
+28 Apr 2026) now standardises between a shopper and a merchant. It is withdrawn whole (OpenSpec change
+`remove-escrow-adopt-ap2`; Cloud's side is kontra-cloud#110):
+
+- **No escrow extension.** `spec/ext-escrow.md` and `spec/schema/ext-escrow.*` are deleted. A card that still carries
+  `https://kontra.sh/ext/escrow/v1` is relayed as an extension the gate does not own (D326).
+- **Admission is `allow` or `deny`** ([`relay.md`](../spec/relay.md) §13.1). `quote` leaves `hooks.json`; a hook that
+  still answers it fails exact parsing and is `admission unavailable` (`-32603`, HTTP `503`), as any invalid decision
+  (D284). There is no `quoted` state, `kontra.approval`, approve URL (`kontra.approve.url`, `sh.kontra/approve-url`),
+  quote expiry, nor `declined` / `quote_expired` cancel reason.
+- **No review window** (§13.3). `ReviewWindow`, `OnReviewMessage`, `OnReviewClosed`, `kontra.review_message`,
+  `kontra.close` and `Patch.holdOpenSeconds` are removed; a message to an ended task is `UnsupportedOperationError`
+  (§7). `OnDispatched`, `OnTerminal`, `kontra.annotate` and `operator_metadata_prefixes` stay: they serve audit,
+  notification and usage, not money. §13.2 is withdrawn; its key and size rules are §13.1's.
+- **The `ReviewWindow` call is retired under a version** (§13.3, §14.4; precedent D348). 43 of the 45 recorded
+  histories schedule `kontra.lifecycle.ReviewWindow` after `OnTerminal`. `terminalHooks` takes a new
+  `workflow.GetVersion` change id: the default version still schedules it once and ends whatever it answers; version
+  1 does not. The built-in `ReviewWindow` stays registered (answering `{open: false}`) so recorded histories and runs
+  in flight across the upgrade complete; an operator's remote lifecycle queue needs a `ReviewWindow` worker only for
+  runs started before the upgrade. The approval and review-message Updates and the close signal are removed
+  outright: no recorded history carries them, and they act only on input that can no longer arrive.
+- **The schema stays for a release.** No migration in this change: `quoted` in the state check, `quote_expires_at`
+  and the elicitation columns stay, unused; the store no longer reads or writes them. Dropping them in the same
+  release would break a replica of the previous release during a rolling update; a later `0006` drops them. The
+  orphan sweep still ends a leftover `quoted` row older than 2 minutes `failed: lifecycle_unavailable` (§14.5).
+- **`caller_metadata` and `kontra.keyRetainUntil` are removed.** `caller_metadata`'s only use was escrow's dispute
+  key; every `kontra.` caller key but `kontra.sealed` and `kontra.sealed.replyTo` is stripped (§2.5), and the
+  configuration refuses `caller_metadata` as an unknown key (Cloud pins the gate, and drops it from its `kontra.yaml`
+  when it moves the pin). A node deletes a job key at terminal, ignoring a `kontra.keyRetainUntil` an earlier release
+  wrote ([`tunnel.md`](../spec/tunnel.md) §2.3); the operator may no longer write that key outside its prefixes.
+- **`/mcp`** (§12.2, §12.3, §12.5). `hire` loses quote handling, URL elicitation (`-32042`,
+  `notifications/elicitation/complete`, the elicitation claim) and the quoted-hire retry; a client that must not
+  create a task twice sends `idempotencyKey` (D338). The hire result loses `url` (its only source was the approve URL)
+  and `quote`. `search` loses `price`, as an argument (a tool error naming it, like `kind`, D350) and as a result
+  member; `annotations.search.price` and `price_model` are no longer read. Form elicitation for `input-required`
+  (§12.4) is unchanged. The test `gate_mcp_hire_quote` is withdrawn; its Admission-down and malformed-decision
+  assertions move to `gate_mcp_hire`.
+- **Listings carry no price** ([`tunnel.md`](../spec/tunnel.md) §6.4). `price` leaves the listing file;
+  `taskTimeoutSeconds` (1 to 604800, default 3600) moves to its top level. A listing is `service`, `visibility`,
+  `sealed`, `published` and `taskTimeoutSeconds`; `kontra publish` prints no price.
+- **AP2 is the author's, and the gate relays it untouched** (§2.6). A seller that wants to be paid declares
+  `https://github.com/google-agentic-commerce/ap2/v1` in its own card and plays its AP2 roles (Shopping Agent,
+  Credential Provider, Merchant, Merchant Payment Processor, Trusted Surface) itself or through parties it chooses.
+  Checkout and Payment Mandates are SD-JWT verifiable credentials, versioned by `vct`, carried as data parts. The
+  gate serves the card entry as written, forwards the activation, relays the parts equal under JCS, sealed or not,
+  and requires, verifies, signs, indexes and stores (apart from the task log) nothing of AP2's. It keys on the URI
+  only: AP2 leaves A2A carriage to the commerce protocol, and its Python and Go samples name their data parts
+  differently, so no spec of Kontra's lists a data-part key. There is no `spec/ext-ap2.md`: Kontra defines nothing on
+  top of AP2. `/mcp` `hire` cannot carry it (D328): a seller that requires AP2 is refused with its A2A URL (D294).
+  `examples/sellers/ap2-merchant` is a v0.2.0 merchant, run by the test `ap2_passthrough` (§16).
+
+Superseded: D21, D38, D41's approval and dispute Updates, D45, D51's escrow keys (its rule that Kontra's keys are the
+gate's and the operator's stands), D64, D106, D109, D110, D169, D188, D273, D288, D290's quoted half, D295's quoted
+parts, D320, D324's `quote` and `url`, and D350's rule that a quote for an MCP task is a deny. D115 keeps one
+caller-chosen identifier in history, the `contextId`. **D300 stays**, with a neutral reason: a required entry of the
+operator's `card_extensions` is the operator's, carried by its own Admission rather than by the seller, so `hire`
+activates it for the buyer; nothing about it was escrow's but its first use. Unchanged: tunnels, sealing, MCP hosting,
+`calls` metering, Admission as access control, keyed `hire` (D338). No table holds a price.

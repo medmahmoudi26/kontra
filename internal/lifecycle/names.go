@@ -41,16 +41,13 @@ func WorkflowID(taskID a2a.TaskID) string { return "task-" + string(taskID) }
 
 // Updates (refusable synchronously, D41) and signals (fire and forget), spec §14.1.
 const (
-	UpdateMessage       = "kontra.message"
-	UpdateCancel        = "kontra.cancel"
-	UpdateApproval      = "kontra.approval"
-	UpdateReviewMessage = "kontra.review_message"
-	UpdateAnnotate      = "kontra.annotate"
+	UpdateMessage  = "kontra.message"
+	UpdateCancel   = "kontra.cancel"
+	UpdateAnnotate = "kontra.annotate"
 
 	SignalDispatched    = "kontra.dispatched"
 	SignalPush          = "kontra.push"
 	SignalInputResponse = "kontra.input_response"
-	SignalClose         = "kontra.close"
 	SignalReconnected   = "kontra.reconnected"
 )
 
@@ -68,22 +65,18 @@ const (
 	ActPushWebhook     = "push_webhook"
 
 	// Lifecycle-queue activities the §14.2 table does not list, each the I/O of a step the spec names:
-	// task_ref builds the hooks' TaskRef from Postgres (§13.3), submit is the approval handler's submitted
-	// write that returns the deadline (§13.2, §14.1), and append_review_message is kontra.review_message's
-	// append that consumes the work item in the same transaction (§14.1, D66).
-	ActTaskRef             = "task_ref"
-	ActSubmit              = "submit"
-	ActAppendReviewMessage = "append_review_message"
+	// task_ref builds the hooks' TaskRef from Postgres (§13.3).
+	ActTaskRef = "task_ref"
 	// reconnect_wait logs the waiting status of a reconnect wait, and reattach_session looks for the session of the
 	// attempt's node to resume on (§6.4's reconnect wait, D341, D342).
 	ActReconnectWait   = "reconnect_wait"
 	ActReattachSession = "reattach_session"
 
-	HookOnDispatched    = "kontra.lifecycle.OnDispatched"
-	HookOnTerminal      = "kontra.lifecycle.OnTerminal"
-	HookReviewWindow    = "kontra.lifecycle.ReviewWindow"
-	HookOnReviewMessage = "kontra.lifecycle.OnReviewMessage"
-	HookOnReviewClosed  = "kontra.lifecycle.OnReviewClosed"
+	HookOnDispatched = "kontra.lifecycle.OnDispatched"
+	HookOnTerminal   = "kontra.lifecycle.OnTerminal"
+	// HookReviewWindow is the retired review-window hook (D351): only a run recorded before
+	// changeNoReviewWindow schedules it, once after OnTerminal; the built-in stays registered for such runs.
+	HookReviewWindow = "kontra.lifecycle.ReviewWindow"
 )
 
 // MaxTurns caps the turns of one task (each is about 11 history events; Temporal allows 2,000 Updates per
@@ -111,8 +104,7 @@ const (
 
 // Application error types the workflow, its Update handlers and its activities use; Client maps them back.
 const (
-	// ErrTypeRefused is a validator's refusal of kontra.message, kontra.review_message, kontra.approval or
-	// kontra.annotate: the caller gets UnsupportedOperationError (spec §7).
+	// ErrTypeRefused is a validator's refusal of kontra.message or kontra.annotate: the caller gets UnsupportedOperationError (spec §7).
 	ErrTypeRefused = "Refused"
 	// ErrTypeBehind is kontra.message refused because a turn is running whose end the workflow has not
 	// processed yet, while the caller has read a later turn end in the log than the last follow-up the
@@ -132,7 +124,4 @@ const (
 	// ErrTypePatchRefused is apply_metadata refusing a patch over 16 KiB or with a key outside the §13.2
 	// rules: the patch is dropped (spec §13.3).
 	ErrTypePatchRefused = "PatchRefused"
-	// ErrTypeWorkItemGone is append_review_message finding the work item missing, another task's, or
-	// consumed by a dispatch: accepted: false (D66).
-	ErrTypeWorkItemGone = "WorkItemGone"
 )

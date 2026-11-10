@@ -1,0 +1,15 @@
+# The same gate with the merchant sealed (spec/ext-sealed.md): the checkout, the mandates and the receipt are sealed
+# end to end like every other part, so the gate holds ciphertext for them. See examples/sealing/README.md.
+listen: 127.0.0.1:8080
+public_url: http://localhost:8080 # a node's --gate must be this origin (spec/tunnel.md §4: bad_origin otherwise)
+postgres: postgres://kontra:kontra@localhost:5432/kontra
+temporal: { address: localhost:7233, namespace: kontra }
+auth: { api_keys: true }
+
+services:
+  ap2-merchant:
+    kind: a2a
+    backend: { tunnel: {} }          # hosted by the nodes enrolled for it: their keys are the recipients
+    allow: ["org:default"]           # every API key of this gate's one tenant
+    sealed: true
+    task: { timeout: 10m, retries: 2 }

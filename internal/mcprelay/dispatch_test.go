@@ -107,12 +107,12 @@ func TestOutcomeForms(t *testing.T) {
 	created := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
 	ret := created.Add(7 * 24 * time.Hour)
 	row := &store.TaskRow{ID: id, State: store.StateCompleted, CreatedAt: created, StatusAt: created.Add(time.Second),
-		RetentionUntil: &ret, Snapshot: &a2a.Task{Metadata: map[string]any{store.MetaMCPMeta: map[string]any{"sh.kontra/escrow": "held"}}}}
+		RetentionUntil: &ret, Snapshot: &a2a.Task{Metadata: map[string]any{store.MetaMCPMeta: map[string]any{"sh.kontra/op": "held"}}}}
 	b, err := outcomeMessage(row, store.MCPOutcome{Kind: store.KindResult, Result: json.RawMessage(`{"content":[],"isError":false}`)}, json.RawMessage(`9`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != `{"jsonrpc":"2.0","id":9,"result":{"content":[],"isError":false,"_meta":{"io.modelcontextprotocol/related-task":{"taskId":"`+id.String()+`"},"sh.kontra/escrow":"held"}}}` {
+	if string(b) != `{"jsonrpc":"2.0","id":9,"result":{"content":[],"isError":false,"_meta":{"io.modelcontextprotocol/related-task":{"taskId":"`+id.String()+`"},"sh.kontra/op":"held"}}}` {
 		t.Fatalf("a stored result: %s", b)
 	}
 	b, _ = outcomeMessage(row, store.MCPOutcome{Kind: store.KindResult, Error: json.RawMessage(`{"code":-32000,"message":"boom","data":{"x":1}}`)}, json.RawMessage(`9`))
@@ -147,8 +147,8 @@ func TestOutcomeForms(t *testing.T) {
 	}
 }
 
-// ttl before the end is an upper bound: the deadline (a quoted task's: its quote's expiry plus the timeout) plus the
-// retention (§11.6).
+// ttl before the end is an upper bound: the deadline plus the retention (§11.6); without a deadline, the creation plus
+// the timeout and the retention.
 func TestTTL(t *testing.T) {
 	c := time.Date(2026, 10, 27, 1, 0, 0, 0, time.UTC)
 	pol := store.ServiceRef{Timeout: time.Hour, Retention: 24 * time.Hour}
@@ -156,9 +156,8 @@ func TestTTL(t *testing.T) {
 	if got := ttlOf(&store.TaskRow{CreatedAt: c, Deadline: &dl}, pol); got != (25 * time.Hour).Milliseconds() {
 		t.Errorf("submitted: %d", got)
 	}
-	exp := c.Add(10 * time.Minute)
-	if got := ttlOf(&store.TaskRow{CreatedAt: c, QuoteExpiresAt: &exp}, pol); got != (25*time.Hour + 10*time.Minute).Milliseconds() {
-		t.Errorf("quoted: %d", got)
+	if got := ttlOf(&store.TaskRow{CreatedAt: c}, pol); got != (25 * time.Hour).Milliseconds() {
+		t.Errorf("no deadline: %d", got)
 	}
 }
 

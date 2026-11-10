@@ -40,14 +40,14 @@ import (
 func TestGateMCPReviewFixes(t *testing.T) {
 	e := newGateEnv(t)
 	ctx := context.Background()
-	const escrow, own = "https://x.example.com/ext/escrow", "https://seller.example.com/ext/own"
+	const opExt, own = "https://x.example.com/ext/audit", "https://seller.example.com/ext/own"
 	kinds, esc := newHireSeller(t), newHireSellerCaps(t, `{"streaming":true,"extensions":[{"uri":"`+own+`","required":true}]}`)
-	services := e.hireServices(kinds, `  escrowed:
+	services := e.hireServices(kinds, `  operated:
     kind: a2a
     backend: { a2a: { url: "`+esc.srv.URL+`/base", allow_private: true } }
     allow: ["org:default"]
     task: { timeout: 10m, retries: 1 }
-    annotations: { card_extensions: [ { uri: "`+escrow+`", required: true } ] }
+    annotations: { card_extensions: [ { uri: "`+opExt+`", required: true } ] }
   narrow:
     kind: a2a
     backend: { a2a: { url: "`+kinds.srv.URL+`/base", allow_private: true } }
@@ -112,7 +112,7 @@ func TestGateMCPReviewFixes(t *testing.T) {
 	// A required extension of the seller's own. The control: the A2A route refuses a SendMessage that does not
 	// activate it.
 	eventually(t, 20*time.Second, "the served card declares the required extensions", func() bool {
-		req, _ := http.NewRequest(http.MethodGet, a.url+"/agents/escrowed/.well-known/agent-card.json", nil)
+		req, _ := http.NewRequest(http.MethodGet, a.url+"/agents/operated/.well-known/agent-card.json", nil)
 		req.Header.Set("Authorization", "Bearer "+hire.Secret)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -120,9 +120,9 @@ func TestGateMCPReviewFixes(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode == http.StatusOK && strings.Contains(string(b), escrow) && strings.Contains(string(b), own)
+		return resp.StatusCode == http.StatusOK && strings.Contains(string(b), opExt) && strings.Contains(string(b), own)
 	})
-	req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/escrowed", strings.NewReader(
+	req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/operated", strings.NewReader(
 		`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"m-esc","role":"ROLE_USER","parts":[{"text":"hi"}]}}}`))
 	req.Header.Set("Authorization", "Bearer "+hire.Secret)
 	req.Header.Set("Content-Type", "application/json")
@@ -137,11 +137,11 @@ func TestGateMCPReviewFixes(t *testing.T) {
 		t.Fatalf("the control, A2A SendMessage without A2A-Extensions: %d %s", resp.StatusCode, b)
 	}
 	before = tasks()
-	for _, call := range []string{`{"name":"hire","arguments":{"service":"escrowed","message":"hi"}}`,
-		`{"name":"hire","arguments":{"service":"escrowed","message":"hi"},"task":{}}`} {
+	for _, call := range []string{`{"name":"hire","arguments":{"service":"operated","message":"hi"}}`,
+		`{"name":"hire","arguments":{"service":"operated","message":"hi"},"task":{}}`} {
 		_, ans = c.rpc("tools/call", call)
-		if r := ans.tool(t); !r.IsError || !strings.Contains(r.text(), own) || strings.Contains(r.text(), escrow) ||
-			!strings.Contains(r.text(), a.url+"/agents/escrowed") || !strings.Contains(r.text(), "No task was created") {
+		if r := ans.tool(t); !r.IsError || !strings.Contains(r.text(), own) || strings.Contains(r.text(), opExt) ||
+			!strings.Contains(r.text(), a.url+"/agents/operated") || !strings.Contains(r.text(), "No task was created") {
 			t.Errorf("hire of a service requiring %s (%s): %s", own, call, ans.raw)
 		}
 	}

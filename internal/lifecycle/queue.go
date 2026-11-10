@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -22,9 +23,6 @@ import (
 
 // ResendWindow is how young a first task must be for a resend to be answered with it (spec §15).
 const ResendWindow = 24 * time.Hour
-
-// MetaApproveURL is the A2A metadata key of a quoted task's approve URL (spec §5.1, §13.2).
-const MetaApproveURL = "kontra.approve.url"
 
 // InlinePushSaver saves a request's inline push config (configuration.taskPushNotificationConfig) for the
 // task inside the work queue's transaction, before the work item is written (spec §10.1), with Save's
@@ -108,17 +106,17 @@ func (q *Queue) now() time.Time {
 // Write never puts a2a-go's payload into Temporal: the payload carries the whole request and every
 // inbound header, Authorization and cookies included (D6). Only the work item's id crosses into Temporal.
 //
-// A new task needs the admission interceptor's decision on ctx (hooks.AdmittedFrom: allow or quote, and the
-// pre-minted id); without one Write creates nothing and answers -32603 "admission unavailable" (spec
+// A new task needs the admission interceptor's decision on ctx (hooks.AdmittedFrom: allow, and the pre-minted
+// id); without one Write creates nothing and answers -32603 "admission unavailable" (spec
 // §13.1: admission fails closed). A resend (same principal, service, messageId and request hash, the first
 // task younger than ResendWindow) is answered with the existing task, re-issuing StartWithMessage with its
 // first work item id (idempotent; a workflow that has ended refuses it, which is swallowed, spec §14.5).
 // Otherwise, in one transaction, which first looks for a resend again under the resend key's lock (two
 // identical requests arriving together make one task), the gate task is pre-created (the id Admission was
-// shown, gate ids, submitted, or quoted on a quote decision, the caller's message in history), the inline
+// shown, gate ids, submitted, the caller's message in history), the inline
 // push config is saved, and the sanitized payload is stored as a work item; after the commit,
 // StartWithMessage. payload.TaskID is set to the task's id, which Write returns. A hire's new task (WithHire,
-// relay.md §12.3) is marked hired, keyed by the hire's resend key, and answered by a retry as Hire says.
+// relay.md §12.3) is marked hired, keyed by the hire's resend key, and answered by a keyed retry as Hire says.
 //
 // A follow-up: the work item is stored (and the task's version V, and the turn end it answers, read in the
 // same transaction) and kontra.message sent, then kontra.push for an inline config it inserted. A refusal
@@ -155,10 +153,10 @@ func (q *Queue) Write(ctx context.Context, p *workqueue.Payload) (a2a.TaskID, er
 	return q.writeFollowUp(ctx, p, owner)
 }
 
-func (q *Queue) input(taskID uuid.UUID, quoteExpires *time.Time) Input {
+func (q *Queue) input(taskID uuid.UUID) Input {
 	return Input{
 		TaskID: taskID.String(), TimeoutSeconds: int64(q.svc.Timeout / time.Second), Retries: q.svc.Retries,
-		Hooks: q.opts.Hooks, QuoteExpiresAt: quoteExpires, ReattachGraceSeconds: graceSeconds(q.opts.ReattachGrace),
+		Hooks: q.opts.Hooks, ReattachGraceSeconds: graceSeconds(q.opts.ReattachGrace),
 	}
 }
 
@@ -176,7 +174,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	// Admission runs before any task exists and fails closed (spec §13.1): a request that reached Write
 	// without the admission interceptor's decision creates nothing.
 	adm, ok := hooks.AdmittedFrom(ctx)
-	if !ok || adm.TaskID == "" || (adm.Decision.Outcome != hooks.Allow && adm.Decision.Outcome != hooks.Quote) {
+	if !ok || adm.TaskID == "" || adm.Decision.Outcome != hooks.Allow {
 		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
 	}
 	// The hash of the request as the caller sent it, before the relay stored its large parts (spec §10.4, §15); a
@@ -208,10 +206,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 			return "", err
 		}
 	}
-	state, quoteExpires, meta, err := admitted(adm.Decision)
-	if err != nil {
-		return "", err
-	}
+	state, meta := store.StateSubmitted, admitted(adm.Decision)
 	msg := *req.Message
 	msg.TaskID, msg.ContextID = a2a.TaskID(taskID.String()), contextID
 	now := q.now().UTC().Truncate(time.Millisecond)
@@ -243,7 +238,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		}
 		if _, err := q.log.CreateTask(ctx, tx, store.NewTask{
 			ID: taskID, Service: q.svc, Protocol: store.ProtocolA2A, Owner: owner, ContextID: contextID, State: state,
-			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, QuoteExpiresAt: quoteExpires,
+			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash,
 		}); err != nil {
 			return err
 		}
@@ -274,7 +269,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	}
 	// The task row exists: its workflow is started even if the caller went away meanwhile (D8), within
 	// AcceptWait.
-	if _, err := q.client.StartWithMessage(context.WithoutCancel(ctx), q.input(taskID, quoteExpires), wid.String()); err != nil {
+	if _, err := q.client.StartWithMessage(context.WithoutCancel(ctx), q.input(taskID), wid.String()); err != nil {
 		// The task row stays without a workflow: a resend re-issues the start, and the orphan sweep ends it
 		// lifecycle_unavailable after 2 minutes (spec §14.5, D63).
 		return "", err
@@ -290,18 +285,15 @@ var errResent = errors.New("lifecycle: an identical request created the task mea
 
 // Hire is what Write needs of a task the gate's own /mcp creates with hire (spec/relay.md §12.2, §12.3): the task is
 // marked hired (tasks.hired, D272), its first_request is Key, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)), instead of the
-// request's hash, and the earlier task Write answers it with is a hire task of the same key that is quoted, or left
-// quoted less than RetryWindow ago (§12.3 Retries), instead of a resend of the same messageId (§15). The caller
-// looks the retry up first (store.Log.FindHireRetry); Write looks again under the key's lock, so two identical
-// hires arriving together make one task.
+// request's hash. A hire without an idempotencyKey is never a resend of an earlier task (D351 removed the retry of a
+// quoted hire): each one is a new task.
 //
 // A hire with an idempotencyKey (Keyed, relay.md §12.3 Idempotency, D338) has its messageId minted from the key: the
 // earlier task Write answers it with is the hire task of the same buyer, principal and first_message_id created less
 // than store.HireKeyWindow ago, whatever its state, looked for across services; one of another service or another
 // resend key is ErrHireKeyReused, and nothing is created.
 type Hire struct {
-	Key         [32]byte
-	RetryWindow time.Duration
+	Key [32]byte
 	// Keyed, for a hire with an idempotencyKey, is how the key finds its task: the hire's messageId is Keyed.MessageIDs[0].
 	Keyed *store.HireKey
 }
@@ -324,16 +316,15 @@ func HireFrom(ctx context.Context) (Hire, bool) {
 }
 
 // findResend is the earlier task a new task's request repeats: a resend of the same messageId and request hash
-// (spec §15), or for a hire one of the same resend key (relay.md §12.3). With tx it looks under the key's lock.
+// (spec §15), or for a keyed hire the task of its idempotencyKey (relay.md §12.3, D338); an unkeyed hire repeats
+// none. With tx it looks under the key's lock.
 func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, hire Hire, hired bool, owner store.Owner, messageID string,
 	hash [32]byte, since time.Time) (*store.TaskRow, error) {
 	switch {
 	case hired && hire.Keyed != nil:
 		return q.findKeyed(ctx, tx, hire, owner)
-	case hired && tx == nil:
-		return q.log.FindHireRetry(ctx, q.svc, owner, hire.Key, hire.RetryWindow)
 	case hired:
-		return q.log.FindHireRetryLocked(ctx, tx, q.svc, owner, hire.Key, hire.RetryWindow)
+		return nil, nil
 	case tx == nil:
 		return q.log.FindResend(ctx, q.svc, owner, messageID, hash, since)
 	}
@@ -365,33 +356,13 @@ func (q *Queue) findKeyed(ctx context.Context, tx pgx.Tx, hire Hire, owner store
 	return k.Task, nil
 }
 
-// admitted is what Admission's decision makes of a new task: submitted with the decision's metadata, or
-// quoted with it and the approve URL (spec §13.2). The decision's mcpMeta is rendered for MCP tasks (M3);
-// an A2A task does not keep it.
-func admitted(d hooks.Decision) (store.State, *time.Time, map[string]any, error) {
-	var meta map[string]any
-	if len(d.Metadata) > 0 {
-		meta = make(map[string]any, len(d.Metadata)+1)
-		for k, v := range d.Metadata {
-			meta[k] = v
-		}
+// admitted is the metadata Admission's allow gives a new task (spec §13.1). The decision's mcpMeta is rendered for
+// MCP tasks (M3); an A2A task does not keep it.
+func admitted(d hooks.Decision) map[string]any {
+	if len(d.Metadata) == 0 {
+		return nil
 	}
-	if d.Outcome != hooks.Quote {
-		return store.StateSubmitted, nil, meta, nil
-	}
-	if d.Quote == nil {
-		return "", nil, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
-	}
-	exp, err := time.Parse(time.RFC3339, d.Quote.ExpiresAt)
-	if err != nil {
-		return "", nil, nil, a2a.NewError(a2a.ErrInternalError, "admission unavailable")
-	}
-	exp = exp.UTC()
-	if meta == nil {
-		meta = map[string]any{}
-	}
-	meta[MetaApproveURL] = d.Quote.ApproveURL
-	return store.StateQuoted, &exp, meta, nil
+	return maps.Clone(d.Metadata)
 }
 
 // resend answers a resend with the task it repeats and re-issues its workflow's start (ReissueStart).
@@ -406,11 +377,9 @@ func (q *Queue) resend(ctx context.Context, p *workqueue.Payload, prev *store.Ta
 }
 
 // ReissueStart re-issues the start of prev's workflow with its first work item id, as a resend does: a task whose
-// start was lost gets its workflow (spec §14.5), and one created quoted and not yet approved waits for
-// kontra.approval until its quote expires, as at its first start (§13.2). A refusal (the work item was accepted
+// start was lost gets its workflow (spec §14.5; a keyed hire's retry, D338). A refusal (the work item was accepted
 // already) and a closed workflow are what an idempotent re-issue meets, and are not errors; a task without a work
-// item has no start to re-issue. The relay's resend answer calls it before it answers a quoted task at once
-// (relay.StartReissuer, D290).
+// item has no start to re-issue.
 func (q *Queue) ReissueStart(ctx context.Context, prev *store.TaskRow) error {
 	wid, err := q.log.FirstWorkItemID(ctx, prev.ID)
 	switch {
@@ -419,11 +388,7 @@ func (q *Queue) ReissueStart(ctx context.Context, prev *store.TaskRow) error {
 	case err != nil:
 		return err
 	}
-	var quoteExpires *time.Time
-	if prev.SubmittedAt == nil {
-		quoteExpires = prev.QuoteExpiresAt // the task was created quoted and not yet approved
-	}
-	if _, err := q.client.StartWithMessage(ctx, q.input(prev.ID, quoteExpires), wid.String()); err != nil && !errors.Is(err, ErrRefused) {
+	if _, err := q.client.StartWithMessage(ctx, q.input(prev.ID), wid.String()); err != nil && !errors.Is(err, ErrRefused) {
 		return err
 	}
 	return nil

@@ -183,7 +183,7 @@ func (j *JobKeys) Rename(from, to string) error {
 // link is os.Link, replaced in tests by a file system without hard links.
 var link = os.Link
 
-// Delete removes jobID's key: when the job is terminal and any kontra.keyRetainUntil has passed; for an MCP
+// Delete removes jobID's key: when the job is terminal; for an MCP
 // session, when it closes and every task created in it is done (spec/tunnel.md §2.3).
 //
 // Deleting a key that is not there is not an error, so a retried cleanup succeeds.

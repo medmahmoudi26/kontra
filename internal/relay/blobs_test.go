@@ -20,7 +20,6 @@ import (
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/blob"
 	"kontra.sh/kontra/internal/blob/blobtest"
-	"kontra.sh/kontra/internal/hooks"
 	"kontra.sh/kontra/internal/lifecycle"
 	ssew "kontra.sh/kontra/internal/sse"
 	"kontra.sh/kontra/internal/store"
@@ -604,17 +603,13 @@ func TestRefusedNewTaskLeavesNoObjects(t *testing.T) {
 	}
 }
 
-// A follow-up's or a review-window message's large parts are stored once the task is known to take the message,
-// and a message refused afterwards leaves neither objects nor blobs rows (spec §7, §10.4: a refused follow-up's
-// content is not kept; per-task totals are bounded): a review message the window refuses, rejects, or whose
-// caller metadata is over 16 KiB; a follow-up whose new push URL is refused; a follow-up the workflow refuses. A
-// review message not accepted in time keeps its work item, and so its objects (D66); an accepted one is
-// appended, naming them.
+// A follow-up's large parts are stored once the task is known to take the message, and a message refused
+// afterwards leaves neither objects nor blobs rows (spec §7, §10.4: a refused follow-up's content is not kept;
+// per-task totals are bounded): a message to a completed task (D351: no review window takes it); a follow-up whose new
+// push URL is refused; a follow-up the workflow refuses.
 func TestRefusedMessagesLeaveNoObjects(t *testing.T) {
 	bt := blobtest.New(t, "")
-	fr := &fakeReviews{}
-	e := newEnv(t, envOptions{bucket: bt.Store, reviews: fr, rules: hooks.KeyRules{CallerMetadata: []string{"kontra.escrow.dispute"}}})
-	fr.e = e
+	e := newEnv(t, envOptions{bucket: bt.Store})
 	h := e.handler()
 	done, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
 	e.setState(done, a2a.TaskStateCompleted)
@@ -633,42 +628,10 @@ func TestRefusedMessagesLeaveNoObjects(t *testing.T) {
 			t.Errorf("%s: blobs rows %+v left", what, rows)
 		}
 	}
-	for i, mode := range []string{"refuse", "reject"} {
-		fr.mode = mode
-		if err := send(done, byte(i), nil, nil); !errors.Is(err, a2a.ErrUnsupportedOperation) {
-			t.Fatalf("%s: %v", mode, err)
-		}
-		clean("a review message the window "+mode+"s", done)
+	if err := send(done, 1, nil, nil); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+		t.Fatalf("a message to a completed task: %v", err)
 	}
-	fr.mode = "accept"
-	if err := send(done, 5, map[string]any{"kontra.escrow.dispute": strings.Repeat("x", 17<<10)}, nil); !errors.Is(err, a2a.ErrInvalidParams) {
-		t.Fatalf("caller metadata over 16 KiB: %v", err)
-	}
-	clean("a review message with too much caller metadata", done)
-	if len(fr.got) != 2 {
-		t.Fatalf("the window was asked %d times", len(fr.got))
-	}
-
-	// Not accepted in time: the work item is kept, so are its objects.
-	fr.mode = "timeout"
-	if err := send(done, 6, nil, nil); !errors.Is(err, a2a.ErrInternalError) {
-		t.Fatalf("timeout: %v", err)
-	}
-	if keys, rows := objectsOf(t, bt, done), e.blobRows(done); len(keys) != 1 || len(rows) != 1 {
-		t.Fatalf("a review message not accepted in time: objects %v, rows %+v (want its one, kept with its work item)", keys, rows)
-	}
-	// Accepted: appended, naming its object.
-	fr.mode = "accept"
-	if err := send(done, 7, nil, nil); err != nil {
-		t.Fatal(err)
-	}
-	rows := e.blobRows(done)
-	if keys := objectsOf(t, bt, done); len(keys) != 2 || len(rows) != 2 {
-		t.Fatalf("an accepted review message: objects %v, rows %+v", keys, rows)
-	}
-	if !strings.Contains(e.logText(done), rows[1].Ref.URL()) {
-		t.Error("the accepted message's row names no logged ref")
-	}
+	clean("a message to a completed task", done)
 
 	// Follow-ups to a task waiting for input.
 	waiting, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})

@@ -281,7 +281,7 @@ func newStack(t *testing.T) *stack {
 	}
 	bk := backends{b: b, info: upstream.Info{ProtocolVersion: "1.0", Binding: a2a.TransportProtocolJSONRPC, Path: "/a2a/", Streaming: true}}
 	reg := relay.NewRegistry()
-	intc := &relay.Interceptors{Svc: svc, Log: log, Canceler: lc, Reviews: lc}
+	intc := &relay.Interceptors{Svc: svc, Log: log, Canceler: lc}
 	hs := relay.NewHandlers(relay.HandlerDeps{
 		Log: log, Puller: store.NewPullerProvider(log, listener),
 		Queue: func(s store.ServiceRef) workqueue.Queue {

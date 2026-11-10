@@ -126,7 +126,6 @@
       "properties": { "listen": { "$ref": "#/$defs/hostPort", "default": ":9090" } }
     },
     "tenancy": { "enum": ["single", "multi"], "default": "single" },
-    "caller_metadata": { "type": "array", "items": { "type": "string", "pattern": "^kontra\\..+" }, "default": [] },
     "operator_metadata_prefixes": { "type": "array", "items": { "type": "string", "pattern": "^kontra\\..+" }, "default": [], "description": "Each prefix lies under kontra. and is longer than it (D113)." },
     "push": {
       "type": "object",
@@ -169,7 +168,7 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["task_queue"],
-          "description": "The remote Lifecycle hook (spec §13.3): the five activities are scheduled by type name on task_queue, and the built-in no-ops are not registered. Accepted since M3 (D186).",
+          "description": "The remote Lifecycle hook (spec §13.3): its activities (OnDispatched and OnTerminal) are scheduled by type name on task_queue, and the built-in no-ops are not registered. Accepted since M3 (D186).",
           "properties": { "task_queue": { "type": "string", "minLength": 1 } }
         }
       }

@@ -10,10 +10,13 @@ identity, policy and end-to-end sealing. Nothing on the node listens on a public
 - Run the same gate image yourself and you have a private one for your team, with no catalog and no
   money code.
 
+Kontra is a framework of secure tunnels over the agent protocols: A2A, A2UI and AP2 pass through it as their
+authors wrote them, sealed end to end when a service asks for it. It runs no payment: an agent that wants to be paid
+configures its own AP2 v0.2.0 roles, and the gate relays the mandates untouched (D351).
+
 This repository holds the open-source parts: the `kontra` CLI, the `kontra-gate` server image,
-the Helm chart and compose file, the extension specs (`escrow`, `sealed`) and the
-examples. The marketplace, listings, escrow and settlement live in a separate private repository
-that deploys and configures this one; nothing here imports from it.
+the Helm chart and compose file, the sealing extension spec and the examples. Kontra Cloud's catalog, accounts and
+console live in a separate private repository that deploys and configures this one; nothing here imports from it.
 
 ## Status
 
@@ -58,8 +61,9 @@ this order:
 3. [`docs/architecture/02-deployment-topology.html`](docs/architecture/02-deployment-topology.html)
    — one CLI on the user's machine, gates as clusters, `kontra dev` removed. Supersedes PRD §10
    (embedded Temporal), §11 (`kontra dev`), §14 M4, §15 demo.
-4. [`spec/`](spec/) — [`tunnel.md`](spec/tunnel.md), [`relay.md`](spec/relay.md) and the two
-   extensions ([`ext-escrow.md`](spec/ext-escrow.md), [`ext-sealed.md`](spec/ext-sealed.md)), with the schema in [`migrations/`](migrations/).
+4. [`spec/`](spec/) — [`tunnel.md`](spec/tunnel.md), [`relay.md`](spec/relay.md) and the sealing
+   extension ([`ext-sealed.md`](spec/ext-sealed.md); the escrow extension is withdrawn, D351), with the schema in
+   [`migrations/`](migrations/).
    Every place they depart from the documents above is numbered in [`docs/decisions.md`](docs/decisions.md).
 
 Where a note and the PRD disagree, the later document wins; `docs/README.md` has the section map.
@@ -272,7 +276,7 @@ services:
 A denied tool is missing from `tools/list`, and a call to it is answered `Unknown tool`, as for one that does not
 exist; `allow:` narrows the rest (absent, every tool; empty, none). The gate records each call by tool name, bytes,
 duration and the result's top-level `isError`, and never reads arguments or content, which may be sealed. MCP
-services are not listed or priced (D350).
+services are not listed (D350).
 
 ## The CLI
 
@@ -283,38 +287,36 @@ One binary, four commands (`kontra <command> -h` has every flag):
 | `kontra connect` | Hosts the agents and MCP servers on this machine at a gate (`--serve`), and lets local clients hire the gate's services on `127.0.0.1:7777`, through one outbound connection | [`spec/tunnel.md`](spec/tunnel.md) |
 | `kontra login` | Gets an API key for a gate from its operator's sign-in, kept in `~/.kontra/credentials` for that gate only | [`spec/tunnel.md`](spec/tunnel.md) §6.3 |
 | `kontra seal` | Seals a file for a sealed service without a node, and opens a sealed answer | [`spec/ext-sealed.md`](spec/ext-sealed.md) §5.1 |
-| `kontra publish` | Sends a listing, how one of your A2A agents is sold, to the gate operator's control plane (Kontra Cloud) | [`spec/tunnel.md`](spec/tunnel.md) §6.4 |
+| `kontra publish` | Sends a listing, how one of your A2A agents is offered, to the gate operator's control plane (Kontra Cloud) | [`spec/tunnel.md`](spec/tunnel.md) §6.4 |
 
-**Publishing a listing (M5).** A listing file says how one of your A2A agents is sold: its visibility, sealing and
-price, one of two in USD: `free`, or `per_task`, a quote held in escrow and released after a review window
-([`spec/ext-escrow.md`](spec/ext-escrow.md); [`spec/schema/listing.json`](spec/schema/listing.json) has every key and
-bound). MCP servers are not listed: hosted through `kontra connect`, one is free and private to your tenant (D350).
+**Publishing a listing (M5).** A listing file says how one of your A2A agents is offered: its visibility, sealing,
+whether it is published and its task timeout ([`spec/schema/listing.json`](spec/schema/listing.json) has every key and
+bound). It has no price: Kontra runs no payment, and an agent that wants to be paid declares AP2 in its own card and
+plays its AP2 roles itself (D351; [`spec/relay.md`](spec/relay.md) §2.6). MCP servers are not listed: hosted through
+`kontra connect`, one is private to your tenant (D350).
 
 ```yaml
-# hello.listing.yaml: the agent `kontra connect --serve a2a:hello=…` hosts, sold per task
+# hello.listing.yaml: the agent `kontra connect --serve a2a:hello=…` hosts
 service: hello
 visibility: public            # public | unlisted (reachable by URL, never searched) | private
-price:
-  model: per_task             # free | per_task
-  amount: "1.00"              # USD, quoted: at most 2 decimals
-  reviewWindowSeconds: 86400  # the buyer may dispute for a day after completion
-  taskTimeoutSeconds: 600
+sealed: off                   # off | optional | required
+taskTimeoutSeconds: 600       # 1 to 604800; default 3600
 ```
 
 ```sh
 kontra publish --dry-run hello.listing.yaml   # checks the file, prints the request, sends nothing
 kontra publish hello.listing.yaml
 #  kontra publish: signing in at https://api.kontra.sh (sign-in by https://api.kontra.sh) in your browser; …
-#  kontra publish: hello is published at version 1: per_task 1.00 USD, public, on https://api.kontra.sh.
+#  kontra publish: hello is published at version 1: public, sealed off, task timeout 600s, on https://api.kontra.sh.
 ```
 
 `published: false` unpublishes the service and keeps the
-listing. Each publish is a new version of the listing; tasks keep the quote they were admitted with. `kontra publish`
+listing. Each publish is a new version of the listing. `kontra publish`
 signs you in in the browser for that publish only, as `kontra login` does, and keeps nothing but the client
 registration: an API key never publishes. It never replaces a listing unseen: for a service that already has one it
-prints that listing's version, price and state and publishes nothing, until you name the version you read
+prints that listing's version, visibility, sealing and state and publishes nothing, until you name the version you read
 (`--version N`) or ask for whatever is current (`--replace`); it stops if another publish came in between. The CLI only carries the listing; the control plane decides
-what it accepts, and the gate holds no price. A team gate has no control plane: its services are its configuration.
+what it accepts. A team gate has no control plane: its services are its configuration.
 
 ### Credentials
 
@@ -374,17 +376,17 @@ local hiring to the first node. Each node is its own row on Cloud's Network page
 cmd/kontra/        the CLI: connect, login, seal, publish, version
 cmd/kontra-gate/   the gate: serve, migrate, enroll, health, version
 internal/          relay, tunnel, gatemcp (/mcp), anon, store (Postgres), lifecycle (Temporal), sealing, …
-spec/              tunnel.md, relay.md, ext-escrow.md, ext-sealed.md, schema/
+spec/              tunnel.md, relay.md, ext-sealed.md, schema/
 migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mcp_tools.sql (the gate's Postgres schema, embedded in kontra-gate)
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)
 compose.dev.yaml   Temporal + Postgres for working on the gate itself
-examples/          sellers/ (a2a server --exec, helloworld, booking, tck; temporal-harness, adk, claude-cli to come),
+examples/          sellers/ (a2a server --exec, helloworld, booking, tck, a2ui, ap2-merchant; temporal-harness, adk, claude-cli to come),
                    mcp/ (filesystem over stdio, everything), front/ (caddy; agentgateway, ingress to come), sealing/
 scripts/           check_specs.py, the test runners, tck.sh, demo-clean-laptop.sh, team-gate-vps.sh
 test/              e2e/ (two replicas behind a front), pentest/, tck/, demo/ (the clean laptop), vps/
 ```
 
-There is no local console (D164): the task thread and the quote page are Cloud's (`app.kontra.sh`, M5).
+There is no local console (D164): the task thread is Cloud's (`app.kontra.sh`, M5).
 
 Apache-2.0.

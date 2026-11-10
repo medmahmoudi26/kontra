@@ -114,8 +114,7 @@ func serverInfo() map[string]any {
 const instructions = "Find agents with search, read one with describe, and hire it with hire (pass an idempotencyKey to " +
 	"retry safely). Follow a running task with status {taskId, after: <cursor>, wait: 25} until it ends; answer its question " +
 	"with reply; stop it with cancel. Continue a conversation with hire and the contextId of a result. List your tasks with " +
-	"tasks; read one artifact in full with artifact. MCP servers are called directly at the URL describe gives. A priced " +
-	"task waits for a person to approve its quote at the URL hire gives."
+	"tasks; read one artifact in full with artifact. MCP servers are called directly at the URL describe gives."
 
 // modernTasks serves a modern tasks/get, tasks/update or tasks/cancel over the principal's hire tasks (§12.5, §11.12
 // "The client side"), from Postgres on any replica: a request that does not declare the tasks extension is 400 with
@@ -145,11 +144,8 @@ func (h *Handler) modernTasks(rq *request) {
 
 // answerModernHire answers a modern hire whose task the Hirer created or found again (§12.5, §11.12 step 4):
 //
-//   - without the tasks extension it is a plain call (§12.2): quoted at once with the approve URL, else after the
-//     plain wait;
-//   - with it, a quoted task at once as CreateTaskResult working with the approve URL in statusMessage and
-//     _meta["sh.kontra/approve-url"] (D21; never -32042, which 2026-07-28 removed: D24, D269); any other is waited
-//     for up to ModernInlineWait and, once ended, answered in line as tasks/result renders it (a CallToolResult with
+//   - without the tasks extension it is a plain call (§12.2), answered after the plain wait;
+//   - with it, the task is waited for up to ModernInlineWait and, once ended, answered in line as tasks/result renders it (a CallToolResult with
 //     resultType complete: the client never sees a task); else (still running, or asking a question, which the client
 //     cannot answer before it learns the task's id) as CreateTaskResult with pollIntervalMs 1000.
 //
@@ -157,17 +153,7 @@ func (h *Handler) modernTasks(rq *request) {
 // A client that closes its response stream before the answer is written has cancelled the request (2026-07-28
 // Streamable HTTP, "Cancellation": a server MUST treat a disconnect so) and never learned the task's id: a task the
 // request created is sent kontra.cancel in MCP mode, not awaited (D57: canceled within 10 s; D178). A task the request
-// found again (a retry, §12.3) was the earlier request's, and is left as it is.
-//
-// SPEC-CONFLICT (relay §11.12 step 4 "a client that closes its response stream before either answer is sent has
-// cancelled the request: the gate sends the task kontra.cancel", which §12.5 applies to hire, quoted tasks included):
-// a quoted hire task runs nothing until a person approves it, and §12.3's retry is how a client gets it again: a
-// hire with the same arguments within 10 minutes of the task leaving quoted answers that task. A quoted task
-// cancelled because its client left would answer the client's re-issued request (2026-07-28: a broken stream's
-// request MUST be re-issued) with "the task was canceled" for 10 minutes. The closest faithful behaviour: a quoted
-// task is not cancelled when its client leaves; it ends on its own when its quote expires, and the re-issued hire
-// gets it with its approve URL. Recorded as D295, and §12.5 now says so; §11.12 step 4 stands for /mcp/{svc}, whose
-// MCP tasks have no retry.
+// found again (a keyed hire, §12.3) was the earlier request's, and is left as it is.
 //
 // A hire with an idempotencyKey is never cancelled for its client leaving (D338): the key says the client re-issues it
 // (2026-07-28: a broken stream's request MUST be re-issued), and its re-issued hire answers the same task, which ran
@@ -178,16 +164,12 @@ func (h *Handler) answerModernHire(rq *request, out HireOutcome, svc store.Servi
 		if rq.ctx().Err() == nil {
 			return false
 		}
-		if !out.Existing && !keyed && row.State != store.StateQuoted && !row.State.Terminal() {
+		if !out.Existing && !keyed && !row.State.Terminal() {
 			h.deps.Tasks.cancelDetached(row.ID, why)
 		}
 		return true
 	}
 	if !augmented {
-		if row.State == store.StateQuoted {
-			rq.result(h.plainAnswer(rq.ctx(), row, rq.p))
-			return
-		}
 		if !h.waitAndAnswerFrom(rq, row.ID, 0, seenFrom(out)) {
 			if r, err := h.deps.Log.Load(context.WithoutCancel(rq.ctx()), row.ID); err == nil {
 				row = r
@@ -198,26 +180,24 @@ func (h *Handler) answerModernHire(rq *request, out HireOutcome, svc store.Servi
 	}
 	const left = "the client closed its stream before the hire was answered (D178)"
 	ctx := rq.ctx()
-	if row.State != store.StateQuoted {
-		wake, stop := h.deps.Waker.WaitTask(ctx, row.ID)
-		defer stop()
-		until := time.NewTimer(ModernInlineWait)
-		defer until.Stop()
-		reread := time.NewTicker(250 * time.Millisecond)
-		defer reread.Stop()
-	wait:
-		for !row.State.Terminal() && row.State != store.StateInputRequired {
-			select {
-			case <-ctx.Done():
-				break wait
-			case <-until.C:
-				break wait
-			case <-wake:
-			case <-reread.C:
-			}
-			if r, err := h.deps.Log.Load(ctx, row.ID); err == nil {
-				row = r
-			}
+	wake, stop := h.deps.Waker.WaitTask(ctx, row.ID)
+	defer stop()
+	until := time.NewTimer(ModernInlineWait)
+	defer until.Stop()
+	reread := time.NewTicker(250 * time.Millisecond)
+	defer reread.Stop()
+wait:
+	for !row.State.Terminal() && row.State != store.StateInputRequired {
+		select {
+		case <-ctx.Done():
+			break wait
+		case <-until.C:
+			break wait
+		case <-wake:
+		case <-reread.C:
+		}
+		if r, err := h.deps.Log.Load(ctx, row.ID); err == nil {
+			row = r
 		}
 	}
 	if cancelIfLeft(left) {
@@ -274,8 +254,7 @@ func modernTaskObject(row *store.TaskRow, svc store.ServiceRef, v taskView, resu
 	return o
 }
 
-// modernCreateTaskResult is a modern hire's CreateTaskResult (§11.12 step 4): resultType "task" and the Task, a
-// quoted task working with the approve URL in statusMessage and _meta["sh.kontra/approve-url"] (D21).
+// modernCreateTaskResult is a modern hire's CreateTaskResult (§11.12 step 4): resultType "task" and the Task.
 func modernCreateTaskResult(row *store.TaskRow, svc store.ServiceRef, rd Reader) (json.RawMessage, error) {
 	return json.Marshal(modernTaskObject(row, svc, modernView(row, rd), resultTask))
 }

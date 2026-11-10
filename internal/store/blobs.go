@@ -15,8 +15,8 @@ import (
 // deletes their blobs rows in the same statement; the caller then deletes their objects. Those are what a request
 // the gate refused, or answered with another task, stored and nothing will ever read: a new task's whose row was
 // never written (a refusal after the parts were stored, a work queue that failed, the later of two identical
-// requests, which the work queue answers with the earlier one's task), a follow-up's or a review-window message's
-// whose work item was deleted. A task that does not exist names none of them. The refs are fresh, minted for this
+// requests, which the work queue answers with the earlier one's task), a follow-up's whose work item was
+// deleted. A task that does not exist names none of them. The refs are fresh, minted for this
 // request: only its own write can name them, and it has returned when this runs.
 func (l *Log) DropUnnamedBlobs(ctx context.Context, task uuid.UUID, refs []blob.Ref) ([]blob.Ref, error) {
 	if len(refs) == 0 {

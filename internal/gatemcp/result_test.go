@@ -20,33 +20,27 @@ import (
 
 	"kontra.sh/kontra/internal/auth"
 	"kontra.sh/kontra/internal/jcs"
-	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/store"
 )
 
 // The hire result's shapes (§12.2, §12.3; D289, D324). A client may show its model and its user a tool result's
 // structuredContent and nothing else (Claude Code 2.1.281 does, M5's gate G3, C59), so every CallToolResult a hire or a
-// reply answers carries in structuredContent what a person needs: taskId and state; the task's thread URL (the approve
-// URL, exactly as the URL elicitation carries it) whenever the task has one; the quote's terms while it is quoted; the
-// text of the content's text blocks (the agent's answer, its question, or what the gate says); data and file links.
+// reply answers carries in structuredContent what a person needs: taskId and state; the text of the content's text
+// blocks (the agent's answer, its question, or what the gate says); data and file links.
 // Each shape is validated against the outputSchema hire and reply declare, and is the fixture
 // spec/schema/examples/mcp-tools.hireResult.<shape>.json, which make check-specs validates with a full 2020-12
 // validator.
 
-const (
-	shapeTask    = "019a0000-0000-7000-8000-000000000001" // taskWith's id
-	shapeApprove = "https://app.kontra.sh/#/t/" + shapeTask
-)
+const shapeTask = "019a0000-0000-7000-8000-000000000001" // taskWith's id
 
-var shapeExpiry = time.Date(2026, 11, 1, 18, 30, 0, 0, time.UTC)
-
-// hireShapes are the CallToolResults hire and reply answer, by shape: what quotedCTR, plainAnswer and Render write
-// for a task in each state.
+// hireShapes are the CallToolResults hire and reply answer, by shape: what plainAnswer and Render write for a task in
+// each state. A task an earlier release quoted keeps kontra.approve.url in its metadata (thread): no answer shows it
+// any more (D351).
 func hireShapes(t *testing.T) map[string]json.RawMessage {
 	t.Helper()
 	h := &Handler{deps: Deps{PublicURL: "https://gateway.example.com/"}}
 	id := uuid.MustParse(shapeTask)
-	thread := map[string]any{lifecycle.MetaApproveURL: shapeApprove}
+	thread := map[string]any{"kontra.approve.url": "https://app.kontra.sh/#/t/" + shapeTask}
 	row := func(state store.State, task *a2a.Task) *store.TaskRow {
 		return &store.TaskRow{ID: id, Service: "hello", ContextID: "ctx", State: state, Snapshot: task}
 	}
@@ -54,9 +48,6 @@ func hireShapes(t *testing.T) map[string]json.RawMessage {
 		t.Helper()
 		return h.plainAnswer(context.Background(), r, auth.Principal{Kind: auth.KindKey, ID: "key:kk_buyer", BuyerID: uuid.Nil})
 	}
-	quoted := row(store.StateQuoted, taskWith(a2a.TaskStateInputRequired, nil, thread))
-	quoted.QuoteExpiresAt = &shapeExpiry
-
 	file := a2a.NewRawPart([]byte("tck"))
 	file.MediaType, file.Filename = "text/plain", "output.txt"
 	link := a2a.NewFileURLPart("https://example.com/output.txt", "text/plain")
@@ -67,12 +58,11 @@ func hireShapes(t *testing.T) map[string]json.RawMessage {
 
 	asking := taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), thread)
 	return map[string]json.RawMessage{
-		"quoted":         plain(quoted),
 		"completed":      plain(row(store.StateCompleted, answered)),
 		"completed_free": plain(row(store.StateCompleted, taskWith(a2a.TaskStateCompleted, agentText("Hello World"), nil))),
-		"failed":         plain(row(store.StateFailed, taskWith(a2a.TaskStateFailed, nil, map[string]any{store.MetaFailure: "timeout", lifecycle.MetaApproveURL: shapeApprove}))),
+		"failed":         plain(row(store.StateFailed, taskWith(a2a.TaskStateFailed, nil, map[string]any{store.MetaFailure: "timeout"}))),
 		"rejected":       plain(row(store.StateRejected, taskWith(a2a.TaskStateRejected, agentText("I do not take that kind of work"), nil))),
-		"declined":       plain(row(store.StateCanceled, taskWith(a2a.TaskStateCanceled, nil, map[string]any{store.MetaCanceled: store.CanceledDeclined, lifecycle.MetaApproveURL: shapeApprove}))),
+		"canceled":       plain(row(store.StateCanceled, taskWith(a2a.TaskStateCanceled, nil, map[string]any{store.MetaCanceled: store.CanceledClient}))),
 		"input_required": plain(row(store.StateInputRequired, asking)),
 		"working":        plain(row(store.StateWorking, taskWith(a2a.TaskStateWorking, nil, thread))),
 	}
@@ -119,31 +109,25 @@ func texts(r shapeResult, data []any) []string {
 	return out
 }
 
-// Each shape's structuredContent carries what the text tells a person: the thread URL, the quote's terms, the agent's
-// answer or question, and the task; and the text blocks stay in content for a client that reads only content.
+// Each shape's structuredContent carries what the text tells a person: the agent's answer or question, and the task
+// (no url, no quote: D351); and the text blocks stay in content for a client that reads only content.
 func TestHireResultShapes(t *testing.T) {
 	shapes := hireShapes(t)
 	type want struct {
-		state, url, text string
-		quote            *QuoteTerms
-		isError          bool
-		data, files      bool
+		state, text string
+		isError     bool
+		data, files bool
 	}
 	wants := map[string]want{
-		"quoted": {state: "TASK_STATE_INPUT_REQUIRED", url: shapeApprove,
-			text: "This task needs a person to approve its quote before it runs: open " + shapeApprove + " to review and approve it (task " +
-				shapeTask + "; the quote expires at 2026-11-01T18:30:00Z). Then call hire again with the same arguments to get its result.",
-			quote: &QuoteTerms{ApproveURL: shapeApprove, ExpiresAt: "2026-11-01T18:30:00Z"}},
-		"completed": {state: "TASK_STATE_COMPLETED", url: shapeApprove,
+		"completed": {state: "TASK_STATE_COMPLETED",
 			text: "the service ended the task: completed\nHello World", data: true, files: true},
 		"completed_free": {state: "TASK_STATE_COMPLETED", text: "Hello World"},
-		"failed":         {state: "TASK_STATE_FAILED", url: shapeApprove, text: "the task timed out", isError: true},
+		"failed":         {state: "TASK_STATE_FAILED", text: "the task timed out", isError: true},
 		"rejected":       {state: "TASK_STATE_REJECTED", text: "I do not take that kind of work", isError: true},
-		"declined": {state: "TASK_STATE_CANCELED", url: shapeApprove,
-			text: "the quote was declined: the task was canceled and nothing was charged", isError: true},
-		"input_required": {state: "TASK_STATE_INPUT_REQUIRED", url: shapeApprove,
+		"canceled":       {state: "TASK_STATE_CANCELED", text: "the task was canceled", isError: true},
+		"input_required": {state: "TASK_STATE_INPUT_REQUIRED",
 			text: "Which date? (answer with the reply tool, taskId " + shapeTask + ")"},
-		"working": {state: "TASK_STATE_WORKING", url: shapeApprove,
+		"working": {state: "TASK_STATE_WORKING",
 			text: "The task " + shapeTask + " is still working. Follow it here with status {taskId: \"" + shapeTask +
 				"\", after: 0, wait: 25}, or with GetTask at https://gateway.example.com/agents/hello (the same credential); " +
 				"call reply when it asks a question."},
@@ -154,7 +138,7 @@ func TestHireResultShapes(t *testing.T) {
 	for name, b := range shapes {
 		w := wants[name]
 		r, hr := decodeShape(t, name, b)
-		if hr.TaskID != shapeTask || hr.State != w.state || hr.URL != w.url || hr.Text != w.text || !reflect.DeepEqual(hr.Quote, w.quote) ||
+		if hr.TaskID != shapeTask || hr.State != w.state || hr.Text != w.text ||
 			r.IsError != w.isError || (len(hr.Data) > 0) != w.data || (len(hr.Files) > 0) != w.files {
 			t.Errorf("%s: isError %v, structuredContent %s", name, r.IsError, r.Structured)
 		}
@@ -164,36 +148,22 @@ func TestHireResultShapes(t *testing.T) {
 		if len(got) == 0 || strings.ReplaceAll(hr.Text, "\n", "") != strings.Join(got, "") {
 			t.Errorf("%s: the content's text blocks %q, the structured text %q", name, got, hr.Text)
 		}
-		if w.url != "" && !strings.Contains(string(b), w.url) {
-			t.Errorf("%s: the URL is not in the result", name)
+		if strings.Contains(string(b), "app.kontra.sh") || strings.Contains(string(b), "approve") {
+			t.Errorf("%s: an earlier release's approve URL is in the result: %s", name, b)
 		}
-	}
-	// The quoted answer: the URL in the text, in structuredContent and in _meta, the one the URL elicitation carries.
-	r, hr := decodeShape(t, "quoted", shapes["quoted"])
-	if len(r.Content) != 1 || r.Content[0].Text != hr.Text || !strings.Contains(r.Content[0].Text, shapeApprove) ||
-		r.Meta[MetaApproveURL] != shapeApprove || hr.URL != approveURL(taskWith(a2a.TaskStateInputRequired, nil, map[string]any{lifecycle.MetaApproveURL: shapeApprove})) {
-		t.Errorf("the quoted answer: %s", shapes["quoted"])
 	}
 	// The completed answer: the agent's text parts joined as statusText joins a message's (a streamed answer's chunks
 	// are parts of one artifact), the message's and each artifact's text on their own lines; data and files beside.
-	_, hr = decodeShape(t, "completed", shapes["completed"])
+	_, hr := decodeShape(t, "completed", shapes["completed"])
 	wantFiles := []FileRef{{URI: "kontra:task/" + shapeTask + "/output.txt", Name: "output.txt", MediaType: "text/plain"},
 		{URI: "https://example.com/output.txt", Name: "output.txt", MediaType: "text/plain"}}
 	if !reflect.DeepEqual(hr.Data, []any{map[string]any{"n": 1.0}}) || !reflect.DeepEqual(hr.Files, wantFiles) {
 		t.Errorf("the completed answer's data %v and files %+v", hr.Data, hr.Files)
 	}
-	// A task with no thread (Admission allowed it without a quote) has no url: the gate never builds the operator's.
-	if _, hr := decodeShape(t, "completed_free", shapes["completed_free"]); hr.URL != "" {
-		t.Errorf("a task that was never quoted has url %q", hr.URL)
-	}
-	// An approve URL that is not https:// (none passes hooks.CheckQuote) is left out rather than break the schema.
-	if u := threadURL(taskWith(a2a.TaskStateCompleted, nil, map[string]any{lifecycle.MetaApproveURL: "http://x.example/t"})); u != "" {
-		t.Errorf("an http approve URL: %q", u)
-	}
 }
 
 // A plain hire or reply still running after the plain wait answers the hire result of a task still running (§12.2,
-// D272, D324): its state, the follow-up text, and the thread URL when the task was quoted; and the texts that describe
+// D272, D324): its state and the follow-up text; and the texts that describe
 // that answer, relay.md §16's gate_mcp_hire row and PlainWait's doc, say so, not D272's {taskId, state} (G3's review).
 func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 	h := &Handler{deps: Deps{PublicURL: "https://gateway.example.com/"}}
@@ -203,16 +173,15 @@ func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		meta map[string]any
-		url  string
 	}{
-		{"quoted, then approved", map[string]any{lifecycle.MetaApproveURL: shapeApprove}, shapeApprove},
-		{"never quoted", nil, ""},
+		{"quoted by an earlier release", map[string]any{"kontra.approve.url": "https://app.kontra.sh/#/t/" + shapeTask}},
+		{"never quoted", nil},
 	} {
 		row := &store.TaskRow{ID: uuid.MustParse(shapeTask), Service: "hello", ContextID: "ctx", State: store.StateWorking,
 			Snapshot: taskWith(a2a.TaskStateWorking, nil, c.meta)}
 		r, hr := decodeShape(t, c.name, h.plainAnswer(context.Background(), row, auth.Principal{Kind: auth.KindKey, ID: "key:kk_buyer"}))
-		if r.IsError || hr.TaskID != shapeTask || hr.State != "TASK_STATE_WORKING" || hr.Text != follow || hr.URL != c.url ||
-			hr.Quote != nil || hr.Data != nil || hr.Files != nil || !slices.Equal(texts(r, nil), []string{follow}) {
+		if r.IsError || hr.TaskID != shapeTask || hr.State != "TASK_STATE_WORKING" || hr.Text != follow ||
+			strings.Contains(string(r.Structured), "url") || hr.Data != nil || hr.Files != nil || !slices.Equal(texts(r, nil), []string{follow}) {
 			t.Errorf("%s: isError %v, structuredContent %s", c.name, r.IsError, r.Structured)
 		}
 	}
@@ -232,7 +201,7 @@ func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 			row = line
 		}
 	}
-	if !strings.Contains(row, "within 25 s and "+says+" (its state, the follow-up text, and the thread URL when it was quoted) otherwise") ||
+	if !strings.Contains(row, "within 25 s and "+says+" (its state and the follow-up text) otherwise") ||
 		strings.Contains(row, "{taskId, state}") {
 		t.Errorf("relay.md §16's gate_mcp_hire row does not say a plain hire still running answers %s:\n%s", says, row)
 	}
@@ -243,7 +212,7 @@ func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 		t.Fatal("hire.go: no PlainWait")
 	}
 	doc := strings.Join(strings.Fields(strings.ReplaceAll(src[start:end], "//", "")), " ")
-	if !strings.Contains(doc, says+": its state, the follow-up text, and the thread URL when it was quoted") ||
+	if !strings.Contains(doc, says+": its state and the follow-up text") ||
 		strings.Contains(doc, "{taskId, state}") {
 		t.Errorf("PlainWait's doc does not say a plain hire still running answers %s: %s", says, doc)
 	}
@@ -288,9 +257,8 @@ func TestHireResultSchema(t *testing.T) {
 		"no state":                  `{"taskId":"` + shapeTask + `"}`,
 		"an unknown state":          `{"taskId":"` + shapeTask + `","state":"working"}`,
 		"a task id that is no uuid": `{"taskId":"t1","state":"TASK_STATE_WORKING"}`,
-		"an http url":               `{"taskId":"` + shapeTask + `","state":"TASK_STATE_WORKING","url":"http://a.example"}`,
-		"a quote without expiry":    `{"taskId":"` + shapeTask + `","state":"TASK_STATE_INPUT_REQUIRED","quote":{"approveUrl":"https://a.example"}}`,
-		"an expiry that is no time": `{"taskId":"` + shapeTask + `","state":"TASK_STATE_INPUT_REQUIRED","quote":{"approveUrl":"https://a.example","expiresAt":"soon"}}`,
+		"a url (D351)":              `{"taskId":"` + shapeTask + `","state":"TASK_STATE_WORKING","url":"https://a.example"}`,
+		"a quote (D351)":            `{"taskId":"` + shapeTask + `","state":"TASK_STATE_INPUT_REQUIRED","quote":{"approveUrl":"https://a.example","expiresAt":"2026-11-01T18:30:00Z"}}`,
 		"empty data":                `{"taskId":"` + shapeTask + `","state":"TASK_STATE_COMPLETED","data":[]}`,
 		"a file without uri":        `{"taskId":"` + shapeTask + `","state":"TASK_STATE_COMPLETED","files":[{"name":"x"}]}`,
 		"text that is no string":    `{"taskId":"` + shapeTask + `","state":"TASK_STATE_COMPLETED","text":["a"]}`,
