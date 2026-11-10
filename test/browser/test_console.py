@@ -189,13 +189,30 @@ def test_another_site_cannot_prompt_agents(stack: Stack, page: Page) -> None:
     """A page of another site in the developer's browser cannot start a task on a local agent: its simple request (a
     text/plain POST with A2A-Version in the query, no preflight) is refused 403 by the profile's edge, and shows in
     traffic as cross_site."""
+    import http.server
+    import threading
+
+    class Blank(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<!doctype html><title>another site</title>")
+
+        def log_message(self, *a):  # noqa: ANN002
+            pass
+
+    other = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Blank)
+    threading.Thread(target=other.serve_forever, daemon=True).start()
     before = {t["task_id"] for t in stack.api("GET", "/v1/tasks?limit=100")["items"]}
-    page.goto("about:blank")
+    page.goto(f"http://127.0.0.1:{other.server_address[1]}/")
     body = '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"csrf","role":"ROLE_USER","parts":[{"text":"pwn"}]}}}'
     page.evaluate("""([url, body]) => fetch(url, {method: 'POST', mode: 'no-cors', headers: {'Content-Type': 'text/plain'}, body})
         .catch(() => null)""", [stack.base + "/agents/notes?A2A-Version=1.0", body])
     page.wait_for_timeout(1500)
     after = {t["task_id"] for t in stack.api("GET", "/v1/tasks?limit=100")["items"]}
     assert after == before, "a cross-site page started a task"
-    ex = stack.api("GET", "/v1/exchanges?failed=1&limit=100")["items"]
-    assert any(x["reason"] == "cross_site" and x["http_status"] == 403 and x["service"] == "notes" for x in ex), ex[:3]
+    other.shutdown()
+    eventually("the refusal is in traffic", lambda: any(
+        x["reason"] == "cross_site" and x["http_status"] == 403 and x["service"] == "notes"
+        for x in stack.api("GET", "/v1/exchanges?failed=1&limit=100")["items"]), within=10)
