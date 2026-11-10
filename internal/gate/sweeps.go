@@ -214,6 +214,9 @@ func (r *Replica) sweepRetention(ctx context.Context) {
 	}
 	// The A2A traffic record (relay.md §13.6): exchanges older than traffic.retention, whatever became of their tasks;
 	// swept whether or not recording is on now, so turning it off leaves existing exchanges to their retention.
+	if r.cfg == nil || r.pool == nil {
+		return // a replica built by a test with no configuration or pool of its own
+	}
 	n, err = SweepTraffic(ctx, r.pool, r.cfg.Traffic.Retention, time.Now())
 	if err != nil && ctx.Err() == nil {
 		r.log.Warn("traffic retention sweep", "error", err, "deleted", n)

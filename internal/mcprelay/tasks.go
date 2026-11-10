@@ -359,13 +359,13 @@ func mcpTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.00
 
 // ttlOf is a task's ttl in milliseconds (§11.6): retention_until − created_at once terminal; before, an upper
 // bound: the deadline plus the retention. Nil (ttl null, unlimited) when the service keeps its tasks forever
-// (task.retention: 0, so a terminal task has no retention_until).
+// (task.retention: 0: a task that ends under it gets no retention_until).
 func ttlOf(row *store.TaskRow, pol store.ServiceRef) *int64 {
 	var end time.Time
 	switch {
 	case row.RetentionUntil != nil:
 		end = *row.RetentionUntil
-	case row.TerminalAt != nil || pol.Retention <= 0:
+	case pol.Retention <= 0:
 		return nil
 	case row.Deadline != nil:
 		end = row.Deadline.Add(pol.Retention)

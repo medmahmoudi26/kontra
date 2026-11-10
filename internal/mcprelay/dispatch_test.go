@@ -165,8 +165,8 @@ func TestTTL(t *testing.T) {
 		t.Errorf("kept forever, running: %d", *got)
 	}
 	end := c.Add(time.Minute)
-	if got := ttlOf(&store.TaskRow{CreatedAt: c, Deadline: &dl, TerminalAt: &end}, pol); got != nil {
-		t.Errorf("ended with no retention_until: %d", *got)
+	if got := ttlOf(&store.TaskRow{CreatedAt: c, Deadline: &dl, TerminalAt: &end}, forever); got != nil {
+		t.Errorf("kept forever, ended: %d", *got)
 	}
 }
 
