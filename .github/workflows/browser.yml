@@ -67,4 +67,13 @@ jobs:
           echo "KONTRA_TEMPORAL_CLI=$RUNNER_TEMP/temporal/temporal" >> "$GITHUB_ENV"
       - name: Install Chromium for Playwright 1.64.0
         run: uv run --no-project --with playwright==1.64.0 playwright install --with-deps chromium
-      - run: make test-browser ARGS=-v
+      - run: make test-browser ARGS="-v -rA"
+        env:
+          KONTRA_BROWSER_DIR: ${{ runner.temp }}/browser
+      - if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser
+          path: |
+            ${{ runner.temp }}/browser/*.log
+            ${{ runner.temp }}/browser/*.png

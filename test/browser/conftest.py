@@ -185,7 +185,8 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
     server = os.environ.get("KONTRA_TEST_PG")
     if not temporal or not server:
         pytest.fail("KONTRA_TEMPORAL_CLI and KONTRA_TEST_PG must be set (scripts/test_browser.sh)")
-    d = tmp_path_factory.mktemp("console")
+    d = Path(os.environ["KONTRA_BROWSER_DIR"]) if os.environ.get("KONTRA_BROWSER_DIR") else tmp_path_factory.mktemp("console")
+    d.mkdir(parents=True, exist_ok=True)
     bindir = d / "bin"
     go = os.environ.get("GO", "go")
     subprocess.run([go, "build", "-o", str(bindir) + "/", "./cmd/kontra-gate", "./cmd/kontra", "./examples/sellers/a2ui",
@@ -248,8 +249,10 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
         def reachable():
             names = {x["name"]: x["reachable"] for x in s.api("GET", "/v1/services")["items"]}
             want = ["booking-form", "merchant", "notes"] + (["files"] if s.mcp else [])
-            return all(names.get(n) for n in want)
-        eventually("every service is reachable", reachable, within=60)
+            # A session serves each, and the gate holds each A2A agent's card (its keeper fetches it after the session).
+            return all(names.get(n) for n in want) and all(
+                s.api("GET", f"/v1/services/{n}").get("card") for n in ["booking-form", "merchant", "notes"])
+        eventually("every service is reachable, with its card", reachable, within=90)
         yield s
     finally:
         for name in list(s.procs)[::-1]:
@@ -276,15 +279,38 @@ def browser():
         b.close()
 
 
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    rep = yield
+    setattr(item, "rep_" + rep.when, rep)
+    return rep
+
+
 @pytest.fixture
-def browser_page(browser):
-    """A page that records console errors, page errors and CSP violations (window.__csp)."""
+def browser_page(browser, request, stack):
+    """A page that records console errors, page errors and CSP violations (window.__csp). On a failed test it prints
+    what the browser saw (console, failed requests, 4xx/5xx answers) and keeps a screenshot and the gate's log in the
+    session directory (CI uploads it)."""
     ctx = browser.new_context()
     pg = ctx.new_page()
     pg.errors = []
-    pg.on("console", lambda m: pg.errors.append(f"console.{m.type}: {m.text}") if m.type == "error" else None)
-    pg.on("pageerror", lambda e: pg.errors.append(f"pageerror: {e}"))
+    seen: list[str] = []
+    pg.on("console", lambda m: (seen.append(f"console.{m.type}: {m.text}"),
+                                pg.errors.append(f"console.{m.type}: {m.text}") if m.type == "error" else None))
+    pg.on("pageerror", lambda e: (seen.append(f"pageerror: {e}"), pg.errors.append(f"pageerror: {e}")))
+    pg.on("requestfailed", lambda r: seen.append(f"requestfailed: {r.method} {r.url} {r.failure}"))
+    pg.on("response", lambda r: seen.append(f"response: {r.status} {r.request.method} {r.url}") if r.status >= 400 else None)
     pg.add_init_script("""window.__csp = []; document.addEventListener('securitypolicyviolation',
         e => window.__csp.push(e.violatedDirective + ' ' + e.blockedURI));""")
     yield pg
+    rep = getattr(request.node, "rep_call", None)
+    if rep is not None and rep.failed:
+        name = request.node.name
+        try:
+            pg.screenshot(path=str(stack.dir / f"{name}.png"), full_page=True)
+            print(f"--- {name}: page {pg.url}\n" + pg.locator("body").inner_text()[:3000])
+        except Exception as e:  # noqa: BLE001
+            print(f"--- {name}: no screenshot: {e}")
+        print("--- what the browser saw:\n" + "\n".join(seen[-80:]))
+        print("--- gate log tail:\n" + stack.gate_log()[-6000:])
     ctx.close()
