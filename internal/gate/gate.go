@@ -51,8 +51,8 @@ import (
 	"kontra.sh/kontra/internal/sse"
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
-	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/traffic"
+	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/tunnelgate"
 	"kontra.sh/kontra/internal/version"
 )
@@ -172,9 +172,9 @@ type Replica struct {
 	// traffic is the A2A traffic record's writer (traffic.record; nil when off).
 	traffic *traffic.Recorder
 	cfg     *config.Config
-	id   string
-	log  *slog.Logger
-	opts options
+	id      string
+	log     *slog.Logger
+	opts    options
 
 	pool      *pgxpool.Pool
 	storeLog  *store.Log

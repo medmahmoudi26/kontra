@@ -15,8 +15,8 @@ import (
 
 	"kontra.sh/kontra/internal/audit"
 	"kontra.sh/kontra/internal/blob"
-	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/blob/blobtest"
+	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/pgtest"
