@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Kontra Console</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="console.css">
+<!-- No inline script, style or handler anywhere: the Content-Security-Policy is script-src 'self'. -->
+<script type="module" src="js/main.js"></script>
+</head>
+<body>
+<noscript><p class="noscript">The Kontra console needs JavaScript: it builds each task's thread from its events in this page.</p></noscript>
+
+<div id="app">
+  <header class="topbar">
+    <a class="logo" href="#/" aria-label="Kontra home">
+      <svg viewBox="0 0 40 48" width="20" height="24" aria-hidden="true">
+        <path opacity="0.5" d="M0 14.5265V33.4739L17.8947 21.2301V2.28271L0 14.5265Z" fill="#67E3F9"/>
+        <path opacity="0.5" d="M0 33.4738V14.5264L17.8947 26.7702V45.7175L0 33.4738Z" fill="#088AB2"/>
+        <path opacity="0.5" d="M40 14.5262V33.4736L22.1053 21.2298V2.28247L40 14.5262Z" fill="#67E3F9"/>
+        <path opacity="0.5" d="M40 33.4738V14.5264L22.1053 26.7702V45.7175L40 33.4738Z" fill="#088AB2"/>
+      </svg>
+      <b>kontra</b>
+    </a>
+    <span class="devbadge" id="devbadge" hidden>local gate</span>
+    <!-- The sections (js/nav.js), then where you are. Below 720px console.css hides the crumb. -->
+    <nav class="sections" id="sections" aria-label="Sections"></nav>
+    <nav class="crumb" id="crumb" aria-label="Where you are" hidden></nav>
+    <div class="spacer"></div>
+    <button class="iconbtn" id="themebtn" type="button" title="Switch theme" aria-label="Switch theme">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
+    </button>
+  </header>
+
+  <!-- Each view fills its own root (js/views/*.js); the router shows one at a time. -->
+  <section class="view browse" id="view-tasks" hidden>
+    <div class="browse-in">
+      <h1>Tasks</h1>
+      <p class="sub">Every task on this gate, from any caller and the console, newest first.</p>
+      <div class="apikeys" id="tasks"></div>
+    </div>
+  </section>
+
+  <section class="view browse" id="view-conversations" hidden>
+    <div class="browse-in">
+      <h1 id="conversationstitle">Conversations</h1>
+      <p class="sub" id="conversationssub">Tasks grouped by service, caller and context, newest activity first.</p>
+      <div class="apikeys" id="conversations"></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-thread" hidden>
+    <div class="run">
+      <aside class="ctx" id="threadctx"></aside>
+      <div class="thread"><div class="thread-scroll"><div class="thread-inner" id="thread"></div></div></div>
+    </div>
+  </section>
+
+  <section class="view browse" id="view-traffic" hidden>
+    <div class="browse-in">
+      <h1>Traffic</h1>
+      <p class="sub">The A2A exchanges this gate answered, refused ones included, newest first.</p>
+      <div class="apikeys" id="traffic"></div>
+    </div>
+  </section>
+
+  <section class="view browse" id="view-calls" hidden>
+    <div class="browse-in">
+      <h1>MCP calls</h1>
+      <p class="sub">The MCP tool calls this gate relayed, newest first.</p>
+      <div class="apikeys" id="calls"></div>
+    </div>
+  </section>
+
+  <section class="view browse" id="view-services" hidden>
+    <div class="browse-in">
+      <h1>Services</h1>
+      <p class="sub">The services behind this gate, and whether an agent is reachable now.</p>
+      <div class="apikeys" id="services"></div>
+    </div>
+  </section>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

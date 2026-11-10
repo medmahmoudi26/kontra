@@ -370,4 +370,38 @@ begin
     end if;
 end $$;
 
+-- 0006: an exchange holds a principal only with its via, a known binding, and may name a service and task that do
+-- not exist (no foreign key: a call refused for an unknown service is still recorded); console_tasks follows its
+-- task's deletion.
+insert into a2a_exchanges (id, at, tenant_id, service, method, binding, principal, via, task_id, bytes_in, bytes_out,
+                           duration_ms, http_status, rpc_code, reason)
+    values ('01900000-0000-7000-8006-000000000001', now(), null, 'nope', 'SendMessage', 'jsonrpc', null, null,
+            '01900000-0000-7000-8006-0000000000ff', 120, 80, 3, 404, -32601, null),
+           ('01900000-0000-7000-8006-000000000002', now(), '01900000-0000-7000-8000-000000000001', 'hello', 'unknown',
+            'rest', null, null, null, 0, 0, 0, 413, null, 'body_too_large');
+do $$ begin
+    insert into a2a_exchanges (id, at, service, method, binding, principal, via, bytes_in, bytes_out, duration_ms, http_status)
+        values ('01900000-0000-7000-8006-000000000003', now(), 'hello', 'GetTask', 'jsonrpc', 'anonymous', null, 0, 0, 0, 200);
+    raise exception 'FAIL: an exchange with a principal and no via was accepted';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into a2a_exchanges (id, at, service, method, binding, bytes_in, bytes_out, duration_ms, http_status)
+        values ('01900000-0000-7000-8006-000000000004', now(), 'hello', 'GetTask', 'grpc', 0, 0, 0, 200);
+    raise exception 'FAIL: an exchange with binding grpc was accepted';
+exception when check_violation then null; end $$;
+do $$
+declare t uuid;
+begin
+    select id into t from tasks order by id limit 1;
+    insert into console_tasks (task_id) values (t);
+    delete from tasks where id = t;
+    if exists (select 1 from console_tasks where task_id = t) then
+        raise exception 'FAIL: console_tasks kept a deleted task';
+    end if;
+end $$;
+do $$ begin
+    insert into console_tasks (task_id) values ('01900000-0000-7000-8006-0000000000fe');
+    raise exception 'FAIL: console_tasks accepted a task that does not exist';
+exception when foreign_key_violation then null; end $$;
+
 select 'migration behaviour: ok';
