@@ -8,6 +8,7 @@ across a gate restart).
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 
@@ -113,6 +114,9 @@ def test_list_views(stack: Stack, page: Page) -> None:
     code, _ = stack.a2a("notes", "SendMessage", {"message": {"messageId": "m", "role": "ROLE_USER", "parts": [{"text": "x"}]}},
                         headers={"A2A-Version": ""})
     assert code == 200  # a JSON-RPC error: -32009
+    # The traffic record is written in batches, off the call: wait for the refused call's row before the page reads it.
+    eventually("the refused call is recorded", lambda: any(
+        "version_unsupported" in json.dumps(x) for x in stack.api("GET", "/v1/exchanges?failed=1&limit=50")["items"]))
 
     page.goto(stack.base + "/#/")
     expect(page.locator(f'#taskrows tr[data-task="{first}"]')).to_be_visible(timeout=15000)
