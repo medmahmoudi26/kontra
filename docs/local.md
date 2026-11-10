@@ -13,7 +13,7 @@ With Docker and Go, from a checkout of this repository:
 docker compose -f compose.dev.yaml up -d --wait                  # 1. Postgres and Temporal, on loopback
 go run ./cmd/kontra-gate migrate -f examples/local/kontra.yaml   # 2. the gate's schema
 go run ./cmd/kontra-gate serve -f examples/local/kontra.yaml &   # 3. the gate, on 127.0.0.1:8080
-go run ./cmd/kontra connect --gate http://127.0.0.1:8080 \
+go run ./cmd/kontra connect --gate http://127.0.0.1:8080 --listen off \
   --serve a2a:booking=http://127.0.0.1:9995 &                     # 4. your agent, through a node
 open http://127.0.0.1:8080/                                       # 5. the console (xdg-open on Linux)
 ```
@@ -23,7 +23,8 @@ open http://127.0.0.1:8080/                                       # 5. the conso
 and prints the console's URL.
 
 Step 4 hosts whatever A2A server answers at that URL, with no enrollment: the service `booking` is created on first
-connect. To try it with an agent from this repository, start one first, e.g. the A2UI table-booking example:
+connect. `--listen off`: this node only hosts (without it, it also lets local clients call the gate's agents through
+`127.0.0.1:7777`). To try it with an agent from this repository, start one first, e.g. the A2UI table-booking example:
 
 ```sh
 go run ./examples/sellers/a2ui --port 9995 &       # an A2A 1.0 agent with an A2UI form
@@ -66,6 +67,23 @@ services:
 
 Going back to a duration does not expire the tasks that ended while it was `0`; `spec/relay.md` §5.4 has the one line
 of SQL that does.
+
+## The traffic record on any gate
+
+The Traffic view's rows are the gate's A2A traffic record, `a2a_exchanges` ([`spec/relay.md`](../spec/relay.md) §13.6):
+one row per A2A call, metadata only. It is on in the local profile and off on every other gate unless its operator
+turns it on:
+
+```yaml
+traffic:
+  record: true      # default false; true in the local development profile
+  retention: 3d     # default 7d; 0 keeps exchanges forever
+```
+
+Recording never slows or fails a call: rows are written in batches, and when the database falls behind they are
+dropped and counted in `kontra_traffic_dropped_total{replica}` on the metrics listener (and on the console's
+`/v1/info`). Turning recording off keeps the rows already written until their retention. Exchanges are deleted by the
+retention sweep every 10 minutes, whatever became of their tasks.
 
 ## What the profile does not protect against
 

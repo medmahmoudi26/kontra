@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -136,5 +139,34 @@ func TestTaskRetentionZero(t *testing.T) {
 	}
 	if err := parseErr(t, minimal+"    task: { retention: 0s }\n"); !strings.Contains(err.Error(), "retention") {
 		t.Errorf("0s: %v", err)
+	}
+}
+
+// docs/local.md's configurations load: the example file, and every YAML block of the page (the traffic block on a
+// team gate's minimal file, the others as they are).
+func TestLocalDocsLoad(t *testing.T) {
+	if _, err := Load(filepath.Join("..", "..", "examples", "local", "kontra.yaml")); err != nil {
+		t.Fatalf("examples/local/kontra.yaml: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join("..", "..", "docs", "local.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := regexp.MustCompile("(?s)```yaml\n(.*?)```").FindAllStringSubmatch(string(b), -1)
+	if len(blocks) < 2 {
+		t.Fatalf("docs/local.md has %d yaml blocks", len(blocks))
+	}
+	for _, m := range blocks {
+		y := m[1]
+		if !strings.Contains(y, "profile: local") {
+			y = minimal + y
+		}
+		c := parse(t, y)
+		if strings.Contains(y, "retention: 0") && !c.Traffic.Retention.IsForever() {
+			t.Errorf("block %q: traffic.retention %s", m[1], c.Traffic.Retention)
+		}
+		if strings.Contains(y, "record: true") && !c.Traffic.Recording() {
+			t.Errorf("block %q: traffic.record off", m[1])
+		}
 	}
 }

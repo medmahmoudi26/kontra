@@ -163,6 +163,24 @@ fixed) and again after the M3 review rounds at `33f06a8` (no finding, D266);
 [`docs/pentest-m3.md`](docs/pentest-m3.md) records the second run's every probe, what changed since the first, and
 the findings and their fixes.
 
+## Local development
+
+A gate on your own machine is a durable A2A inspector: connect the A2A servers you are building to it, and see every
+task, conversation and A2A call in the same console as Kontra Cloud, each task's thread rendered live (A2UI surfaces,
+AP2 checkouts, mandates and receipts), and prompt your agents from it. It is the gate with `profile: local`: plain
+HTTP on loopback, no sign-in, no enrollment token, every client one shared caller of your callee agents.
+
+```sh
+docker compose -f compose.dev.yaml up -d --wait
+go run ./cmd/kontra-gate migrate -f examples/local/kontra.yaml
+go run ./cmd/kontra-gate serve -f examples/local/kontra.yaml &
+go run ./cmd/kontra connect --gate http://127.0.0.1:8080 --listen off --serve a2a:booking=http://127.0.0.1:9995 &
+# then open http://127.0.0.1:8080/
+```
+
+[`docs/local.md`](docs/local.md) walks through it, with an example agent to try, how to keep history forever, and
+what the profile does not protect against (anything else on your machine can reach it: never use it for a team).
+
 ## A team gate from source
 
 For working on the gate: Postgres and Temporal from `compose.dev.yaml`, the gate and the node built from this
