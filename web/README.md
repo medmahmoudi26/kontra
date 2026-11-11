@@ -1,8 +1,13 @@
 # web: the console's protocol renderer
 
-The browser console a gate serves in the local development profile (`profile: local`): the task list,
-conversations, a task's thread built live from its event log, A2UI surfaces, AP2 parts, A2A traffic and MCP
-calls. It is plain ES modules with no build step, embedded in `kontra-gate` by the `web` Go package
+The browser console a gate serves in the local development profile (`profile: local`): the A2A inspector with
+history. Its A2A contexts (the landing page) and tasks, a task's thread built live from its event log, A2UI surfaces,
+AP2 parts, the A2A traffic of both legs with each call's bodies, the agents' cards compared with the cards the gate
+serves, a playground for A2A 1.0's eleven methods, and MCP calls. Everything is labelled as A2A names it (D360):
+`Caller · SendMessage`, `Callee · Message`, `Callee · TaskStatusUpdateEvent`, `Gate · TaskStatusUpdateEvent`,
+`Gate → Callee · GetTask`, from the gate's record of where each event came from (`origin`, D357), with the object the
+caller received beside it when the gate converted one (D5), each item's validation against the pinned A2A specification
+(D359), and ids in full. It is plain ES modules with no build step, embedded in `kontra-gate` by the `web` Go package
 (`web.go`), and loads nothing from another origin.
 
 The console talks to the gate's console API (`/v1/*`, `internal/console`), whose shapes follow Kontra Cloud's
@@ -27,10 +32,13 @@ Not taken: `inputschema.js` (the input-schema extension, withdrawn by D350), `pr
 module of sign-in, keys, billing, disputes and the catalog. `js/agentschema.js` keeps the half of `inputschema.js`
 that draws and answers an agent's own form on the thread (the A2A samples' form part, Structured Input's
 `input_schema`); a first message is text, or the card's AgentStack initial form. `api.js`, `app.js`, `main.js`,
-`nav.js` and `routes.js` were rewritten for the gate's console API, and `views/{tasks,conversations,traffic,calls,
+`nav.js` and `routes.js` were rewritten for the gate's console API, and `views/{tasks,contexts,traffic,calls,
 services}.js` are this repository's own list views. `js/ap2.js` (AP2 v0.2.0 data parts, classified by the keys
 `examples/sellers/ap2-merchant` emits and decoded for display, never verified) and `views/ap2.js` (their cards) are
-new here too.
+new here too, and so are, for the A2A wire, `views/{contexts,exchange,playground,wire}.js` (`contexts.js` replaces
+`conversations.js`; the Cards page, `views/agents.js`, compares the two cards at `#/cards/<service>`) and the wire model
+in `js/taskevents.js` (`wireOf`, `wireOfExchange`, `routingOf`). The playground's A2A calls go through `api.js` (`a2a`)
+to the service's own A2A route on the gate's origin (`routes.js`'s `A2A_ROUTES`): no other module names `/agents/`.
 
 ## Tests
 

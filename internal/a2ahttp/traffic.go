@@ -1,15 +1,17 @@
 package a2ahttp
 
 import (
-	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/google/uuid"
 
+	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/traffic"
 )
 
@@ -26,28 +28,49 @@ const captureHead = 16 << 10
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec := s.deps.Traffic
 	rt, ok := parseRoute(r, s.deps.Multi)
-	if rec == nil || !ok {
+	if !ok {
 		s.serve(w, r)
 		return
 	}
+	if rec == nil {
+		// Unrecorded, the call still says which A2A method brought its message (D357).
+		var body []byte
+		if rt.kind == routeJSONRPC || rt.message {
+			body, _ = readBody(r)
+		}
+		s.serve(w, r.WithContext(withOrigin(r.Context(), methodOf(r, rt, body), uuid.Nil)))
+		return
+	}
 	start := time.Now()
-	ctx, note := traffic.WithNote(r.Context())
+	ctx, note := traffic.WithNote(r.Context()) // the exchange's id, minted now (D356), for what the call writes
+	bodyMax := rec.BodyMax()
 	var body []byte
-	if rt.kind == routeJSONRPC || rt.message {
+	if rt.kind == routeJSONRPC || rt.message || bodyMax > 0 {
 		body, _ = readBody(r) // the edge has read it already; put back for the handler
 	}
-	cw := &captureWriter{ResponseWriter: w}
+	ctx = withOrigin(ctx, methodOf(r, rt, body), note.ID())
+	version := versionOf(r) // before Versions rewrites the header
+	cw := &captureWriter{ResponseWriter: w, bodyMax: bodyMax, start: start}
 	s.serve(cw, r.WithContext(ctx))
 
-	e := traffic.Exchange{At: start, Service: rt.name, Binding: traffic.BindingREST, BytesIn: max(r.ContentLength, int64(len(body))),
-		BytesOut: cw.n, Duration: time.Since(start), HTTPStatus: cw.status()}
+	e := traffic.Exchange{At: start, Leg: traffic.LegCaller, Service: rt.name, Binding: traffic.BindingREST,
+		A2AVersion: version, BytesIn: max(r.ContentLength, int64(len(body))), BytesOut: cw.n, Duration: time.Since(start),
+		HTTPStatus: cw.status()}
 	if rt.kind == routeJSONRPC {
 		e.Binding = traffic.BindingJSONRPC
 	}
 	e.Method = methodOf(r, rt, body)
+	if bodyMax > 0 && !note.NoBodies() {
+		e.Request = traffic.KeepBody(body, bodyMax)
+		if cw.frames != nil {
+			e.Frames, e.FramesDropped = cw.frames.Done()
+		} else {
+			e.Response = traffic.KeepPrefix(cw.body.Bytes(), cw.n, bodyMax)
+		}
+	}
 	note.Fill(&e)
 	taskID, contextID := requestIDs(rt, e.Method, body)
-	t, c, code := answerIDs(cw.head.Bytes(), cw.Header().Get("Content-Type"))
+	t, c, code := traffic.AnswerIDs(cw.head.Bytes(), cw.Header().Get("Content-Type"))
 	if taskID == "" {
 		taskID = t
 	}
@@ -60,6 +83,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	e.ContextID = contextID
 	rec.Record(e)
+}
+
+// withOrigin is ctx whose caller's message, if the call carries one, came by method in exchange (D357).
+func withOrigin(ctx context.Context, method string, exchange uuid.UUID) context.Context {
+	o := &store.Origin{Actor: store.ActorCaller, Type: method, Method: method}
+	if exchange != uuid.Nil {
+		o.ExchangeID = exchange.String()
+	}
+	return store.WithRequestOrigin(ctx, o)
 }
 
 // RecordRefusal records an edge refusal (413, 429, 408) of a request to an A2A route, which never reached a handler: the
@@ -86,13 +118,20 @@ func (s *Server) RecordRefusal(r *http.Request, status int, reason string) {
 	rec.Record(e)
 }
 
-// captureWriter counts what the answer writes and keeps its first captureHead bytes; it passes Flush and the
-// connection's controls through (Unwrap), so streams are unchanged.
+// captureWriter counts what the answer writes and keeps its first captureHead bytes; with bodies on it also keeps the
+// answer's first bodyMax bytes, or a stream's frames. It passes Flush and the connection's controls through (Unwrap),
+// so streams are unchanged.
 type captureWriter struct {
 	http.ResponseWriter
 	code int
 	n    int64
 	head bytes.Buffer
+
+	bodyMax int
+	start   time.Time
+	decided bool            // whether the answer is a stream is known (its first write)
+	body    bytes.Buffer    // a plain answer's first bodyMax bytes
+	frames  *traffic.Frames // a stream's frames
 }
 
 func (c *captureWriter) WriteHeader(code int) {
@@ -108,6 +147,19 @@ func (c *captureWriter) Write(b []byte) (int, error) {
 	}
 	if room := captureHead - c.head.Len(); room > 0 {
 		c.head.Write(b[:min(room, len(b))])
+	}
+	if c.bodyMax > 0 {
+		if !c.decided {
+			c.decided = true
+			if strings.HasPrefix(c.Header().Get("Content-Type"), "text/event-stream") {
+				c.frames = traffic.NewFrames(c.start, c.bodyMax)
+			}
+		}
+		if c.frames != nil {
+			_, _ = c.frames.Write(b)
+		} else if room := c.bodyMax - c.body.Len(); room > 0 {
+			c.body.Write(b[:min(room, len(b))])
+		}
 	}
 	n, err := c.ResponseWriter.Write(b)
 	c.n += int64(n)
@@ -127,12 +179,14 @@ func (c *captureWriter) status() int {
 	return c.code
 }
 
-// a2aMethods are the JSON-RPC methods of A2A 1.0; any other name a caller sends is recorded as unknown, so the record
-// never keeps a string the caller chose.
-var a2aMethods = map[string]bool{
-	"SendMessage": true, "SendStreamingMessage": true, "GetTask": true, "ListTasks": true, "CancelTask": true,
-	"SubscribeToTask": true, "CreateTaskPushNotificationConfig": true, "GetTaskPushNotificationConfig": true,
-	"ListTaskPushNotificationConfigs": true, "DeleteTaskPushNotificationConfig": true, "GetExtendedAgentCard": true,
+// versionOf is the A2A version a request claims (A2A-Version, header else query parameter) as major.minor, or "" when
+// it claims none or something that is not a version: the record never keeps a string the caller chose.
+func versionOf(r *http.Request) string {
+	v := r.Header.Get(a2a.SvcParamVersion)
+	if v == "" {
+		v = r.URL.Query().Get(a2a.SvcParamVersion)
+	}
+	return traffic.MajorMinor(v)
 }
 
 // methodOf names the call: the JSON-RPC method, the HTTP+JSON route's method, or card, upstream_card and seller_jwks.
@@ -148,7 +202,7 @@ func methodOf(r *http.Request, rt route, body []byte) string {
 		var req struct {
 			Method string `json:"method"`
 		}
-		if json.Unmarshal(body, &req) == nil && a2aMethods[req.Method] {
+		if json.Unmarshal(body, &req) == nil && traffic.A2AMethods[req.Method] {
 			return req.Method
 		}
 		return traffic.MethodUnknown
@@ -219,71 +273,4 @@ func requestIDs(rt route, method string, body []byte) (taskID, contextID string)
 		return rt.taskID, ""
 	}
 	return "", ""
-}
-
-// idsOf reads a task's or a message's ids from one A2A object: a Task (id, contextId), a Message or an update
-// (taskId, contextId), or a wrapper holding one (task, message, statusUpdate, artifactUpdate).
-func idsOf(raw json.RawMessage) (taskID, contextID string) {
-	var o struct {
-		ID             string          `json:"id"`
-		TaskID         string          `json:"taskId"`
-		ContextID      string          `json:"contextId"`
-		Task           json.RawMessage `json:"task"`
-		Message        json.RawMessage `json:"message"`
-		StatusUpdate   json.RawMessage `json:"statusUpdate"`
-		ArtifactUpdate json.RawMessage `json:"artifactUpdate"`
-	}
-	if len(raw) == 0 || json.Unmarshal(raw, &o) != nil {
-		return "", ""
-	}
-	for _, inner := range []json.RawMessage{o.Task, o.Message, o.StatusUpdate, o.ArtifactUpdate} {
-		if len(inner) > 0 {
-			return idsOf(inner)
-		}
-	}
-	if o.TaskID != "" {
-		return o.TaskID, o.ContextID
-	}
-	if o.ContextID != "" { // a Task: its id is the task's
-		return o.ID, o.ContextID
-	}
-	return "", ""
-}
-
-// answerIDs reads the head of an answer: a JSON-RPC envelope (result, or error and its code), an HTTP+JSON object,
-// or a stream's first event (SSE data: lines, each a JSON-RPC envelope or a StreamResponse).
-func answerIDs(head []byte, contentType string) (taskID, contextID string, rpcCode *int) {
-	if strings.HasPrefix(contentType, "text/event-stream") {
-		sc := bufio.NewScanner(bytes.NewReader(head))
-		sc.Buffer(make([]byte, 0, len(head)), len(head)+1)
-		for sc.Scan() {
-			if data, ok := strings.CutPrefix(sc.Text(), "data:"); ok {
-				t, c, code := answerIDs([]byte(strings.TrimSpace(data)), "application/json")
-				if t != "" || code != nil {
-					return t, c, code
-				}
-			}
-		}
-		return "", "", nil
-	}
-	var env struct {
-		JSONRPC string          `json:"jsonrpc"`
-		Result  json.RawMessage `json:"result"`
-		Error   *struct {
-			Code int `json:"code"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(head, &env) != nil {
-		return "", "", nil // an answer longer than the head is read no further
-	}
-	if env.JSONRPC == "" {
-		t, c := idsOf(head)
-		return t, c, nil
-	}
-	if env.Error != nil {
-		code := env.Error.Code
-		return "", "", &code
-	}
-	t, c := idsOf(env.Result)
-	return t, c, nil
 }

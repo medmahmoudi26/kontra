@@ -216,6 +216,8 @@ func (h *Hirer) create(ctx context.Context, req HireRequest, activated []string)
 		return HireOutcome{}, err
 	}
 	hctx := withHireActivated(lifecycle.WithHire(ctx, lifecycle.Hire{Key: req.FirstRequest, Keyed: req.Keyed}), activated)
+	// The caller's message came as the gate's own /mcp hire, which the gate sends as SendMessage (D357).
+	hctx = store.WithRequestOrigin(hctx, &store.Origin{Actor: store.ActorCaller, Type: "SendMessage", Method: "mcp:hire"})
 	start, err := send(hctx, sh, req.Principal, &a2a.SendMessageRequest{Message: req.Message})
 	if err != nil {
 		return HireOutcome{}, err

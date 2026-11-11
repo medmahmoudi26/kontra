@@ -102,6 +102,9 @@ type Interceptors struct {
 	// Anon checks a message to an anonymous tenant's service against its parts_bytes (spec/tunnel.md §6.2;
 	// *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
 	Anon AnonStorage
+	// Local is the local development profile: every client is the one anonymous caller, so the anonymous refusals
+	// of ListTasks and push configs, which are about callers the gate cannot tell apart, do not apply (spec §18.1).
+	Local bool
 }
 
 // AnonStorage checks a caller's message of n bytes to a service of tenant svcTenant (slug svcSlug) against an
@@ -177,20 +180,26 @@ func isAnonymous(ctx context.Context) bool {
 }
 
 func (i *Interceptors) anonymous(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
-	if !isAnonymous(ctx) {
+	if !isAnonymous(ctx) || i.Local {
 		return ctx, nil, nil
 	}
 	switch cc.Method() {
 	case "ListTasks":
 		return ctx, nil, unsupported("ListTasks is not available to anonymous callers")
 	case "GetTaskPushConfig", "ListTaskPushConfigs", "CreateTaskPushConfig", "DeleteTaskPushConfig":
-		return ctx, nil, unsupported("push notifications are not available to anonymous callers")
+		return ctx, nil, noPush()
 	case "SendMessage", "SendStreamingMessage":
 		if r, ok := req.Payload.(*a2a.SendMessageRequest); ok && r.Config != nil && r.Config.PushConfig != nil {
-			return ctx, nil, unsupported("push notifications are not available to anonymous callers")
+			return ctx, nil, noPush()
 		}
 	}
 	return ctx, nil, nil
+}
+
+// noPush refuses an anonymous caller's push config with A2A's own error for it, PushNotificationNotSupportedError: an
+// anonymous-only service's card says pushNotifications false (spec §2.3, §3).
+func noPush() error {
+	return a2a.NewError(a2a.ErrPushNotificationNotSupported, "push notifications are not available to anonymous callers")
 }
 
 // anonStorage refuses a message to an anonymous tenant's service that would take the tenant's stored bytes past

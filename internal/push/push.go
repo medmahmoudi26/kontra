@@ -85,6 +85,15 @@ type ConfigStore struct {
 	signal Signaler
 	policy ssrf.Policy
 	logger *slog.Logger
+	// anonymous lets the anonymous principal set configs: the local development profile (spec §18.1).
+	anonymous bool
+}
+
+// AllowAnonymous lets the anonymous principal set configs (the local development profile, whose one caller is every
+// client).
+func (s *ConfigStore) AllowAnonymous() *ConfigStore {
+	s.anonymous = true
+	return s
 }
 
 var (
@@ -102,8 +111,7 @@ func NewConfigStore(db *pgxpool.Pool, signal Signaler, policy ssrf.Policy, logge
 	return &ConfigStore{db: db, signal: signal, policy: policy, logger: logger}
 }
 
-func invalid(msg string) error     { return a2a.NewError(a2a.ErrInvalidParams, msg) }
-func unsupported(msg string) error { return a2a.NewError(a2a.ErrUnsupportedOperation, msg) }
+func invalid(msg string) error { return a2a.NewError(a2a.ErrInvalidParams, msg) }
 
 // errConfigNotFound is a config the task does not have. A2A answers TaskNotFoundError (spec §3.1.8); it
 // also matches a2a-go's push.ErrPushConfigNotFound.
@@ -111,10 +119,10 @@ var errConfigNotFound = a2a.NewError(errors.Join(a2a.ErrTaskNotFound, a2apush.Er
 
 func taskNotFound() error { return a2a.NewError(a2a.ErrTaskNotFound, "task not found") }
 
-// anonymousRefused is the anonymous principal setting a config (spec §2.3); the interceptor answers the
-// same before the store runs.
+// anonymousRefused is the anonymous principal setting a config (spec §2.3): A2A's PushNotificationNotSupportedError,
+// as the interceptor answers before the store runs.
 func anonymousRefused() error {
-	return unsupported("push notifications are not available to anonymous callers")
+	return a2a.NewError(a2a.ErrPushNotificationNotSupported, "push notifications are not available to anonymous callers")
 }
 
 // CheckURL is the set-time check of a push config URL (spec §10.1, §10.3): the URL parses and
@@ -209,7 +217,7 @@ func checkURLOffline(rawURL string, policy ssrf.Policy, logger *slog.Logger) err
 	if err != nil {
 		return err
 	}
-	p := ssrf.Policy{AllowPrivate: policy.AllowPrivate, Resolver: noLookup{}}
+	p := ssrf.Policy{AllowPrivate: policy.AllowPrivate, AllowLoopback: policy.AllowLoopback, Resolver: noLookup{}}
 	if err := ssrf.CheckURL(context.Background(), u, p); err != nil && !errors.Is(err, errNoLookup) {
 		return refusal(context.Background(), logger, u, err)
 	}
@@ -534,7 +542,7 @@ func (s *ConfigStore) Save(ctx context.Context, taskID a2a.TaskID, config *a2a.P
 	if err != nil {
 		return nil, err
 	}
-	if p, ok := auth.FromContext(ctx); ok && p.Kind == auth.KindAnonymous {
+	if p, ok := auth.FromContext(ctx); ok && p.Kind == auth.KindAnonymous && !s.anonymous {
 		return nil, anonymousRefused()
 	}
 	if err := validate(config); err != nil {
@@ -567,7 +575,7 @@ func (s *ConfigStore) Save(ctx context.Context, taskID a2a.TaskID, config *a2a.P
 		if err != nil {
 			return err
 		}
-		if owner.anonymous {
+		if owner.anonymous && !s.anonymous {
 			return anonymousRefused()
 		}
 		res, err = s.save(ctx, tx, tid, owner.buyer, config, urlChecked)
@@ -601,7 +609,7 @@ func foreignTask(err error) error {
 // follow-up is refused). A row inserted on a task that ended meanwhile is announced too: its push_webhook,
 // if the workflow still runs one, finds it done and ends at once.
 func (s *ConfigStore) SaveInline(ctx context.Context, tx pgx.Tx, taskID uuid.UUID, owner store.Owner, cfg *a2a.PushConfig) (string, bool, error) {
-	if owner.Via == store.ViaAnonymous {
+	if owner.Via == store.ViaAnonymous && !s.anonymous {
 		return "", false, anonymousRefused()
 	}
 	if err := validate(cfg); err != nil {

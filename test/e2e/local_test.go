@@ -147,7 +147,7 @@ func TestLocalProfile(t *testing.T) {
 		Items []struct{ Method, Principal string }
 	}
 	eventually(t, 10*time.Second, "two SendMessage exchanges", func() bool {
-		getJSON(t, g.URL+"/v1/exchanges?method=SendMessage", &ex)
+		getJSON(t, g.URL+"/v1/exchanges?method=SendMessage&leg=caller", &ex)
 		return len(ex.Items) == 2
 	})
 

@@ -35,18 +35,19 @@ import { CATALOGS, FormBook, actionMessage, actionReply, answerOf, formReply, su
 import { collect, formSpec, refusal } from "../agentschema.js";
 import { answeredValues, fulfilledValues, normalizeForm, requestedForm, valueRows } from "../agentstack.js";
 import { agentForm } from "../agentform.js";
-import { gate } from "../app.js";
+import { gate, offers } from "../app.js";
 import { GateError, errorFrom } from "../api.js";
 import { $, errorText, fill, h, icon, toast } from "../dom.js";
 import { fieldNode } from "../formfields.js";
 import { crumb, showView } from "../nav.js";
 import { readEvents } from "../sse.js";
-import { FORM_MAX, describe, foldResult } from "../taskevents.js";
+import { FORM_MAX, describe, foldResult, wireOf } from "../taskevents.js";
 import { byCard, chipRow, enterSends, hm, hms, jsonBox, mss, oneLine, phone, plainText, rawToggle, reducedMotion } from "./cards.js";
-import { VIA_WORDS, copyButton, failure, isTerminal, serviceAvatar, shortId, stateChip, when } from "./common.js";
+import { VIA_WORDS, failure, isTerminal, serviceAvatar, shortId, stateChip, when } from "./common.js";
 import { dataView, fileRow, sealedRow, textView } from "./outputs.js";
 import { requestCard, requestRow, requestRows } from "./request.js";
 import { ap2Card } from "./ap2.js";
+import { idRow as wireIdRow, labelChip, openingNodes, timelineRow } from "./wire.js";
 
 const TASK_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -398,7 +399,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const newSmall = h("a", { class: "btn sm", id: "newrunsm", href: runHref, text: "New task", hidden: true });
   newSmall.style.textDecoration = "none";
   const footTerms = h("div", { class: "terms2", id: "ctxfoot" });
-  const logCount = h("span", { text: "Event log" });
+  const logCount = h("span", { text: "A2A timeline" });
   const log = h("div", { class: "events", id: "eventlog" });
   log.style.marginTop = "8px";
   const logBox = h("details", { class: "keyimport", id: "eventsbox" }, [h("summary", {}, [logCount]), log]);
@@ -462,16 +463,18 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     const t = P.t;
     if (!t) return;
     foot.hidden = false;
-    const idRow = h("div", { class: "tr" }, [h("b", { text: "id" }), h("span", {}, [shortId(t.task_id), " "])]);
-    const copy = copyButton(t.task_id, "copy");
-    copy.className = "linkbtn";
-    idRow.lastChild.appendChild(copy);
+    // The ids in full, with Copy (spec: Identifiers Shown In Full): the gate's, and the callee's own.
+    const tl = P.timeline;
+    const ctxHref = t.context_id && t.caller_id ? `#/c/${encodeURIComponent(t.service)}/${encodeURIComponent(t.caller_id)}/${encodeURIComponent(t.context_id)}` : null;
     fill(footTerms, [
-      idRow,
+      wireIdRow("taskId", t.task_id),
+      t.context_id ? wireIdRow("contextId", t.context_id, { href: ctxHref }) : null,
+      ...(tl ? openingNodes(null, (tl.callee_contexts || []).filter((c) => (c.task_ids || []).includes(t.task_id))) : []),
+      tl && tl.opening && tl.opening.task_id === t.task_id ? h("p", { class: "small muted", id: "ctxopened",
+        text: tl.opening.assigned === true ? "This task opened its context: the gate assigned the contextId." : tl.opening.assigned === false ? "This task opened its context: the caller sent the contextId." : "" }) : null,
       h("div", { class: "tr" }, [h("b", { text: "started" }), h("span", { text: when(t.created_at) })]),
       h("div", { class: "tr" }, [h("b", { text: "duration" }), h("span", { id: "ctxduration", text: "" })]),
       h("div", { class: "tr" }, [h("b", { text: "caller" }), h("span", { text: [t.caller, VIA_WORDS[t.via] || t.via].filter(Boolean).join(" · ") || "—" })]),
-      t.context_id ? h("div", { class: "tr" }, [h("b", { text: "context" }), h("span", { title: t.context_id, text: shortId(t.context_id) })]) : null,
     ]);
     tick();
   };
@@ -514,14 +517,43 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     });
   };
 
-  const logLine = (ev, d) => {
+  /** The A2A timeline (D360): each event as A2A names it (`<Actor> · <A2A type>`, from the gate's record of its
+   * origin), the object the caller received and any conversion, its validation and its exchange; and, from the task's
+   * timeline (GET /v1/tasks/{id}/timeline), the calls on either leg that carried no event, in time order. */
+  const timelineItem = (row, at) => {
+    row.dataset.at = String(Date.parse(at) || 0);
+    const stick = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+    const t = Number(row.dataset.at);
+    const after = Array.from(log.children).find((c) => Number(c.dataset.at || 0) > t);
+    if (after) log.insertBefore(row, after);
+    else log.appendChild(row);
+    logCount.textContent = `A2A timeline (${log.childElementCount})`;
+    if (stick) log.scrollTop = log.scrollHeight;
+  };
+  const logLine = (ev) => {
     P.events += 1;
-    logCount.textContent = `Event log (${P.events})`;
-    const at = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
-    const row = h("div", { class: "ev" }, [h("time", { text: hms(ev.at) }), h("p", { text: d.line })]);
-    row.style.gridTemplateColumns = "56px minmax(0,1fr)";
-    log.appendChild(row);
-    if (at) log.scrollTop = log.scrollHeight;
+    timelineItem(timelineRow({ ...ev, type: "event", task_id: P.taskId }), ev.at);
+  };
+  /** The task's timeline: its exchanges that carried no event join the A2A timeline; its context's opening and the
+   * callee's ids join the sidebar's ids. */
+  let timelineBusy = false;
+  const loadTimeline = async () => {
+    if (!P.taskId || !offers("timeline") || timelineBusy) return;
+    timelineBusy = true;
+    try {
+      const tl = await gate.taskTimeline(P.taskId);
+      if (!alive()) return;
+      P.timeline = tl;
+      for (const it of Array.isArray(tl.items) ? tl.items : []) {
+        if (it.type !== "exchange" || $(`[data-exchange="${it.id}"]`, log)) continue;
+        timelineItem(timelineRow(it), it.at);
+      }
+      footRows();
+    } catch {
+      // the next refresh tries again
+    } finally {
+      timelineBusy = false;
+    }
   };
 
   // ------------------------------------------------------------------ the clock
@@ -543,7 +575,17 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   // ------------------------------------------------------------------ cards
 
   /** Add a card to the thread: before the live Running card while it is the last one. */
-  const place = (node) => grew(() => {
+  /** A card drawn for an event carries that event's A2A label (D360): who sent which A2A object. */
+  const wireTag = (node) => {
+    if (!P.wire || !node || node.querySelector("[data-wire]")) return node;
+    const at = node.querySelector(".by") || node.querySelector(".hd") || null;
+    const tag = labelChip(P.wire);
+    if (at) at.appendChild(tag);
+    else node.insertBefore(tag, node.firstChild);
+    return node;
+  };
+  const place = (node) => placeNow(wireTag(node));
+  const placeNow = (node) => grew(() => {
     if (P.live && !P.live.done && P.live.node.parentElement === list && P.live.node === list.lastElementChild) list.insertBefore(node, P.live.node);
     else list.appendChild(node);
   });
@@ -683,6 +725,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     }
     P.live = liveCard(at, phase);
     P.resultsCard = null; // a new turn's results come under it
+    wireTag(P.live.node);
     grew(() => list.appendChild(P.live.node));
     P.live.cancel(Boolean(P.t && P.t.actions.includes("cancel")));
     tick();
@@ -753,6 +796,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const ensureResults = (at) => {
     if (P.resultsCard) return P.resultsCard;
     P.resultsCard = resultsCard(at);
+    wireTag(P.resultsCard.node);
     grew(() => list.appendChild(P.resultsCard.node));
     return P.resultsCard;
   };
@@ -1305,7 +1349,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     const row = requestRow({ rows, text: first.text, raw: () => reqRaw });
     if (!P.req) {
       P.req = byCard({ you: true }, at, row, { id: "request" });
-      list.prepend(P.req.node);
+      list.prepend(wireTag(P.req.node));
     } else {
       P.req.body.replaceChildren(row);
       if (at) P.req.time.textContent = hm(at);
@@ -1422,8 +1466,13 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     const at = Date.parse(ev.at);
     P.lastEventAt = Date.now() < P.replayUntil && at ? Math.min(Date.now(), at) : Date.now();
     const d = describe(ev);
-    logLine(ev, d);
-    onContent(ev, d);
+    logLine(ev);
+    P.wire = wireOf(ev);
+    try {
+      onContent(ev, d);
+    } finally {
+      P.wire = null;
+    }
     if (ev.kind === "message") liven();
     else if (ev.kind !== "artifact") scheduleRefresh();
     tick();
@@ -1471,7 +1520,10 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     t = P.t;
     if (t.created_at) P.createdAt = Date.parse(t.created_at) || P.createdAt;
     if (t.terminal_at) P.terminalAt = Date.parse(t.terminal_at) || P.terminalAt;
-    if (!before || before.state !== t.state) footRows();
+    if (!before || before.state !== t.state) {
+      footRows();
+      loadTimeline();
+    }
     if (P.live && !P.live.done) P.live.cancel(t.actions.includes("cancel") && !isTerminal(t.state));
     drawComposer(t);
     liven();

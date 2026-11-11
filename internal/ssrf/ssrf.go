@@ -51,8 +51,30 @@ type Policy struct {
 	// AllowPrivate skips the address check and permits http:// (D67); redirects and the environment's
 	// proxy stay refused.
 	AllowPrivate bool
+	// AllowLoopback admits loopback addresses alone (127.0.0.0/8, ::1), and http:// to a loopback host: the local
+	// development profile's push targets (spec §18.1). Every other address rule stays, and a host that resolves to
+	// a loopback address is connected to that address only.
+	AllowLoopback bool
 	// Resolver replaces net.DefaultResolver (tests).
 	Resolver Resolver
+}
+
+// checkAddr is CheckAddr under p: a loopback address passes under AllowLoopback.
+func (p Policy) checkAddr(addr netip.Addr) error {
+	if p.AllowLoopback && addr.IsValid() && addr.Zone() == "" && addr.Unmap().IsLoopback() {
+		return nil
+	}
+	return CheckAddr(addr)
+}
+
+// loopbackHost reports whether host names the loopback interface: localhost or a loopback IP literal.
+func loopbackHost(host string) bool {
+	host = strings.TrimSuffix(strings.TrimPrefix(strings.ToLower(host), "["), "]")
+	if host == "localhost" {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Unmap().IsLoopback()
 }
 
 func (p Policy) resolver() Resolver {
@@ -68,7 +90,7 @@ func (p Policy) CheckScheme(u *url.URL) error {
 	case "https":
 		return nil
 	case "http":
-		if p.AllowPrivate {
+		if p.AllowPrivate || (p.AllowLoopback && loopbackHost(u.Hostname())) {
 			return nil
 		}
 		return fmt.Errorf("%w: http:// needs allow_private (only https:// is dialed otherwise)", ErrScheme)
@@ -99,7 +121,7 @@ func CheckURL(ctx context.Context, u *url.URL, p Policy) error {
 	if p.AllowPrivate {
 		return nil
 	}
-	_, err := resolve(ctx, p.resolver(), u.Hostname())
+	_, err := resolve(ctx, p, u.Hostname())
 	return err
 }
 
@@ -250,10 +272,11 @@ func embedded(v4 netip.Addr, kind string) string {
 // resolve returns every address host names (an IP literal is itself), refusing the whole name when any
 // one of them is refused: a name that resolves to a public and a private address is not dialed at all. A
 // name that does not exist or has no address is ErrNoHost; any other lookup failure is ErrLookup.
-func resolve(ctx context.Context, r Resolver, host string) ([]netip.Addr, error) {
+func resolve(ctx context.Context, p Policy, host string) ([]netip.Addr, error) {
+	r := p.resolver()
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	if a, err := netip.ParseAddr(host); err == nil {
-		if err := CheckAddr(a); err != nil {
+		if err := p.checkAddr(a); err != nil {
 			return nil, err
 		}
 		return []netip.Addr{a.Unmap()}, nil
@@ -271,7 +294,7 @@ func resolve(ctx context.Context, r Resolver, host string) ([]netip.Addr, error)
 	}
 	out := make([]netip.Addr, 0, len(addrs))
 	for _, a := range addrs {
-		if err := CheckAddr(a); err != nil {
+		if err := p.checkAddr(a); err != nil {
 			return nil, fmt.Errorf("%s resolves to a refused address: %w", host, err)
 		}
 		out = append(out, a.Unmap())
@@ -297,7 +320,7 @@ func NewDialer(p Policy) *Dialer {
 			if err != nil {
 				return fmt.Errorf("%w: %s", ErrAddress, address)
 			}
-			return CheckAddr(ap.Addr())
+			return p.checkAddr(ap.Addr())
 		}
 	}
 	d.dial = d.inner.DialContext
@@ -319,7 +342,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	if d.policy.AllowPrivate {
 		return d.dial(ctx, network, address)
 	}
-	addrs, err := resolve(ctx, d.policy.resolver(), host)
+	addrs, err := resolve(ctx, d.policy, host)
 	if err != nil {
 		return nil, err
 	}

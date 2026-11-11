@@ -30,6 +30,8 @@ func TestLocalDefaults(t *testing.T) {
 		{"public_url", c.PublicURL, "http://127.0.0.1:8080"},
 		{"traffic.record", c.Traffic.Recording(), true},
 		{"traffic.retention", c.Traffic.Retention.D(), 7 * 24 * time.Hour},
+		{"traffic.bodies", c.Traffic.KeepsBodies(), true},
+		{"traffic.body_max", c.Traffic.BodyMax, ByteSize(DefaultTrafficBodyMax)},
 		{"tenancy", c.Tenancy, TenancySingle},
 		{"limits.rps_per_ip", c.Limits.RPSPerIP, float64(LocalRPSPerIP)},
 	} {
@@ -103,6 +105,31 @@ func TestNoProfileUnchanged(t *testing.T) {
 	}
 	if c := parse(t, localMinimal+"limits: { rps_per_ip: 10 }\n"); c.Limits.RPSPerIP != 10 {
 		t.Errorf("an explicit limits.rps_per_ip in the profile: %v", c.Limits.RPSPerIP)
+	}
+}
+
+// traffic.bodies and traffic.body_max (D358): bodies on by default in the profile only, never without recording;
+// body_max defaults to 256 KiB and stays within 1 KiB to 16 MiB.
+func TestTrafficBodiesConfig(t *testing.T) {
+	if c := parse(t, minimal); c.Traffic.KeepsBodies() || c.Traffic.BodyMax != DefaultTrafficBodyMax {
+		t.Errorf("team gate default: bodies %v, body_max %d", c.Traffic.KeepsBodies(), c.Traffic.BodyMax)
+	}
+	if c := parse(t, minimal+"traffic: { record: true }\n"); c.Traffic.KeepsBodies() {
+		t.Error("a team gate recording traffic keeps bodies without traffic.bodies")
+	}
+	if c := parse(t, minimal+"traffic: { record: true, bodies: true, body_max: 64KiB }\n"); !c.Traffic.KeepsBodies() || c.Traffic.BodyMax != 64<<10 {
+		t.Errorf("team gate opt-in: %+v", c.Traffic)
+	}
+	if c := parse(t, minimal+"traffic: { bodies: true }\n"); c.Traffic.KeepsBodies() {
+		t.Error("bodies kept while traffic.record is off")
+	}
+	if c := parse(t, localMinimal+"traffic: { bodies: false }\n"); c.Traffic.KeepsBodies() || !c.Traffic.Recording() {
+		t.Errorf("bodies: false in the profile: %+v", c.Traffic)
+	}
+	for _, y := range []string{"traffic: { body_max: 512 }", "traffic: { body_max: 32MiB }"} {
+		if err := parseErr(t, localMinimal+y+"\n"); !strings.Contains(err.Error(), "traffic.body_max") {
+			t.Errorf("%s: %v", y, err)
+		}
 	}
 }
 

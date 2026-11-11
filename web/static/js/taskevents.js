@@ -300,3 +300,97 @@ export function foldResult(prev, a) {
   if (a.lastChunk !== null && a.lastChunk !== undefined) r.lastChunk = a.lastChunk;
   return r;
 }
+
+// ------------------------------------------------------------------ the A2A wire (D357, D360)
+
+/** The actors of the A2A wire, as an item's label names them: the caller (the client that called the
+ * gate), the callee (the service's agent) and the gate itself. */
+export const ACTORS = Object.freeze({ caller: "Caller", callee: "Callee", gate: "Gate" });
+
+/** A2A's own names of a logged event's StreamResponse member: the object the caller received. */
+const MEMBER_TYPES = Object.freeze({ task: "Task", message: "Message", statusUpdate: "TaskStatusUpdateEvent", artifactUpdate: "TaskArtifactUpdateEvent" });
+
+const str = (v) => (typeof v === "string" && v ? v : null);
+
+/** The A2A object a payload holds for the caller ("Task", "Message", "TaskStatusUpdateEvent",
+ * "TaskArtifactUpdateEvent"), or null. */
+export function callerTypeOf(payload) {
+  if (!isObj(payload)) return null;
+  for (const [member, type] of Object.entries(MEMBER_TYPES)) if (isObj(payload[member])) return type;
+  return null;
+}
+
+/** The ids an event's object carries: the task's, as the caller saw them (gate ids). */
+function idsOf(payload) {
+  if (!isObj(payload)) return { taskId: null, contextId: null };
+  if (isObj(payload.task)) return { taskId: str(payload.task.id), contextId: str(payload.task.contextId) };
+  for (const m of ["statusUpdate", "artifactUpdate", "message"]) {
+    if (isObj(payload[m])) return { taskId: str(payload[m].taskId), contextId: str(payload[m].contextId) };
+  }
+  return { taskId: null, contextId: null };
+}
+
+/** The A2A members that place a caller's message (D360): its contextId, its taskId (null: it named
+ * none, so the agent may answer it with a new task or a Message), and the tasks it refers to. */
+export function routingOf(m) {
+  if (!isObj(m)) return null;
+  return {
+    contextId: str(m.contextId),
+    taskId: str(m.taskId),
+    referenceTaskIds: Array.isArray(m.referenceTaskIds) ? m.referenceTaskIds.filter((x) => typeof x === "string").slice(0, 20) : [],
+  };
+}
+
+/** One logged event as the A2A wire labels it: who sent which A2A object in which method (its
+ * origin, the gate's record: never inferred), the object the caller received for it, and whether the
+ * gate converted one into the other (D5); its ids, its exchange and its validation.
+ *
+ * { actor, type, method, callerType, convertedTo, exchangeId, contextAssigned, ids, validation,
+ *   recorded, label } -- `recorded` false for an event logged before origins were (its label then
+ * names the caller-facing object only). */
+export function wireOf(ev) {
+  const payload = isObj(ev && ev.payload) ? ev.payload : null;
+  const callerType = str(ev && ev.caller_type) || callerTypeOf(payload);
+  const o = isObj(ev && ev.origin) ? ev.origin : null;
+  const actor = o && Object.hasOwn(ACTORS, o.actor) ? o.actor : null;
+  const type = (o && str(o.type)) || callerType;
+  const out = {
+    actor,
+    type,
+    method: o ? str(o.method) : null,
+    callerType,
+    convertedTo: o ? str(o.converted_to) : null,
+    exchangeId: o ? str(o.exchange_id) : null,
+    contextAssigned: o && typeof o.context_assigned === "boolean" ? o.context_assigned : null,
+    ids: idsOf(payload),
+    validation: isObj(ev && ev.validation) ? ev.validation : null,
+    recorded: Boolean(actor),
+  };
+  out.label = actor ? `${ACTORS[actor]} · ${type || ev.kind}` : (type || String((ev && ev.kind) || "event"));
+  return out;
+}
+
+/** One exchange of a timeline (a call that carried no event) as the wire labels it: the caller's
+ * call to the gate, or the gate's call to the callee. */
+export function wireOfExchange(x) {
+  const callee = x && x.leg === "callee";
+  const method = str(x && x.method) || "unknown";
+  return {
+    actor: callee ? "gate" : "caller",
+    type: method,
+    method,
+    exchangeId: str(x && x.id),
+    label: callee ? `Gate → Callee · ${method}` : `Caller · ${method}`,
+    failed: Boolean(x && x.failed),
+    outcome: x ? [x.http_status ? String(x.http_status) : null, x.rpc_code !== null && x.rpc_code !== undefined ? `rpc ${x.rpc_code}` : null, str(x.reason)].filter(Boolean).join(" · ") : "",
+  };
+}
+
+/** A validation result in a few words: "valid A2A 1.0", "invalid A2A 1.0: 2 issues", "not validated: …". */
+export function validationWords(v) {
+  if (!isObj(v)) return null;
+  if (!v.validated) return str(v.note) || "not validated";
+  if (v.valid) return `valid A2A ${v.version}`;
+  const n = Array.isArray(v.issues) ? v.issues.length : 0;
+  return `invalid A2A ${v.version}: ${n} issue${n === 1 ? "" : "s"}`;
+}

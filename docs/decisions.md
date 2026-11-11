@@ -204,7 +204,7 @@ PRD §12 principals: `key:`, `org:`, `oidc:sub:`. Hiring through a node and the 
 service, never implied). Consequence, accepted: all anonymous callers of a team gate (and of one tenant on a
 multi-tenant gate) share one buyer, so their tasks are readable and cancellable by anyone holding the task id;
 `ListTasks`, `tasks/list` and push configs are refused for them ([`relay.md`](../spec/relay.md) §2.3).
-Amended by D301 (`oidc:*`, every principal of the configured OIDC issuer).
+Amended by D301 (`oidc:*`, every principal of the configured OIDC issuer) and D361 (the local development profile; A2A's push error).
 
 ## MCP
 
@@ -6216,7 +6216,8 @@ The console's traffic view needs every A2A call, refused ones included, which no
 edge and in `a2ahttp` before any task row. `a2a_exchanges` (migration 0006, [`relay.md`](../spec/relay.md) §13.6)
 holds one row per call, at the exchange level (no request bodies or headers in v1), written by a bounded, batched
 writer that drops and counts rather than waits. It is off by default and on in the local development profile, with
-its own retention (`traffic.retention`, default 7 days, `0` forever), independent of the tasks'.
+its own retention (`traffic.retention`, default 7 days, `0` forever), independent of the tasks'. Amended by D355 (the
+callee leg is recorded too), D356 (an exchange's id is minted on arrival) and D358 (bodies, as an opt-in).
 
 ### D354. A task retention of `0` keeps a service's tasks forever — **decided by the owner, 10 Nov**
 
@@ -6225,3 +6226,82 @@ its own, distinct from an absent key (7 days): a task that ends under it has no 
 sweep never selects it ([`relay.md`](../spec/relay.md) §5.4). It is opt-in per service; the console shows "kept
 forever". `services.retention_s` admits `0` (migration 0006).
 
+
+## The owner's decisions of 11 Nov: the A2A wire on the console (OpenSpec change `console-a2a-protocol-view`)
+
+Kontra is the A2A inspector with history: the console labels everything it shows with A2A's own names (`Caller ·
+SendMessage`, `Callee · Message`, `Task`, `TaskStatusUpdateEvent`), puts contexts first, and reads only what the gate
+recorded on both legs of a call. Where a choice was open, the owner chose the convention over anything of Kontra's own.
+
+### D355. Both legs of an A2A call are exchanges of one table
+
+A call the gate makes to a service's agent (a message send or stream, a `GetTask` poll or re-attach, a forwarded
+`CancelTask`, a card fetch) is recorded as an exchange like a call the gate receives, with `leg` `callee` beside
+`caller` (migration 0007, [`relay.md`](../spec/relay.md) §13.6). On the callee leg `task_id` and `context_id` are the
+agent's own ids and `gate_task_id` is the gate task the call works for. One table keeps one index, one view, one
+filter and one retention sweep for both. The callee leg is recorded by a `RoundTripper` around the HTTP client
+`internal/upstream` hands each dispatch, so every call a2a-go's client makes is seen without changing a2a-go.
+
+### D356. An exchange's id is minted when the call arrives
+
+It was minted when the call ended. Minted at arrival (still UUIDv7, ordered by arrival) and carried in the request's
+context, it is known to whatever the call writes while it runs: the task event a caller's message creates, the events a
+callee's answer produces, so each event names the exchange that carried it (D357). The exchange's row is still
+written when the call ends, and may be dropped under pressure (D353); a reader treats an event's missing exchange as
+not recorded.
+
+### D357. Every task event records its origin
+
+`task_events.origin` (migration 0007, [`relay.md`](../spec/relay.md) §5.2) says who produced the event: the actor
+(`caller`, `callee`, `gate`), the A2A type that actor sent (`SendMessage`, `SendStreamingMessage`, `Message`, `Task`,
+`TaskStatusUpdateEvent`, `TaskArtifactUpdateEvent`), the method it travelled in, the exchange that carried it, and
+`converted_to` when the gate logged it as another type (D5's `Message`, a polled `Task`'s difference). A caller's first
+message also says whether its `contextId` was the caller's or minted by the gate (D3), which the stored message no
+longer shows. Written by the code that knows it, in the event's own transaction: the console never infers it. Rows
+from before 0007 have none and are drawn with their caller-facing type only.
+
+### D358. Bodies are an opt-in of the traffic record: on in the local development profile, off elsewhere — **decided by the owner, 11 Nov**
+
+Amends D353 for the opt-in only. The convention: debugging tools on a developer's machine (the A2A Inspector,
+mitmproxy) keep every body; production gateways (Envoy, Kong, Apigee's trace, OpenTelemetry's HTTP conventions) keep
+metadata, and capture bodies only when the operator opts in, size-capped, without headers. So `traffic.bodies`
+defaults to `true` in the local development profile and `false` on every other gate, and applies only while
+`traffic.record` is on. Each kept body or frame is cut at `traffic.body_max` (256 KiB), an exchange's frames at 16
+times that; a push notification config's `token` and an `AuthenticationInfo`'s `credentials` are replaced by
+`"[redacted]"` before anything is queued; no header is ever kept; a sealed service's calls keep none. The recorder
+keeps a byte budget for queued bodies (64 MiB): past it an exchange is queued without its bodies, counted in
+`kontra_traffic_bodies_dropped_total`, and the call is never slowed.
+
+### D359. A2A validation reuses a2a-go's generated descriptors and runs when an item is read
+
+The console says of every card, body, frame and event whether it is valid A2A, as the A2A Inspector does. 1.0 objects
+are walked against `a2apb/v1`'s descriptors as `protojson` reads them (unknown members, wrong types, enum names,
+oneofs and duplicates are issues, each with its JSON path) with the `google.api.field_behavior = REQUIRED` options; the
+normative 1.0 artefact is the proto, so a JSON Schema would be a second idea of valid. 0.3 objects are checked against
+A2A 0.3.0's own published JSON Schema (`specification/json/a2a.json` at tag `v0.3.0`, embedded unchanged), the normative
+artefact of 0.3; the OpenSpec design named `a2apb/v0/pbjson`, which turned out to be hand-written Go structs, not a
+schema. Validation runs in the console API when an item is read,
+never on a call's path. Checked on 11 Nov: a2a-go v2.7.0's `a2apb/v1` is the pinned proto
+(`specification/a2a.proto` at `3303592…`, built with buf against googleapis): its 202 fields and enum values, with
+their numbers, JSON names, cardinality, oneofs and `REQUIRED` behaviours, are the same, so no descriptors are
+generated here. Re-check when either pin moves.
+
+### D360. The console's labels come from origin, the caller-facing object from the event's kind; contexts first
+
+An item is labelled `<actor> · <A2A type>` from its origin, and shows the object the caller received from the logged
+`StreamResponse` member; where the two differ (D5) it shows both. A thread and a context are one timeline: events
+merged with the caller-leg exchanges that name the task and produced no event (`GetTask`, `SubscribeToTask`, push
+config methods), by time then seq. In A2A every message belongs to a context and a task is what an agent may create
+for one, so the console opens on Contexts, and a task's thread is its context's timeline filtered to it. Timeline rows
+are interactions that carry a `task_id` or none, ready for a message answered without a task.
+
+### D361. The local development profile's caller lists tasks and sets push configs; anonymous push refusals are A2A's own error
+
+D20 refuses `ListTasks` and push configs to the `anonymous` principal because its callers cannot be told apart. In
+the local development profile every client is that one caller (D352), so the refusal protects nobody and only keeps a
+stock A2A client from two of A2A's methods: there it is lifted, in the interceptors, the task store and the push
+config store, and push URLs may be `http` or `https` on a loopback host, connected to loopback only, every other SSRF
+rule staying ([`relay.md`](../spec/relay.md) §10.3, §18.1). Elsewhere, an anonymous-only service's served card now
+says `capabilities.pushNotifications: false` (§3), and an anonymous push config is refused with
+`PushNotificationNotSupportedError`, A2A's error for exactly that, instead of `UnsupportedOperationError`: a client that
+trusts the card is told the same thing by the error. Amends D20.

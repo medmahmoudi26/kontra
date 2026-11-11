@@ -9,6 +9,7 @@ import (
 	"net/url"
 
 	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/traffic"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -174,7 +175,7 @@ func NewTunnel(service, kind string, open StreamOpener) (*Tunnel, error) {
 		DisableKeepAlives:      true,
 		MaxResponseHeaderBytes: maxTunnelHeaderBytes,
 	}
-	t.client = &http.Client{Transport: &limitTransport{next: tr, tunnel: true}, CheckRedirect: ssrf.NoRedirects}
+	t.client = &http.Client{Transport: &limitTransport{next: traffic.CalleeTransport{Next: tr}, tunnel: true}, CheckRedirect: ssrf.NoRedirects}
 	return t, nil
 }
 

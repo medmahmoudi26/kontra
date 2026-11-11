@@ -34,6 +34,7 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2acompat/a2av0"
 
 	"kontra.sh/kontra/internal/ssrf"
+	"kontra.sh/kontra/internal/traffic"
 	"kontra.sh/kontra/internal/tunnel"
 )
 
@@ -137,7 +138,7 @@ func newDirect(rawURL string, pol ssrf.Policy, dial func(ctx context.Context, ne
 		return dial(ctx, network, address)
 	}
 	d.client = &http.Client{
-		Transport:     &limitTransport{next: ssrf.NewTransportWithDial(pol, pinned)},
+		Transport:     &limitTransport{next: traffic.CalleeTransport{Next: ssrf.NewTransportWithDial(pol, pinned)}},
 		CheckRedirect: ssrf.NoRedirects,
 	}
 	return d, nil

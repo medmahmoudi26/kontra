@@ -355,3 +355,46 @@ func TestLookupFailuresAreClassified(t *testing.T) {
 		}
 	}
 }
+
+// AllowLoopback (the local development profile's push targets): http:// and https:// to a loopback host are accepted
+// and connected to loopback only; every other private or special address stays refused, and http:// to anything
+// else too.
+func TestAllowLoopback(t *testing.T) {
+	ctx := context.Background()
+	p := Policy{AllowLoopback: true, Resolver: fakeResolver{
+		"localhost": {"127.0.0.1"}, "rebind.example": {"127.0.0.1", "10.0.0.5"}, "internal.example": {"10.0.0.5"},
+	}}
+	for _, ok := range []string{"http://127.0.0.1:9000/hook", "http://localhost:9000/hook", "http://[::1]:9000/hook", "https://127.0.0.1/hook"} {
+		u, _ := url.Parse(ok)
+		if err := CheckURL(ctx, u, p); err != nil {
+			t.Errorf("%s: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"http://10.0.0.5/hook", "https://10.0.0.5/hook", "https://internal.example/hook",
+		"https://rebind.example/hook", "http://169.254.169.254/latest", "https://[fe80::1%25eth0]/x"} {
+		u, _ := url.Parse(bad)
+		if err := CheckURL(ctx, u, p); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+	// Without it, loopback is refused as before.
+	u, _ := url.Parse("http://127.0.0.1:9000/hook")
+	if err := CheckURL(ctx, u, Policy{}); err == nil {
+		t.Error("loopback accepted without AllowLoopback")
+	}
+	// The dialer connects to a loopback listener, and refuses a private address.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	d := NewDialer(p)
+	c, err := d.DialContext(ctx, "tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial loopback: %v", err)
+	}
+	c.Close()
+	if _, err := d.DialContext(ctx, "tcp", "10.0.0.5:80"); !errors.Is(err, ErrAddress) {
+		t.Errorf("dial 10.0.0.5: %v", err)
+	}
+}

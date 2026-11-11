@@ -416,4 +416,52 @@ begin
     exception when check_violation then null; end;
 end $$;
 
+-- 0007: a callee-leg exchange names its gate task, a caller-leg one never does; a kept body has its size; frames go
+-- with their exchange; task_events.origin is free JSON.
+insert into a2a_exchanges (id, at, service, method, binding, leg, gate_task_id, a2a_version, bytes_in, bytes_out,
+                           duration_ms, http_status, request_body, request_size, request_truncated)
+    values ('01900000-0000-7000-8007-000000000001', now(), 'hello', 'SendStreamingMessage', 'jsonrpc', 'callee',
+            '01900000-0000-7000-8007-0000000000ff', '1.0', 10, 20, 1, 200, '\x7b7d', 2, false);
+insert into a2a_exchange_frames (exchange_id, n, offset_ms, sse_id, data, size)
+    values ('01900000-0000-7000-8007-000000000001', 0, 0, null, '\x7b7d', 2),
+           ('01900000-0000-7000-8007-000000000001', 1, 5, '2', '\x7b7d', 2);
+do $$ begin
+    insert into a2a_exchanges (id, at, service, method, binding, leg, gate_task_id, bytes_in, bytes_out, duration_ms, http_status)
+        values ('01900000-0000-7000-8007-000000000002', now(), 'hello', 'GetTask', 'jsonrpc', 'caller',
+                '01900000-0000-7000-8007-0000000000ff', 0, 0, 0, 200);
+    raise exception 'FAIL: a caller-leg exchange with a gate_task_id was accepted';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into a2a_exchanges (id, at, service, method, binding, leg, callee_task_id, bytes_in, bytes_out, duration_ms, http_status)
+        values ('01900000-0000-7000-8007-000000000005', now(), 'hello', 'GetTask', 'jsonrpc', 'caller', 'agent-1', 0, 0, 0, 200);
+    raise exception 'FAIL: a caller-leg exchange with a callee_task_id was accepted';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into a2a_exchanges (id, at, service, method, binding, bytes_in, bytes_out, duration_ms, http_status, response_body)
+        values ('01900000-0000-7000-8007-000000000003', now(), 'hello', 'GetTask', 'jsonrpc', 0, 0, 0, 200, '\x7b7d');
+    raise exception 'FAIL: a kept body without its size was accepted';
+exception when check_violation then null; end $$;
+do $$ begin
+    insert into a2a_exchanges (id, at, service, method, binding, leg, bytes_in, bytes_out, duration_ms, http_status)
+        values ('01900000-0000-7000-8007-000000000004', now(), 'hello', 'GetTask', 'jsonrpc', 'upstream', 0, 0, 0, 200);
+    raise exception 'FAIL: an exchange with leg upstream was accepted';
+exception when check_violation then null; end $$;
+delete from a2a_exchanges where id = '01900000-0000-7000-8007-000000000001';
+do $$ begin
+    if exists (select 1 from a2a_exchange_frames where exchange_id = '01900000-0000-7000-8007-000000000001') then
+        raise exception 'FAIL: frames outlived their exchange';
+    end if;
+end $$;
+do $$
+declare t uuid;
+begin
+    select task_id into t from task_events order by task_id limit 1;
+    if t is not null then
+        update task_events set origin = '{"actor":"callee","type":"Message","method":"SendMessage"}' where task_id = t;
+        raise exception 'FAIL: task_events accepted an update';
+    end if;
+exception when others then
+    if sqlerrm like 'FAIL:%' then raise; end if;
+end $$;
+
 select 'migration behaviour: ok';

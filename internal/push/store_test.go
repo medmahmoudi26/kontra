@@ -172,7 +172,7 @@ func TestSaveInlineThenResave(t *testing.T) {
 		_, _, err := cs.SaveInline(ctx, tx, id, anon, pushConfig("http://127.0.0.1:9/hook"))
 		return err
 	})
-	if !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("SaveInline for the anonymous principal: %v", err)
 	}
 }
@@ -285,12 +285,12 @@ func TestAnonymousIsRefused(t *testing.T) {
 	cs := NewConfigStore(e.pool, sig, private, nil)
 	ctx := context.Background()
 	id := e.newTask(anon)
-	if _, err := cs.Save(ctx, tid(id), pushConfig("http://127.0.0.1:9/hook")); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := cs.Save(ctx, tid(id), pushConfig("http://127.0.0.1:9/hook")); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("Save on an anonymous task: %v", err)
 	}
 	mine := e.newTask(buyerA)
 	actx := auth.WithPrincipal(ctx, auth.Anonymous(anon.BuyerID))
-	if _, err := cs.Save(actx, tid(mine), pushConfig("http://127.0.0.1:9/hook")); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := cs.Save(actx, tid(mine), pushConfig("http://127.0.0.1:9/hook")); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("Save by the anonymous principal: %v", err)
 	}
 	if n := e.count(`select count(*) from kontra.push_configs`); n != 0 || len(sig.list()) != 0 {
@@ -652,4 +652,18 @@ func TestDeliveringCountReachesTheBuyersTasksByIndex(t *testing.T) {
 		t.Fatalf("the per-buyer count scans every buyer's tasks or configs:\n%s", text)
 	}
 	t.Logf("plan:\n%s", text)
+}
+
+// In the local development profile (AllowAnonymous) the shared anonymous caller sets configs.
+func TestAnonymousAllowedLocally(t *testing.T) {
+	e := newEnv(t)
+	cs := NewConfigStore(e.pool, &signals{}, private, nil).AllowAnonymous()
+	ctx := auth.WithPrincipal(context.Background(), auth.Anonymous(anon.BuyerID))
+	id := e.newTask(anon)
+	if _, err := cs.Save(ctx, tid(id), pushConfig("http://127.0.0.1:9/hook")); err != nil {
+		t.Fatalf("Save by the local profile's caller: %v", err)
+	}
+	if n := e.count(`select count(*) from kontra.push_configs`); n != 1 {
+		t.Errorf("%d configs", n)
+	}
 }

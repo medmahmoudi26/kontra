@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +36,7 @@ import (
 	"kontra.sh/kontra/internal/ssrf"
 	"kontra.sh/kontra/internal/store"
 	"kontra.sh/kontra/internal/tenant"
+	"kontra.sh/kontra/internal/traffic"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/upstream"
 )
@@ -109,7 +111,10 @@ type Services struct {
 	cardEvery time.Duration // a tunnel card's refetch while serving (card.Refresh)
 	signer    card.Signer   // nil: cards are not signed (loopback test registries only)
 	loopback  bool          // public_url is a loopback origin
+	local     bool          // the local development profile (ServicesOptions.Local)
 	keyClient *http.Client  // fetches seller_keys {url} sets: the SSRF-safe client (spec §10.3)
+	// traffic records each card fetch as a callee-leg exchange (D355); set by SetTraffic, nil records none.
+	traffic atomic.Pointer[traffic.Recorder]
 
 	// readMu makes each re-read (its query and its apply) one step, so a read that began before a change
 	// committed is never applied after one that began after it.
@@ -230,7 +235,10 @@ func parseBackend(js []byte) (backendSpec, error) {
 type ServicesOptions struct {
 	PublicURL string // {public_url} of the served cards
 	Multi     bool   // /agents/{tenant}/{name} paths
-	Logger    *slog.Logger
+	// Local is the local development profile, whose shared caller may set push configs: an anonymous-only
+	// service's card still says pushNotifications true there.
+	Local  bool
+	Logger *slog.Logger
 	// OnChange is called, outside the registry's lock, for a service whose policy, allow: list, card source
 	// or state changed, and for one that went away: the relay's handler cache drops it (relay.Handlers.
 	// Invalidate), so the next request builds it again with the service's current policy.
@@ -253,6 +261,14 @@ type ServicesOptions struct {
 	SellerKeysClient *http.Client
 }
 
+// SetTraffic makes every card fetch from now on a callee-leg exchange of rec (traffic.record, D355).
+func (s *Services) SetTraffic(rec *traffic.Recorder) { s.traffic.Store(rec) }
+
+// cardCtx is ctx whose card fetch for ref is recorded.
+func (s *Services) cardCtx(ctx context.Context, ref store.ServiceRef) context.Context {
+	return traffic.WithCallee(ctx, &traffic.Callee{Recorder: s.traffic.Load(), TenantID: ref.TenantID, Service: ref.Name})
+}
+
 // NewServices returns an empty registry over db; Reload or Sync fills it.
 func NewServices(db *pgxpool.Pool, o ServicesOptions) *Services {
 	if o.Logger == nil {
@@ -262,6 +278,7 @@ func NewServices(db *pgxpool.Pool, o ServicesOptions) *Services {
 		db: db, logger: o.Logger, publicURL: o.PublicURL, multi: o.Multi, keeperOpt: o.KeeperOptions,
 		onChange: o.OnChange, byName: map[string]*entry{}, byID: map[svcID]*entry{}, tunnels: o.Tunnels,
 		sessions: o.Sessions, cardEvery: o.TunnelCardRefresh, signer: o.Signer, keyClient: o.SellerKeysClient,
+		local: o.Local,
 	}
 	if u, err := url.Parse(o.PublicURL); err == nil {
 		s.loopback = config.IsLocalhost(u.Hostname())
@@ -778,7 +795,7 @@ func (s *Services) build(x row, old *entry) (*entry, error) {
 		}
 		operatorURIs = extensionURIs(exts)
 		in := card.Input{PublicURL: s.publicURL, ServicePath: ServicePath(x.tenant, x.name, s.multi),
-			OnlyAnonymous: allow.OnlyAnonymous(), CardExtensions: exts}
+			OnlyAnonymous: allow.OnlyAnonymous(), NoPush: allow.OnlyAnonymous() && !s.local, CardExtensions: exts}
 		if x.sealed != string(config.SealedOff) {
 			// ext-sealed.md §1: the recipients are part of the card, so a change of them (an enrollment, a
 			// revocation, a rotation) changes the keeper's key, and the card is rewritten and signed again.
@@ -1047,6 +1064,9 @@ func (s *Services) newKeeper(e *entry, b backendSpec, in card.Input, x row) (*ca
 		card.WithPersist(func(ctx context.Context, sv *card.Served, _ time.Time) error {
 			return s.persistCard(ctx, ref, backendJS, sv, false)
 		}),
+		card.WithFetch(func(ctx context.Context, b upstream.Backend) (*upstream.Fetched, error) {
+			return upstream.FetchCard(s.cardCtx(ctx, ref), b)
+		}),
 	)
 	k := card.NewKeeper(be, in, append(opts, s.keeperOpt...)...)
 	if len(x.upstream) > 0 && x.fetchedAt != nil {
@@ -1076,7 +1096,7 @@ func (s *Services) newTunnelKeeper(e *entry, in card.Input, common []card.Keeper
 			return s.persistCard(ctx, ref, backendJS, sv, true)
 		}),
 		card.WithFetch(func(ctx context.Context, _ upstream.Backend) (*upstream.Fetched, error) {
-			f, err := s.tunnels.FetchCard(ctx, ref.TenantID, ref.Name)
+			f, err := s.tunnels.FetchCard(s.cardCtx(ctx, ref), ref.TenantID, ref.Name)
 			if err != nil {
 				return nil, err
 			}

@@ -29,15 +29,28 @@ const DefaultTrafficRetention = DefaultTaskRetention
 // Local reports whether the gate runs in the local development profile.
 func (c *Config) Local() bool { return c.Profile == ProfileLocal }
 
-// Traffic is the A2A traffic record (spec/relay.md §13.6): one metadata-only exchange per A2A call, in
-// a2a_exchanges. Off unless set, on in the local development profile.
+// Traffic is the A2A traffic record (spec/relay.md §13.6): one exchange per A2A call on either leg, in
+// a2a_exchanges. Off unless set, on in the local development profile. With bodies on (D358), an exchange also keeps
+// its request and response bodies or stream frames, each cut at body_max, credentials redacted, never a header.
 type Traffic struct {
 	Record    *bool     `yaml:"record"`    // nil: the profile's default (on in local, off otherwise)
 	Retention Retention `yaml:"retention"` // default 7d; 0 keeps exchanges forever
+	Bodies    *bool     `yaml:"bodies"`    // nil: the profile's default (on in local, off otherwise)
+	BodyMax   ByteSize  `yaml:"body_max"`  // default 256 KiB, from 1 KiB to 16 MiB
 }
+
+// DefaultTrafficBodyMax is traffic.body_max's default, and its bounds.
+const (
+	DefaultTrafficBodyMax = 256 << 10
+	minTrafficBodyMax     = 1 << 10
+	maxTrafficBodyMax     = 16 << 20
+)
 
 // Recording reports whether exchanges are recorded.
 func (t Traffic) Recording() bool { return t.Record != nil && *t.Record }
+
+// KeepsBodies reports whether recorded exchanges keep their bodies and frames: only while recording is on.
+func (t Traffic) KeepsBodies() bool { return t.Recording() && t.Bodies != nil && *t.Bodies }
 
 // Retention is a retention period: a positive duration ("7d", "36h"), or 0, which keeps forever. The zero
 // value of the type means absent (the default applies); Forever is the explicit 0.
@@ -119,16 +132,25 @@ func (c *Config) applyLocalDerived() {
 	if c.Traffic.Retention == 0 {
 		c.Traffic.Retention = Retention(DefaultTrafficRetention)
 	}
+	if c.Traffic.BodyMax == 0 {
+		c.Traffic.BodyMax = DefaultTrafficBodyMax
+	}
 	if !c.Local() {
+		off := false
 		if c.Traffic.Record == nil {
-			off := false
 			c.Traffic.Record = &off
+		}
+		if c.Traffic.Bodies == nil {
+			c.Traffic.Bodies = &off
 		}
 		return
 	}
+	on := true
 	if c.Traffic.Record == nil {
-		on := true
 		c.Traffic.Record = &on
+	}
+	if c.Traffic.Bodies == nil {
+		c.Traffic.Bodies = &on
 	}
 	// Every client is the one anonymous caller, admitted to every service whatever its allow: (relay.md §18).
 	for name, s := range c.Services {
@@ -159,6 +181,9 @@ func (c *Config) validateProfile(v *validator) {
 	}
 	if r := c.Traffic.Retention; !r.IsForever() && (r.D() < time.Second || r.D()%time.Second != 0) {
 		v.add("traffic.retention %s: want 0 (keep forever) or a whole number of seconds, at least 1s", r)
+	}
+	if m := c.Traffic.BodyMax; m < minTrafficBodyMax || m > maxTrafficBodyMax {
+		v.add("traffic.body_max %d: want from 1KiB to 16MiB", m)
 	}
 }
 

@@ -111,13 +111,19 @@ func (e *env) exec(sql string, args ...any) {
 // console's.
 func (e *env) task(state store.State, text, ctxID string, console bool) uuid.UUID {
 	e.t.Helper()
+	return e.taskWith(state, text, ctxID, console, nil)
+}
+
+// taskWith is task with the first event's origin (D357).
+func (e *env) taskWith(state store.State, text, ctxID string, console bool, origin *store.Origin) uuid.UUID {
+	e.t.Helper()
 	id := uuid.Must(uuid.NewV7())
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(text))
 	msg.TaskID, msg.ContextID = a2a.TaskID(id.String()), ctxID
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: ctxID, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{msg}}
 	svc := store.ServiceRef{TenantID: e.team, Tenant: "default", Name: "hello", Kind: "a2a"}
 	nt := store.NewTask{ID: id, Service: svc, Protocol: store.ProtocolA2A, ContextID: ctxID, State: store.StateSubmitted, Snapshot: snap,
-		Owner: store.Owner{BuyerID: e.buyer, Principal: "anonymous", Via: store.ViaAnonymous}}
+		Owner: store.Owner{BuyerID: e.buyer, Principal: "anonymous", Via: store.ViaAnonymous}, Origin: origin}
 	if _, err := e.log.CreateTask(context.Background(), nil, nt); err != nil {
 		e.t.Fatal(err)
 	}

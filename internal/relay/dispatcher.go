@@ -19,6 +19,7 @@ import (
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/traffic"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -45,6 +46,16 @@ type Dispatcher struct {
 	// dispatch and forward_cancel of such a task are handed to it; abort reaches its dispatches through the same
 	// Registry. Nil: an MCP task's dispatch is an error (a gate that serves no MCP tasks has none).
 	MCP MCPDispatcher
+	// Traffic records the gate's A2A calls to agents as callee-leg exchanges (traffic.record, D355); nil records none.
+	Traffic *traffic.Recorder
+}
+
+// callee is what the traffic record needs of a dispatch's or forward_cancel's calls to the agent.
+func (d *Dispatcher) callee(svc store.ServiceRef, task uuid.UUID) *traffic.Callee {
+	if d.Traffic == nil {
+		return nil
+	}
+	return &traffic.Callee{Recorder: d.Traffic, TenantID: svc.TenantID, Service: svc.Name, GateTask: &task}
 }
 
 // MCPDispatcher is the MCP half of the dispatch activities (internal/mcprelay's Dispatcher).
@@ -204,6 +215,10 @@ func (d *Dispatcher) dispatch(ctx, pctx context.Context, log *slog.Logger, taskU
 		followUp: followUp, workItem: wi.ID, delivered: wi.DeliveredAt != nil, since: wi.TaskVersion}
 	// The objects the dispatch stores in the bucket are pending on its context until the append that logs their
 	// parts writes their rows (blob.Pending, spec §10.4).
+	dctx = traffic.WithCallee(dctx, d.callee(svc, taskUUID))
+	// D357: the origins of the events this dispatch yields, and of the caller's message its turn writes.
+	dctx, origins := store.WithOrigins(dctx)
+	origins.SetCaller(wi.Payload.Origin)
 	dctx = withDispatch(store.WithFence(blob.WithPending(dctx, blob.NewPending()), fence), info)
 	dctx = workqueue.AttachHeartbeater(dctx, hb)
 	_, herr := sh.HandlerFn(dctx, payload)
@@ -361,6 +376,7 @@ func (d *Dispatcher) writeFailed(ctx context.Context, fence *store.Fence, taskID
 		_, err = d.Log.Append(ctx, nil, store.Write{
 			TaskID: taskID, PrevVersion: row.Version, Kind: store.KindStatus, State: store.StateFailed,
 			StatusAt: store.StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload, Fence: fence,
+			Origin: store.GateOrigin(),
 		})
 		if err == nil || errors.Is(err, store.ErrFenced) || !errors.Is(err, taskstore.ErrConcurrentModification) {
 			return err
@@ -503,7 +519,7 @@ func (d *Dispatcher) ForwardCancel(ctx context.Context, in lifecycle.AttemptRef)
 		return lifecycle.ForwardCancelResult{}, err
 	}
 	defer client.Destroy()
-	cctx, ex := upstream.WithExchange(ctx)
+	cctx, ex := upstream.WithExchange(traffic.WithCallee(ctx, d.callee(svc, taskUUID)))
 	cctx = upstream.WithTask(cctx, upstream.ExchangeTask{TaskID: row.ID.String(), ContextID: row.ContextID})
 	var (
 		t     *a2a.Task

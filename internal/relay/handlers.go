@@ -54,6 +54,8 @@ type ServiceHandler struct {
 
 // HandlerDeps are what every service handler is built from.
 type HandlerDeps struct {
+	// Local is the local development profile: its one shared caller may list tasks (spec §18.1).
+	Local        bool
 	Log          *store.Log
 	Puller       eventqueue.PullerProvider
 	PushStore    a2apush.ConfigStore                        // nil: push config calls answer PushNotificationNotSupported
@@ -129,6 +131,9 @@ func (h *Handlers) For(ctx context.Context, svc store.ServiceRef) (*ServiceHandl
 		owner = CallerOwner
 	}
 	st := store.New(d.Log.DB(), svc, owner, d.Registry, d.Log)
+	if d.Local {
+		st.ListAnonymous()
+	}
 	q := &capturingQueue{Queue: d.Queue(svc)}
 	qm := eventqueue.NewPullQueueManager(newTaskFromStart(d.Puller), eventqueue.PullConfig{PollInterval: PollInterval, InactivityTimeout: 0})
 	exec := NewExecutor(d.Log, d.Registry, d.Backends).ForService(svc, d.Signals, d.Logger, d.Executor)

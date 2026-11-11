@@ -72,23 +72,29 @@ func New(d Deps) *Console {
 	}
 	c := &Console{d: d, api: http.NewServeMux()}
 	for pattern, h := range map[string]http.HandlerFunc{
-		"GET /v1/info":                                       c.info,
-		"GET /v1/tasks":                                      c.tasks,
-		"POST /v1/tasks":                                     c.startTask,
-		"GET /v1/tasks/{task_id}":                            c.task,
-		"GET /v1/tasks/{task_id}/events":                     c.taskEvents,
-		"GET /v1/tasks/{task_id}/files/{ref}":                c.taskFile,
-		"POST /v1/tasks/{task_id}/messages":                  c.taskMessage,
-		"POST /v1/tasks/{task_id}/cancel":                    c.cancelTask,
-		"POST /v1/tasks/{task_id}/continue":                  c.continueTask,
-		"GET /v1/conversations":                              c.conversations,
-		"GET /v1/conversations/{service}/{caller}/{context}": c.conversation,
-		"GET /v1/services":                                   c.services,
-		"GET /v1/services/{name}":                            c.service,
-		"GET /v1/services/{name}/form":                       c.startForm,
-		"GET /v1/tunnels":                                    c.tunnels,
-		"GET /v1/exchanges":                                  c.exchanges,
-		"GET /v1/calls":                                      c.calls,
+		"GET /v1/info":                                           c.info,
+		"GET /v1/tasks":                                          c.tasks,
+		"POST /v1/tasks":                                         c.startTask,
+		"GET /v1/tasks/{task_id}":                                c.task,
+		"GET /v1/tasks/{task_id}/events":                         c.taskEvents,
+		"GET /v1/tasks/{task_id}/files/{ref}":                    c.taskFile,
+		"POST /v1/tasks/{task_id}/messages":                      c.taskMessage,
+		"POST /v1/tasks/{task_id}/cancel":                        c.cancelTask,
+		"POST /v1/tasks/{task_id}/continue":                      c.continueTask,
+		"GET /v1/conversations":                                  c.conversations,
+		"GET /v1/conversations/{service}/{caller}/{context}":     c.conversation,
+		"GET /v1/contexts":                                       c.conversations,
+		"GET /v1/contexts/{service}/{caller}/{context}":          c.conversation,
+		"GET /v1/contexts/{service}/{caller}/{context}/timeline": c.contextTimeline,
+		"GET /v1/tasks/{task_id}/timeline":                       c.taskTimeline,
+		"GET /v1/exchanges/{id}":                                 c.exchange,
+		"GET /v1/services/{name}/cards":                          c.serviceCards,
+		"GET /v1/services":                                       c.services,
+		"GET /v1/services/{name}":                                c.service,
+		"GET /v1/services/{name}/form":                           c.startForm,
+		"GET /v1/tunnels":                                        c.tunnels,
+		"GET /v1/exchanges":                                      c.exchanges,
+		"GET /v1/calls":                                          c.calls,
 	} {
 		c.api.HandleFunc(pattern, h)
 	}
@@ -102,6 +108,8 @@ var Paths = []string{
 	"POST /v1/tasks/{task_id}/continue", "GET /v1/conversations", "GET /v1/conversations/{service}/{caller}/{context}",
 	"GET /v1/services", "GET /v1/services/{name}", "GET /v1/services/{name}/form", "GET /v1/tunnels",
 	"GET /v1/exchanges", "GET /v1/calls",
+	"GET /v1/contexts", "GET /v1/contexts/{service}/{caller}/{context}", "GET /v1/contexts/{service}/{caller}/{context}/timeline",
+	"GET /v1/tasks/{task_id}/timeline", "GET /v1/exchanges/{id}", "GET /v1/services/{name}/cards",
 }
 
 // pagePaths are the page and its files (web.FS): / and the paths under it the page loads.
@@ -164,7 +172,8 @@ func (c *Console) answer(w http.ResponseWriter, r *http.Request, v any, err erro
 // ---------------------------------------------------------------- GET /v1/info
 
 // Features the console API offers (GET /v1/info): the frontend hides any other (sign-in, money, sealing).
-var Features = []string{"tasks", "conversations", "thread", "prompt", "services", "tunnels", "traffic", "calls", "a2ui", "ap2"}
+var Features = []string{"tasks", "conversations", "thread", "prompt", "services", "tunnels", "traffic", "calls", "a2ui", "ap2",
+	"contexts", "timeline", "bodies", "playground", "cards_compare", "validation"}
 
 func (c *Console) info(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -201,7 +210,8 @@ func (c *Console) info(w http.ResponseWriter, r *http.Request) {
 			"traffic":  int64(cfg.Traffic.Retention.D() / time.Second), // 0: kept forever
 			"services": services,                                       // seconds; 0: kept forever
 		},
-		"traffic": map[string]any{"recording": cfg.Traffic.Recording(), "dropped": c.d.Dropped()},
+		"traffic": map[string]any{"recording": cfg.Traffic.Recording(), "bodies": cfg.Traffic.KeepsBodies(),
+			"body_max": int64(cfg.Traffic.BodyMax), "dropped": c.d.Dropped()},
 	}, nil)
 }
 

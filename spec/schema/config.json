@@ -189,10 +189,12 @@
     "traffic": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The A2A traffic record (relay.md §13.6): one metadata-only exchange per A2A call, in a2a_exchanges.",
+      "description": "The A2A traffic record (relay.md §13.6): one exchange per A2A call on either leg (caller to gate, gate to callee), in a2a_exchanges; metadata only unless bodies is on.",
       "properties": {
         "record": { "type": "boolean", "description": "Record exchanges. Default false, true in the local development profile." },
-        "retention": { "$ref": "#/$defs/retention", "default": "7d", "description": "Exchanges older than this are deleted; 0 keeps them forever." }
+        "retention": { "$ref": "#/$defs/retention", "default": "7d", "description": "Exchanges older than this are deleted, with their bodies and frames; 0 keeps them forever." },
+        "bodies": { "type": "boolean", "description": "Also keep each exchange's request and response bodies or stream frames, credential members redacted, never a header (D358). Default false, true in the local development profile; only while record is on; never for a sealed service." },
+        "body_max": { "$ref": "#/$defs/byteSize", "default": "256KiB", "description": "Each kept body or frame is cut at this size and marked truncated; one exchange keeps at most 16 times this in frames. From 1KiB to 16MiB." }
       }
     },
     "tunnel": {

@@ -6,10 +6,12 @@
 // card shows, opens the full description and each skill's details, and turns up to close them.
 // Everything a card says comes from the agent: it is set as text, never as markup.
 
-import { gate } from "../app.js";
+import { gate, offers } from "../app.js";
 import { $, fill, h, icon } from "../dom.js";
 import { showView } from "../nav.js";
+import { jsonBox } from "./cards.js";
 import { copyButton, failure, serviceAvatar, span } from "./common.js";
+import { validationMark } from "./wire.js";
 
 let generation = 0;
 
@@ -79,6 +81,8 @@ function card(s) {
     s.url ? h("div", { class: "url" }, [h("code", { text: s.url }), copyButton(s.url, "Copy", note)]) : null,
     h("div", { class: "foot" }, [
       s.kind === "a2a" && !s.disabled ? h("a", { class: "btn sm", href: `#/run/${encodeURIComponent(s.name)}`, text: "Start a task" }) : null,
+      s.kind === "a2a" && offers("cards_compare") ? h("a", { class: "btn sm ghost", href: `#/cards/${encodeURIComponent(s.name)}`, dataset: { act: "compare" }, text: "Compare cards" }) : null,
+      s.kind === "a2a" && !s.disabled && offers("playground") ? h("a", { class: "btn sm ghost", href: `#/play/${encodeURIComponent(s.name)}`, dataset: { act: "play" }, text: "Playground" }) : null,
       h("span", { class: "tag", text: s.kind === "mcp" ? "mcp server" : "a2a agent" }),
       s.sealed ? h("span", { class: "tag", text: "sealed" }) : null,
       s.disabled ? h("span", { class: "tag", text: "disabled" }) : null,
@@ -127,4 +131,48 @@ export async function showCards() {
   requestAnimationFrame(() => requestAnimationFrame(measure));
   window.addEventListener("resize", measure);
   return () => window.removeEventListener("resize", measure);
+}
+
+// ------------------------------------------------------------------ #/cards/<name>: the two cards (D360)
+
+/** One of the two cards, its validation, and, on the served one, the members the gate set marked. */
+function cardColumn(title, side, gateSet, id) {
+  if (!side) return h("div", { class: "card", id }, [h("div", { class: "hd" }, [h("h3", { text: title })]),
+    h("div", { class: "bd" }, [h("p", { class: "empty", text: "No card." })])]);
+  let text;
+  try {
+    text = typeof side.card === "string" ? side.card : JSON.stringify(side.card, null, 2);
+  } catch {
+    text = String(side.card);
+  }
+  return h("div", { class: "card", id }, [
+    h("div", { class: "hd" }, [h("h3", { text: title }), h("span", { class: "tag", text: `A2A ${side.version}` }), validationMark(side.validation)]),
+    h("div", { class: "bd stack" }, [
+      gateSet ? h("div", { class: "gateset", dataset: { gateset: gateSet.join(" ") } }, gateSet.length
+        ? [h("p", { class: "small", text: "Set or rewritten by the gate:" }), ...gateSet.map((p) => h("code", { class: "mark", text: p }))]
+        : [h("p", { class: "small", text: "The gate changed nothing." })]) : null,
+      jsonBox(text),
+    ]),
+  ]);
+}
+
+/** #/cards/<name>. */
+export async function showCardCompare(name) {
+  showView("#view-cards", "cards", [name || "?"]);
+  const root = $("#cards");
+  const mine = ++generation;
+  fill(root, [h("p", { class: "empty", text: "Loading…" })]);
+  let got;
+  try {
+    got = await gate.serviceCards(name);
+  } catch (err) {
+    if (mine === generation) fill(root, [failure(err, "This service's cards")]);
+    return () => {};
+  }
+  if (mine !== generation) return () => {};
+  fill(root, [h("div", { class: "compare", id: "cardcompare" }, [
+    cardColumn("The callee's card, as fetched", got.callee, null, "calleecard"),
+    cardColumn("The gate's served card", got.served, Array.isArray(got.gate_set) ? got.gate_set : [], "servedcard"),
+  ])]);
+  return () => {};
 }

@@ -43,11 +43,11 @@
     </div>
   </section>
 
-  <section class="view browse" id="view-conversations" hidden>
+  <section class="view browse" id="view-contexts" hidden>
     <div class="browse-in">
-      <h1 id="conversationstitle">Conversations</h1>
-      <p class="sub" id="conversationssub">Tasks grouped by service, caller and context, newest activity first.</p>
-      <div class="apikeys" id="conversations"></div>
+      <h1 id="contextstitle">Contexts</h1>
+      <p class="sub" id="contextssub">Every A2A context on this gate, newest activity first.</p>
+      <div class="apikeys" id="contexts"></div>
     </div>
   </section>
 
@@ -63,6 +63,22 @@
       <h1>Traffic</h1>
       <p class="sub">The A2A exchanges this gate answered, refused ones included, newest first.</p>
       <div class="apikeys" id="traffic"></div>
+    </div>
+  </section>
+
+  <section class="view browse" id="view-exchange" hidden>
+    <div class="browse-in">
+      <h1 id="exchangetitle">Exchange</h1>
+      <p class="sub" id="exchangesub">One A2A call, as the gate recorded it.</p>
+      <div class="apikeys" id="exchange"></div>
+    </div>
+  </section>
+
+  <section class="view browse" id="view-playground" hidden>
+    <div class="browse-in">
+      <h1>Playground</h1>
+      <p class="sub">Send any A2A 1.0 method to a service, on either binding, as a stock A2A client does: the gate admits, relays and records it like any call.</p>
+      <div class="apikeys" id="playground"></div>
     </div>
   </section>
 

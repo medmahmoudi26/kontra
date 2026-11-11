@@ -3,7 +3,8 @@
 # `make tck VARIANT=direct`. The TCK calls the gate itself, in plaintext on loopback (a localhost public_url).
 #
 # The pinned TCK sends no credential (a2a-tck#163), so `tck` admits the anonymous principal (D18, D20), which is
-# refused ListTasks and push configs (spec/relay.md §2.3); the TCK's webhook receiver listens on loopback in
+# refused ListTasks and push configs (spec/relay.md §2.3; its card says pushNotifications false, D361); the TCK's
+# webhook receiver listens on loopback in
 # plaintext, so push.allow_private (D67). The seller (examples/sellers/tck) declares no required extension: the TCK
 # never sends A2A-Extensions (a2a-tck#193).
 listen: "@LISTEN@"

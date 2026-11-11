@@ -147,7 +147,7 @@ func (l *Log) LogReconnectWait(ctx context.Context, taskID uuid.UUID, since, unt
 		}
 		ap, err := l.Append(ctx, nil, Write{
 			TaskID: taskID, PrevVersion: row.Version, Kind: KindStatus, State: StateWorking,
-			StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
+			StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload, Origin: GateOrigin(),
 		})
 		if err == nil {
 			return ReconnectWait{Seq: ap.Seq, Logged: true, State: StateWorking}, nil

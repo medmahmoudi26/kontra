@@ -32,22 +32,43 @@ go run ./examples/sellers/ap2-merchant --port 9993 & # an AP2 v0.2.0 merchant (a
 ```
 
 Any A2A client can then call `http://127.0.0.1:8080/agents/booking` with no credential (send `A2A-Version: 1.0`), and
-the console shows its task as it happens. To stop: `kill %1 %2 %3` (or Ctrl-C each), then
+the console shows its task as it happens. Every A2A method works, `ListTasks` and the push notification configs
+included: every client is one caller, so the refusals a team gate keeps for anonymous callers do not apply, and a push
+webhook may listen on `http://127.0.0.1:<port>` (loopback only). To stop: `kill %1 %2 %3` (or Ctrl-C each), then
 `docker compose -f compose.dev.yaml down -v` to drop the data.
 
 ## What the console shows
 
-- **Tasks** and **Conversations**: every caller's tasks, newest first, and tasks grouped by service, caller and context
-  id. A task's thread is drawn from its event log as it happens: messages, results, A2UI surfaces, AP2 checkouts,
-  mandates and receipts as cards (decoded for display, never verified), sealed parts as envelopes.
-- **Traffic**: one row per A2A call, refused calls included (a missing `A2A-Version`, an unknown service, a body over
-  the limit), with its outcome and a link to its task; nothing of a body or a header is kept
-  ([`spec/relay.md`](../spec/relay.md) §13.6). A gap is never silent: dropped rows are counted on `/v1/info` and in
-  `kontra_traffic_dropped_total`.
+The console is an A2A inspector with history: everything it shows is what the gate recorded, labelled as A2A names it.
+
+- **Contexts** (the landing page): in A2A every message belongs to a context, and the agent may answer it with a task.
+  A context's page says how it was opened (the `contextId` your client sent, or the one the gate assigned in its
+  answer) and which context your agent knows it by, lists the tasks the agent created in it, and draws one timeline of
+  every interaction: each caller message with its `contextId`, its `taskId` (or none) and its `referenceTaskIds`.
+- **Tasks**, and a task's thread drawn from its event log as it happens: messages, results, A2UI surfaces, AP2
+  checkouts, mandates and receipts as cards (decoded for display, never verified), sealed parts as envelopes. Its **A2A
+  timeline** labels every item `<Actor> · <A2A type>`: `Caller · SendMessage` (or `SendStreamingMessage`),
+  `Callee · Task`, `Callee · TaskStatusUpdateEvent`, `Callee · TaskArtifactUpdateEvent`, `Callee · Message`, and
+  `Gate · TaskStatusUpdateEvent` for what the gate wrote itself (a failure, a reconnect wait). Where the gate delivered
+  another object than the agent sent (an agent's `Message` reaches the caller as a completed task carrying it; a polled
+  `Task` as status and artifact updates), the item says so. Your client's other calls on the task (`GetTask`,
+  `SubscribeToTask`, push configurations) and the gate's calls to your agent that carried nothing new are in the
+  timeline too. Each item is checked against the pinned A2A specification (1.0, or 0.3 for a 0.3 agent), and the
+  task's `taskId` and `contextId`, and your agent's own ids, are shown in full with Copy.
+- **Traffic**: one row per A2A call on both legs (your client to the gate, the gate to your agent), refused calls
+  included (a missing `A2A-Version`, an unknown service, a body over the limit, a required extension missing), with its
+  binding, method, `contextId` and outcome; filter by leg, method or `contextId`. A row opens the exchange: in this
+  profile its request and response bodies, or its stream's frames with their SSE ids and times, are kept, credentials
+  redacted and never a header ([`spec/relay.md`](../spec/relay.md) §13.6), each validated. A gap is never silent:
+  dropped rows are counted on `/v1/info` and in `kontra_traffic_dropped_total`.
 - **MCP calls** of the MCP servers your node hosts (`--serve mcp:name=…`).
 - **Cards**: one card per service, as its agent card says (name, version, description, skills), with its URL,
   whether an agent is reachable now and how long its ended tasks are kept. The arrow under a card opens the rest of
-  a long description and each skill's details (examples, input and output modes).
+  a long description and each skill's details. **Compare cards** shows your agent's card as fetched beside the card the
+  gate serves for it, the members the gate set or rewrote marked, each validated.
+- **Playground**: any of A2A 1.0's eleven methods, on JSON-RPC or HTTP+JSON, from a JSON body prefilled with what the
+  method requires, sent to the service's own A2A route as any client sends it; the raw answer or the stream's frames,
+  then the exchange the gate recorded with its validation.
 - **Run a task**: start a task on a service from its card (its skills, examples and AgentStack initial form), answer
   it when it asks for input (text, a form, an A2UI action), cancel it, or continue its conversation. The console acts
   only on the tasks it started; a task another client started is watch-only.
@@ -73,18 +94,23 @@ of SQL that does.
 ## The traffic record on any gate
 
 The Traffic view's rows are the gate's A2A traffic record, `a2a_exchanges` ([`spec/relay.md`](../spec/relay.md) §13.6):
-one row per A2A call, metadata only. It is on in the local profile and off on every other gate unless its operator
-turns it on:
+one row per A2A call, on both legs: the calls the gate receives and the calls it makes to your agents. It is on in the
+local profile and off on every other gate unless its operator turns it on. Bodies are a separate choice: kept by
+default in the local profile, never elsewhere unless the operator opts in, each cut at `body_max`, a push
+configuration's token and credentials replaced by `"[redacted]"`, never a header, never a sealed service's:
 
 ```yaml
 traffic:
   record: true      # default false; true in the local development profile
-  retention: 3d     # default 7d; 0 keeps exchanges forever
+  retention: 3d     # default 7d; 0 keeps exchanges forever, with their bodies
+  bodies: false     # default false; true in the local development profile
+  body_max: 256KiB  # each body or stream frame is cut here, marked truncated
 ```
 
 Recording never slows or fails a call: rows are written in batches, and when the database falls behind they are
 dropped and counted in `kontra_traffic_dropped_total{replica}` on the metrics listener (and on the console's
-`/v1/info`). Turning recording off keeps the rows already written until their retention. Exchanges are deleted by the
+`/v1/info`); past a 64 MiB budget of queued bodies, rows are kept without their bodies and counted in
+`kontra_traffic_bodies_dropped_total{replica}`. Turning recording off keeps the rows already written until their retention. Exchanges are deleted by the
 retention sweep every 10 minutes, whatever became of their tasks.
 
 ## What the profile does not protect against

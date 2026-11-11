@@ -396,7 +396,7 @@ cmd/kontra-gate/   the gate: serve, migrate, enroll, health, version
 internal/          relay, tunnel, gatemcp (/mcp), anon, store (Postgres), lifecycle (Temporal), sealing, …
 spec/              tunnel.md, relay.md, ext-sealed.md, schema/
 migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mcp_tools.sql,
-                   0006_local_console.sql (the gate's Postgres schema, embedded in kontra-gate)
+                   0006_local_console.sql, 0007_a2a_wire.sql (the gate's Postgres schema, embedded in kontra-gate)
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)
 compose.dev.yaml   Temporal + Postgres for working on the gate itself
