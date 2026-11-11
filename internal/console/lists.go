@@ -360,6 +360,82 @@ type serviceView struct {
 	Description *string         `json:"description"`
 	URL         string          `json:"url"`
 	Card        json.RawMessage `json:"card,omitempty"` // the served card (GET /v1/services/{name})
+	Agent       *agentSummary   `json:"agent"`          // the served card in brief (GET /v1/services); null: none
+}
+
+// agentSummary is what the Cards page shows of a served A2A card, each field clipped (the card is the agent's).
+type agentSummary struct {
+	Name        *string        `json:"name"`
+	Version     *string        `json:"version"`
+	Description *string        `json:"description"`
+	Provider    *string        `json:"provider"`
+	Skills      []summarySkill `json:"skills"`
+}
+
+type summarySkill struct {
+	Name        string   `json:"name"`
+	Description *string  `json:"description"`
+	Tags        []string `json:"tags"`
+	Examples    []string `json:"examples"`
+	InputModes  []string `json:"input_modes"`
+	OutputModes []string `json:"output_modes"`
+}
+
+// summaryCard is the part of an A2A card the summary reads; a card that does not parse has no summary.
+type summaryCard struct {
+	Name        string `json:"name"`
+	Version     string `json:"version"`
+	Description string `json:"description"`
+	Provider    struct {
+		Organization string `json:"organization"`
+	} `json:"provider"`
+	Skills []struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Tags        []any  `json:"tags"`
+		Examples    []any  `json:"examples"`
+		InputModes  []any  `json:"inputModes"`
+		OutputModes []any  `json:"outputModes"`
+	} `json:"skills"`
+}
+
+// strs is the non-empty strings of xs, at most n, each clipped to m bytes.
+func strs(xs []any, n, m int) []string {
+	out := []string{}
+	for _, x := range xs {
+		if t, ok := x.(string); ok && len(out) < n {
+			if c := clip(t, m); c != nil {
+				out = append(out, *c)
+			}
+		}
+	}
+	return out
+}
+
+func summarize(raw []byte) *agentSummary {
+	var k summaryCard
+	if len(raw) == 0 || json.Unmarshal(raw, &k) != nil {
+		return nil
+	}
+	a := &agentSummary{Name: clip(k.Name, 200), Version: clip(k.Version, 64), Description: clip(k.Description, 4000),
+		Provider: clip(k.Provider.Organization, 200), Skills: []summarySkill{}}
+	for _, sk := range k.Skills {
+		if len(a.Skills) == skillsMax {
+			break
+		}
+		name := clip(sk.Name, 200)
+		if name == nil {
+			name = clip(sk.ID, 200)
+		}
+		if name == nil {
+			continue
+		}
+		a.Skills = append(a.Skills, summarySkill{Name: *name, Description: clip(sk.Description, 2000),
+			Tags: strs(sk.Tags, 10, 64), Examples: strs(sk.Examples, examples, 500),
+			InputModes: strs(sk.InputModes, 10, 100), OutputModes: strs(sk.OutputModes, 10, 100)})
+	}
+	return a
 }
 
 const serviceColumns = `s.name, s.kind, case when s.backend ? 'tunnel' then 'tunnel' else 'direct' end, s.source,
@@ -385,7 +461,8 @@ func (c *Console) scanService(row interface{ Scan(...any) error }, extra ...any)
 func (c *Console) services(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := readCtx(r)
 	defer cancel()
-	rows, err := c.d.DB.Query(ctx, `select `+serviceColumns+` from kontra.services s order by s.disabled_at is not null, s.name`)
+	rows, err := c.d.DB.Query(ctx, `select `+serviceColumns+`, case when s.kind = 'a2a' then s.card::text end from kontra.services s
+		order by s.disabled_at is not null, s.name`)
 	if err != nil {
 		c.answer(w, r, nil, err)
 		return
@@ -393,11 +470,13 @@ func (c *Console) services(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	items := []*serviceView{}
 	for rows.Next() {
-		v, err := c.scanService(rows)
+		var card []byte
+		v, err := c.scanService(rows, &card)
 		if err != nil {
 			c.answer(w, r, nil, err)
 			return
 		}
+		v.Agent = summarize(card)
 		items = append(items, v)
 	}
 	if err := rows.Err(); err != nil {

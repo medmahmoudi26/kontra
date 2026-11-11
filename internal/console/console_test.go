@@ -564,6 +564,13 @@ func TestServices(t *testing.T) {
 	if len(got) != 2 || got[0]["name"] != "hello" || got[0]["reachable"] != false || got[0]["sessions"] != float64(0) || got[0]["retention"] != float64(604800) {
 		t.Fatalf("services %v", got)
 	}
+	ag, _ := got[0]["agent"].(map[string]any)
+	if ag == nil || ag["name"] != "Hello" || ag["description"] != "Says hello." || ag["version"] != nil || got[1]["agent"] != nil {
+		t.Fatalf("agent summary %v / %v", got[0]["agent"], got[1]["agent"])
+	}
+	if sk := ag["skills"].([]any)[0].(map[string]any); sk["name"] != "Say hi" || fmt.Sprint(sk["examples"]) != "[hi there]" || fmt.Sprint(sk["tags"]) != "[]" {
+		t.Fatalf("summary skills %v", sk)
+	}
 	e.exec(`insert into kontra.gate_replicas (replica_id, version) values ('r1', 'test')`)
 	e.exec(`insert into kontra.tunnel_keys (key_id, tenant_id, pubkey, node_name) values ('k1_aaaaaaaaaaaaaaaaaaaaaaaaaa', $1, decode(repeat('01', 32), 'hex'), 'laptop')`, e.team)
 	e.exec(`insert into kontra.tunnels (session_id, key_id, tenant_id, replica_id, services, cli_version)

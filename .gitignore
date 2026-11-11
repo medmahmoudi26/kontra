@@ -5,3 +5,6 @@
 /deploy/compose/tls/
 /deploy/compose/kontra.*.yaml
 !/deploy/compose/kontra.vps.yaml
+
+# Python bytecode (the browser tests)
+__pycache__/

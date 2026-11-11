@@ -65,10 +65,15 @@ func main() {
 	}
 	base := "http://" + l.Addr().String()
 	card := &a2a.AgentCard{
-		Name: "Echo", Description: "Answers with the message's text as a Markdown result.", Version: "1.0.0",
+		// A long description that carries markup: the Cards page clamps it under its arrow, and shows it as text.
+		Name: "Echo", Version: "1.0.0", Description: "Answers with the message's text as a Markdown result. " +
+			"It keeps every line of what it was sent, headings, lists and code included, and adds nothing of its own, " +
+			"so what the console draws is exactly what an agent's Markdown looks like. " +
+			`<img src=x onerror="window.__pwned = 4"> stays text. Use it to check how a thread renders results.`,
 		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(base, a2a.TransportProtocolJSONRPC)},
 		DefaultInputModes:   []string{"text/plain"}, DefaultOutputModes: []string{"text/markdown"},
-		Skills: []a2a.AgentSkill{{ID: "echo", Name: "Echo", Description: "Echoes Markdown.", Examples: []string{"**hello**"}}},
+		Skills: []a2a.AgentSkill{{ID: "echo", Name: "Echo", Description: "Echoes Markdown.", Examples: []string{"**hello**"},
+			Tags: []string{"markdown"}, InputModes: []string{"text/plain"}, OutputModes: []string{"text/markdown"}}},
 	}
 	h := a2asrv.NewHandler(agent{}, a2asrv.WithTaskStore(taskstore.NewInMemory(nil)))
 	mux := http.NewServeMux()

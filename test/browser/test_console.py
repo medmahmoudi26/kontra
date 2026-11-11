@@ -8,6 +8,7 @@ across a gate restart).
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 
@@ -37,7 +38,7 @@ def no_trouble(page: Page) -> None:
 def test_loads_without_sign_in(stack: Stack, page: Page) -> None:
     page.goto(stack.base + "/")
     expect(page.locator(".brand, header").first).to_be_visible()
-    for name in ["Tasks", "Conversations", "Traffic", "MCP calls", "Services"]:
+    for name in ["Tasks", "Conversations", "Traffic", "MCP calls", "Cards"]:
         expect(page.get_by_role("link", name=name).first).to_be_visible()
     assert not re.search(r"sign in|log in|password", page.locator("body").inner_text(), re.I)
     info = stack.api("GET", "/v1/info")
@@ -113,6 +114,9 @@ def test_list_views(stack: Stack, page: Page) -> None:
     code, _ = stack.a2a("notes", "SendMessage", {"message": {"messageId": "m", "role": "ROLE_USER", "parts": [{"text": "x"}]}},
                         headers={"A2A-Version": ""})
     assert code == 200  # a JSON-RPC error: -32009
+    # The traffic record is written in batches, off the call: wait for the refused call's row before the page reads it.
+    eventually("the refused call is recorded", lambda: any(
+        "version_unsupported" in json.dumps(x) for x in stack.api("GET", "/v1/exchanges?failed=1&limit=50")["items"]))
 
     page.goto(stack.base + "/#/")
     expect(page.locator(f'#taskrows tr[data-task="{first}"]')).to_be_visible(timeout=15000)
@@ -133,11 +137,11 @@ def test_list_views(stack: Stack, page: Page) -> None:
     page.locator(f'#trafficcard a[href="#/t/{first}"]').first.click()
     expect(page).to_have_url(re.compile(f"#/t/{first}"))
 
-    page.goto(stack.base + "/#/services")
-    row = page.locator('tr[data-service="notes"]')
+    page.goto(stack.base + "/#/services")  # the old address opens the Cards page
+    row = page.locator('article[data-service="notes"]')
     expect(row).to_contain_text("reachable", timeout=15000)
     expect(row).to_contain_text("kept forever")
-    expect(page.locator('tr[data-service="merchant"]')).to_contain_text("7d")
+    expect(page.locator('article[data-service="merchant"]')).to_contain_text("7d")
 
     page.goto(stack.base + "/#/calls")
     expect(page.locator("#calls")).to_be_visible()
@@ -223,3 +227,43 @@ def test_another_site_cannot_prompt_agents(stack: Stack, page: Page) -> None:
     eventually("the refusal is in traffic", lambda: any(
         x["reason"] == "cross_site" and x["http_status"] == 403 and x["service"] == "notes"
         for x in stack.api("GET", "/v1/exchanges?failed=1&limit=100")["items"]), within=10)
+
+
+def test_cards_show_the_agents_cards(stack: Stack, page: Page) -> None:
+    """console-agent-cards: each service is a card; an A2A service's shows its agent card (name, version, skills); a
+    long description is clamped under a down arrow that opens it and the skills' details and closes them again; what
+    the card says is text."""
+    page.goto(stack.base + "/#/cards")
+    notes = page.locator('article[data-service="notes"]')
+    expect(notes.locator(".nm b")).to_have_text("Echo", timeout=15000)
+    expect(notes.locator(".nm .v")).to_have_text("v1.0.0")
+    expect(notes.locator(".skills .tag")).to_have_text(["Echo"])
+    expect(notes).to_contain_text("http://127.0.0.1")
+    expect(notes.get_by_role("link", name="Start a task")).to_have_attribute("href", "#/run/notes")
+    desc = notes.locator(".desc")
+    closed = desc.evaluate("e => e.clientHeight")
+    assert desc.evaluate("e => e.scrollHeight > e.clientHeight + 2"), "the long description is not clamped"
+
+    arrow = notes.locator("button.expand")
+    expect(arrow).to_be_visible()
+    expect(arrow).to_have_attribute("aria-expanded", "false")
+    expect(notes.locator(".details")).to_be_hidden()
+    arrow.click()
+    expect(arrow).to_have_attribute("aria-expanded", "true")
+    expect(notes.locator('.details [data-skill="Echo"]')).to_contain_text("Echoes Markdown.")
+    expect(notes.locator('.details [data-skill="Echo"]')).to_contain_text("in: text/plain · out: text/markdown")
+    expect(notes.locator('.details [data-skill="Echo"] code')).to_have_text(["**hello**"])
+    assert desc.evaluate("e => e.clientHeight") > closed, "the description did not open"
+    expect(desc).to_contain_text('<img src=x onerror="window.__pwned = 4"> stays text.')
+    assert page.evaluate("window.__pwned") is None
+    assert page.locator("#cards img").count() == 0
+    arrow.click()
+    expect(arrow).to_have_attribute("aria-expanded", "false")
+    expect(notes.locator(".details")).to_be_hidden()
+    assert desc.evaluate("e => e.clientHeight") == closed
+
+    if stack.mcp:
+        files = page.locator('article[data-service="files"]')
+        expect(files).to_contain_text("mcp server")
+        expect(files.get_by_role("link", name="Start a task")).to_have_count(0)
+    no_trouble(page)

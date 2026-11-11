@@ -8,16 +8,16 @@
 //   #/run/<service>                  start a task on an A2A service, from its card
 //   #/traffic                        the gate's A2A exchanges
 //   #/calls                          the gate's MCP tool calls
-//   #/services                       the gate's services and whether an agent is reachable now
+//   #/cards                          the agents' cards and whether one is reachable now (#/services too)
 //
 // Any other address shows the tasks.
 
 import { loadInfo, state } from "./app.js";
 import { $, errorText, toast } from "./dom.js";
 import { hideViews, navLinks } from "./nav.js";
+import { leaveCards, showCards } from "./views/agents.js";
 import { leaveCalls, showCalls } from "./views/calls.js";
 import { leaveConversations, showConversation, showConversations } from "./views/conversations.js";
-import { leaveServices, showServices } from "./views/services.js";
 import { leaveTasks, showTasks } from "./views/tasks.js";
 import { leaveThread, showRun, showThread, shownTask } from "./views/thread.js";
 import { leaveTraffic, showTraffic } from "./views/traffic.js";
@@ -32,7 +32,7 @@ function leaveAll() {
   leaveThread();
   leaveTraffic();
   leaveCalls();
-  leaveServices();
+  leaveCards();
 }
 
 const part = (s) => {
@@ -65,7 +65,7 @@ async function route() {
     else if (run) next = await showRun(part(run[1]));
     else if (hash === "#/traffic") next = await showTraffic();
     else if (hash === "#/calls") next = await showCalls();
-    else if (hash === "#/services") next = await showServices();
+    else if (hash === "#/cards" || hash === "#/services") next = await showCards();
     else next = await showTasks();
   } catch (err) {
     if (mine === routeSeq) toast(errorText(err));
