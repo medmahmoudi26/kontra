@@ -237,13 +237,12 @@ func TestPurgePassEndsAtItsBudget(t *testing.T) {
 	if took := time.Since(start); took > purgeBudget+time.Second || n >= tenants || err == nil {
 		t.Fatalf("a pass over its budget: %d purged in %s (%v)", n, took, err)
 	}
+	// Each further pass goes on where the last stopped. How many tenants a pass fits depends on the machine (a slow
+	// runner under -race may fit none in one), so passes go on until every tenant is purged, within a deadline.
 	total := n
-	for range tenants {
+	for deadline := time.Now().Add(30 * time.Second); total < tenants && time.Now().Before(deadline); {
 		m, _ := sw.Purge(ctx)
 		total += m
-		if total == tenants {
-			break
-		}
 	}
 	if total != tenants {
 		t.Fatalf("%d of %d purged over the passes", total, tenants)

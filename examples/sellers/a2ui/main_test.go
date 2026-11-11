@@ -550,10 +550,7 @@ func TestCancel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := client(t, serve(t), a2a.TransportProtocolJSONRPC, tc.header)
 			first := send(t, c, textMessage("a table, please"), nil)
-			task, err := c.CancelTask(ctxT(t), &a2a.CancelTaskRequest{ID: first.ID})
-			if err != nil {
-				t.Fatalf("CancelTask: %v", err)
-			}
+			task := cancelTask(t, c, first.ID)
 			id := ""
 			if tc.header != nil {
 				id = surfacePrefix + string(first.ID)
@@ -591,9 +588,10 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// cancelTask cancels a task that just answered input-required. a2a-go v2.7.0 answers the message before it drops the
-// finished execution, and a CancelTask in that gap joins it and is refused ErrTaskNotCancelable with the task still
-// input-required; retried, it reaches the idle task.
+// cancelTask cancels a task that just answered input-required. a2a-go v2 (through v2.8.0) answers the message before
+// it drops the finished execution, and a CancelTask in that gap joins it: it is refused ErrTaskNotCancelable with the
+// task still input-required, or fails "queue is closed" when the execution's queue is already closing (taskexec's TODO
+// "better handling for concurrent Execute() and Cancel() calls"). Retried, it reaches the idle task.
 func cancelTask(t *testing.T, c *a2aclient.Client, id a2a.TaskID) *a2a.Task {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -602,7 +600,8 @@ func cancelTask(t *testing.T, c *a2aclient.Client, id a2a.TaskID) *a2a.Task {
 		if err == nil {
 			return task
 		}
-		if !errors.Is(err, a2a.ErrTaskNotCancelable) || time.Now().After(deadline) {
+		racing := errors.Is(err, a2a.ErrTaskNotCancelable) || strings.Contains(err.Error(), "queue is closed")
+		if !racing || time.Now().After(deadline) {
 			t.Fatal(err)
 		}
 		time.Sleep(20 * time.Millisecond)
