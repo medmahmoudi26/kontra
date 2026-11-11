@@ -393,11 +393,13 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 		t.Fatalf("turn 1: %d %s", resp.StatusCode, b)
 	}
 	turn1 := st.all(t)
-	if len(turn1) < 2 || turn1[0].id < 1 {
+	if len(turn1) < 1 || turn1[0].id < 1 {
 		t.Fatalf("turn 1: %+v", turn1)
 	}
+	// The lead is the task as the seller's first answer exposed it (D362): submitted, or already input-required
+	// when the seller's turn ended before the stream read it, which then is the stream's one event.
 	first, ok := eventOf(t, turn1[0].data).(*a2a.Task)
-	if !ok || first.Status.State != a2a.TaskStateSubmitted {
+	if !ok || (first.Status.State != a2a.TaskStateSubmitted && first.Status.State != a2a.TaskStateInputRequired) {
 		t.Fatalf("turn 1 starts with %s", turn1[0].data)
 	}
 	taskID := first.ID
