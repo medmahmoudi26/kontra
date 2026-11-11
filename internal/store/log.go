@@ -253,17 +253,22 @@ type Call struct {
 // MaxCallTool is the longest tool name a calls row holds (0001: 1 to 128 characters).
 const MaxCallTool = 128
 
-// exposes reports whether the write exposes a provisional task (D362; tasks.exposed_at, set once): an event the
-// callee sent as a Task or a task event (not a Message, which D5 logs as a completed status), or any other status
-// that ends or answers the turn (a gate-written failure, timeout or cancel before any callee answer). A caller's
-// message, metadata, and a gate status that keeps the turn going (working) expose nothing.
+// exposes reports whether the write exposes a provisional task (D362; tasks.exposed_at, set once). Only what is known
+// to keep the record provisional does: a callee's Message (which D5 logs as a completed status), and a gate-written
+// status that keeps the turn going (working); a caller's message and metadata are no answer. Any other task, status or
+// artifact event exposes it: the callee's task events, a status that ends or answers the turn, and an event whose
+// origin was not named, which is shown rather than hidden.
 func (w *Write) exposes() bool {
-	carried := w.Kind == KindTask || w.Kind == KindStatus || w.Kind == KindArtifact
-	if w.Origin != nil && w.Origin.Actor == ActorCallee {
-		return carried && w.Origin.Type != TypeMessage
-	}
-	if w.Kind != KindTask && w.Kind != KindStatus {
+	if w.Kind != KindTask && w.Kind != KindStatus && w.Kind != KindArtifact {
 		return false
+	}
+	switch {
+	case w.Origin == nil || w.Origin.Actor == "":
+		return true
+	case w.Origin.Actor == ActorCallee:
+		return w.Origin.Type != TypeMessage
+	case w.Kind == KindArtifact:
+		return true
 	}
 	return w.State.Terminal() || w.State == StateInputRequired || w.State == StateAuthRequired
 }

@@ -68,7 +68,8 @@ func TestExposure(t *testing.T) {
 
 	t.Run("message answer", func(t *testing.T) {
 		task := e.provisional(buyerA, "hi")
-		mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateWorking, "")) // the gate's own working status
+		working := status(task, a2a.TaskStateWorking, "")
+		mustApply(t, fromOrigin(ctx, working, GateOrigin()), s, task.ID, working) // the gate's own working status
 		if e.exposed(task) {
 			t.Fatal("a gate working status exposed the record")
 		}
@@ -120,10 +121,19 @@ func TestExposure(t *testing.T) {
 		}
 	})
 
+	t.Run("origin not named", func(t *testing.T) {
+		task := e.provisional(buyerA, "hi")
+		mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateWorking, ""))
+		if !e.exposed(task) {
+			t.Fatal("an event of unknown origin left the record hidden: it is shown rather than hidden")
+		}
+	})
+
 	for _, st := range []a2a.TaskState{a2a.TaskStateFailed, a2a.TaskStateCanceled, a2a.TaskStateInputRequired} {
 		t.Run("gate "+string(st), func(t *testing.T) {
 			task := e.provisional(buyerA, "hi")
-			mustApply(t, ctx, s, task.ID, status(task, st, "the gate says so"))
+			ev := status(task, st, "the gate says so")
+			mustApply(t, fromOrigin(ctx, ev, GateOrigin()), s, task.ID, ev)
 			if !e.exposed(task) {
 				t.Fatalf("a gate %s status before any callee answer did not expose the record", st)
 			}

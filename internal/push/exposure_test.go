@@ -57,7 +57,7 @@ func TestPushWaitsForExposure(t *testing.T) {
 	id := e.provisionalTask(buyerA)
 	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
 	out := runPush(context.Background(), d, id, cid)
-	e.status(id, store.StateWorking) // the gate's own: the record stays provisional
+	e.writeFrom(id, store.StateWorking, nil, store.GateOrigin()) // the gate's own: the record stays provisional
 	time.Sleep(200 * time.Millisecond)
 	if n := len(r.requests()); n != 0 {
 		t.Fatalf("%d deliveries for a provisional record, want none", n)

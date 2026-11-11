@@ -355,7 +355,8 @@ func (s *stack) carried(t *testing.T, id a2a.TaskID) []int64 {
 // "follow-up turn through the real stack", spec §7, §9, §14.1):
 //
 //   - a2a-go's resolver fetches GET {svc} as the card, and a2a-go's client sends through the gate;
-//   - SendStreamingMessage of a new task on JSON-RPC: the creation row with id: 1, closing at input-required;
+//   - SendStreamingMessage of a new task on JSON-RPC: the task snapshot once the seller's answer exposed it (D362),
+//     with its seq as its id, closing at input-required;
 //   - two concurrent follow-ups: exactly one is accepted, the other refused before any SSE header;
 //   - the accepted follow-up's stream leads with the snapshot at V without an id and closes after completed;
 //   - SubscribeToTask resumes over HTTP+JSON with Last-Event-ID, and refuses another buyer.
@@ -392,7 +393,7 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 		t.Fatalf("turn 1: %d %s", resp.StatusCode, b)
 	}
 	turn1 := st.all(t)
-	if len(turn1) < 2 || turn1[0].id != 1 {
+	if len(turn1) < 2 || turn1[0].id < 1 {
 		t.Fatalf("turn 1: %+v", turn1)
 	}
 	first, ok := eventOf(t, turn1[0].data).(*a2a.Task)
@@ -474,6 +475,9 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 		t.Fatalf("turn 2 ends with %s", end.data)
 	}
 	carried := s.carried(t, taskID)
+	for len(carried) > 0 && carried[0] < turn1[0].id {
+		carried = carried[1:] // before the exposure the stream led with (D362)
+	}
 	var ids []int64
 	for _, ev := range turn1 {
 		ids = append(ids, ev.id)
