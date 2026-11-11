@@ -65,8 +65,26 @@ jobs:
           echo "${TEMPORAL_CLI_BINARY_SHA256}  $RUNNER_TEMP/temporal/temporal" | sha256sum -c -
           "$RUNNER_TEMP/temporal/temporal" --version | grep -q 'Server 1\.32\.'
           echo "KONTRA_TEMPORAL_CLI=$RUNNER_TEMP/temporal/temporal" >> "$GITHUB_ENV"
+      # Chromium itself comes from Playwright's CDN and is cached; its system packages come from apt, retried, and on a
+      # failure the runner's mirror list (azure.archive.ubuntu.com first, which has failed to resolve for an hour at a
+      # time) is replaced by Ubuntu's own archive.
+      - name: Cache Playwright 1.64.0's Chromium
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-1.64.0-chromium-${{ runner.os }}-${{ runner.arch }}
       - name: Install Chromium for Playwright 1.64.0
-        run: uv run --no-project --with playwright==1.64.0 playwright install --with-deps chromium
+        run: |
+          pw() { uv run --no-project --with playwright==1.64.0 playwright "$@"; }
+          pw install chromium
+          for attempt in 1 2 3; do
+            if pw install-deps chromium; then exit 0; fi
+            echo "::warning::Chromium's system packages failed to install (attempt $attempt); using archive.ubuntu.com"
+            echo "http://archive.ubuntu.com/ubuntu/" | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            sudo sed -i 's#azure\.archive\.ubuntu\.com#archive.ubuntu.com#g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+            sleep $((attempt * 15))
+          done
+          exit 1
       - run: make test-browser ARGS="-v -rA"
         env:
           KONTRA_BROWSER_DIR: ${{ runner.temp }}/browser
