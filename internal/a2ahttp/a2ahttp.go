@@ -377,6 +377,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	traffic.SetTenant(ctx, svc.Ref.TenantID)
+	if svc.Ref.Sealed != "" {
+		traffic.SetNoBodies(ctx) // a sealed service's calls keep no bodies (D358)
+	}
 	if !authenticated {
 		buyerTenant := uuid.Nil // a team gate: one fixed buyer for every anonymous caller (spec §2.3)
 		if s.deps.Multi {

@@ -39,6 +39,15 @@ type Store struct {
 	// listBytes and listBatch bound ListTasks (ListPageBytes, listBatchStored); tests lower them.
 	listBytes int
 	listBatch int64
+	// anonymousList lets the anonymous principal list its tasks: the local development profile, whose one caller
+	// is every client (spec §18.1).
+	anonymousList bool
+}
+
+// ListAnonymous lets the anonymous principal list tasks (the local development profile).
+func (s *Store) ListAnonymous() *Store {
+	s.anonymousList = true
+	return s
 }
 
 var _ taskstore.Store = (*Store)(nil)
@@ -119,6 +128,7 @@ func (s *Store) Update(ctx context.Context, req *taskstore.UpdateRequest) (tasks
 	w := Write{
 		TaskID: id, PrevVersion: int64(req.PrevVersion), Snapshot: req.Task,
 		Timeout: s.svc.Timeout, Retention: s.svc.Retention, Fence: FenceFrom(ctx),
+		Origin: OriginsFrom(ctx).take(req.Event),
 	}
 	scope := ScopeOf(s.svc, o)
 	w.Scope = &scope

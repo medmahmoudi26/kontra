@@ -1,0 +1,17 @@
+# The TCK's gate in the local development profile (spec/relay.md §18, D361): `make tck VARIANT=local`. Every client is
+# the one shared anonymous caller, and the profile lifts the anonymous refusals of ListTasks and push configs, so the
+# TCK reaches both with no credential (a2a-tck#163); its webhook receiver listens on loopback, which the profile's push
+# policy admits (loopback only). The seller (examples/sellers/tck) is the direct backend, as in the direct variant.
+profile: local
+listen: "@LISTEN@"
+public_url: "@PUBLIC_URL@"
+postgres: "@POSTGRES@"
+temporal: { address: "@TEMPORAL@", namespace: kontra }
+metrics: { listen: "127.0.0.1:0" }
+drain_timeout: 2s
+
+services:
+  tck:
+    kind: a2a
+    backend: { a2a: { url: "@SELLER@", allow_private: true } }
+    task: { timeout: 10m, retries: 2 }

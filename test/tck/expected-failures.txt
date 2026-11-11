@@ -37,13 +37,9 @@ tests/compatibility/core_operations/test_task_history.py::TestHistoryLengthZeroS
 tests/compatibility/core_operations/test_task_lifecycle.py::TestCancelTask::test_cancel_terminal_task_returns_error[http_json]  # a2a-tck#231 (PR #232): v1.0.0's 409, v1.0.1's 400
 
 # --- Every variant: expected skips ---
-# The tests of an error the gate's card rules out: it declares pushNotifications (the gate pushes itself, D16,
-# spec/relay.md §3) and streaming, and no extended card (D52), so PushNotificationNotSupported, UnsupportedOperation
-# for streaming and the extended card's errors cannot be triggered.
-skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityPushNotifications::test_push_not_supported_jsonrpc  # D16: the gate's card declares pushNotifications
-skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityPushNotifications::test_push_not_supported_rest  # D16: the gate's card declares pushNotifications
-skip tests/compatibility/jsonrpc/test_error_codes.py::TestJsonRpcErrorCodeMappings::test_push_notification_not_supported_error  # D16: the gate's card declares pushNotifications
-skip tests/compatibility/http_json/test_http_status.py::TestHttpJsonStatusCodes::test_push_not_supported_returns_400  # D16: the gate's card declares pushNotifications
+# The tests of an error the gate's card rules out: it declares streaming, and no extended card (D52), so
+# UnsupportedOperation for streaming and the extended card's errors cannot be triggered. (Push: the auth variant's
+# card declares pushNotifications, the anonymous variants' does not, D361; see their sections.)
 skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityStreaming::test_streaming_not_supported_jsonrpc  # D52: the gate's card declares streaming
 skip tests/compatibility/jsonrpc/test_error_codes.py::TestJsonRpcErrorCodeMappings::test_unsupported_operation_error  # D52: the gate's card declares streaming
 skip tests/compatibility/http_json/test_http_status.py::TestHttpJsonStatusCodes::test_unsupported_operation_returns_400  # D52: the gate's card declares streaming
@@ -64,7 +60,7 @@ skip tests/compatibility/http_json/test_http_status.py::TestHttpJsonStatusCodes:
 
 [direct tunnel caddy]
 # The TCK sends no credential (a2a-tck#163, PR #200), so these variants call `tck` as the anonymous principal, which is
-# refused ListTasks and push configs (spec/relay.md §2.3, D20). The auth variant runs them with an API key.
+# refused ListTasks (spec/relay.md §2.3, D20). The auth variant runs them with an API key.
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-001-jsonrpc]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-001-http_json]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-002-jsonrpc]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
@@ -75,28 +71,40 @@ tests/compatibility/core_operations/test_requirements.py::test_must_requirement[
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-004-http_json]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-005-jsonrpc]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
 tests/compatibility/core_operations/test_requirements.py::test_must_requirement[CORE-LIST-005-http_json]  # D20: ListTasks is refused to anonymous callers (a2a-tck#163)
-tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[jsonrpc]  # D20: push configs are refused to anonymous callers (a2a-tck#163)
-tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[http_json]  # D20: push configs are refused to anonymous callers (a2a-tck#163)
-# The other push tests skip once CreatePushNotificationConfig, or a message carrying an inline config, is refused.
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[jsonrpc]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[http_json]  # D20: its CreatePushNotificationConfig is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[jsonrpc]  # D20: its message's inline push config is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[http_json]  # D20: its message's inline push config is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[jsonrpc]  # D20: its message's inline push config is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[http_json]  # D20: its message's inline push config is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[jsonrpc]  # D20: its message's inline push config is refused (a2a-tck#163)
-skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[http_json]  # D20: its message's inline push config is refused (a2a-tck#163)
+# `tck` admits only the anonymous principal, so its served card declares pushNotifications false and a push config is
+# PushNotificationNotSupportedError (spec/relay.md §2.3, §3, D361): the TCK's push-not-supported tests run and pass,
+# and its push config and delivery tests skip ("Agent does not support push notifications").
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_create_push_config[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_push_config[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_nonexistent_config_returns_error[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_get_nonexistent_config_returns_error[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_list_push_configs[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_push_config[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_delete_is_idempotent[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationCrud::test_config_persists[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_includes_auth[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_at_least_once[http_json]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[jsonrpc]  # D361: the anonymous-only card declares pushNotifications false
+skip tests/compatibility/core_operations/test_push_notifications.py::TestPushNotificationDelivery::test_delivery_payload_format[http_json]  # D361: the anonymous-only card declares pushNotifications false
 
-[auth]
-# With an API key ListTasks and push pass on both bindings, except CreateTaskPushNotificationConfig on JSON-RPC: the
+[auth local]
+# The auth variant's card declares pushNotifications, and so does the local variant's (the local development profile's
+# shared caller may set push configs, D361) (the gate pushes itself, D16, spec/relay.md §3): its
+# PushNotificationNotSupported tests cannot be triggered.
+skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityPushNotifications::test_push_not_supported_jsonrpc  # D16: the gate's card declares pushNotifications
+skip tests/compatibility/core_operations/test_error_handling.py::TestCapabilityPushNotifications::test_push_not_supported_rest  # D16: the gate's card declares pushNotifications
+skip tests/compatibility/jsonrpc/test_error_codes.py::TestJsonRpcErrorCodeMappings::test_push_notification_not_supported_error  # D16: the gate's card declares pushNotifications
+skip tests/compatibility/http_json/test_http_status.py::TestHttpJsonStatusCodes::test_push_not_supported_returns_400  # D16: the gate's card declares pushNotifications
+# With an API key (auth), or as the local profile's shared caller (local), ListTasks and push pass on both bindings,
+# except CreateTaskPushNotificationConfig on JSON-RPC: the
 # TCK's JSON-RPC client sends the config's task as task_id (snake_case, A2A §5.5: camelCase), so the gate finds no task.
 # It is a2a-tck#242's defect in the same client, filed there for history_length only (D291). The other JSON-RPC
 # push CRUD tests then skip.

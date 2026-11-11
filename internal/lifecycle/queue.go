@@ -201,6 +201,9 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
 	}
 	contextID := req.Message.ContextID
+	origin := store.RequestOrigin(ctx) // D357: the caller's message, the method it came in, its exchange
+	assigned := contextID == ""
+	origin.ContextAssigned = &assigned // D3: the gate minted the contextId
 	if contextID == "" {
 		if contextID, err = ids.NewContextID(); err != nil {
 			return "", err
@@ -238,7 +241,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		}
 		if _, err := q.log.CreateTask(ctx, tx, store.NewTask{
 			ID: taskID, Service: q.svc, Protocol: store.ProtocolA2A, Owner: owner, ContextID: contextID, State: state,
-			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash,
+			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, Origin: origin,
 		}); err != nil {
 			return err
 		}
@@ -419,6 +422,7 @@ func (q *Queue) writeFollowUp(ctx context.Context, p *workqueue.Payload, owner s
 		if err != nil {
 			return err
 		}
+		wp.Origin = store.RequestOrigin(ctx) // D357: the follow-up's method and exchange
 		if err := q.log.InsertWorkItem(ctx, tx, store.WorkItem{ID: wid, TaskID: taskID, Kind: store.WorkExecute, Payload: wp}); err != nil {
 			return err
 		}

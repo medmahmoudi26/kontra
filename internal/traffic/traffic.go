@@ -1,16 +1,21 @@
-// Package traffic is the A2A traffic record (spec/relay.md §13.6; the a2a-traffic capability): one metadata-only
-// exchange per A2A call the gate receives, refused calls included, in a2a_exchanges (migration 0006).
+// Package traffic is the A2A traffic record (spec/relay.md §13.6; the a2a-traffic capability): one exchange per A2A
+// call on either leg, refused calls included, in a2a_exchanges (migrations 0006, 0007): the calls the gate receives
+// (leg caller) and the calls it makes to a service's agent (leg callee, D355).
 //
-// An exchange holds the time, the service as requested, the method, the binding, the caller's principal name and via,
-// the task and context ids when the call names or creates one, the sizes, the duration and the outcome (HTTP status,
-// JSON-RPC error code, the gate's reason). Never a body, a header, a part, a credential or a credential's hash.
+// An exchange holds the time, the leg, the service as requested, the method, the binding, the A2A version, the
+// caller's principal name and via, the task and context ids when the call names or creates one (on the callee leg the
+// agent's, with the gate task beside them), the sizes, the duration and the outcome (HTTP status, JSON-RPC error code,
+// the gate's reason). With bodies on (traffic.bodies, D358) it also holds its request body and its response body or
+// stream frames, each cut at traffic.body_max, credential members redacted (Redact). Never a header, a credential or a
+// credential's hash.
 //
 // Recording never affects a call: Record hands the exchange to a bounded channel and returns; one goroutine per
 // replica (Run) writes batches with COPY. A full channel, or a batch the database refuses, is dropped and counted
-// (Dropped, kontra_traffic_dropped_total), never waited for.
+// (Dropped, kontra_traffic_dropped_total), never waited for. Queued bodies have a byte budget: past it an exchange is
+// queued without them (BodiesDropped, kontra_traffic_bodies_dropped_total).
 //
-// The two points that record are internal/a2ahttp (every request to an A2A route, around its handler) and the edge's
-// own refusals (413, 429, 408) on A2A paths, which never reach a handler.
+// The points that record are internal/a2ahttp (every request to an A2A route, around its handler), the edge's own
+// refusals (413, 429, 408) on A2A paths, which never reach a handler, and the callee leg's RoundTripper (callee.go).
 package traffic
 
 import (
@@ -26,11 +31,14 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Bounds of the writer (design §6): the channel, and a batch's rows and age.
+// Bounds of the writer (design §6): the channel, and a batch's rows and age; and the bytes of bodies and frames queued
+// at once (D358).
 const (
-	QueueSize  = 4096
-	BatchRows  = 512
-	FlushEvery = 250 * time.Millisecond
+	QueueSize   = 4096
+	BatchRows   = 512
+	FlushEvery  = 250 * time.Millisecond
+	BodyBudget  = 64 << 20
+	FramesTimes = 16 // an exchange's frames, in all, at most FramesTimes × body_max
 	// writeTimeout bounds one batch's COPY; a batch that does not land in time is dropped.
 	writeTimeout = 5 * time.Second
 )
@@ -43,6 +51,12 @@ const (
 
 // MethodUnknown is the method of a call whose method was never read (an edge refusal) or is not one of A2A's.
 const MethodUnknown = "unknown"
+
+// Legs (D355).
+const (
+	LegCaller = "caller" // a call the gate received
+	LegCallee = "callee" // a call the gate made to a service's agent
+)
 
 // Gate reasons the A2A routes record (the edge's are edge.Reason*).
 const (
@@ -57,21 +71,70 @@ const (
 
 // Exchange is one A2A call.
 type Exchange struct {
-	At         time.Time // when the call arrived
-	TenantID   *uuid.UUID
-	Service    string // as requested
-	Method     string
-	Binding    string
-	Principal  string // "" before authentication
-	Via        string // with Principal
-	TaskID     *uuid.UUID
-	ContextID  string
-	BytesIn    int64
-	BytesOut   int64
-	Duration   time.Duration
-	HTTPStatus int
-	RPCCode    *int
-	Reason     string
+	ID           uuid.UUID // minted when the call arrived (NewID, D356); minted at write when zero
+	At           time.Time // when the call arrived
+	Leg          string    // LegCaller (the default) or LegCallee
+	TenantID     *uuid.UUID
+	Service      string // as requested
+	Method       string
+	Binding      string
+	A2AVersion   string // "1.0", "0.3", or "" when not known
+	Principal    string // "" before authentication
+	Via          string // with Principal
+	TaskID       *uuid.UUID
+	ContextID    string
+	GateTaskID   *uuid.UUID // the callee leg's gate task
+	CalleeTaskID string     // the callee leg's agent task id (TaskID stays nil there)
+	BytesIn      int64
+	BytesOut     int64
+	Duration     time.Duration
+	HTTPStatus   int
+	RPCCode      *int
+	Reason       string
+	// With bodies on: the request body, the response body (nil for a stream), the stream's frames.
+	Request       *Body
+	Response      *Body
+	Frames        []Frame
+	FramesDropped int
+}
+
+// Body is a kept request or response body: Data cut at body_max and redacted, Size the full size.
+type Body struct {
+	Data      []byte
+	Size      int64
+	Truncated bool
+}
+
+// Frame is one kept SSE event of a stream: its data, its SSE id, and when it was sent from the call's start.
+type Frame struct {
+	Offset    time.Duration
+	SSEID     string
+	Data      []byte
+	Size      int64
+	Truncated bool
+}
+
+// NewID mints an exchange id: UUIDv7, so ids order by arrival.
+func NewID() uuid.UUID { return uuid.Must(uuid.NewV7()) }
+
+// bodyBytes is what e's bodies and frames hold in memory.
+func (e *Exchange) bodyBytes() int64 {
+	var n int64
+	if e.Request != nil {
+		n += int64(len(e.Request.Data))
+	}
+	if e.Response != nil {
+		n += int64(len(e.Response.Data))
+	}
+	for _, f := range e.Frames {
+		n += int64(len(f.Data))
+	}
+	return n
+}
+
+// stripBodies drops e's bodies and frames, keeping its metadata.
+func (e *Exchange) stripBodies() {
+	e.Request, e.Response, e.Frames, e.FramesDropped = nil, nil, nil, 0
 }
 
 // Copier is the one database call the writer makes; *pgxpool.Pool implements it.
@@ -87,26 +150,69 @@ type Recorder struct {
 	dropped atomic.Int64
 	every   time.Duration
 	rows    int
+
+	bodyMax       int   // 0: bodies off
+	budget        int64 // bytes of bodies and frames queued at once
+	queued        atomic.Int64
+	bodiesDropped atomic.Int64
 }
 
-// New returns a recorder writing to db; Run must run for anything to be written.
+// New returns a recorder writing to db; Run must run for anything to be written. It keeps no bodies until KeepBodies.
 func New(db Copier, log *slog.Logger) *Recorder {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Recorder{db: db, log: log, ch: make(chan Exchange, QueueSize), every: FlushEvery, rows: BatchRows}
+	return &Recorder{db: db, log: log, ch: make(chan Exchange, QueueSize), every: FlushEvery, rows: BatchRows, budget: BodyBudget}
 }
 
-// Record queues e, or drops and counts it when the queue is full. It never blocks.
+// KeepBodies turns bodies on (traffic.bodies), each body or frame cut at max bytes. Call it before the first Record.
+func (r *Recorder) KeepBodies(max int) *Recorder {
+	if r != nil && max > 0 {
+		r.bodyMax = max
+	}
+	return r
+}
+
+// BodyMax is how much of each body or frame is kept: 0 when bodies are off (or r is nil).
+func (r *Recorder) BodyMax() int {
+	if r == nil {
+		return 0
+	}
+	return r.bodyMax
+}
+
+// Record queues e, or drops and counts it when the queue is full. It never blocks. Past the body budget, e is queued
+// without its bodies and frames, and counted in BodiesDropped.
 func (r *Recorder) Record(e Exchange) {
 	if r == nil {
 		return
 	}
+	if r.bodyMax == 0 {
+		e.stripBodies()
+	}
+	n := e.bodyBytes()
+	if n > 0 {
+		if r.queued.Add(n) > r.budget {
+			r.queued.Add(-n)
+			e.stripBodies()
+			r.bodiesDropped.Add(1)
+			n = 0
+		}
+	}
 	select {
 	case r.ch <- e:
 	default:
+		r.queued.Add(-n)
 		r.dropped.Add(1)
 	}
+}
+
+// BodiesDropped is how many exchanges this replica queued without their bodies because the body budget was full.
+func (r *Recorder) BodiesDropped() int64 {
+	if r == nil {
+		return 0
+	}
+	return r.bodiesDropped.Load()
 }
 
 // Dropped is how many exchanges this replica has dropped since it started.
@@ -158,24 +264,67 @@ func (r *Recorder) Run(ctx context.Context) error {
 }
 
 var columns = []string{"id", "at", "tenant_id", "service", "method", "binding", "principal", "via", "task_id", "context_id",
-	"bytes_in", "bytes_out", "duration_ms", "http_status", "rpc_code", "reason"}
+	"bytes_in", "bytes_out", "duration_ms", "http_status", "rpc_code", "reason",
+	"leg", "gate_task_id", "callee_task_id", "a2a_version", "request_body", "request_size", "request_truncated",
+	"response_body", "response_size", "response_truncated", "frames_dropped"}
 
+var frameColumns = []string{"exchange_id", "n", "offset_ms", "sse_id", "data", "size", "truncated"}
+
+// write stores a batch: its exchanges, then their frames, two COPYs of one batch (the frames' foreign key needs their
+// exchanges first). Frames the database refuses are dropped with the exchanges' metadata kept.
 func (r *Recorder) write(ctx context.Context, batch []Exchange) {
 	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
+	var held int64
 	rows := make([][]any, len(batch))
-	for i, e := range batch {
-		rows[i] = e.row()
+	var frames [][]any
+	for i := range batch {
+		if batch[i].ID == uuid.Nil {
+			batch[i].ID = NewID()
+		}
+		held += batch[i].bodyBytes()
+		rows[i] = batch[i].row()
+		frames = append(frames, batch[i].frameRows()...)
 	}
+	defer r.queued.Add(-held)
 	if _, err := r.db.CopyFrom(ctx, pgx.Identifier{"kontra", "a2a_exchanges"}, columns, pgx.CopyFromRows(rows)); err != nil {
 		r.dropped.Add(int64(len(batch)))
 		r.log.Warn("traffic: a batch of exchanges was not stored and is dropped", "exchanges", len(batch), "error", err)
+		return
 	}
+	if len(frames) == 0 {
+		return
+	}
+	if _, err := r.db.CopyFrom(ctx, pgx.Identifier{"kontra", "a2a_exchange_frames"}, frameColumns, pgx.CopyFromRows(frames)); err != nil {
+		r.bodiesDropped.Add(int64(len(batch)))
+		r.log.Warn("traffic: a batch's stream frames were not stored and are dropped", "frames", len(frames), "error", err)
+	}
+}
+
+// frameRows are e's frames as a2a_exchange_frames stores them.
+func (e Exchange) frameRows() [][]any {
+	rows := make([][]any, 0, len(e.Frames))
+	for i, f := range e.Frames {
+		var sseID any
+		if f.SSEID != "" {
+			sseID = clip(f.SSEID, 64)
+		}
+		data := f.Data
+		if data == nil {
+			data = []byte{}
+		}
+		rows = append(rows, []any{e.ID, int32(i), int32(min(max(f.Offset.Milliseconds(), 0), 1<<31-1)), sseID, data,
+			max(f.Size, int64(len(data))), f.Truncated})
+	}
+	return rows
 }
 
 // row is e as a2a_exchanges stores it, every value inside its column's CHECK.
 func (e Exchange) row() []any {
-	id := uuid.Must(uuid.NewV7())
+	id := e.ID
+	if id == uuid.Nil {
+		id = NewID()
+	}
 	null := func(s string, max int) any {
 		if s == "" {
 			return nil
@@ -202,9 +351,30 @@ func (e Exchange) row() []any {
 	if e.RPCCode != nil {
 		rpc = *e.RPCCode
 	}
-	return []any{id, e.At, e.TenantID, clip(e.Service, 256), method, binding, principal, via, e.TaskID,
+	leg, gateTask, calleeTask, taskID := LegCaller, any(nil), any(nil), any(e.TaskID)
+	if e.Leg == LegCallee {
+		leg, taskID = LegCallee, nil
+		if e.GateTaskID != nil {
+			gateTask = *e.GateTaskID
+		}
+		calleeTask = null(e.CalleeTaskID, 256)
+	}
+	body := func(b *Body) (data, size any, truncated bool) {
+		if b == nil {
+			return nil, nil, false
+		}
+		d := b.Data
+		if d == nil {
+			d = []byte{}
+		}
+		return d, max(b.Size, int64(len(d))), b.Truncated
+	}
+	reqBody, reqSize, reqTrunc := body(e.Request)
+	respBody, respSize, respTrunc := body(e.Response)
+	return []any{id, e.At, e.TenantID, clip(e.Service, 256), method, binding, principal, via, taskID,
 		null(e.ContextID, 256), max(e.BytesIn, 0), max(e.BytesOut, 0), int32(min(max(e.Duration.Milliseconds(), 0), 1<<31-1)),
-		int16(status), rpc, null(e.Reason, 64)}
+		int16(status), rpc, null(e.Reason, 64),
+		leg, gateTask, calleeTask, null(e.A2AVersion, 16), reqBody, reqSize, reqTrunc, respBody, respSize, respTrunc, int32(max(e.FramesDropped, 0))}
 }
 
 var knownVia = map[string]bool{"api_key": true, "oidc": true, "mcp": true, "node": true, "anonymous": true}
@@ -241,21 +411,44 @@ func Sweep(ctx context.Context, db interface {
 }
 
 // Note is what a call's handlers tell the recorder while the call runs (WithNote): the caller once authenticated, the
-// tenant of the service, and the gate's reason for a refusal.
+// tenant of the service, the gate's reason for a refusal, and that the call's bodies may not be kept (a sealed
+// service). It also carries the exchange's id, minted when the call arrived (D356).
 type Note struct {
+	id        uuid.UUID
 	mu        sync.Mutex
 	principal string
 	via       string
 	tenant    *uuid.UUID
 	reason    string
+	noBodies  bool
 }
 
 type noteKey struct{}
 
-// WithNote returns ctx carrying a new Note.
+// WithNote returns ctx carrying a new Note with a fresh exchange id.
 func WithNote(ctx context.Context) (context.Context, *Note) {
-	n := &Note{}
+	n := &Note{id: NewID()}
 	return context.WithValue(ctx, noteKey{}, n), n
+}
+
+// ID is the exchange's id.
+func (n *Note) ID() uuid.UUID { return n.id }
+
+// ExchangeID is the id of the exchange ctx's call is recorded as, when it is recorded.
+func ExchangeID(ctx context.Context) (uuid.UUID, bool) {
+	if n := noteOf(ctx); n != nil {
+		return n.id, true
+	}
+	return uuid.Nil, false
+}
+
+// SetNoBodies says the call's bodies may not be kept (a sealed service's call).
+func SetNoBodies(ctx context.Context) {
+	if n := noteOf(ctx); n != nil {
+		n.mu.Lock()
+		n.noBodies = true
+		n.mu.Unlock()
+	}
 }
 
 func noteOf(ctx context.Context) *Note {
@@ -292,9 +485,20 @@ func SetReason(ctx context.Context, reason string) {
 	}
 }
 
-// Fill copies what the note holds into e.
+// Fill copies what the note holds into e, and drops e's bodies when the call's may not be kept.
 func (n *Note) Fill(e *Exchange) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	e.ID = n.id
 	e.Principal, e.Via, e.TenantID, e.Reason = n.principal, n.via, n.tenant, n.reason
+	if n.noBodies {
+		e.stripBodies()
+	}
+}
+
+// NoBodies reports whether the call's bodies may not be kept.
+func (n *Note) NoBodies() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.noBodies
 }

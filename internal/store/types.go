@@ -217,6 +217,7 @@ type Event struct {
 	Payload    json.RawMessage // the A2A StreamResponse with gate ids; {"metadata": …} for metadata rows
 	PayloadRef string          // bucket key for parts over 256 KiB (spec §10.4); never a URL
 	CreatedAt  time.Time
+	Origin     json.RawMessage // where the event came from (D357); nil on rows written before 0007
 }
 
 // TaskRow is one tasks row, read without caller scope by internal callers. Owner.TenantID is never set:

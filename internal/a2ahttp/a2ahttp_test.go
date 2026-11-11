@@ -28,6 +28,7 @@ import (
 	"kontra.sh/kontra/internal/relay"
 	"kontra.sh/kontra/internal/sse"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/traffic"
 )
 
 var tenantID = uuid.MustParse("0192f0b4-0000-7000-8000-0000000000ee")
@@ -38,6 +39,8 @@ type call struct {
 	principal  auth.Principal
 	versions   []string
 	extensions []string
+	exchange   uuid.UUID     // the traffic record's exchange id the call carried
+	origin     *store.Origin // the caller's origin the call carried (D357)
 }
 
 // stub is the service's a2a-go handler: it records each call and answers a fixed task, or err.
@@ -49,6 +52,8 @@ type stub struct {
 
 func (s *stub) record(ctx context.Context, method string) {
 	c := call{method: method}
+	c.exchange, _ = traffic.ExchangeID(ctx)
+	c.origin = store.RequestOrigin(ctx)
 	c.principal, _ = auth.FromContext(ctx)
 	if cc, ok := a2asrv.CallContextFrom(ctx); ok {
 		c.versions, _ = cc.ServiceParams().Get(a2a.SvcParamVersion)

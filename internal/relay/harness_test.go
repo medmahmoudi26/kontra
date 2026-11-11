@@ -133,6 +133,8 @@ type envOptions struct {
 	wrapTaskStore func(*store.Store) taskstore.Store
 	// bucket is the claim-check bucket (blobs:), nil without one.
 	bucket blob.Store
+	// local is the local development profile (its anonymous caller lists tasks and sets push configs).
+	local bool
 }
 
 func newEnv(t *testing.T, o envOptions) *env {
@@ -156,9 +158,9 @@ func newEnv(t *testing.T, o envOptions) *env {
 	e.render = blob.NewRenderer(o.bucket, e.pool, nil)
 	o.opts.Bucket, o.opts.Render = o.bucket, e.render
 	e.intc = &Interceptors{Svc: e.svc, Log: e.log, Rules: o.rules, Admit: o.admit, Canceler: o.canceler,
-		PushPolicy: o.policy, Bucket: o.bucket, Render: e.render}
+		PushPolicy: o.policy, Bucket: o.bucket, Render: e.render, Local: o.local}
 	e.handlers = NewHandlers(HandlerDeps{
-		Log: e.log, Puller: store.NewPullerProvider(e.log, listener), PushStore: o.push,
+		Local: o.local, Log: e.log, Puller: store.NewPullerProvider(e.log, listener), PushStore: o.push,
 		Queue:        func(store.ServiceRef) workqueue.Queue { q, _ := workqueue.NewPushQueue(e.queue); return q },
 		Interceptors: func(store.ServiceRef) []a2asrv.CallInterceptor { return e.intc.Chain() },
 		Registry:     e.reg, Backends: e.backends, Signals: e.signals, Executor: o.opts,

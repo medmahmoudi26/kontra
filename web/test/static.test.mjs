@@ -39,10 +39,10 @@ test("index.html has no inline script, style or handler, and loads nothing from 
   assert.ok(!css.includes("url(//"));
 });
 
-test("no module but routes.js names a /v1/ path, and only api.js calls fetch", () => {
+test("no module but routes.js names a /v1/ or an A2A path, and only api.js calls fetch", () => {
   for (const [name, text] of Object.entries(sources())) {
     const literals = text.match(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`]*`/g) || [];
-    if (name !== "routes.js") assert.deepEqual(literals.filter((l) => l.includes("/v1/") || l.includes("/.well-known")), [], name);
+    if (name !== "routes.js") assert.deepEqual(literals.filter((l) => l.includes("/v1/") || l.includes("/.well-known") || l.includes("/agents/")), [], name);
     if (name !== "api.js") assert.doesNotMatch(text, /\bfetch\(/, name);
     assert.ok(!text.includes("XMLHttpRequest"), name);
     assert.ok(!text.includes("EventSource"), name);
@@ -55,8 +55,9 @@ test("the console calls only the operations of routes.js, and api.js calls each 
   const { Gate } = await load("api.js");
   const src = sources();
   assert.deepEqual(Object.keys(ROUTES).sort(), [
-    "calls", "cancel_task", "continue_task", "conversation", "conversations", "exchanges", "info", "service",
-    "services", "start_form", "start_task", "task", "task_events", "task_file", "task_message", "tasks", "tunnels",
+    "calls", "cancel_task", "context", "context_timeline", "contexts", "continue_task", "conversation", "conversations",
+    "exchange", "exchanges", "info", "service", "service_cards", "services", "start_form", "start_task", "task",
+    "task_events", "task_file", "task_message", "task_timeline", "tasks", "tunnels",
   ]);
   // api.js names only rows of the table, and every row.
   const named = new Set([...src["api.js"].matchAll(/this\.(?:call|send)\("([a-z_]+)"/g)].map((m) => m[1]));
@@ -103,4 +104,32 @@ test("a refusal reads as a GateError, flat or under `error`", async () => {
   assert.deepEqual([flat.status, flat.code, flat.message], [404, "task_not_found", "no such task"]);
   assert.deepEqual([nested.status, nested.code, nested.message], [403, "foreign_origin", "refused"]);
   assert.deepEqual([bare.status, bare.code, bare.message], [502, "http_error", "HTTP 502"]);
+});
+
+test("the playground's A2A routes are A2A 1.0's eleven methods, sent as a stock client sends them", async () => {
+  const { A2A_ROUTES, a2aPath } = await load("routes.js");
+  const { Gate } = await load("api.js");
+  assert.deepEqual(Object.keys(A2A_ROUTES).sort(), [
+    "CancelTask", "CreateTaskPushNotificationConfig", "DeleteTaskPushNotificationConfig", "GetExtendedAgentCard",
+    "GetTask", "GetTaskPushNotificationConfig", "ListTaskPushNotificationConfigs", "ListTasks", "SendMessage",
+    "SendStreamingMessage", "SubscribeToTask",
+  ]);
+  assert.equal(a2aPath("jsonrpc", "GetTask", { service: "hello" }), "/agents/hello");
+  assert.equal(a2aPath("rest", "GetTaskPushNotificationConfig", { service: "hello", task_id: "t/1", id: "p" }), "/agents/hello/tasks/t%2F1/pushNotificationConfigs/p");
+  assert.throws(() => a2aPath("rest", "GetTask", { service: "hello" }), /needs id/);
+  const sent = [];
+  const gate = new Gate({ fetch: async (url, init) => { sent.push([url, init]); return new Response("{}", { status: 200 }); } });
+  await gate.a2a("hello", "jsonrpc", "ListTasks", { body: { jsonrpc: "2.0", id: 1, method: "ListTasks", params: {} } });
+  await gate.a2a("hello", "rest", "SubscribeToTask", { params: { id: "t1" }, lastEventId: 3, extensions: ["https://x/ext"] });
+  assert.deepEqual(sent.map(([u, i]) => [u, i.method]), [["/agents/hello", "POST"], ["/agents/hello/tasks/t1:subscribe", "GET"]]);
+  for (const [, init] of sent) {
+    assert.equal(init.credentials, "omit");
+    assert.equal(init.redirect, "error");
+    assert.equal(init.headers["A2A-Version"], "1.0");
+    assert.ok(!Object.hasOwn(init.headers, "Authorization"));
+  }
+  assert.equal(sent[1][1].headers["Last-Event-ID"], "3");
+  assert.equal(sent[1][1].headers.Accept, "text/event-stream");
+  assert.equal(sent[1][1].headers["A2A-Extensions"], "https://x/ext");
+  assert.equal(sent[1][1].body, undefined);
 });

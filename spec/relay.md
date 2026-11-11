@@ -219,7 +219,8 @@ is; an operator alerts on `fresh` 0. API keys are not on the feed: their revocat
 
 **Anonymous callers share a buyer.** All of them on a team gate, and all of one tenant's on a
 multi-tenant gate, are one `buyer_id`. So for the `anonymous` principal `ListTasks` and MCP `tasks/list`
-are refused (`UnsupportedOperationError` / `-32601`), push configs are refused, and a task is readable
+are refused (`UnsupportedOperationError` / `-32601`), push configs are refused (`PushNotificationNotSupportedError`,
+as an anonymous-only service's card says, §3), and a task is readable
 and cancellable by whoever holds its id: ids are not secrets (a UUIDv7 discloses its creation time and
 has 62 random bits), so this is a property of opting in to `anonymous`, recorded as such (D20). The TCK
 target is the case for it (D18). An MCP service's `max_sessions_per_principal` does not apply to `anonymous`: one
@@ -416,7 +417,7 @@ five fields with the 1.0 names, plus two it must also own, D52):
 |---|---|
 | `supportedInterfaces` | `[{url: {public_url}{svc}, protocolBinding: "JSONRPC", protocolVersion: "1.0"}, {url: {public_url}{svc}, protocolBinding: "HTTP+JSON", protocolVersion: "1.0"}]`. Never an upstream URL. |
 | `securitySchemes`, `securityRequirements` | `{"bearer": {"httpAuthSecurityScheme": {"scheme": "Bearer"}}}` and `[{"schemes": {"bearer": {"list": []}}}]`; plus an `openIdConnect` scheme when the operator configures an IdP. Omitted when the service's `allow:` is exactly `[anonymous]`. |
-| `capabilities.pushNotifications` | `true`: the gate implements push itself (§10). |
+| `capabilities.pushNotifications` | `true`: the gate implements push itself (§10); `false` for a service whose `allow:` is exactly `[anonymous]` outside the local development profile, whose callers are all refused push configs (§2.3). |
 | `capabilities.streaming` | `true`: the gate streams from its own log whatever the upstream does. |
 | `capabilities.extendedAgentCard` | `false` (PRD §17, default). `GetExtendedAgentCard` answers `UnsupportedOperationError`. |
 | `capabilities.extensions` | The seller's list, except that every entry whose URI the gate or the operator asserts — `https://kontra.sh/ext/sealed/v1` for a sealed service, `https://kontra.sh/ext/anonymous/v1` (`required: false`, `params.expiresAt`) for a service of an anonymous tenant ([`tunnel.md`](tunnel.md) §6.1, D292), and every URI in the operator's `card_extensions` (§13.4) — replaces a seller entry with the same URI. A seller's `input-schema/v1` entry passes unchanged. |
@@ -576,6 +577,19 @@ and for MCP tasks `input_request`, `input_response` and `result` (§11.5). `payl
 kept, not refused or rewritten (D49). `task_events` is append-only (a trigger refuses updates; rows go only
 at retention, §5.4).
 
+Each row also records its **origin** (`task_events.origin`, migration 0007, D357): `actor` (`caller`, `callee` or
+`gate`), `type` (the A2A type that actor sent: the caller's method, `SendMessage` or `SendStreamingMessage`; the
+agent's `Task`, `Message`, `TaskStatusUpdateEvent` or `TaskArtifactUpdateEvent`; the gate's `TaskStatusUpdateEvent`),
+`method` (the A2A method it travelled in: the caller's; the gate's upstream `SendMessage`, `SendStreamingMessage`,
+`GetTask`, `SubscribeToTask` or `CancelTask`; `mcp:hire` for the gate's own `/mcp`), `exchange_id` (the traffic
+record's exchange that carried it, §13.6, when one was recorded), `converted_to` (the type the gate logged instead,
+§6.3: a `Message` or a `Task` logged as status and artifact events) and, on a caller's first message,
+`context_assigned` (the gate minted its `contextId`, §4). It is written in the event's own transaction by the code that
+knows it: the A2A route's call for the caller's message (a follow-up's, through its work item), the dispatch for each
+event it yields (named by the event itself, since a2a-go hands the yielded event to the store after its event pipe),
+and the gate's own writers (a failure, a reconnect wait, `write_terminal`; a completed or rejected state relayed from
+the agent's answer to a forwarded `CancelTask` is the callee's `Task`). Rows written before 0007 have none.
+
 One `LISTEN kontra_task_events` connection per replica wakes in-process subscribers; the notify payload is a
 hint, the table is the truth. Every NOTIFY-ing commit in a Postgres cluster is serialized by Postgres; M1
 measures that ceiling on the target database, and runs of artifact-append chunks may be coalesced into one
@@ -670,7 +684,7 @@ over an `http.Client` whose dialer opens a tunnel stream (or the SSRF-safe diale
 | A `Task` (later, from polling, or the first one after a re-attach, §6.4) | The difference from the gate's projection: a `status` event if the status changed, an `artifact` event per new or grown artifact (`a2aevent.Recover` semantics). Nothing already in the log is logged twice. |
 | `statusUpdate` | `status`, ids rewritten. |
 | `artifactUpdate` | `artifact`, ids rewritten. A first chunk with `append: true` for an artifact the gate has not seen is logged with `append: false`; an empty artifact is dropped. |
-| A `Message` (no task) | A terminal `status` event: `completed`, with the upstream message (ids rewritten, `taskId` set to the gate task) as `status.message` (D5). The caller always gets a task. |
+| A `Message` (no task) | A terminal `status` event: `completed`, with the upstream message (ids rewritten, `taskId` set to the gate task) as `status.message` (D5), its origin the callee's `Message` with `converted_to` `TaskStatusUpdateEvent` (§5.2, D357). The caller always gets a task. |
 | A JSON-RPC/HTTP error **before** the first upstream task id | Depends on the error: see §6.4. |
 | A JSON-RPC/HTTP error **after** it | A terminal `status` event `failed` with a status message carrying the upstream error text. |
 | `rejected` / `failed` status | Logged as is; terminal; no retry. An upstream terminal status without a message gets a gate-written agent message naming the upstream state, so every relayed failure carries a message. |
@@ -2069,26 +2083,51 @@ service removed or disabled answers as an unknown service at once, and its tasks
 ### 13.6 The A2A traffic record
 
 With `traffic.record` on (off by default, on in the local development profile, D353), the gate keeps one row of
-`a2a_exchanges` (migration 0006) per A2A call it receives: every JSON-RPC or HTTP+JSON method call, every card fetch,
-and every stream (`SendStreamingMessage`, `SubscribeToTask`), once, when it ends, with its whole duration. Calls
-refused before any handler runs are recorded too: the edge's `413`, `429` and `408` (§2.2) with method `unknown`,
-since their body was never read. Requests to `/mcp…`, `/v1/tunnel`, `/healthz` and the console are not exchanges.
+`a2a_exchanges` (migrations 0006, 0007) per A2A call, on either leg (D355):
 
-An exchange holds the time the call arrived, the service as the path names it (it may name none), the method (one of
-A2A's, `card`, `upstream_card`, `seller_jwks`, or `unknown`: never a string the caller chose), the binding, the
-caller's principal and `via` once authenticated, the task and context ids the call names or creates, the request's
-and the answer's sizes in bytes, the duration, the HTTP status, the JSON-RPC error code when one was answered, and the
-gate's reason for a refusal (`unauthenticated`, `unknown_service`, `allow_denied`, `invalid_request`,
-`version_unsupported`, `extension_required`, `admission_denied`, `rate_limited`, `body_too_large`, `body_timeout`,
-`cross_site`). It
-never holds a body, a header, a part, a credential or a credential's hash. The table has no foreign key: a call to an
-unknown service is recorded with the name it asked for, and deleting an exchange never depends on its task.
+- **caller**: a call the gate receives: every JSON-RPC or HTTP+JSON method call, every card fetch, and every stream
+  (`SendStreamingMessage`, `SubscribeToTask`), once, when it ends, with its whole duration. Calls refused before any
+  handler runs are recorded too: the edge's `413`, `429` and `408` (§2.2) with method `unknown`, since their body was
+  never read. Requests to `/mcp…`, `/v1/tunnel`, `/healthz` and the console are not exchanges.
+- **callee**: a call the gate makes to a service's agent, through a tunnel or to a direct backend: each message send or
+  stream, `GetTask` poll or re-attach, forwarded `CancelTask` and card fetch (§3, §6), once, when its answer ends,
+  including a call that got no answer (status `502`, reason `upstream_unreachable`). A 0.3 agent's call is named by
+  the A2A 1.0 method it is, with `a2a_version` `0.3`. A dispatch's or `forward_cancel`'s calls name the gate task they
+  work for (`gate_task_id`); a card fetch names none. MCP calls are not exchanges (§11; their calls are `calls`).
+
+An exchange's id is minted when the call arrives (UUIDv7, D356) and travels in the call's context, so what the call
+writes (the task event a caller's message creates, the events an agent's answer produces, §5.2) can name it. It holds
+the time the call arrived, the leg, the service as the path names it (it may name none), the method (one of A2A's,
+`card`, `upstream_card`, `seller_jwks`, or `unknown`: never a string the caller chose), the binding, the A2A version
+the call spoke (`1.0` or `0.3`, when known), the caller's principal and `via` once authenticated, the task and context
+ids the call names or creates (on the callee leg the agent's own: `callee_task_id`, any string it chose, and
+`context_id`, with `task_id` null), the request's and the answer's sizes in bytes, the duration, the HTTP status, the
+JSON-RPC error code when one was answered, and the gate's reason for a refusal (`unauthenticated`, `unknown_service`,
+`allow_denied`, `invalid_request`, `version_unsupported`, `extension_required`, `admission_denied`, `rate_limited`,
+`body_too_large`, `body_timeout`, `cross_site`, and on the callee leg `upstream_unreachable`). The table has no foreign
+key to tasks: a call to an unknown service is recorded with the name it asked for, and deleting an exchange never
+depends on its task.
+
+**Bodies** (`traffic.bodies`, D358): off by default, on in the local development profile, and only while recording is
+on. With them an exchange also holds its request body and its answer: the body (`response_body`), or for a stream each
+SSE event's data in order, with its SSE `id` and its offset from the call's start (`a2a_exchange_frames`, deleted with
+its exchange); `: keep-alive` comments are not frames. Each body or frame is cut at `traffic.body_max` (default 256
+KiB), marked truncated with its full size; one exchange keeps at most 16 times that in frames and counts the rest in
+`frames_dropped`. Before anything is queued, every credential member the A2A specification defines is replaced by
+`"[redacted]"`: a push notification config's `token` (a `token` member of an object with a `url`: 1.0's
+`TaskPushNotificationConfig`, 0.3's `PushNotificationConfig`) and an `AuthenticationInfo`'s `credentials` (a
+`credentials` member of an `authentication` object), wherever they appear (`SendMessage`'s configuration, the push
+config methods' params and answers); a body that looks like JSON but does not parse has every string value of such a
+member replaced. No header is ever kept, and a sealed service's calls keep no body. Without bodies, an exchange never
+holds a body, a header, a part, a credential or a credential's hash.
 
 Recording never delays, fails or changes an answer. Each replica queues exchanges in a bounded channel (4096) and one
-goroutine writes them with `COPY` every 250 ms or 512 rows; a full channel, or a batch the database refuses, is dropped
-and counted in `kontra_traffic_dropped_total{replica}` on the metrics listener. Exchanges older than
-`traffic.retention` (default 7 days, `0` keeps them forever) are deleted by the retention sweep (§5.4), batched by
-`at`, whether or not recording is on now.
+goroutine writes them with `COPY` every 250 ms or 512 rows, then their frames; a full channel, or a batch the database
+refuses, is dropped and counted in `kontra_traffic_dropped_total{replica}` on the metrics listener. Queued bodies and
+frames have a budget of 64 MiB per replica: past it an exchange is queued without them and counted in
+`kontra_traffic_bodies_dropped_total{replica}`. Exchanges older than `traffic.retention` (default 7 days, `0` keeps
+them forever) are deleted, with their frames, by the retention sweep (§5.4), batched by `at`, whether or not
+recording is on now.
 
 ## 14. `TaskLifecycle`
 
@@ -2344,6 +2383,8 @@ met, are D297.
 | `profile` | none (a team or Cloud gate); `local`: the local development profile | §18 (D352) |
 | `traffic.record` | `false`; `true` in the local development profile | §13.6 (D353) |
 | `traffic.retention` | `7d`; `0` keeps exchanges forever | §13.6 (D353) |
+| `traffic.bodies` | `false`; `true` in the local development profile; only while `traffic.record` is on | §13.6 (D358) |
+| `traffic.body_max` | `256KiB`, from `1KiB` to `16MiB` | §13.6 (D358) |
 
 `services.<name>.task.retention` also takes `0`, which keeps the service's tasks forever (§5.4, D354).
 
@@ -2371,7 +2412,10 @@ section applies. [`docs/local.md`](../docs/local.md) is the walk-through.
 - **One shared caller.** Every request on the A2A and MCP routes, a request a node opened included, is the
   `anonymous` principal with the team gate's one anonymous buyer (§2.3), whatever credential it carries: no header is
   read. Every service admits it (its `allow:` is `[anonymous]`). The relay's own refusals for anonymous callers
-  (`ListTasks`, push configurations) stay.
+  (`ListTasks`, push configurations, §2.3) are lifted: the profile has one caller, so it lists its tasks and sets push
+  configurations as any caller does, and a push URL may be `http` or `https` on a loopback host (`127.0.0.1`,
+  `localhost`, `[::1]`), connected to loopback only, every other rule of §10.3 staying (D361). Served cards keep
+  `capabilities.pushNotifications: true`.
 - **Nodes without enrollment.** A hello with no token and no credential (a node with nothing for this gate asks for an
   anonymous session, [`tunnel.md`](tunnel.md) §6) is admitted on the team tenant for every service it declares: a
   service that does not exist is created as a tunnel service with `allow: [anonymous]`, a configured one is served with
@@ -2380,9 +2424,11 @@ section applies. [`docs/local.md`](../docs/local.md) is the walk-through.
   stays enabled: new tasks fail `no_session` (§6.4) and the earlier tasks stay.
 - **One address.** Every client is on `127.0.0.1`, so `limits.rps_per_ip` (§2.2), which they share, defaults to
   `2000` rather than `50`.
-- **Traffic recorded** (§13.6), unless `traffic.record: false`.
+- **Traffic recorded** (§13.6), on both legs, unless `traffic.record: false`; with each call's bodies and stream frames
+  (`traffic.bodies`, D358), unless `traffic.bodies: false`.
 - **Announced.** At start the gate logs, at warning level, that it serves every client without credentials and shows
-  every conversation on its console, with the console's URL.
+  every conversation on its console, with the console's URL, and, with bodies on, that it keeps every A2A call's
+  request and response bodies.
 
 ### 18.2 The console API
 
@@ -2392,14 +2438,17 @@ pages of at most 100 (`next` is the next page's `before`):
 
 | Route | What |
 |---|---|
-| `GET /v1/info` | `profile`, `features`, the retention of each service and of the traffic (seconds; `0` kept forever), and the traffic record's drop count since start. |
+| `GET /v1/info` | `profile`, `features`, the retention of each service and of the traffic (seconds; `0` kept forever), whether bodies are kept and their `body_max`, and the traffic record's drop count since start. |
 | `GET /v1/tasks` | Tasks (`service`, `state`, `kind` filters): id, service, protocol, state, caller, `via` (`console` for the console's own), context, times, retention, the first words of the first message (not for a sealed service), and `actions`. |
 | `GET /v1/tasks/{id}` | One task, with its snapshot; `404` when unknown. |
 | `GET /v1/tasks/{id}/events` | Server-Sent Events of its log after `Last-Event-ID` (or `after`): `id` the seq, `event` the kind, `data` `{seq, kind, at, stored_apart, payload}`, woken by `NOTIFY kontra_task_events`, with no gap and no duplicate; an ended task's stream closes with `event: end` (`{state, version}`). |
 | `GET /v1/tasks/{id}/files/{ref}` | A part stored apart (§10.4), only for the task whose part it is. |
-| `GET /v1/conversations`, `GET /v1/conversations/{service}/{caller}/{context}` | Tasks grouped by service, caller (its buyer id) and context id, the scope of a context (§4), newest activity first; one conversation's tasks oldest first. |
+| `GET /v1/contexts`, `GET /v1/contexts/{service}/{caller}/{context}` (and their former names `/v1/conversations…`) | Tasks grouped into A2A contexts by service, caller (its buyer id) and context id, the scope of a context (§4), newest activity first; one context's tasks oldest first. |
+| `GET /v1/tasks/{id}/timeline`, `GET /v1/contexts/{service}/{caller}/{context}/timeline` | A task's or a context's items in time order, then seq: each event with its origin (§5.2), the A2A object the caller received for it (`caller_type`) and its validation against the pinned A2A specification (D359), and the exchanges of either leg that name its tasks and carried no event (§13.6); the context's opening (`assigned`: whether the gate minted its `contextId`) and the callee's own context ids from its attempts. The events stream above carries the same `origin`, `caller_type` and `validation`, live. |
+| `GET /v1/exchanges/{id}` | One exchange: its metadata and, when kept (`traffic.bodies`), its request and response bodies or its stream's frames, each as text (or base64), with its full size, whether it was cut, and its validation. |
+| `GET /v1/services/{name}/cards` | An A2A service's callee card as fetched and its served card, each with the version it is checked against and its validation, and the JSON paths of the served card the gate set or rewrote (§3). |
 | `GET /v1/services`, `GET /v1/services/{name}`, `GET /v1/services/{name}/form`, `GET /v1/tunnels` | Services with their kind, backend, retention and whether a session serves them now; one with its served card; what starting a task on an A2A service takes, read from its card; the tunnel sessions. |
-| `GET /v1/exchanges`, `GET /v1/calls` | The traffic record (`service`, `method`, `task`, `failed` filters) and the MCP calls (`service`). |
+| `GET /v1/exchanges`, `GET /v1/calls` | The traffic record (`leg`, `service`, `method`, `task` on either leg, `context`, `failed` filters) and the MCP calls (`service`). |
 | `POST /v1/tasks`, `POST /v1/tasks/{id}/messages`, `/cancel`, `/continue` | Prompting: start a task, answer one waiting at `input-required`, cancel one that has not ended, continue one that has, in its context. |
 
 Prompting is a real A2A request to the gate's own `public_url` (HTTP+JSON, `A2A-Version: 1.0`, the A2UI, AP2,

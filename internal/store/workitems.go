@@ -67,6 +67,9 @@ type WorkPayload struct {
 	CallContext map[string]any          `json:"callContext"`
 	Owner       Owner                   `json:"owner"`
 	MCP         *MCPWork                `json:"mcp,omitempty"`
+	// Origin is the origin of the caller's message this turn carries (D357): the method it came in and the
+	// exchange that carried it, written by the request that stored the item, read by the dispatch that logs it.
+	Origin *Origin `json:"origin,omitempty"`
 }
 
 // MCPWork is what a gate-owned MCP task's work item stores (spec/relay.md §11.5 step 2, §11.12 step 3): the

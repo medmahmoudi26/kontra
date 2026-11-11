@@ -224,7 +224,8 @@ func TestFollowUpThroughTheHandler(t *testing.T) {
 	}
 }
 
-// The anonymous principal shares one buyer: ListTasks and push configs are refused (spec §2.3).
+// The anonymous principal shares one buyer: ListTasks is refused, UnsupportedOperation, and push configs with A2A's
+// PushNotificationNotSupportedError, as an anonymous-only service's card says (spec §2.3, §3).
 func TestAnonymousRefusals(t *testing.T) {
 	e := newEnv(t, envOptions{push: a2apush.NewInMemoryStore()})
 	h := e.handler()
@@ -233,26 +234,49 @@ func TestAnonymousRefusals(t *testing.T) {
 	if _, err := h.ListTasks(anon, &a2a.ListTasksRequest{}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
 		t.Errorf("ListTasks: %v", err)
 	}
-	if _, err := h.CreateTaskPushConfig(anon, &a2a.PushConfig{TaskID: id, URL: "https://hooks.example/x"}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := h.CreateTaskPushConfig(anon, &a2a.PushConfig{TaskID: id, URL: "https://hooks.example/x"}); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("CreateTaskPushConfig: %v", err)
 	}
-	if _, err := h.ListTaskPushConfigs(anon, &a2a.ListTaskPushConfigRequest{TaskID: id}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := h.ListTaskPushConfigs(anon, &a2a.ListTaskPushConfigRequest{TaskID: id}); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("ListTaskPushConfigs: %v", err)
 	}
-	if _, err := h.GetTaskPushConfig(anon, &a2a.GetTaskPushConfigRequest{TaskID: id, ID: "x"}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := h.GetTaskPushConfig(anon, &a2a.GetTaskPushConfigRequest{TaskID: id, ID: "x"}); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("GetTaskPushConfig: %v", err)
 	}
-	if err := h.DeleteTaskPushConfig(anon, &a2a.DeleteTaskPushConfigRequest{TaskID: id, ID: "x"}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if err := h.DeleteTaskPushConfig(anon, &a2a.DeleteTaskPushConfigRequest{TaskID: id, ID: "x"}); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("DeleteTaskPushConfig: %v", err)
 	}
 	inline := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q")),
 		Config: &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: "https://hooks.example/x"}}}
-	if _, err := h.SendMessage(anon, inline); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := h.SendMessage(anon, inline); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("inline push config: %v", err)
 	}
 	// An authenticated caller lists its own tasks.
 	if res, err := h.ListTasks(asCaller(buyerA), &a2a.ListTasksRequest{}); err != nil || len(res.Tasks) != 1 {
 		t.Errorf("buyer A's ListTasks: %+v %v", res, err)
+	}
+}
+
+// In the local development profile every client is the one anonymous caller: it lists its tasks and sets push
+// configs as any caller does (spec §18.1).
+func TestLocalProfileAnonymousCaller(t *testing.T) {
+	e := newEnv(t, envOptions{push: a2apush.NewInMemoryStore(), local: true, policy: ssrf.Policy{AllowLoopback: true}})
+	h := e.handler()
+	buyer := uuid.Must(uuid.NewV7())
+	anon := auth.WithPrincipal(context.Background(), auth.Anonymous(buyer))
+	owner := store.Owner{BuyerID: buyer, Principal: "anonymous", Via: store.ViaAnonymous}
+	id, _ := e.newTask(taskSpec{owner: owner, text: "q"})
+	e.newTask(taskSpec{owner: buyerA, text: "not the shared caller's"})
+	res, err := h.ListTasks(anon, &a2a.ListTasksRequest{})
+	if err != nil || len(res.Tasks) != 1 || res.Tasks[0].ID != id {
+		t.Fatalf("ListTasks: %+v %v", res, err)
+	}
+	cfg, err := h.CreateTaskPushConfig(anon, &a2a.PushConfig{TaskID: id, URL: "http://127.0.0.1:9000/hook"})
+	if err != nil || cfg == nil {
+		t.Fatalf("CreateTaskPushConfig: %+v %v", cfg, err)
+	}
+	if l, err := h.ListTaskPushConfigs(anon, &a2a.ListTaskPushConfigRequest{TaskID: id}); err != nil || l == nil || len(l.Configs) != 1 {
+		t.Errorf("ListTaskPushConfigs: %+v %v", l, err)
 	}
 }
 

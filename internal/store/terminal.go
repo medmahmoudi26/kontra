@@ -183,9 +183,15 @@ func (l *Log) terminalWrite(ctx context.Context, q querier, row *TaskRow, w Term
 	if err != nil {
 		return Write{}, err
 	}
+	// D357: the gate writes the event; a completed or rejected one relays the agent's answer to the forwarded
+	// CancelTask (its Task, logged as a status).
+	origin := GateOrigin()
+	if w.State == StateCompleted || w.State == StateRejected {
+		origin = &Origin{Actor: ActorCallee, Type: TypeTask, Method: "CancelTask", ConvertedTo: TypeStatusUpdate}
+	}
 	return Write{
 		TaskID: w.TaskID, PrevVersion: row.Version, Kind: KindStatus, State: w.State,
-		StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload,
+		StatusAt: StatusTime(ev.Status.Timestamp), Snapshot: next, Payload: payload, Origin: origin,
 	}, nil
 }
 

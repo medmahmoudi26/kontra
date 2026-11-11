@@ -1,5 +1,6 @@
 // Command echoagent is the browser tests' agent (test/browser): a plain A2A 1.0 agent, a2a-go v2.7.0, that answers
-// every message with one result, report.md, holding the message's text as Markdown, and completes. The tests send it
+// every message with one result, report.md, holding the message's text as Markdown, and completes; "message only" it
+// answers with a bare Message and no task. The tests send it
 // Markdown that carries HTML (a script, an onerror handler) to check that the console shows agent content as text and
 // runs none of it.
 //
@@ -29,6 +30,14 @@ type agent struct{}
 
 func (agent) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
+		// "message only": a stateless answer, a bare Message and no task (A2A allows either; the gate logs it as a
+		// completed task carrying it, D5, and the console shows Callee · Message, converted).
+		if ec.StoredTask == nil && len(ec.Message.Parts) > 0 {
+			if t, ok := ec.Message.Parts[0].Content.(a2a.Text); ok && string(t) == "message only" {
+				yield(a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("A plain answer.")), nil)
+				return
+			}
+		}
 		if ec.StoredTask == nil && !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}

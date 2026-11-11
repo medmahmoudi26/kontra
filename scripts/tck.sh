@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The pinned A2A TCK against the gate (spec/relay.md §0, §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, D279):
-# `make tck VARIANT=direct|tunnel|caddy|auth`, or scripts/tck.sh <variant>.
+# `make tck VARIANT=direct|tunnel|caddy|auth|local`, or scripts/tck.sh <variant>.
 #
 #   direct  the `tck` service on the direct backend, the TCK talking to the gate itself (tck_jsonrpc, tck_rest)
 #   tunnel  the same seller hosted through `kontra connect` (tck_jsonrpc, tck_rest on the tunnel backend)
@@ -8,6 +8,8 @@
 #   auth    the direct backend behind a loopback Caddy that adds `Authorization: Bearer <a tck API key>` to every
 #           request, so the TCK runs as an API key's principal and reaches ListTasks and push configs, which the
 #           anonymous principal is refused (D20; the TCK sends no credential, a2a-tck#163); nightly only
+#   local   the direct backend on a gate in the local development profile (profile: local, D361): the shared
+#           anonymous caller reaches ListTasks and push configs with no credential
 #
 # One run: the TCK's environment synced (uv sync --frozen, before anything starts); a fresh database on
 # $KONTRA_TEST_PG (a server where the user may create databases) or, when it is unset, a postgres:17-alpine
@@ -36,8 +38,8 @@ CADDY_VERSION=v2.11.7
 
 variant="${1:-${VARIANT:-direct}}"
 case "$variant" in
-  direct | tunnel | caddy | auth) ;;
-  *) echo "tck: VARIANT $variant: want direct, tunnel, caddy or auth" >&2; exit 2 ;;
+  direct | tunnel | caddy | auth | local) ;;
+  *) echo "tck: VARIANT $variant: want direct, tunnel, caddy, auth or local" >&2; exit 2 ;;
 esac
 read -r -a bindings <<<"${KONTRA_TCK_BINDINGS:-jsonrpc http_json}"
 
@@ -213,7 +215,7 @@ seller="$(head -1 "$run/seller.out")"
 read -r g_port f_port f_http <<<"$(free_ports 3)"
 gate="http://127.0.0.1:$g_port"
 case "$variant" in
-  direct | tunnel) public="$gate" ;;
+  direct | tunnel | local) public="$gate" ;;
   caddy) public="https://127.0.0.1:$f_port" ;;
   auth) public="http://127.0.0.1:$f_port" ;;
 esac

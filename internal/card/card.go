@@ -46,7 +46,10 @@ type Input struct {
 	PublicURL     string // {public_url}
 	ServicePath   string // {svc}: /agents/{name} or /agents/{tenant}/{name}
 	OnlyAnonymous bool   // allow: is exactly [anonymous]: no security fields
-	OIDC          bool   // add an openIdConnect scheme (operator IdP)
+	// NoPush is a service whose callers are all refused push configs (allow: is exactly [anonymous], outside the
+	// local development profile, spec §2.3): its card says capabilities.pushNotifications false, not true.
+	NoPush bool
+	OIDC   bool // add an openIdConnect scheme (operator IdP)
 	// OIDCIssuer is the IdP's issuer URL; the scheme's openIdConnectUrl is its discovery document. OIDC
 	// principals are not built in M1, so this stays empty there.
 	OIDCIssuer string
@@ -554,7 +557,11 @@ func Rewrite(in Input) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	caps = caps.set("pushNotifications", json.RawMessage("true")).
+	push := json.RawMessage("true")
+	if in.NoPush {
+		push = json.RawMessage("false")
+	}
+	caps = caps.set("pushNotifications", push).
 		set("streaming", json.RawMessage("true")).
 		set("extendedAgentCard", json.RawMessage("false"))
 	exts, err := extensions(caps, in)

@@ -141,7 +141,8 @@ func TestMigrateCommand(t *testing.T) {
 		!regexp.MustCompile(`(?m)^OK up 0003_m4\.sql \(`).MatchString(out) || !regexp.MustCompile(`(?m)^OK up 0004_m5\.sql \(`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^OK up 0005_mcp_tools\.sql \(`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^OK up 0006_local_console\.sql \(`).MatchString(out) ||
-		!strings.Contains(out, "database at version 6; this gate needs 6") {
+		!regexp.MustCompile(`(?m)^OK up 0007_a2a_wire\.sql \(`).MatchString(out) ||
+		!strings.Contains(out, "database at version 7; this gate needs 7") {
 		t.Errorf("migrate up printed:\n%s", out)
 	}
 	m, err := migrate.Open(context.Background(), dsn)
@@ -163,16 +164,21 @@ func TestMigrateCommand(t *testing.T) {
 		!regexp.MustCompile(`(?m)^3\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0003_m4\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^4\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0004_m5\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^5\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0005_mcp_tools\.sql$`).MatchString(out) ||
-		!regexp.MustCompile(`(?m)^6\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0006_local_console\.sql$`).MatchString(out) {
+		!regexp.MustCompile(`(?m)^6\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0006_local_console\.sql$`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^7\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0007_a2a_wire\.sql$`).MatchString(out) {
 		t.Errorf("migrate status = %v:\n%s", err, out)
 	}
 
-	// The URL from the configuration file; down (0006, 0005, 0004, 0003, 0002, then 0001), then status shows all six pending.
+	// The URL from the configuration file; down (0007, 0006, 0005, 0004, 0003, 0002, then 0001), then status shows all seven pending.
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "kontra.yaml")
 	y := "public_url: http://localhost:8080\npostgres: \"" + dsn + "\"\n"
 	if err := os.WriteFile(cfg, []byte(y), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	out, err = runCmd(t, "migrate", "-f", cfg, "down")
+	if err != nil || !strings.Contains(out, "OK down 0007_a2a_wire.sql") || !strings.Contains(out, "database at version 6") {
+		t.Errorf("migrate down = %v:\n%s", err, out)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg, "down")
 	if err != nil || !strings.Contains(out, "OK down 0006_local_console.sql") || !strings.Contains(out, "database at version 5") {
@@ -207,7 +213,8 @@ func TestMigrateCommand(t *testing.T) {
 		!regexp.MustCompile(`(?m)^3\s+pending\s+-\s+0003_m4\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^4\s+pending\s+-\s+0004_m5\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^5\s+pending\s+-\s+0005_mcp_tools\.sql$`).MatchString(out) ||
-		!regexp.MustCompile(`(?m)^6\s+pending\s+-\s+0006_local_console\.sql$`).MatchString(out) {
+		!regexp.MustCompile(`(?m)^6\s+pending\s+-\s+0006_local_console\.sql$`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^7\s+pending\s+-\s+0007_a2a_wire\.sql$`).MatchString(out) {
 		t.Errorf("status after down = %v:\n%s", err, out)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg, "down")
@@ -217,7 +224,7 @@ func TestMigrateCommand(t *testing.T) {
 	out, err = runCmd(t, "migrate", "-f", cfg) // up is the default action
 	if err != nil || !strings.Contains(out, "OK up 0001_init.sql") || !strings.Contains(out, "OK up 0002_m3.sql") || !strings.Contains(out, "OK up 0003_m4.sql") ||
 		!strings.Contains(out, "OK up 0004_m5.sql") || !strings.Contains(out, "OK up 0005_mcp_tools.sql") ||
-		!strings.Contains(out, "OK up 0006_local_console.sql") {
+		!strings.Contains(out, "OK up 0006_local_console.sql") || !strings.Contains(out, "OK up 0007_a2a_wire.sql") {
 		t.Errorf("migrate (default up) = %q, %v", out, err)
 	}
 	if err := m.Check(context.Background()); err != nil {

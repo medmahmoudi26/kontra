@@ -163,22 +163,26 @@ func sortByCreated(ts []*taskView) {
 // ---------------------------------------------------------------- exchanges
 
 type exchangeView struct {
-	ID         string    `json:"id"`
-	At         time.Time `json:"at"`
-	Service    string    `json:"service"`
-	Method     string    `json:"method"`
-	Binding    string    `json:"binding"`
-	Principal  *string   `json:"principal"`
-	Via        *string   `json:"via"`
-	TaskID     *string   `json:"task_id"`
-	ContextID  *string   `json:"context_id"`
-	BytesIn    int64     `json:"bytes_in"`
-	BytesOut   int64     `json:"bytes_out"`
-	DurationMS int       `json:"duration_ms"`
-	HTTPStatus int       `json:"http_status"`
-	RPCCode    *int      `json:"rpc_code"`
-	Reason     *string   `json:"reason"`
-	Failed     bool      `json:"failed"`
+	ID           string    `json:"id"`
+	At           time.Time `json:"at"`
+	Leg          string    `json:"leg"` // caller | callee (D355)
+	Service      string    `json:"service"`
+	Method       string    `json:"method"`
+	Binding      string    `json:"binding"`
+	A2AVersion   *string   `json:"a2a_version"`
+	CalleeTaskID *string   `json:"callee_task_id"`
+	Bodies       bool      `json:"bodies"`
+	Principal    *string   `json:"principal"`
+	Via          *string   `json:"via"`
+	TaskID       *string   `json:"task_id"`
+	ContextID    *string   `json:"context_id"`
+	BytesIn      int64     `json:"bytes_in"`
+	BytesOut     int64     `json:"bytes_out"`
+	DurationMS   int       `json:"duration_ms"`
+	HTTPStatus   int       `json:"http_status"`
+	RPCCode      *int      `json:"rpc_code"`
+	Reason       *string   `json:"reason"`
+	Failed       bool      `json:"failed"`
 }
 
 type timeCursor struct {
@@ -215,13 +219,23 @@ func (c *Console) exchanges(w http.ResponseWriter, r *http.Request) {
 		task = &id
 	}
 	failed := q.Get("failed") == "1" || q.Get("failed") == "true"
-	rows, err := c.d.DB.Query(ctx, `select id, at, service, method, binding, principal, via, task_id, context_id, bytes_in,
-			bytes_out, duration_ms, http_status, rpc_code, reason
-		  from kontra.a2a_exchanges
-		 where ($1::text = '' or service = $1) and ($2::text = '' or method = $2) and ($3::uuid is null or task_id = $3)
-		   and (not $4 or http_status >= 400 or rpc_code is not null or reason is not null)
-		   and ($5::timestamptz is null or (at, id) < ($5, $6::uuid))
-		 order by at desc, id desc limit $7`, q.Get("service"), q.Get("method"), task, failed, at, curID, limit+1)
+	leg := q.Get("leg")
+	if leg != "" && leg != "caller" && leg != "callee" {
+		c.answer(w, r, nil, fail(http.StatusUnprocessableEntity, "invalid_request", "leg: caller or callee"))
+		return
+	}
+	// A task filter names the gate task on either leg (the callee leg's gate_task_id).
+	rows, err := c.d.DB.Query(ctx, `select x.id, x.at, x.leg, x.service, x.method, x.binding, x.a2a_version, x.principal, x.via,
+			coalesce(x.task_id, x.gate_task_id), x.callee_task_id, x.context_id, x.bytes_in, x.bytes_out, x.duration_ms,
+			x.http_status, x.rpc_code, x.reason,
+			x.request_body is not null or x.response_body is not null or exists (select 1 from kontra.a2a_exchange_frames f where f.exchange_id = x.id)
+		  from kontra.a2a_exchanges x
+		 where ($1::text = '' or x.service = $1) and ($2::text = '' or x.method = $2)
+		   and ($3::uuid is null or x.task_id = $3 or x.gate_task_id = $3)
+		   and (not $4 or x.http_status >= 400 or x.rpc_code is not null or x.reason is not null)
+		   and ($5::timestamptz is null or (x.at, x.id) < ($5, $6::uuid))
+		   and ($8::text = '' or x.leg = $8) and ($9::text = '' or x.context_id = $9)
+		 order by x.at desc, x.id desc limit $7`, q.Get("service"), q.Get("method"), task, failed, at, curID, limit+1, leg, q.Get("context"))
 	if err != nil {
 		c.answer(w, r, nil, err)
 		return
@@ -235,8 +249,8 @@ func (c *Console) exchanges(w http.ResponseWriter, r *http.Request) {
 			taskID *uuid.UUID
 			status int16
 		)
-		if err := rows.Scan(&id, &v.At, &v.Service, &v.Method, &v.Binding, &v.Principal, &v.Via, &taskID, &v.ContextID,
-			&v.BytesIn, &v.BytesOut, &v.DurationMS, &status, &v.RPCCode, &v.Reason); err != nil {
+		if err := rows.Scan(&id, &v.At, &v.Leg, &v.Service, &v.Method, &v.Binding, &v.A2AVersion, &v.Principal, &v.Via, &taskID,
+			&v.CalleeTaskID, &v.ContextID, &v.BytesIn, &v.BytesOut, &v.DurationMS, &status, &v.RPCCode, &v.Reason, &v.Bodies); err != nil {
 			c.answer(w, r, nil, err)
 			return
 		}

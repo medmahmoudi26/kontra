@@ -66,7 +66,8 @@ test-e2e:
 # The pinned A2A TCK against the gate (spec/relay.md §16 tck_jsonrpc, tck_rest, tck_behind_caddy; D18, D279),
 # one variant per run: VARIANT=direct (the default) or tunnel (the seller examples/sellers/tck on the direct
 # backend, or hosted through `kontra connect`), caddy (the direct backend behind examples/front/caddy), auth (behind
-# a loopback front that adds a tck API key: ListTasks and push through the TCK, nightly). scripts/tck.sh starts a
+# a loopback front that adds a tck API key: ListTasks and push through the TCK, nightly), local (a gate in the local
+# development profile: ListTasks and push as the shared caller, D361). scripts/tck.sh starts a
 # Temporal development server from $KONTRA_TEMPORAL_CLI, a fresh database on $KONTRA_TEST_PG (or a postgres:17-alpine
 # container), the gate, the seller, the node and Caddy ($KONTRA_CADDY, 2.11.7) as processes, runs the TCK checkout
 # $KONTRA_TCK_DIR (a2a-tck d4d6fae) under uv for each binding with test/tck/kontra_xfail.py enforcing

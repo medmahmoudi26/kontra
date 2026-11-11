@@ -8,16 +8,20 @@ import { $, fill, h } from "./dom.js";
 
 /** Every view of the page (index.html), each a <section> the router shows one at a time. */
 export const VIEWS = Object.freeze([
-  "#view-tasks", "#view-conversations", "#view-thread", "#view-traffic", "#view-calls", "#view-cards",
+  "#view-tasks", "#view-contexts", "#view-thread", "#view-traffic", "#view-exchange", "#view-calls", "#view-cards",
+  "#view-playground",
 ]);
 
-/** The sections: [key, href, label, feature] (a section whose feature /v1/info leaves out is hidden). */
+/** The sections: [key, href, label, feature] (a section whose feature /v1/info leaves out is hidden). In A2A every
+ * message belongs to a context, and a task is what an agent may create in it: Contexts comes first and is the landing
+ * page (D360); a backend without contexts lands on Tasks. */
 export const SECTIONS = Object.freeze([
-  ["tasks", "#/", "Tasks", null],
-  ["conversations", "#/conversations", "Conversations", "conversations"],
+  ["contexts", "#/", "Contexts", "contexts"],
+  ["tasks", "#/tasks", "Tasks", null],
   ["traffic", "#/traffic", "Traffic", "traffic"],
   ["calls", "#/calls", "MCP calls", "calls"],
   ["cards", "#/cards", "Cards", null],
+  ["playground", "#/play", "Playground", "playground"],
 ]);
 
 /** The sections the backend offers. */

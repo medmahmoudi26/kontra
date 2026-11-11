@@ -1034,3 +1034,23 @@ func TestReplicaCountBeforeItIsKnown(t *testing.T) {
 		t.Errorf("a failed count once N is known: N = %d, want the last, 3", n)
 	}
 }
+
+// The local development profile (spec §18.1): with AllowLoopback alone (no allow_private) the anonymous caller's
+// config to a loopback webhook is accepted and every status change is delivered to it.
+func TestLoopbackWebhookInTheLocalProfile(t *testing.T) {
+	e := newEnv(t)
+	local := ssrf.Policy{AllowLoopback: true}
+	cs := NewConfigStore(e.pool, nil, local, nil).AllowAnonymous()
+	r := newReceiver(t, nil)
+	id := e.newTask(anon)
+	cid, _ := e.saveInline(cs, id, anon, pushConfig(r.url("/hook")))
+	e.status(id, store.StateWorking)
+	term := e.status(id, store.StateCompleted)
+	o := waitOut(t, runPush(context.Background(), NewDeliverer(e.log, local, fast()), id, cid), 10*time.Second)
+	if o.err != nil || o.res != (lifecycle.PushResult{DeliveredSeq: term, Stopped: StoppedTerminal}) {
+		t.Fatalf("push_webhook: %+v %v", o.res, o.err)
+	}
+	if n := len(r.requests()); n != 3 {
+		t.Errorf("%d deliveries, want 3 (submitted, working, completed)", n)
+	}
+}

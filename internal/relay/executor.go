@@ -34,6 +34,7 @@ import (
 	"kontra.sh/kontra/internal/lifecycle"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/store"
+	"kontra.sh/kontra/internal/traffic"
 	"kontra.sh/kontra/internal/upstream"
 )
 
@@ -199,7 +200,7 @@ var errRetryable = errors.New("relay: upstream failed before its first task id; 
 // Execute runs one turn of one attempt.
 func (e *Executor) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
-		r := &run{e: e, ec: ec, yield: yield}
+		r := &run{e: e, ec: ec, yield: yield, ctx: ctx}
 		r.execute(ctx)
 	}
 }
@@ -250,6 +251,10 @@ type run struct {
 	resendFull bool
 	// digests are the SHA-256 of the objects this run stored or read, by ref (sameObjects).
 	digests map[blob.Ref][sha256.Size]byte
+	// method is the A2A method of the upstream call whose answer handle relays (D357).
+	method string
+	// ctx is the execution's context: it carries the dispatch's Origins (D357).
+	ctx context.Context
 }
 
 func (r *run) execute(ctx context.Context) {
@@ -423,9 +428,14 @@ func (r *run) finish(ev a2a.Event, err error) {
 	r.yield(ev, err)
 }
 
-// emit yields one translated event: a terminal one is recorded in the registry first, and its outcome
-// set, because a2a-go's consumer may store it before yield returns. It reports whether the turn ended.
-func (r *run) emit(ev a2a.Event) bool {
+// emit yields one event the gate wrote itself (origin gate, D357); emitFrom yields one with its origin.
+func (r *run) emit(ev a2a.Event) bool { return r.emitFrom(ev, nil) }
+
+// emitFrom yields one translated event: a terminal one is recorded in the registry first, and its outcome
+// set, because a2a-go's consumer may store it before yield returns. The event's origin (nil: the gate's) is
+// named for the store by the event itself, since a2a-go hands the yielded pointer to the store after its
+// event pipe (D357). It reports whether the turn ended.
+func (r *run) emitFrom(ev a2a.Event, origin *store.Origin) bool {
 	if r.finished {
 		return true
 	}
@@ -448,6 +458,11 @@ func (r *run) emit(ev a2a.Event) bool {
 			}
 		}
 	}
+	if origin == nil {
+		origin = store.GateOrigin()
+		origin.Type = store.TypeOf(ev)
+	}
+	store.OriginsFrom(r.ctx).Set(ev, origin)
 	if !r.yield(ev, nil) {
 		r.finished = true
 		return true
@@ -719,6 +734,7 @@ func (r *run) references(ctx context.Context) (map[a2a.TaskID]a2a.TaskID, error)
 // upstream refused streaming before any event (D15).
 func (r *run) stream(ctx context.Context, req *a2a.SendMessageRequest) (fallback bool) {
 	r.ex.Reset()
+	r.method = "SendStreamingMessage"
 	got := false
 	for ev, err := range r.client.SendStreamingMessage(ctx, req) {
 		if err != nil {
@@ -795,6 +811,7 @@ func (r *run) poll(ctx context.Context, req *a2a.SendMessageRequest) {
 	}
 	cp.Config = &cfg
 	r.ex.Reset()
+	r.method = "SendMessage"
 	res, err := r.client.SendMessage(ctx, &cp)
 	if err != nil {
 		r.upstreamFailed(ctx, err)
@@ -884,6 +901,7 @@ func (r *run) getTask(ctx context.Context, g *getTasks, history int) *a2a.Task {
 	cctx, cancel := context.WithTimeout(ctx, r.e.opts.GetTaskTimeout)
 	defer cancel()
 	r.ex.Reset()
+	r.method = "GetTask"
 	t, err := r.client.GetTask(cctx, &a2a.GetTaskRequest{ID: r.ids.UpstreamTaskID, HistoryLength: &history})
 	g.retryAfter = 0
 	full := g.fullWait
@@ -1073,6 +1091,7 @@ func (r *run) refusedResend(ctx context.Context, f upstream.Failure) {
 func (r *run) track(ctx context.Context) {
 	if r.info.Streaming {
 		r.ex.Reset()
+		r.method = "SubscribeToTask"
 		for ev, err := range r.client.SubscribeToTask(ctx, &a2a.SubscribeToTaskRequest{ID: r.ids.UpstreamTaskID}) {
 			if err != nil {
 				if ctx.Err() != nil {
@@ -1158,6 +1177,14 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		r.fail(store.ReasonUpstreamError, "the service sent a malformed event: "+err.Error())
 		return true
 	}
+	// D357: what the agent sent, in which call, carried by which exchange; each logged event names it, and the type
+	// the gate logged it as when that is another (D5's Message, a Task's status and artifacts).
+	sent := &store.Origin{Actor: store.ActorCallee, Type: store.TypeOf(ev), Method: r.method}
+	if c, ok := traffic.CalleeFrom(ctx); ok {
+		if id := c.Last(); id != uuid.Nil {
+			sent.ExchangeID = id.String()
+		}
+	}
 	// A later Task at the turn boundary the projection already shows (the same final state, status message
 	// and timestamp). On a re-attach that is the boundary this turn reached before its context was lost:
 	// nothing new to log, and the turn ends (endLogged, below). On a turn's own dispatch it can only be the
@@ -1199,7 +1226,11 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 			r.fail(store.ReasonUpstreamError, msg)
 			return true
 		}
-		if r.emit(out) {
+		origin := *sent
+		if t := store.TypeOf(out); t != origin.Type {
+			origin.ConvertedTo = t
+		}
+		if r.emitFrom(out, &origin) {
 			return true
 		}
 	}

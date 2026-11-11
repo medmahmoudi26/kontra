@@ -664,3 +664,25 @@ func TestCombinedCardServesNoUpstreamURL(t *testing.T) {
 		}
 	}
 }
+
+// A service whose callers are all refused push configs says so: pushNotifications false; every other keeps true.
+func TestRewriteNoPush(t *testing.T) {
+	for _, tc := range []struct {
+		noPush bool
+		want   bool
+	}{{true, false}, {false, true}} {
+		in := input(read(t, "v1-vendor.json"))
+		in.OnlyAnonymous, in.NoPush = true, tc.noPush
+		served, err := Rewrite(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var card a2a.AgentCard
+		if err := json.Unmarshal(served, &card); err != nil {
+			t.Fatal(err)
+		}
+		if card.Capabilities.PushNotifications != tc.want || !card.Capabilities.Streaming {
+			t.Errorf("NoPush %v: capabilities %+v", tc.noPush, card.Capabilities)
+		}
+	}
+}

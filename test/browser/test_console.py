@@ -38,7 +38,7 @@ def no_trouble(page: Page) -> None:
 def test_loads_without_sign_in(stack: Stack, page: Page) -> None:
     page.goto(stack.base + "/")
     expect(page.locator(".brand, header").first).to_be_visible()
-    for name in ["Tasks", "Conversations", "Traffic", "MCP calls", "Cards"]:
+    for name in ["Contexts", "Tasks", "Traffic", "MCP calls", "Cards", "Playground"]:
         expect(page.get_by_role("link", name=name).first).to_be_visible()
     assert not re.search(r"sign in|log in|password", page.locator("body").inner_text(), re.I)
     info = stack.api("GET", "/v1/info")
@@ -118,17 +118,18 @@ def test_list_views(stack: Stack, page: Page) -> None:
     eventually("the refused call is recorded", lambda: any(
         "version_unsupported" in json.dumps(x) for x in stack.api("GET", "/v1/exchanges?failed=1&limit=50")["items"]))
 
-    page.goto(stack.base + "/#/")
+    page.goto(stack.base + "/#/tasks")
     expect(page.locator(f'#taskrows tr[data-task="{first}"]')).to_be_visible(timeout=15000)
 
-    page.goto(stack.base + "/#/conversations")
-    expect(page.locator(f'[data-context="{ctx}"]')).to_be_visible(timeout=15000)
-    expect(page.locator(f'[data-context="{ctx}"]')).to_contain_text("2")
-    page.locator(f'[data-context="{ctx}"] a').click()
-    expect(page.locator("#convtasks tbody tr")).to_have_count(2)
+    for address in ["/#/", "/#/conversations"]:  # Contexts is the landing page; the old address opens it too
+        page.goto(stack.base + address)
+        expect(page.locator(f'[data-context="{ctx}"]')).to_be_visible(timeout=15000)
+        expect(page.locator(f'[data-context="{ctx}"]')).to_contain_text("2")
+    page.locator(f'[data-context="{ctx}"] a').first.click()
+    expect(page.locator("#ctxtasks tbody tr")).to_have_count(2)
 
     page.goto(stack.base + "/#/traffic")
-    expect(page.locator("#trafficretention")).to_have_text("Exchanges are kept forever.", timeout=15000)
+    expect(page.locator("#trafficretention")).to_have_text("Exchanges are kept forever, with their bodies.", timeout=15000)
     expect(page.locator("#trafficcard tbody tr").first).to_be_visible()
     page.locator("#failedonly").click()
     expect(page.locator("#trafficcard")).to_contain_text("version_unsupported", timeout=15000)
@@ -175,7 +176,7 @@ def test_end_to_end_across_a_restart(stack: Stack, page: Page) -> None:
         tasks = {t["task_id"]: t for t in stack.api("GET", "/v1/tasks?limit=100")["items"]}
         assert {client, console, booking} <= set(tasks)
         assert tasks[console]["via"] == "console" and tasks[client]["via"] == "anonymous"
-        convs = {c["context_id"] for c in stack.api("GET", "/v1/conversations?limit=100")["items"]}
+        convs = {c["context_id"] for c in stack.api("GET", "/v1/contexts?limit=100")["items"]}
         assert {tasks[client]["context_id"], tasks[console]["context_id"], tasks[booking]["context_id"]} <= convs
         ex = stack.api("GET", "/v1/exchanges?limit=100")["items"]
         by_task = {x["task_id"] for x in ex if x["method"] == "SendMessage"}
@@ -266,4 +267,168 @@ def test_cards_show_the_agents_cards(stack: Stack, page: Page) -> None:
         files = page.locator('article[data-service="files"]')
         expect(files).to_contain_text("mcp server")
         expect(files.get_by_role("link", name="Start a task")).to_have_count(0)
+    no_trouble(page)
+
+
+# ---------------------------------------------------------------------- console-a2a-protocol-view (D355-D361)
+
+def timeline(page: Page) -> list[str]:
+    """The thread's A2A timeline, opened: each row's label."""
+    box = page.locator("#eventsbox")
+    if not box.evaluate("e => e.open"):
+        box.locator("summary").click()
+    return page.locator("#eventlog .tl-row").evaluate_all("rows => rows.map(r => r.dataset.wire)")
+
+
+def test_thread_labels_every_item(stack: Stack, page: Page) -> None:
+    """7.2: every item of a task's thread is labelled as A2A names it, from the gate's record of its origin: the
+    caller's SendMessage, the callee's Task (polled: logged as status and artifact events, converted), the caller's
+    GetTask calls between them; the cards carry their event's label; taskId and contextId are shown in full, copyable."""
+    page.context.grant_permissions(["clipboard-read", "clipboard-write"])
+    task = stack.send("notes", "hello wire")
+    eventually("it completes", lambda: stack.state(task) == "completed")
+    for _ in range(2):
+        stack.a2a("notes", "GetTask", {"id": task})
+    eventually("the GetTask calls are recorded", lambda: sum(
+        1 for x in stack.api("GET", f"/v1/exchanges?task={task}&method=GetTask&leg=caller")["items"]) >= 2)
+    page.goto(stack.base + f"/#/t/{task}")
+    expect(page.locator("#thread")).to_contain_text("hello wire", timeout=15000)
+    eventually("the timeline has the GetTask calls", lambda: timeline(page).count("Caller · GetTask") >= 2, within=15)
+    labels = timeline(page)
+    assert labels[0] == "Caller · SendMessage", labels
+    assert "Callee · Task" in labels, labels
+    expect(page.locator('#eventlog .tl-row[data-wire="Callee · Task"] .conv').first).to_contain_text(
+        re.compile(r"the caller received a Task(Status|Artifact)UpdateEvent \(converted by the gate\)"))
+    expect(page.locator('#eventlog .tl-row[data-wire="Caller · SendMessage"] .conv')).to_contain_text("the caller received a Task")
+    expect(page.locator("#eventlog .vmark.ok").first).to_be_visible()
+    assert page.locator("#thread [data-wire]").count() > 0, "no card carries an A2A label"
+    row = page.locator('#ctxfoot [data-id="taskId"]')
+    expect(row.locator(".mono")).to_have_text(task)
+    row.get_by_role("button", name="Copy").click()
+    assert page.evaluate("navigator.clipboard.readText()") == task
+    ctx = stack.api("GET", f"/v1/tasks/{task}")["context_id"]
+    expect(page.locator('#ctxfoot [data-id="contextId"] .mono')).to_have_text(ctx)
+    no_trouble(page)
+
+
+def test_message_answer_is_shown_converted(stack: Stack, page: Page) -> None:
+    """7.2: an agent that answers with a bare Message: Callee · Message, and the caller received a completed
+    TaskStatusUpdateEvent carrying it, converted by the gate (D5)."""
+    task = stack.send("notes", "message only")
+    eventually("it completes", lambda: stack.state(task) == "completed")
+    page.goto(stack.base + f"/#/t/{task}")
+    expect(page.locator("#thread")).to_contain_text("A plain answer.", timeout=15000)
+    eventually("the Message is labelled", lambda: "Callee · Message" in timeline(page), within=15)
+    row = page.locator('#eventlog .tl-row[data-wire="Callee · Message"]')
+    expect(row).to_contain_text("the caller received a TaskStatusUpdateEvent (converted by the gate)")
+    no_trouble(page)
+
+
+def test_contexts_page(stack: Stack, page: Page) -> None:
+    """7.3: Contexts is the landing page; a context's page says how it was opened (the caller's contextId, or the
+    gate's), names the callee's own context, and draws one timeline across its tasks, each caller message showing its
+    contextId, its taskId or none, and its referenceTaskIds as links."""
+    ctx = "ctx-" + uuid.uuid4().hex[:8]
+    first = stack.send("notes", "first", context=ctx)
+    eventually("it completes", lambda: stack.state(first) == "completed")
+    code, got = stack.a2a("notes", "SendMessage", {"message": {"messageId": str(uuid.uuid4()), "role": "ROLE_USER",
+        "contextId": ctx, "referenceTaskIds": [first], "parts": [{"text": "refine it"}]}})
+    second = got["result"]["task"]["id"]
+    eventually("the refinement completes", lambda: stack.state(second) == "completed")
+    caller = stack.api("GET", f"/v1/tasks/{first}")["caller_id"]
+    page.goto(stack.base + "/")
+    expect(page.locator(f'[data-context="{ctx}"]')).to_be_visible(timeout=15000)
+    page.goto(stack.base + f"/#/c/notes/{caller}/{ctx}")
+    expect(page.locator('#ctxopening [data-opening="caller"]')).to_contain_text("contextId sent by the caller", timeout=15000)
+    expect(page.locator("#ctxopening [data-callee]")).to_have_count(1)
+    expect(page.locator("#ctxtasks tbody tr")).to_have_count(2)
+    rows = page.locator("#ctxtimeline .tl-row")
+    expect(rows.first).to_be_visible()
+    assert rows.evaluate_all("rs => rs.map(r => r.dataset.wire)").count("Caller · SendMessage") == 2
+    refine = page.locator('#ctxtimeline .tl-row[data-wire="Caller · SendMessage"]').nth(1)
+    expect(refine.locator('[data-id="taskId"]')).to_contain_text("none")
+    expect(refine.locator(f'a[href="#/t/{first}"]')).to_have_text(first)
+    # A message with no contextId: the gate assigned one.
+    alone = stack.send("notes", "alone")
+    eventually("it completes", lambda: stack.state(alone) == "completed")
+    actx = stack.api("GET", f"/v1/tasks/{alone}")["context_id"]
+    page.goto(stack.base + f"/#/c/notes/{caller}/{actx}")
+    expect(page.locator('#ctxopening [data-opening="gate"]')).to_contain_text("contextId assigned by the gate", timeout=15000)
+    no_trouble(page)
+
+
+def test_traffic_and_exchange(stack: Stack, page: Page) -> None:
+    """7.4: the Traffic view shows both legs, filtered by leg; an exchange's page shows its request and answer with
+    their validation; a refused call (extension_required) is an exchange with no task; a stream's frames."""
+    task = stack.send("notes", "traffic")
+    eventually("it completes", lambda: stack.state(task) == "completed")
+    code, got = stack.a2a("merchant", "SendMessage", {"message": {"messageId": str(uuid.uuid4()), "role": "ROLE_USER",
+        "parts": [{"text": "no AP2"}]}})
+    assert got["error"]["code"] == -32008
+    eventually("both legs recorded", lambda: {x["leg"] for x in stack.api("GET", f"/v1/exchanges?task={task}")["items"]} == {"caller", "callee"})
+    page.goto(stack.base + "/#/traffic")
+    page.locator("#legfilter").select_option("callee")
+    expect(page.locator('#trafficcard tbody tr[data-leg="callee"]').first).to_be_visible(timeout=15000)
+    assert page.locator('#trafficcard tbody tr[data-leg="caller"]').count() == 0
+    page.locator("#legfilter").select_option("")
+    page.locator("#failedonly").click()
+    expect(page.locator("#trafficcard")).to_contain_text("extension_required", timeout=15000)
+    page.locator("#failedonly").click()
+    send = next(x for x in stack.api("GET", f"/v1/exchanges?task={task}&leg=caller&method=SendMessage")["items"])
+    page.goto(stack.base + f"/#/x/{send['id']}")
+    expect(page.locator("#exchangetitle")).to_have_text("Caller · SendMessage", timeout=15000)
+    expect(page.locator("#exchangerequest")).to_contain_text('"text": "traffic"')
+    expect(page.locator("#exchangerequest .vmark.ok")).to_be_visible()
+    expect(page.locator("#exchangeresponse .vmark.ok")).to_be_visible()
+    no_trouble(page)
+
+
+def test_cards_compared(stack: Stack, page: Page) -> None:
+    """7.5: a service's callee card and served card side by side, the members the gate set marked, each validated."""
+    page.goto(stack.base + "/#/cards")
+    page.locator('article[data-service="notes"] [data-act="compare"]').click()
+    expect(page.locator("#calleecard")).to_contain_text('"name": "Echo"', timeout=15000)
+    expect(page.locator("#servedcard .gateset")).to_contain_text("$.capabilities.streaming")
+    expect(page.locator("#servedcard .gateset")).to_contain_text("$.supportedInterfaces")
+    expect(page.locator("#calleecard .vmark")).to_be_visible()
+    expect(page.locator("#servedcard .vmark.ok")).to_be_visible()
+    no_trouble(page)
+
+
+def test_playground(stack: Stack, page: Page) -> None:
+    """7.6: ListTasks over JSON-RPC from the playground answers the shared caller's tasks (the local profile lifts the
+    anonymous refusal, D361) and is recorded as a caller-leg exchange; SubscribeToTask with Last-Event-ID over HTTP+JSON
+    shows the frames after that seq as they come."""
+    page.goto(stack.base + "/#/play/notes")
+    page.locator("#playmethod").select_option("ListTasks")
+    page.locator("#playsend").click()
+    expect(page.locator("#playstatus")).to_contain_text("HTTP 200", timeout=15000)
+    expect(page.locator("#playout pre.json")).to_contain_text('"tasks"')
+    expect(page.locator("#playrecorded")).to_be_visible(timeout=15000)
+    assert any(x["method"] == "ListTasks" and x["leg"] == "caller" for x in stack.api("GET", "/v1/exchanges?service=notes&method=ListTasks")["items"])
+
+    waiting = stack.send("booking-form", "a table, please", a2ui=True)
+    eventually("it waits for input", lambda: stack.state(waiting) == "input-required")
+    page.goto(stack.base + "/#/play/booking-form")
+    page.locator("#playbinding").select_option("rest")
+    page.locator("#playmethod").select_option("SubscribeToTask")
+    page.locator("#playbody").fill(json.dumps({"id": waiting}))
+    page.locator("#playlastid").fill("1")
+    page.locator("#playsend").click()
+    expect(page.locator("#playframes .frame").first).to_be_visible(timeout=15000)
+    expect(page.locator("#playframes")).to_contain_text("INPUT_REQUIRED")
+    no_trouble(page)
+
+
+def test_bodies_render_as_text(stack: Stack, page: Page) -> None:
+    """7.7: a body carrying markup is drawn as text on the exchange page, and none of it runs."""
+    task = stack.send("notes", '<script>window.__pwned = 9</script><img src=x onerror="window.__pwned = 10">')
+    eventually("it completes", lambda: stack.state(task) == "completed")
+    eventually("its exchange is recorded", lambda: stack.api("GET", f"/v1/exchanges?task={task}&leg=caller&method=SendMessage")["items"])
+    x = stack.api("GET", f"/v1/exchanges?task={task}&leg=caller&method=SendMessage")["items"][0]
+    page.goto(stack.base + f"/#/x/{x['id']}")
+    expect(page.locator("#exchangerequest")).to_contain_text("<script>window.__pwned = 9</script>", timeout=15000)
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.__pwned") is None
+    assert page.locator("#exchange script, #exchange img").count() == 0
     no_trouble(page)

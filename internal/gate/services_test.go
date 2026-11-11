@@ -1480,3 +1480,32 @@ func TestMCPServicesInTheRegistry(t *testing.T) {
 		t.Errorf("disabled web: %+v", web)
 	}
 }
+
+// Spec §2.3: an anonymous-only service's card says pushNotifications false on a team gate, whose anonymous callers
+// are refused push configs; in the local development profile, whose shared caller may set them, it says true.
+func TestAnonymousOnlyCardPush(t *testing.T) {
+	ctx := context.Background()
+	for _, local := range []bool{false, true} {
+		pool := pgtest.Pool(t, pgtest.Migrated(t))
+		seller := newFakeSeller(t, fakeCard)
+		s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Local: local})
+		if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, "anonymous", "")); err != nil {
+			t.Fatal(err)
+		}
+		if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {
+			t.Fatal(err)
+		}
+		hello, _ := s.Lookup(ctx, TeamTenant, "hello")
+		served, err := hello.Cards()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := `"pushNotifications":false`
+		if local {
+			want = `"pushNotifications":true`
+		}
+		if !bytes.Contains(served.Body, []byte(want)) {
+			t.Errorf("local %v: served card %s, want %s", local, served.Body, want)
+		}
+	}
+}

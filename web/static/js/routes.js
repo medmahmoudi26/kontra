@@ -22,7 +22,46 @@ export const ROUTES = Object.freeze({
   tunnels: ["GET", "/v1/tunnels"],
   exchanges: ["GET", "/v1/exchanges"],
   calls: ["GET", "/v1/calls"],
+  contexts: ["GET", "/v1/contexts"],
+  context: ["GET", "/v1/contexts/{service}/{caller}/{context}"],
+  context_timeline: ["GET", "/v1/contexts/{service}/{caller}/{context}/timeline"],
+  task_timeline: ["GET", "/v1/tasks/{task_id}/timeline"],
+  exchange: ["GET", "/v1/exchanges/{id}"],
+  service_cards: ["GET", "/v1/services/{name}/cards"],
 });
+
+/** The A2A routes the playground calls (#/play/<service>, D360): a service's own A2A route on the gate's
+ * origin, as any A2A client calls it, so the gate admits, relays and records the call as a client's. JSON-RPC
+ * has one path for every method; HTTP+JSON has A2A 1.0's per method (specification/a2a.proto's
+ * google.api.http rules), `{id}` and `{task_id}` filled from the body. Nothing else of the page reaches
+ * /agents/. */
+export const A2A_JSONRPC = "/agents/{service}";
+export const A2A_ROUTES = Object.freeze({
+  SendMessage: ["POST", "/agents/{service}/message:send"],
+  SendStreamingMessage: ["POST", "/agents/{service}/message:stream"],
+  GetTask: ["GET", "/agents/{service}/tasks/{id}"],
+  ListTasks: ["GET", "/agents/{service}/tasks"],
+  CancelTask: ["POST", "/agents/{service}/tasks/{id}:cancel"],
+  SubscribeToTask: ["GET", "/agents/{service}/tasks/{id}:subscribe"],
+  CreateTaskPushNotificationConfig: ["POST", "/agents/{service}/tasks/{task_id}/pushNotificationConfigs"],
+  GetTaskPushNotificationConfig: ["GET", "/agents/{service}/tasks/{task_id}/pushNotificationConfigs/{id}"],
+  ListTaskPushNotificationConfigs: ["GET", "/agents/{service}/tasks/{task_id}/pushNotificationConfigs"],
+  DeleteTaskPushNotificationConfig: ["DELETE", "/agents/{service}/tasks/{task_id}/pushNotificationConfigs/{id}"],
+  GetExtendedAgentCard: ["GET", "/agents/{service}/extendedAgentCard"],
+});
+
+/** The A2A methods that answer with a stream (SSE). */
+export const A2A_STREAMS = Object.freeze(["SendStreamingMessage", "SubscribeToTask"]);
+
+/** The path of A2A route `method` (HTTP+JSON) or the JSON-RPC path, its parameters filled and escaped. */
+export function a2aPath(binding, method, params = {}) {
+  const tpl = binding === "jsonrpc" ? A2A_JSONRPC : (A2A_ROUTES[method] || [])[1];
+  if (!tpl) throw new Error(`no A2A route ${method}`);
+  return tpl.replace(/\{([a-z_]+)\}/g, (_, key) => {
+    if (!Object.hasOwn(params, key) || typeof params[key] !== "string" || !params[key]) throw new Error(`${method} needs ${key}`);
+    return segment(params[key]);
+  });
+}
 
 /** One URL path segment, escaped: "/", "?", "#" and a bare "." or ".." can never change which
  * route a value reaches. */

@@ -235,6 +235,8 @@ type Write struct {
 	// statement as the terminal event, so exactly when it commits: the terminal rule lets one terminal event per
 	// task commit, so a task has one row whoever ends it (the dispatch, write_terminal, the orphan sweep).
 	Call *Call
+	// Origin is where the event came from (task_events.origin, D357); nil writes none.
+	Origin *Origin
 }
 
 // Call is the calls row of a gate-owned MCP task (spec/relay.md §11.4, §11.5 step 6, §11.8): the tool, the
@@ -320,8 +322,8 @@ with u as (
 		   for share of a))
 	returning t.id, t.version, t.deadline
 ), e as (
-	insert into kontra.task_events (task_id, seq, kind, payload, payload_ref)
-	select u.id, u.version, $3::text, $7::json, $8::text from u
+	insert into kontra.task_events (task_id, seq, kind, payload, payload_ref, origin)
+	select u.id, u.version, $3::text, $7::json, $8::text, $17::json from u
 	returning task_id, seq`
 
 // appendSQL is the one write of spec §5.2 as a single statement: appendCTEs and pg_notify. Zero rows is a
@@ -384,12 +386,12 @@ func appendCall(stmt string, args []any, c *Call) (string, []any, error) {
 }
 
 // appendDeliverSQL is appendSQL for a write that also records a follow-up's delivery (D81), in the same
-// statement: delivered_at of work item $17 is set from the tasks row the UPDATE wrote, so a refused (fenced,
+// statement: delivered_at of work item $18 is set from the tasks row the UPDATE wrote, so a refused (fenced,
 // stale, terminal) write sets nothing. Only a write carrying a delivery pays for the extra UPDATE.
 const appendDeliverSQL = appendCTEs + `), d as (
 	update kontra.work_items w set delivered_at = now()
 	  from u
-	 where w.id = $17::uuid and w.task_id = u.id and w.delivered_at is null
+	 where w.id = $18::uuid and w.task_id = u.id and w.delivered_at is null
 	returning w.id
 )
 select e.seq, u.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text), exists (select 1 from d)
@@ -459,7 +461,7 @@ func (l *Log) Append(ctx context.Context, tx pgx.Tx, w Write) (Appended, error) 
 	args := []any{
 		w.TaskID, w.PrevVersion, string(w.Kind), state, nullTime(w.StatusAt), snap, payload,
 		nullString(w.PayloadRef), w.AfterTerminalOK, micros(w.Timeout), micros(w.Retention),
-		st, ss, sb, fn, fd,
+		st, ss, sb, fn, fd, w.Origin.encode(),
 	}
 	stmt := l.appendStmt
 	var armed *uuid.UUID
@@ -538,6 +540,8 @@ type NewTask struct {
 	// Payload is the `task` row's payload when it is not the A2A StreamResponse of Snapshot: an MCP task's
 	// (spec §11.9, NewMCPTask).
 	Payload json.RawMessage
+	// Origin is the `task` row's origin (D357): the caller's first message; nil writes none.
+	Origin *Origin
 }
 
 func (t *NewTask) validate() error {
@@ -599,18 +603,18 @@ with t as (
 	  from kontra.services s where s.tenant_id = $2::uuid and s.name = $3::text
 	returning id, deadline
 ), e as (
-	insert into kontra.task_events (task_id, seq, kind, payload)
-	select t.id, 1, 'task', $16::json from t
+	insert into kontra.task_events (task_id, seq, kind, payload, origin)
+	select t.id, 1, 'task', $16::json, $17::json from t
 	returning task_id, seq
 )
 select e.seq, t.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text)
   from e join t on t.id = e.task_id`
 
 // createBlobsSQL is createSQL that also writes the blobs rows of the large parts of the caller's first message
-// (spec §10.4, D167), in the statement that creates the task; the rows' arrays are $17 to $19.
+// (spec §10.4, D167), in the statement that creates the task; the rows' arrays are $18 to $20.
 var createBlobsSQL = strings.Replace(createSQL, ")\nselect e.seq", `), b as (
 	insert into kontra.blobs (ref, tenant_id, task_id, size)
-	select x.ref, x.tenant_id, t.id, x.size from t, unnest($17::text[], $18::uuid[], $19::bigint[]) as x(ref, tenant_id, size)
+	select x.ref, x.tenant_id, t.id, x.size from t, unnest($18::text[], $19::uuid[], $20::bigint[]) as x(ref, tenant_id, size)
 	on conflict (ref) do nothing
 	returning ref
 )
@@ -646,7 +650,7 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 		t.ID, t.Service.TenantID, t.Service.Name, string(t.Protocol), t.Owner.BuyerID, t.Owner.Principal,
 		t.Owner.Via, t.ContextID, firstMsg, firstReq, string(t.State), snap,
 		nullTime(StatusTime(t.Snapshot.Status.Timestamp)),
-		micros(t.Service.Timeout), micros(t.Service.Retention), payload,
+		micros(t.Service.Timeout), micros(t.Service.Retention), payload, t.Origin.encode(),
 	}
 	stmt := createSQL
 	if rows := blob.PendingRows(ctx, t.ID, payload); len(rows) > 0 {
@@ -852,19 +856,22 @@ func (l *Log) events(ctx context.Context, q querier, taskID uuid.UUID, after int
 	if limit < 1 || limit > 1000 {
 		limit = 1000
 	}
-	rows, err := q.Query(ctx, `select seq, kind, payload, coalesce(payload_ref, ''), created_at
+	rows, err := q.Query(ctx, `select seq, kind, payload, coalesce(payload_ref, ''), created_at, origin
 		from kontra.task_events where task_id = $1 and seq > $2 order by seq limit $3`, taskID, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: events of task %s: %w", taskID, err)
 	}
 	evs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (Event, error) {
 		ev := Event{TaskID: taskID}
-		var payload []byte
-		if err := r.Scan(&ev.Seq, &ev.Kind, &payload, &ev.PayloadRef, &ev.CreatedAt); err != nil {
+		var payload, origin []byte
+		if err := r.Scan(&ev.Seq, &ev.Kind, &payload, &ev.PayloadRef, &ev.CreatedAt, &origin); err != nil {
 			return Event{}, err
 		}
 		if payload != nil {
 			ev.Payload = payload
+		}
+		if origin != nil {
+			ev.Origin = origin
 		}
 		return ev, nil
 	})
@@ -888,8 +895,8 @@ func (l *Log) EventsWithin(ctx context.Context, taskID uuid.UUID, after int64, l
 		limit = 1000
 	}
 	maxBytes = max(maxBytes, 1)
-	rows, err := l.db.Query(ctx, `select seq, kind, payload, coalesce(payload_ref, ''), created_at, stored from (
-			select seq, kind, payload, payload_ref, created_at, coalesce(pg_column_size(payload), 0)::bigint as stored,
+	rows, err := l.db.Query(ctx, `select seq, kind, payload, coalesce(payload_ref, ''), created_at, stored, origin from (
+			select seq, kind, payload, payload_ref, created_at, origin, coalesce(pg_column_size(payload), 0)::bigint as stored,
 				sum(coalesce(pg_column_size(payload), 0)) over (order by seq) - coalesce(pg_column_size(payload), 0) as before
 			from kontra.task_events where task_id = $1 and seq > $2 order by seq limit $3) e
 		where before < $4 order by seq`, taskID, after, limit, int64(maxBytes))
@@ -901,14 +908,17 @@ func (l *Log) EventsWithin(ctx context.Context, taskID uuid.UUID, after int64, l
 	for read < int64(maxBytes) && rows.Next() {
 		ev := Event{TaskID: taskID}
 		var (
-			payload []byte
-			size    int64
+			payload, origin []byte
+			size            int64
 		)
-		if err := rows.Scan(&ev.Seq, &ev.Kind, &payload, &ev.PayloadRef, &ev.CreatedAt, &size); err != nil {
+		if err := rows.Scan(&ev.Seq, &ev.Kind, &payload, &ev.PayloadRef, &ev.CreatedAt, &size, &origin); err != nil {
 			return nil, false, fmt.Errorf("store: events of task %s: %w", taskID, err)
 		}
 		if payload != nil {
 			ev.Payload = payload
+		}
+		if origin != nil {
+			ev.Origin = origin
 		}
 		read += int64(len(payload))
 		stored += size

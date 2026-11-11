@@ -409,8 +409,12 @@ func (r *Replica) assemble() error {
 		EnrollWithAPIKey: cfg.Tunnel.EnrollWithAPIKey, Keys: r.keys, Logger: log, Anonymous: anonLimits, Local: cfg.Local(),
 	})
 
-	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, Resolver: pushResolver(log)}
+	// The local development profile pushes to loopback webhooks, connected to loopback only (spec §18.1).
+	policy := ssrf.Policy{AllowPrivate: cfg.Push.AllowPrivate, AllowLoopback: cfg.Local(), Resolver: pushResolver(log)}
 	pushStore := push.NewConfigStore(r.pool, r.lifecycle, policy, log)
+	if cfg.Local() {
+		pushStore.AllowAnonymous() // the shared caller sets configs (spec §18.1)
+	}
 	rules := hooks.KeyRules{OperatorPrefixes: cfg.OperatorMetadataPrefixes}
 	var err error
 	if r.admission, r.admissionOps, err = buildAdmission(cfg, rules, log); err != nil {
@@ -432,7 +436,7 @@ func (r *Replica) assemble() error {
 
 	var handlers *relay.Handlers
 	r.services = NewServices(r.pool, ServicesOptions{
-		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti, Logger: log, Signer: signer,
+		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti, Local: cfg.Local(), Logger: log, Signer: signer,
 		// seller_keys {url} sets: the SSRF dialer with its address checks always on (spec §3, §10.3).
 		SellerKeysClient: ssrf.NewClient(ssrf.Policy{Resolver: pushResolver(log)}),
 		OnChange: func(ref store.ServiceRef) {
@@ -473,6 +477,7 @@ func (r *Replica) assemble() error {
 		executor.Tenants = r.anonCaps
 	}
 	handlers = relay.NewHandlers(relay.HandlerDeps{
+		Local:     cfg.Local(),
 		Log:       r.storeLog,
 		Puller:    store.NewPullerProvider(r.storeLog, r.listener),
 		PushStore: pushStore,
@@ -481,7 +486,7 @@ func (r *Replica) assemble() error {
 		},
 		Interceptors: func(svc store.ServiceRef) []a2asrv.CallInterceptor {
 			i := &relay.Interceptors{Svc: svc, Log: r.storeLog, Rules: rules, Admit: r.admission, Canceler: r.lifecycle,
-				PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log}
+				PushPolicy: policy, Bucket: r.blobs, Render: r.render, Logger: log, Local: cfg.Local()}
 			if r.anonCaps != nil {
 				i.Anon = r.anonCaps
 			}
@@ -510,9 +515,18 @@ func (r *Replica) assemble() error {
 	if r.anonCaps != nil {
 		mcpDispatch.Tenants = r.anonCaps
 	}
+	// The A2A traffic record (traffic.record), on both legs: the routes record the caller's calls, the dispatch and
+	// forward_cancel the gate's calls to agents (D355).
+	if cfg.Traffic.Recording() {
+		r.traffic = traffic.New(r.pool, log.With("component", "traffic"))
+		if cfg.Traffic.KeepsBodies() {
+			r.traffic.KeepBodies(int(cfg.Traffic.BodyMax)) // D358
+		}
+		r.services.SetTraffic(r.traffic)
+	}
 	r.dispatch = &countingDispatch{DispatchActivities: &relay.Dispatcher{
 		ReplicaID: r.id, Log: r.storeLog, Registry: registry, Handlers: handlers, Backends: r.services,
-		Signals: r.lifecycle, Logger: log, MCP: mcpDispatch,
+		Signals: r.lifecycle, Logger: log, MCP: mcpDispatch, Traffic: r.traffic,
 	}}
 	deliverer := push.NewDeliverer(r.storeLog, policy, push.DelivererOptions{Waker: r.listener, Logger: log, Render: r.render})
 	// prepare places a tunnel service's attempts on the sessions of every replica (spec §6.1); the
@@ -541,9 +555,6 @@ func (r *Replica) assemble() error {
 	// (M5, D314), with their tenant claims and revocation feeds, before the routes they guard serve anything.
 	if err := r.assembleOIDC(routes, authn); err != nil {
 		return err
-	}
-	if cfg.Traffic.Recording() {
-		r.traffic = traffic.New(r.pool, log.With("component", "traffic"))
 	}
 	a2aRoutes := a2ahttp.New(a2ahttp.Deps{
 		Services: r.services, Handlers: handlers, SSE: writer, Auth: authn,
@@ -903,7 +914,7 @@ func (r *Replica) Run(ctx context.Context) error {
 	go func() { serveErr <- r.metrics.Serve(bg) }()
 	r.log.Info("serving", "addr", r.Addr().String(), "metrics", r.MetricsAddr().String())
 	if r.cfg.Local() {
-		LocalBanner(r.log, r.cfg.PublicURL)
+		LocalBanner(r.log, r.cfg.PublicURL, r.cfg.Traffic.KeepsBodies())
 	}
 
 	var failed error
@@ -1246,6 +1257,8 @@ func (r *Replica) serveMetrics(w http.ResponseWriter, _ *http.Request) {
 	gauge("kontra_gate_tunnel_sessions", "Tunnel sessions this replica holds.", r.tunnels.Count())
 	_, _ = fmt.Fprintf(w, "# HELP kontra_traffic_dropped_total A2A exchanges this replica dropped instead of storing (relay.md §13.6).\n"+
 		"# TYPE kontra_traffic_dropped_total counter\nkontra_traffic_dropped_total{replica=%q} %d\n", r.id, r.traffic.Dropped())
+	_, _ = fmt.Fprintf(w, "# HELP kontra_traffic_bodies_dropped_total A2A exchanges this replica stored without their bodies because the body budget was full (relay.md §13.6, D358).\n"+
+		"# TYPE kontra_traffic_bodies_dropped_total counter\nkontra_traffic_bodies_dropped_total{replica=%q} %d\n", r.id, r.traffic.BodiesDropped())
 	writePatchRefusals(w, r.id, &r.refusals)
 	writeFeeds(w, r.id, r.feeds)
 }

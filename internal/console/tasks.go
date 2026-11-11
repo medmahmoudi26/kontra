@@ -255,8 +255,9 @@ func afterOf(r *http.Request) (int64, error) {
 	return n, nil
 }
 
-// eventFrame is one SSE event: id its seq, event its kind, data {seq, kind, at, stored_apart, payload} with the stored
-// payload as it is (on one line).
+// eventFrame is one SSE event: id its seq, event its kind, data {seq, kind, at, stored_apart, origin, caller_type,
+// validation, payload} with the stored payload as it is (on one line): where it came from, the A2A object the caller
+// received for it, and whether it is valid A2A 1.0 (D357, D359, D360).
 func eventFrame(ev store.Event) []byte {
 	payload := []byte(ev.Payload)
 	if bytes.ContainsAny(payload, "\r\n") {
@@ -265,8 +266,10 @@ func eventFrame(ev store.Event) []byte {
 			payload = b.Bytes()
 		}
 	}
+	it := newEventItem(ev)
 	head, _ := json.Marshal(map[string]any{"seq": ev.Seq, "kind": string(ev.Kind), "at": ev.CreatedAt.UTC().Format(time.RFC3339Nano),
-		"stored_apart": ev.PayloadRef != ""})
+		"stored_apart": ev.PayloadRef != "", "task_id": it.TaskID, "origin": it.Origin, "caller_type": it.CallerType,
+		"validation": it.Validation})
 	var data []byte
 	if len(payload) > 0 {
 		data = append(append(append(head[:len(head)-1:len(head)-1], `,"payload":`...), payload...), '}')

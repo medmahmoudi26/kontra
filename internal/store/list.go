@@ -91,7 +91,7 @@ func (s *Store) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListT
 	if err != nil {
 		return nil, err
 	}
-	if o.Via == ViaAnonymous {
+	if o.Via == ViaAnonymous && !s.anonymousList {
 		return nil, fmt.Errorf("store: anonymous callers cannot list tasks: %w", a2a.ErrUnsupportedOperation)
 	}
 	pageSize := req.PageSize
