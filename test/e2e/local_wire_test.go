@@ -72,11 +72,25 @@ func TestLocalProfileWire(t *testing.T) {
 	const secret, pushToken = "kk_wire_secret_00000001", "push-token-wire-1"
 	buyer := &Buyer{Key: secret}
 	tasks := map[string]a2a.TaskID{}
+	msgContext := "" // the Message agent's interaction is no task: its caller leg names its context
 	for _, svc := range []string{"stream", "poll", "msg"} {
 		c := buyer.Client(t, g, svc)
 		res, err := c.SendMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("wire "+svc))})
 		if err != nil {
 			t.Fatalf("%s: SendMessage: %v", svc, err)
+		}
+		if svc == "msg" {
+			// D362: the Message agent's answer is its Message, and the gate's record of it is no task.
+			m, ok := res.(*a2a.Message)
+			if !ok || m.TaskID != "" {
+				t.Fatalf("msg: answer %T %+v, want the agent's Message with no taskId", res, res)
+			}
+			var id string
+			if err := h.Pool.QueryRow(ctx, `select id::text from kontra.tasks where context_id = $1 and exposed_at is null`, m.ContextID).Scan(&id); err != nil {
+				t.Fatalf("msg: the gate's record of the interaction: %v", err)
+			}
+			tasks[svc], msgContext = a2a.TaskID(id), m.ContextID
+			continue
 		}
 		task, ok := res.(*a2a.Task)
 		if !ok {
@@ -98,7 +112,7 @@ func TestLocalProfileWire(t *testing.T) {
 		t.Fatalf("CreateTaskPushNotificationConfig in the local profile: %v", err)
 	}
 
-	// Every event names its origin; the Message agent's answer is the callee's Message, converted (D5, D357).
+	// Every event names its origin; the Message agent's answer is the callee's Message, logged converted (D5, D357).
 	for svc, id := range tasks {
 		rows, err := h.Pool.Query(ctx, `select seq, origin::text from kontra.task_events where task_id = $1 order by seq`, string(id))
 		if err != nil {
@@ -142,7 +156,8 @@ func TestLocalProfileWire(t *testing.T) {
 		eventually(t, 10*time.Second, svc+": both legs recorded", func() bool {
 			var caller, callee int
 			_ = h.Pool.QueryRow(ctx, `select count(*) filter (where leg = 'caller' and request_body is not null),
-				count(*) filter (where leg = 'callee') from kontra.a2a_exchanges where task_id = $1 or gate_task_id = $1`, string(id)).Scan(&caller, &callee)
+				count(*) filter (where leg = 'callee') from kontra.a2a_exchanges
+				where task_id = $1 or gate_task_id = $1 or ($2 <> '' and leg = 'caller' and context_id = $2)`, string(id), map[bool]string{true: msgContext}[svc == "msg"]).Scan(&caller, &callee)
 			return caller > 0 && callee > 0
 		})
 	}

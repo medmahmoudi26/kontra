@@ -41,8 +41,8 @@ func callerType(payload []byte) string {
 
 // eventItem is one logged event as a timeline (and the events stream) shows it.
 type eventItem struct {
-	Type        string           `json:"type"` // "event"
-	TaskID      string           `json:"task_id"`
+	Type        string           `json:"type"`    // "event"
+	TaskID      *string          `json:"task_id"` // null: a provisional record's (D362), which its caller never saw as a task
 	Seq         int64            `json:"seq"`
 	Kind        string           `json:"kind"`
 	At          time.Time        `json:"at"`
@@ -54,7 +54,8 @@ type eventItem struct {
 }
 
 func newEventItem(ev store.Event) *eventItem {
-	it := &eventItem{Type: "event", TaskID: ev.TaskID.String(), Seq: ev.Seq, Kind: string(ev.Kind), At: ev.CreatedAt,
+	id := ev.TaskID.String()
+	it := &eventItem{Type: "event", TaskID: &id, Seq: ev.Seq, Kind: string(ev.Kind), At: ev.CreatedAt,
 		StoredApart: ev.PayloadRef != "", Origin: ev.Origin, Payload: ev.Payload}
 	if len(it.Origin) == 0 {
 		it.Origin = json.RawMessage("null")
@@ -67,6 +68,19 @@ func newEventItem(ev store.Event) *eventItem {
 		}
 	}
 	return it
+}
+
+// provisional makes it an event of a provisional record (D362): the caller was sent no task, so it names none, and the
+// caller received only the callee's Message that ended a message-only interaction (D5 logs it as a completed status),
+// nothing for any other row.
+func (it *eventItem) provisional() {
+	it.TaskID = nil
+	var o store.Origin
+	if json.Unmarshal(it.Origin, &o) == nil && o.Actor == store.ActorCallee && o.Type == store.TypeMessage {
+		it.CallerType = store.TypeMessage
+		return
+	}
+	it.CallerType = ""
 }
 
 // ---------------------------------------------------------------- exchanges
@@ -138,6 +152,10 @@ const timelineMax = 2000
 
 // timeline is the items of tasks (events, and the exchanges that carried none) in time order, then seq.
 func (c *Console) timeline(ctx context.Context, tasks []uuid.UUID) ([]any, bool, error) {
+	hidden, err := c.provisional(ctx, tasks)
+	if err != nil {
+		return nil, false, err
+	}
 	var events []*eventItem
 	carried := map[string]bool{}
 	for _, id := range tasks {
@@ -148,6 +166,9 @@ func (c *Console) timeline(ctx context.Context, tasks []uuid.UUID) ([]any, bool,
 			}
 			for _, ev := range evs {
 				it := newEventItem(ev)
+				if hidden[id] {
+					it.provisional()
+				}
 				var o store.Origin
 				if json.Unmarshal(ev.Origin, &o) == nil && o.ExchangeID != "" {
 					carried[o.ExchangeID] = true
@@ -185,6 +206,9 @@ func (c *Console) timeline(ctx context.Context, tasks []uuid.UUID) ([]any, bool,
 		if carried[x.ID] {
 			continue // the event it carried names it
 		}
+		if x.TaskID != nil && hidden[uuid.MustParse(*x.TaskID)] {
+			x.TaskID = nil // a provisional record's id, which the caller was never sent (D362)
+		}
 		all = append(all, timed{x.At, 0, x})
 	}
 	if err := rows.Err(); err != nil {
@@ -207,6 +231,23 @@ func (c *Console) timeline(ctx context.Context, tasks []uuid.UUID) ([]any, bool,
 		items = []any{}
 	}
 	return items, more, nil
+}
+
+// provisional is the records among tasks that are not exposed (D362).
+func (c *Console) provisional(ctx context.Context, tasks []uuid.UUID) (map[uuid.UUID]bool, error) {
+	rows, err := c.d.DB.Query(ctx, `select id from kontra.tasks where id = any($1) and exposed_at is null`, tasks)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		out[id] = true
+	}
+	return out, nil
 }
 
 // contextOf is a context's opening and its callee contexts, for its tasks oldest first.
@@ -348,9 +389,28 @@ func (c *Console) contextTimeline(w http.ResponseWriter, r *http.Request) {
 		c.answer(w, r, nil, err)
 		return
 	}
-	ids := make([]string, len(tasks))
-	for i, t := range tasks {
-		ids[i] = t.String()
+	hidden, err := c.provisional(ctx, tasks)
+	if err != nil {
+		c.answer(w, r, nil, err)
+		return
+	}
+	ids := []string{} // the context's tasks: a message-only interaction is none (D362)
+	for _, t := range tasks {
+		if !hidden[t] {
+			ids = append(ids, t.String())
+		}
+	}
+	if hidden[uuid.MustParse(op.TaskID)] {
+		op.TaskID = ""
+	}
+	for _, cc := range callee {
+		kept := []string{}
+		for _, t := range cc.TaskIDs {
+			if !hidden[uuid.MustParse(t)] {
+				kept = append(kept, t)
+			}
+		}
+		cc.TaskIDs = kept
 	}
 	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": buyer.String(), "context_id": contextID,
 		"task_ids": ids, "opening": op, "callee_contexts": callee, "items": items, "more": more}, nil)

@@ -253,6 +253,21 @@ type Call struct {
 // MaxCallTool is the longest tool name a calls row holds (0001: 1 to 128 characters).
 const MaxCallTool = 128
 
+// exposes reports whether the write exposes a provisional task (D362; tasks.exposed_at, set once): an event the
+// callee sent as a Task or a task event (not a Message, which D5 logs as a completed status), or any other status
+// that ends or answers the turn (a gate-written failure, timeout or cancel before any callee answer). A caller's
+// message, metadata, and a gate status that keeps the turn going (working) expose nothing.
+func (w *Write) exposes() bool {
+	carried := w.Kind == KindTask || w.Kind == KindStatus || w.Kind == KindArtifact
+	if w.Origin != nil && w.Origin.Actor == ActorCallee {
+		return carried && w.Origin.Type != TypeMessage
+	}
+	if w.Kind != KindTask && w.Kind != KindStatus {
+		return false
+	}
+	return w.State.Terminal() || w.State == StateInputRequired || w.State == StateAuthRequired
+}
+
 func (w *Write) validate() error {
 	if w.PrevVersion < 1 {
 		// a2a-go's in-memory store reads 0 as "skip the check"; this store never writes unchecked.
@@ -300,6 +315,7 @@ with u as (
 		status_at = coalesce($5::timestamptz, case when $3::text in ('status', 'task') then now() else t.status_at end),
 		version = t.version + 1,
 		updated_at = now(),
+		exposed_at = coalesce(t.exposed_at, case when $18::bool then now() end),
 		submitted_at = case when $4::text = 'submitted' and t.submitted_at is null then now() else t.submitted_at end,
 		deadline = case when $4::text = 'submitted' and t.deadline is null
 			then now() + coalesce($10::bigint * interval '1 microsecond',
@@ -386,12 +402,12 @@ func appendCall(stmt string, args []any, c *Call) (string, []any, error) {
 }
 
 // appendDeliverSQL is appendSQL for a write that also records a follow-up's delivery (D81), in the same
-// statement: delivered_at of work item $18 is set from the tasks row the UPDATE wrote, so a refused (fenced,
+// statement: delivered_at of work item $19 is set from the tasks row the UPDATE wrote, so a refused (fenced,
 // stale, terminal) write sets nothing. Only a write carrying a delivery pays for the extra UPDATE.
 const appendDeliverSQL = appendCTEs + `), d as (
 	update kontra.work_items w set delivered_at = now()
 	  from u
-	 where w.id = $18::uuid and w.task_id = u.id and w.delivered_at is null
+	 where w.id = $19::uuid and w.task_id = u.id and w.delivered_at is null
 	returning w.id
 )
 select e.seq, u.deadline, pg_notify('kontra_task_events', e.task_id::text || ':' || e.seq::text), exists (select 1 from d)
@@ -461,7 +477,7 @@ func (l *Log) Append(ctx context.Context, tx pgx.Tx, w Write) (Appended, error) 
 	args := []any{
 		w.TaskID, w.PrevVersion, string(w.Kind), state, nullTime(w.StatusAt), snap, payload,
 		nullString(w.PayloadRef), w.AfterTerminalOK, micros(w.Timeout), micros(w.Retention),
-		st, ss, sb, fn, fd, w.Origin.encode(),
+		st, ss, sb, fn, fd, w.Origin.encode(), w.exposes(),
 	}
 	stmt := l.appendStmt
 	var armed *uuid.UUID
@@ -542,6 +558,10 @@ type NewTask struct {
 	Payload json.RawMessage
 	// Origin is the `task` row's origin (D357): the caller's first message; nil writes none.
 	Origin *Origin
+	// Provisional leaves the task unexposed (tasks.exposed_at null, D362): a new A2A message the caller awaits the
+	// answer to (not returnImmediately, not a /mcp hire), until the callee's first answer shows it is a task. Every
+	// other task is exposed at creation.
+	Provisional bool
 }
 
 func (t *NewTask) validate() error {
@@ -592,14 +612,15 @@ const createSQL = `
 with t as (
 	insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id,
 		first_message_id, first_request, state, version, snapshot, status_at,
-		deadline, submitted_at, terminal_at, retention_until)
+		deadline, submitted_at, terminal_at, retention_until, exposed_at)
 	select $1::uuid, s.tenant_id, s.name, $4::text, $5::uuid, $6::text, $7::text, $8::text, $9::text, $10::bytea,
 		$11::text, 1, $12::json, coalesce($13::timestamptz, now()),
 		now() + coalesce($14::bigint * interval '1 microsecond', s.timeout_s * interval '1 second'),
 		now(),
 		case when $11::text in ('completed', 'failed', 'canceled', 'rejected') then now() end,
 		case when $11::text in ('completed', 'failed', 'canceled', 'rejected')
-			then now() + coalesce($15::bigint * interval '1 microsecond', nullif(s.retention_s, 0) * interval '1 second') end
+			then now() + coalesce($15::bigint * interval '1 microsecond', nullif(s.retention_s, 0) * interval '1 second') end,
+		case when not $18::bool then now() end
 	  from kontra.services s where s.tenant_id = $2::uuid and s.name = $3::text
 	returning id, deadline
 ), e as (
@@ -611,10 +632,10 @@ select e.seq, t.deadline, pg_notify('kontra_task_events', e.task_id::text || ':'
   from e join t on t.id = e.task_id`
 
 // createBlobsSQL is createSQL that also writes the blobs rows of the large parts of the caller's first message
-// (spec §10.4, D167), in the statement that creates the task; the rows' arrays are $18 to $20.
+// (spec §10.4, D167), in the statement that creates the task; the rows' arrays are $19 to $21.
 var createBlobsSQL = strings.Replace(createSQL, ")\nselect e.seq", `), b as (
 	insert into kontra.blobs (ref, tenant_id, task_id, size)
-	select x.ref, x.tenant_id, t.id, x.size from t, unnest($18::text[], $19::uuid[], $20::bigint[]) as x(ref, tenant_id, size)
+	select x.ref, x.tenant_id, t.id, x.size from t, unnest($19::text[], $20::uuid[], $21::bigint[]) as x(ref, tenant_id, size)
 	on conflict (ref) do nothing
 	returning ref
 )
@@ -650,7 +671,7 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 		t.ID, t.Service.TenantID, t.Service.Name, string(t.Protocol), t.Owner.BuyerID, t.Owner.Principal,
 		t.Owner.Via, t.ContextID, firstMsg, firstReq, string(t.State), snap,
 		nullTime(StatusTime(t.Snapshot.Status.Timestamp)),
-		micros(t.Service.Timeout), micros(t.Service.Retention), payload, t.Origin.encode(),
+		micros(t.Service.Timeout), micros(t.Service.Retention), payload, t.Origin.encode(), t.Provisional,
 	}
 	stmt := createSQL
 	if rows := blob.PendingRows(ctx, t.ID, payload); len(rows) > 0 {
@@ -677,7 +698,7 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 // taskCols are the columns scanTask reads, from kontra.tasks aliased t.
 const taskCols = `t.id, t.tenant_id, t.service, t.protocol, t.buyer_id, t.principal, t.via, t.context_id,
 	coalesce(t.first_message_id, ''), t.state, t.version, t.snapshot, t.status_at, t.deadline,
-	t.created_at, t.submitted_at, t.terminal_at, t.retention_until`
+	t.created_at, t.submitted_at, t.terminal_at, t.retention_until, t.exposed_at`
 
 func scanTask(row pgx.Row) (*TaskRow, error) {
 	var (
@@ -686,7 +707,7 @@ func scanTask(row pgx.Row) (*TaskRow, error) {
 	)
 	err := row.Scan(&r.ID, &r.TenantID, &r.Service, &r.Protocol, &r.Owner.BuyerID, &r.Owner.Principal,
 		&r.Owner.Via, &r.ContextID, &r.FirstMessageID, &r.State, &r.Version, &snap, &r.StatusAt,
-		&r.Deadline, &r.CreatedAt, &r.SubmittedAt, &r.TerminalAt, &r.RetentionUntil)
+		&r.Deadline, &r.CreatedAt, &r.SubmittedAt, &r.TerminalAt, &r.RetentionUntil, &r.ExposedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -740,11 +761,23 @@ func (l *Log) LoadService(ctx context.Context, tenantID uuid.UUID, name string) 
 	return ref, nil
 }
 
-// LoadScoped returns the task row if it belongs to the caller's scope, else an error wrapping
-// a2a.ErrTaskNotFound. The SSE writer and push read through it.
+// LoadScoped returns the task row if it belongs to the caller's scope and is exposed (D362), else an error wrapping
+// a2a.ErrTaskNotFound: a provisional record (a new message the callee has not answered with a task, or answered with
+// a Message) is not the caller's to read, and its id was never sent. Every caller read goes through it: the SSE
+// writer, follow-ups, cancel, push.
 func (l *Log) LoadScoped(ctx context.Context, svc ServiceRef, o Owner, taskID uuid.UUID) (*TaskRow, error) {
+	return l.loadScoped(ctx, svc, o, taskID, ` and t.exposed_at is not null`)
+}
+
+// LoadScopedAll is LoadScoped for the gate's own reads of a caller's request, a provisional record included: the
+// answer to a new message (a Message, or the task once exposed) and a resend's.
+func (l *Log) LoadScopedAll(ctx context.Context, svc ServiceRef, o Owner, taskID uuid.UUID) (*TaskRow, error) {
+	return l.loadScoped(ctx, svc, o, taskID, "")
+}
+
+func (l *Log) loadScoped(ctx context.Context, svc ServiceRef, o Owner, taskID uuid.UUID, exposed string) (*TaskRow, error) {
 	r, err := scanTask(l.db.QueryRow(ctx, `select `+taskCols+` from kontra.tasks t
-		where t.id = $1 and t.tenant_id = $2 and t.service = $3 and t.buyer_id = $4`,
+		where t.id = $1 and t.tenant_id = $2 and t.service = $3 and t.buyer_id = $4`+exposed,
 		taskID, svc.TenantID, svc.Name, o.BuyerID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound()

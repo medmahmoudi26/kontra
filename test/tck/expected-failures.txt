@@ -15,14 +15,11 @@
 # Measured by M4 WP-02's review on 28 Oct with fresh TCK ids per test (test/tck/kontra_tck_ids.py, D291), the four
 # variants each run twice (jsonrpc, then http_json); see D291 for the counts.
 #
-# Not listed, because the gate passes them: CORE-SEND-003 (a2a-tck#202 asserts success for an unsupported media type;
+# Not listed, because the gate passes them: DM-MSG-001 (a seller's Message reaches the caller as that Message since
+# D362; D5 answered it as a completed task), CORE-SEND-003 (a2a-tck#202 asserts success for an unsupported media type;
 # the seller answers ContentTypeNotSupportedError, which the gate relays as a failed task, spec/relay.md §6.4).
 
 # --- Every variant: expected failures ---
-# The gate answers a seller's Message with a completed task (D5: in a2a-go's cluster mode a bare Message never
-# reaches the caller), and DM-MSG-001 wants the Message itself.
-tests/compatibility/core_operations/test_artifacts.py::TestMessageResponse::test_returns_message_with_text_part[jsonrpc]  # D5: a seller's Message is answered as a completed task carrying it
-tests/compatibility/core_operations/test_artifacts.py::TestMessageResponse::test_returns_message_with_text_part[http_json]  # D5: a seller's Message is answered as a completed task carrying it
 # CORE-HIST-001 and CORE-HIST-002 on JSON-RPC: the TCK's JSON-RPC client sends GetTask's history_length in snake_case
 # (A2A §5.5: camelCase), so the limit never reaches the gate; both pass on HTTP+JSON. The TCK xfails CORE-HIST-001
 # (a SHOULD) itself; CORE-HIST-002 (a MUST) fails.

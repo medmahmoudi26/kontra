@@ -40,6 +40,19 @@ type memLog struct {
 	reads   int
 	maxRead int // the most payload bytes one EventsWithin returned
 	wakeups chan struct{}
+	// hidden is a provisional record (D362): LoadScoped does not find it, LoadScopedAll does, with no ExposedAt.
+	hidden bool
+}
+
+// expose exposes a provisional record and wakes the stream.
+func (l *memLog) expose() {
+	l.mu.Lock()
+	l.hidden = false
+	l.mu.Unlock()
+	select {
+	case l.wakeups <- struct{}{}:
+	default:
+	}
 }
 
 func newMemLog(t *testing.T) *memLog {
@@ -107,7 +120,15 @@ func (l *memLog) fold(seq int64) (*a2a.Task, error) {
 	return f.Snapshot()
 }
 
-func (l *memLog) LoadScoped(_ context.Context, s store.ServiceRef, o store.Owner, id uuid.UUID) (*store.TaskRow, error) {
+func (l *memLog) LoadScoped(ctx context.Context, s store.ServiceRef, o store.Owner, id uuid.UUID) (*store.TaskRow, error) {
+	r, err := l.LoadScopedAll(ctx, s, o, id)
+	if err == nil && r.ExposedAt == nil {
+		return nil, a2a.NewError(a2a.ErrTaskNotFound, "task not found")
+	}
+	return r, err
+}
+
+func (l *memLog) LoadScopedAll(_ context.Context, s store.ServiceRef, o store.Owner, id uuid.UUID) (*store.TaskRow, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if id != l.taskID || o.BuyerID != l.owner.BuyerID || s.Name != svc.Name {
@@ -121,7 +142,12 @@ func (l *memLog) LoadScoped(_ context.Context, s store.ServiceRef, o store.Owner
 	if err != nil {
 		return nil, err
 	}
-	return &store.TaskRow{ID: id, State: st, Version: int64(len(l.rows)), Snapshot: snap, Owner: l.owner}, nil
+	row := &store.TaskRow{ID: id, State: st, Version: int64(len(l.rows)), Snapshot: snap, Owner: l.owner, ContextID: snap.ContextID}
+	if !l.hidden {
+		now := time.Now()
+		row.ExposedAt = &now
+	}
+	return row, nil
 }
 
 // EventsWithin is store.Log.EventsWithin over the rows: at most limit rows, ending with the one that
@@ -807,5 +833,65 @@ func TestWriteTimeoutDoesNotCutAnIdleStream(t *testing.T) {
 	l.status(t, a2a.TaskStateCompleted)
 	if got := s.rest(t); len(got) != 1 {
 		t.Fatalf("after an idle wait: %d events", len(got))
+	}
+}
+
+// D362: a new message's stream sends nothing while its record is provisional, only keep-alives; when the callee
+// answers with a Message (the record ends unexposed), the stream's one event is that Message, without an id and
+// without a taskId, and it closes. Both bindings.
+func TestSendStreamingMessageAnswer(t *testing.T) {
+	for _, b := range []Binding{JSONRPC, HTTPJSON} {
+		t.Run(fmt.Sprint(b), func(t *testing.T) {
+			l := newMemLog(t)
+			l.hidden = true
+			w := testWriter(l, Options{KeepAlive: 20 * time.Millisecond})
+			s := serve(t, func(rw http.ResponseWriter, r *http.Request) {
+				w.SendStreaming(rw, r, Stream{Binding: b, RequestID: json.RawMessage(`7`), Service: svc, Owner: ownerA},
+					func(context.Context) (Start, error) {
+						return Start{TaskID: a2a.TaskID(l.taskID.String()), New: true}, nil
+					})
+			}, nil)
+			if ev, _ := s.next(t); ev.comment != "keep-alive" {
+				t.Fatalf("first frame %+v, want a keep-alive while the record is provisional", ev)
+			}
+			answer := a2a.NewMessageForTask(a2a.MessageRoleAgent, l.info(), a2a.NewTextPart("hello"))
+			l.add(t, store.KindStatus, a2a.NewStatusUpdateEvent(l.info(), a2a.TaskStateCompleted, answer))
+			got := s.rest(t)
+			if len(got) != 1 || got[0].id != 0 {
+				t.Fatalf("events %+v, want one Message without an id", got)
+			}
+			msg, ok := decode(t, b, got[0].data, "7").(*a2a.Message)
+			if !ok || msg.TaskID != "" || msg.ContextID != "ctx-1" || msg.ID != answer.ID {
+				t.Fatalf("event %s, want the callee's Message with the gate's contextId and no taskId", got[0].data)
+			}
+		})
+	}
+}
+
+// D362: a new message's record exposed while the stream waited (the callee answered with a task): the snapshot at
+// that version leads, with the version as its id, then the rows after it.
+func TestSendStreamingHeldUntilExposed(t *testing.T) {
+	l := newMemLog(t)
+	l.hidden = true
+	w := testWriter(l, Options{KeepAlive: 20 * time.Millisecond, Reread: 20 * time.Millisecond})
+	s := serve(t, func(rw http.ResponseWriter, r *http.Request) {
+		w.SendStreaming(rw, r, Stream{Binding: HTTPJSON, Service: svc, Owner: ownerA},
+			func(context.Context) (Start, error) {
+				return Start{TaskID: a2a.TaskID(l.taskID.String()), New: true}, nil
+			})
+	}, nil)
+	if ev, _ := s.next(t); ev.comment != "keep-alive" {
+		t.Fatalf("first frame %+v, want a keep-alive", ev)
+	}
+	v := l.status(t, a2a.TaskStateWorking) // 2: the callee's task, which exposes the record
+	l.expose()
+	lead, _ := s.nextData(t)
+	if task, ok := decode(t, HTTPJSON, lead.data, "").(*a2a.Task); lead.id != v || !ok || task.Status.State != a2a.TaskStateWorking {
+		t.Fatalf("lead %+v, want the working snapshot with id %d", lead, v)
+	}
+	l.artifact(t, "a")                  // 3
+	l.status(t, a2a.TaskStateCompleted) // 4
+	if got := s.rest(t); !eqIDs(eventIDs(got), 3, 4) {
+		t.Fatalf("ids %v, want [3 4]", eventIDs(got))
 	}
 }

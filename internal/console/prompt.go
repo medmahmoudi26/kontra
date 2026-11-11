@@ -560,7 +560,8 @@ func refusal(status int, body []byte, what string) error {
 	return fail(http.StatusUnprocessableEntity, "gate_refused", msg)
 }
 
-// send sends message:send, returning at once (the task as the gate made or moved it).
+// send sends a follow-up with message:send, returning at once (the task as the gate moved it): a follow-up names an
+// exposed task (D362), which the answer is.
 func (c *Console) send(ctx context.Context, service string, msg map[string]any, exts []string) (*gateAnswer, error) {
 	resp, body, err := c.call(ctx, service, "/message:send",
 		map[string]any{"message": msg, "configuration": map[string]any{"returnImmediately": true}}, exts)
@@ -593,6 +594,58 @@ func (c *Console) send(ctx context.Context, service string, msg map[string]any, 
 		return &gateAnswer{TaskID: got.Message.TaskID, State: "working", ContextID: got.Message.ContextID}, nil
 	}
 	return nil, fail(http.StatusBadGateway, "invalid_response", "the gate answered no task")
+}
+
+// streamStart sends a new message with message:stream, as the A2A Inspector does, so that an agent answering with a
+// Message is answered to the console as it is to any client (D362), instead of message:send with returnImmediately,
+// which always makes a task. The gate writes the stream's headers once it has admitted the message and recorded it,
+// so the console reads the record the gate made (by the message's id, which it minted), remembers it, and leaves the
+// stream: the interaction goes on without it (D8), and the console shows it from the log. The record is the gate's
+// internal id: a task once the agent answers with one, a message-only interaction otherwise.
+func (c *Console) streamStart(ctx context.Context, service string, msg map[string]any, exts []string) (*gateAnswer, error) {
+	b, err := json.Marshal(map[string]any{"message": msg})
+	if err != nil {
+		return nil, err
+	}
+	sctx, cancel := context.WithCancel(ctx)
+	defer cancel() // leaves the stream once the record is read
+	u := strings.TrimRight(c.d.Config.PublicURL, "/") + "/agents/" + url.PathEscape(service) + "/message:stream"
+	req, err := http.NewRequestWithContext(sctx, http.MethodPost, u, bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("A2A-Version", "1.0")
+	req.Header.Set("User-Agent", "kontra-console")
+	if len(exts) > 0 {
+		req.Header.Set("A2A-Extensions", strings.Join(exts, ", "))
+	}
+	resp, err := c.d.HTTP.Do(req)
+	if err != nil {
+		return nil, fail(http.StatusServiceUnavailable, "gate_unavailable", "the gate's own A2A route did not answer: "+err.Error())
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		got, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, refusal(resp.StatusCode, got, "the message")
+	}
+	messageID, _ := msg["messageId"].(string)
+	var (
+		id        uuid.UUID
+		contextID string
+		state     string
+	)
+	err = c.d.DB.QueryRow(ctx, `select t.id, t.context_id, t.state from kontra.tasks t
+		where t.tenant_id = (select id from kontra.tenants where slug = 'default') and t.service = $1 and t.first_message_id = $2
+		order by t.created_at desc limit 1`, service, messageID).Scan(&id, &contextID, &state)
+	if isNoRows(err) {
+		return nil, fail(http.StatusBadGateway, "invalid_response", "the gate opened the stream but recorded no message")
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &gateAnswer{TaskID: id.String(), State: state, ContextID: contextID}, nil
 }
 
 // remember records a task the console started.
@@ -629,7 +682,7 @@ func (c *Console) start(ctx context.Context, b *startBody, contextID string) (*g
 	if err != nil {
 		return nil, err
 	}
-	got, err := c.send(ctx, s.name, msg, exts)
+	got, err := c.streamStart(ctx, s.name, msg, exts)
 	if err != nil {
 		return nil, err
 	}

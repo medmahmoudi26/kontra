@@ -825,3 +825,54 @@ func TestTunnelResumeAfterReconnect(t *testing.T) {
 		})
 	}
 }
+
+// D362, spec §4: an agent behind a node that answers with a bare Message makes no upstream task, but its context
+// continues. The Message's context id is recorded on the attempt, and the next message of the gate context on the
+// same session reaches the agent in it: "two messages, one context".
+func TestTunnelMessageContextContinues(t *testing.T) {
+	answer := a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+		return func(yield func(a2a.Event, error) bool) {
+			m := a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("ok"))
+			m.ContextID = ec.ContextID
+			yield(m, nil)
+		}
+	})
+	s1 := newSession()
+	e, _, nodes := tunnelEnv(t, envOptions{}, false, answer, s1)
+	n := nodes[s1]
+	var msgs []a2a.Message
+	inner := n.svc
+	n.setService(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var rpc struct {
+			Method string                 `json:"method"`
+			Params a2a.SendMessageRequest `json:"params"`
+		}
+		if json.Unmarshal(body, &rpc) == nil && (rpc.Method == "SendMessage" || rpc.Method == "SendStreamingMessage") {
+			n.mu.Lock()
+			msgs = append(msgs, *rpc.Params.Message)
+			n.mu.Unlock()
+		}
+		inner.ServeHTTP(w, r)
+	}))
+	run := func(text string) a2a.TaskID {
+		t.Helper()
+		id, wid := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: text, session: &s1})
+		if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
+			t.Fatalf("dispatch %+v", res)
+		}
+		return id
+	}
+	first := run("one")
+	a := e.attempt(first, 1)
+	if a.UpstreamTaskID != "" || a.UpstreamContextID == "" {
+		t.Fatalf("attempt after a Message answer: task %q context %q, want no task and the agent's context", a.UpstreamTaskID, a.UpstreamContextID)
+	}
+	run("two")
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if len(msgs) != 2 || msgs[0].ContextID != "" || msgs[1].ContextID != a.UpstreamContextID {
+		t.Fatalf("the agent's messages %+v, want the second in context %q", msgs, a.UpstreamContextID)
+	}
+}

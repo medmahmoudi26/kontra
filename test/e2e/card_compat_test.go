@@ -39,8 +39,8 @@ func getCard(t *testing.T, ctx context.Context, u, key string) []byte {
 // binding, and its answer, one "Hello World" Message. The gate fetches the 0.2.5 card from .well-known/agent.json (D71), serves it verbatim at
 // agent-card.upstream.json, and serves at {svc} a 1.0 card a stock a2a-go client resolves: the gate's own
 // interfaces at protocol 1.0, none of the 0.x interface members, and every seller member byte-identical.
-// A 1.0 call through the gate reaches the seller as a 0.x message/send and comes back as a completed task
-// carrying the seller's message (spec §6.3, D5), and a stream works the same way. Every served interface
+// A 1.0 call through the gate reaches the seller as a 0.x message/send and comes back as the seller's Message, with
+// the gate's contextId and no taskId (spec §6.3, D362), and a stream works the same way: its one event is that Message. Every served interface
 // names public_url, the harness's Front, on both replicas; the stock client calls through it.
 func TestCardCompat(t *testing.T) {
 	h := start(t, Options{
@@ -122,16 +122,16 @@ func TestCardCompat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendMessage through the served card: %v", err)
 	}
-	task, ok := res.(*a2a.Task)
-	if !ok || task.Status.State != a2a.TaskStateCompleted || task.Status.Message == nil || task.Status.Message.Parts[0].Text() != slowagent.HelloWorld {
-		t.Fatalf("the 0.2.5 seller's Message must come back as a completed task carrying it: %#v", res)
+	msg, ok := res.(*a2a.Message)
+	if !ok || msg.TaskID != "" || msg.ContextID == "" || len(msg.Parts) == 0 || msg.Parts[0].Text() != slowagent.HelloWorld {
+		t.Fatalf("the 0.2.5 seller's Message must come back as that Message, with no taskId: %#v", res)
 	}
 	// The card says streaming, so the dispatch streams: one 0.x message/stream, never a 1.0 method.
 	if n := seller.Count("message/send") + seller.Count("message/stream"); n != 1 || seller.Sends() != 1 {
 		t.Fatalf("the seller received %d 0.x sends, want 1 (requests %v)", n, methods(seller))
 	}
 
-	// A stream through the gate, on HTTP+JSON this time, also ends completed with the seller's message.
+	// A stream through the gate, on HTTP+JSON this time: its one event is the seller's Message, without an id.
 	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[0], newMessage("hello world"), Call{Service: "hello025", Binding: HTTPJSON})
 	if err != nil {
 		t.Fatal(err)
@@ -140,17 +140,12 @@ func TestCardCompat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evs) < 2 || evs[0].Kind != "task" || evs[len(evs)-1].State != a2a.TaskStateCompleted {
-		t.Fatalf("the stream through the 0.2.5 seller: %d events, want the task then the completed row", len(evs))
+	if len(evs) != 1 || evs[0].Kind != "message" || evs[0].ID != nil {
+		t.Fatalf("the stream through the 0.2.5 seller: %d events, want one Message without an id", len(evs))
 	}
-	final, err := fold(evs)
-	if err != nil {
-		t.Fatal(err)
+	if m := evs[0].Event.(*a2a.Message); m.TaskID != "" || m.Parts[0].Text() != slowagent.HelloWorld {
+		t.Fatalf("the streamed Message: %+v", m)
 	}
-	if final.Status.Message == nil || final.Status.Message.Parts[0].Text() != slowagent.HelloWorld {
-		t.Fatalf("the streamed task's status message: %+v", final.Status.Message)
-	}
-	checkCarried(t, h, s.TaskID(), ids(evs))
 	if n := seller.Count("message/send") + seller.Count("message/stream"); n != 2 || seller.Sends() != 2 {
 		t.Fatalf("the seller received %d 0.x sends, want 2 (requests %v)", n, methods(seller))
 	}

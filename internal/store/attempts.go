@@ -300,6 +300,28 @@ func (l *Log) setFirstUpstreamID(ctx context.Context, f *Fence, upstreamTaskID, 
 	return nil
 }
 
+// SetUpstreamContext records the upstream context id of a callee's Message answer on the attempt (D362), under the
+// dispatch's fence f, before the event that carried it is logged: an attempt answered with a Message has no upstream
+// task id, but its context continues (spec §4), so the next message in the same gate context reaches it. It writes
+// nothing on an attempt that already has an upstream task or context id, or that the fence no longer holds, and is
+// best effort: the caller's answer does not depend on it.
+func (l *Log) SetUpstreamContext(ctx context.Context, f *Fence, upstreamContextID string) error {
+	if f == nil || upstreamContextID == "" {
+		return nil
+	}
+	ctx, cancel := l.writeCtx(ctx)
+	defer cancel()
+	_, err := l.writeExec(ctx, `update kontra.attempts a set upstream_context_id = $3
+			where a.task_id = $1 and a.n = $2 and a.upstream_task_id is null and a.upstream_context_id is null
+			  and a.ended_at is null and a.dispatch_id = $4
+			  and not exists (select 1 from kontra.attempts b where b.task_id = a.task_id and b.n > a.n)`,
+		f.TaskID, f.N, upstreamContextID, f.DispatchID)
+	if err != nil {
+		return fmt.Errorf("store: upstream context of attempt %d of task %s: %w", f.N, f.TaskID, err)
+	}
+	return nil
+}
+
 // EndAttempt records the attempt's outcome and ended_at, only when the attempt ends (never when a turn
 // stops at input-required, D77). Ending an attempt that has ended already keeps its first outcome and is
 // not an error (a retried activity).
@@ -379,14 +401,15 @@ func SameBackend(backendParam, sessionParam string) string {
 // §4 (nil when there is none). Contexts are scoped by (tenant, service, buyer, context id), so another
 // buyer's identical context string is never found (D53). The backend is the attempt being dispatched's
 // (SameBackend): a tunnel attempt counts only on the same session, a direct one only while the service's
-// backend is the one it was placed on (SameDirectBackend).
+// backend is the one it was placed on (SameDirectBackend). An attempt answered with a Message has a context id and no
+// task id (SetUpstreamContext, D362): it counts from when it ended.
 func (l *Log) PreviousContextAttempt(ctx context.Context, svc ServiceRef, o Owner, contextID string, backend Backend, session *uuid.UUID) (*Attempt, error) {
 	a, err := scanAttempt(l.db.QueryRow(ctx, `select `+attemptCols+` from kontra.attempts a
 		join kontra.tasks t on t.id = a.task_id
 		join kontra.services s on s.tenant_id = t.tenant_id and s.name = t.service
 		where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.context_id = $4
 		  and a.upstream_context_id is not null and `+SameBackend("$5", "$6")+`
-		order by a.first_upstream_id_at desc, a.task_id desc, a.n desc limit 1`,
+		order by coalesce(a.first_upstream_id_at, a.ended_at, a.started_at) desc, a.task_id desc, a.n desc limit 1`,
 		svc.TenantID, svc.Name, o.BuyerID, contextID, string(backend), session))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

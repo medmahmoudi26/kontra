@@ -29,32 +29,36 @@ const (
 // taskView is a task as the console shows it (Kontra Cloud's TaskView, without money): its metadata, what the console
 // may do on it, and its snapshot (the task view only).
 type taskView struct {
-	TaskID         string          `json:"task_id"`
-	Service        string          `json:"service"`
-	Kind           string          `json:"kind"` // a2a | mcp (tasks.protocol)
-	State          string          `json:"state"`
-	Caller         string          `json:"caller"`    // the principal
-	CallerID       string          `json:"caller_id"` // the buyer id: the conversation's scope (spec §4)
-	Via            string          `json:"via"`       // "console" for a task the console started
-	ContextID      string          `json:"context_id"`
-	CreatedAt      time.Time       `json:"created_at"`
-	StatusAt       time.Time       `json:"status_at"`
-	TerminalAt     *time.Time      `json:"terminal_at"`
-	RetentionUntil *time.Time      `json:"retention_until"`
-	Retention      int64           `json:"retention"` // the service's, in seconds; 0: kept forever
-	Version        int64           `json:"version"`   // the seq of its last event
-	Sealed         bool            `json:"sealed"`
-	Content        bool            `json:"content"` // the events carry readable parts (not sealed)
-	Summary        *string         `json:"summary"` // the first words of its first message
-	Console        bool            `json:"console"` // the console started it, and may act on it
-	Actions        []string        `json:"actions"`
-	Snapshot       json.RawMessage `json:"snapshot,omitempty"`
+	TaskID         string     `json:"task_id"`
+	Service        string     `json:"service"`
+	Kind           string     `json:"kind"` // a2a | mcp (tasks.protocol)
+	State          string     `json:"state"`
+	Caller         string     `json:"caller"`    // the principal
+	CallerID       string     `json:"caller_id"` // the buyer id: the conversation's scope (spec §4)
+	Via            string     `json:"via"`       // "console" for a task the console started
+	ContextID      string     `json:"context_id"`
+	CreatedAt      time.Time  `json:"created_at"`
+	StatusAt       time.Time  `json:"status_at"`
+	TerminalAt     *time.Time `json:"terminal_at"`
+	RetentionUntil *time.Time `json:"retention_until"`
+	Retention      int64      `json:"retention"` // the service's, in seconds; 0: kept forever
+	Version        int64      `json:"version"`   // the seq of its last event
+	Sealed         bool       `json:"sealed"`
+	Content        bool       `json:"content"` // the events carry readable parts (not sealed)
+	Summary        *string    `json:"summary"` // the first words of its first message
+	Console        bool       `json:"console"` // the console started it, and may act on it
+	// Exposed is false for a provisional record (D362): a new message the callee has not answered with a task, or
+	// answered with a Message. It is no task to its caller (no taskId was sent), so the Tasks list leaves it out and a
+	// context's timeline shows it as the caller's message and the callee's Message.
+	Exposed  bool            `json:"exposed"`
+	Actions  []string        `json:"actions"`
+	Snapshot json.RawMessage `json:"snapshot,omitempty"`
 }
 
 // taskColumns are what every task read selects: never a payload of another table, never first_request.
 const taskColumns = `t.id, t.service, t.protocol, t.state, t.principal, t.buyer_id, t.via, t.context_id, t.created_at,
 	t.status_at, t.terminal_at, t.retention_until, t.version, coalesce(s.sealed, 'off'), coalesce(s.retention_s, 0),
-	ct.task_id is not null,
+	ct.task_id is not null, t.exposed_at is not null,
 	case when coalesce(s.sealed, 'off') = 'off' and json_typeof(t.snapshot -> 'history' -> 0 -> 'parts') = 'array' then
 		(select left(p ->> 'text', ` + "160" + `) from json_array_elements(t.snapshot -> 'history' -> 0 -> 'parts') p
 		  where p ->> 'text' is not null limit 1) end`
@@ -71,7 +75,7 @@ func scanTask(row pgx.Row, extra ...any) (*taskView, error) {
 		sealed string
 	)
 	dst := append([]any{&id, &v.Service, &v.Kind, &v.State, &v.Caller, &buyer, &v.Via, &v.ContextID, &v.CreatedAt,
-		&v.StatusAt, &v.TerminalAt, &v.RetentionUntil, &v.Version, &sealed, &v.Retention, &v.Console, &v.Summary}, extra...)
+		&v.StatusAt, &v.TerminalAt, &v.RetentionUntil, &v.Version, &sealed, &v.Retention, &v.Console, &v.Exposed, &v.Summary}, extra...)
 	if err := row.Scan(dst...); err != nil {
 		return nil, err
 	}
@@ -89,10 +93,17 @@ func scanTask(row pgx.Row, extra ...any) (*taskView, error) {
 var terminalStates = map[string]bool{"completed": true, "failed": true, "canceled": true, "rejected": true}
 
 // actionsOf is what the console may do on a task (design §5): only on an A2A task it started, of a service that is not
-// sealed: reply while it waits at input-required, cancel while it has not ended, continue once it has.
+// sealed: reply while it waits at input-required, cancel while it has not ended, continue once it has. A provisional
+// record (D362) is no task its caller may name: nothing until it ends, then continue (a new message in its context).
 func actionsOf(v *taskView) []string {
 	out := []string{}
 	if !v.Console || v.Kind != "a2a" || v.Sealed {
+		return out
+	}
+	if !v.Exposed {
+		if terminalStates[v.State] {
+			out = append(out, "continue")
+		}
 		return out
 	}
 	switch {
@@ -145,7 +156,7 @@ func (c *Console) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := c.d.DB.Query(ctx, `select `+taskColumns+taskFrom+`
 		where ($1::text = '' or t.service = $1) and ($2::text = '' or t.state = $2) and ($3::text = '' or t.protocol = $3)
-		  and ($4::uuid is null or t.id < $4)
+		  and ($4::uuid is null or t.id < $4) and t.exposed_at is not null -- D362: a message-only interaction is no task
 		order by t.id desc limit $5`, q.Get("service"), q.Get("state"), kind, before, limit+1)
 	if err != nil {
 		c.answer(w, r, nil, err)
@@ -258,7 +269,10 @@ func afterOf(r *http.Request) (int64, error) {
 // eventFrame is one SSE event: id its seq, event its kind, data {seq, kind, at, stored_apart, origin, caller_type,
 // validation, payload} with the stored payload as it is (on one line): where it came from, the A2A object the caller
 // received for it, and whether it is valid A2A 1.0 (D357, D359, D360).
-func eventFrame(ev store.Event) []byte {
+//
+// exposed is whether the event's record is exposed (D362): a provisional record's events carry no task_id, and their
+// caller_type is what the caller got, the callee's Message for the end of a message-only interaction and nothing else.
+func eventFrame(ev store.Event, exposed bool) []byte {
 	payload := []byte(ev.Payload)
 	if bytes.ContainsAny(payload, "\r\n") {
 		var b bytes.Buffer
@@ -267,6 +281,9 @@ func eventFrame(ev store.Event) []byte {
 		}
 	}
 	it := newEventItem(ev)
+	if !exposed {
+		it.provisional()
+	}
 	head, _ := json.Marshal(map[string]any{"seq": ev.Seq, "kind": string(ev.Kind), "at": ev.CreatedAt.UTC().Format(time.RFC3339Nano),
 		"stored_apart": ev.PayloadRef != "", "task_id": it.TaskID, "origin": it.Origin, "caller_type": it.CallerType,
 		"validation": it.Validation})
@@ -331,8 +348,15 @@ func (c *Console) taskEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		exposed := true
+		if len(evs) > 0 {
+			// Read after the rows: a record exposed by one of them shows exposed (D362).
+			if cur, err := c.d.Log.Load(ctx, id); err == nil && cur != nil {
+				exposed = cur.ExposedAt != nil
+			}
+		}
 		for _, ev := range evs {
-			if !write(eventFrame(ev)) {
+			if !write(eventFrame(ev, exposed)) {
 				return
 			}
 			last = ev.Seq

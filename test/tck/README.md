@@ -34,8 +34,7 @@ logged). Gate on the exit status, not on the TCK's percentages (a2a-tck#234).
 - [`expected-failures.txt`](expected-failures.txt): every test that does not pass, failures and skips alike, with its
   reason (an a2a-tck issue or a decision), per variant (`[direct tunnel caddy]`, `[auth]`) and binding. An expected
   skip is a line `skip <node id>  # <reason>`. None is a gate defect: TCK bugs (a2a-tck#231, #242), a2a-go v2.7.0's
-  (D7: SendMessage's `historyLength`, a body read whatever its Content-Type), D5 (a seller's Message is answered as a
-  task), D20 (the anonymous principal is refused ListTasks and push configs; the TCK sends no credential,
+  (D7: SendMessage's `historyLength`, a body read whatever its Content-Type), D20 (the anonymous principal is refused ListTasks and push configs; the TCK sends no credential,
   a2a-tck#163), and the errors the gate's card rules out (it pushes and streams, D16, D52; no extended card, D52).
 - [`kontra_xfail.py`](kontra_xfail.py): a pytest plugin, loaded into the TCK's pytest with `-p kontra_xfail` and
   `PYTHONPATH` naming this directory, `TCK_EXPECTED_FAILURES` naming the file and `TCK_VARIANT` the variant. It

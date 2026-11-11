@@ -332,6 +332,9 @@ func (r *run) run(ctx context.Context) (lifecycle.PushResult, error) {
 		return r.result(StoppedTerminal), nil
 	}
 	r.beat(ctx)
+	if stopped, err := r.awaitExposure(ctx, wake); err != nil || stopped != "" {
+		return r.result(stopped), err
+	}
 	for {
 		evs, _, err := r.d.log.EventsWithin(ctx, r.taskID, f.Seq(), readBatch, r.d.opts.ReadBytes)
 		if err != nil {
@@ -400,6 +403,35 @@ func (r *run) run(ctx context.Context) (lifecycle.PushResult, error) {
 				return lifecycle.PushResult{}, errStopping
 			default:
 			}
+		}
+	}
+}
+
+// awaitExposure holds the delivery until the task is exposed (D362): nothing is delivered for a provisional record,
+// a new message whose callee has not answered with a task. A record that ends unexposed (the callee answered with a
+// Message) never will be: its configs are deleted, since they hold credentials and nothing would ever reach them,
+// and the activity stops as for a deleted config.
+func (r *run) awaitExposure(ctx context.Context, wake <-chan struct{}) (string, error) {
+	for {
+		var exposed, ended bool
+		err := r.d.log.DB().QueryRow(ctx, `select exposed_at is not null, terminal_at is not null from kontra.tasks where id = $1`,
+			r.taskID).Scan(&exposed, &ended)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return StoppedDeleted, nil // the task is gone, and its configs with it
+		case err != nil:
+			return "", r.ctxErr(ctx, fmt.Errorf("push_webhook: read the exposure of task %s: %w", r.taskID, err))
+		case exposed:
+			return "", nil
+		case ended:
+			if _, err := r.d.log.DB().Exec(ctx, `delete from kontra.push_configs p using kontra.tasks t
+				where p.task_id = $1 and t.id = p.task_id and t.exposed_at is null and t.terminal_at is not null`, r.taskID); err != nil {
+				return "", r.ctxErr(ctx, fmt.Errorf("push_webhook: delete the configs of message-only task %s: %w", r.taskID, err))
+			}
+			return StoppedDeleted, nil
+		}
+		if err := r.idle(ctx, wake); err != nil {
+			return "", err
 		}
 	}
 }

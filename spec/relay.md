@@ -473,6 +473,14 @@ enforces its own modes (D14).
 - **Task ids** are minted by the gate, UUIDv7. A caller can never choose one (spec §3.4.1). A message naming
   an unknown `taskId`, a task the principal may not see, or anything that does not parse as a UUID (checked
   before any query) is `TaskNotFoundError` (`-32001`; MCP `-32602`).
+- **Provisional records** (D362). The gate records every accepted message as a task row at admission, but a new
+  message's row is provisional (`tasks.exposed_at` null) while the caller awaits the answer: no caller method sees
+  it (`GetTask`, `ListTasks`, `SubscribeToTask`, `CancelTask`, follow-ups and the push config methods answer
+  `TaskNotFoundError`, as for an unknown id), and its id is never sent. It is **exposed**, in the transaction of
+  the event that causes it, when the callee answers with a `Task` or a task event, when a gate-written status ends
+  or answers the turn first (a failure after retries, a timeout, a cancel), or at admission when the caller asked
+  `returnImmediately: true` or the task is a `/mcp` `hire`'s (§12). A row the callee answers with a `Message`
+  stays provisional for good: the caller receives that `Message` (§6.3).
 - **Context ids.** A `contextId` supplied by the caller on a message without `taskId` is kept verbatim (spec
   §3.4.1: preserve or reject, never replace). Contexts are scoped by `(tenant_id, service, buyer_id,
   context_id)`: two buyers using the same string never share a context. Without one, the gate mints a
@@ -481,7 +489,9 @@ enforces its own modes (D14).
   first task of a gate context is sent without `contextId`; the context id the upstream answers with is
   recorded on the attempt. A later task in the same gate context carries that recorded id only when it is
   dispatched to the same tunnel session or the same direct backend; otherwise it carries none. So two
-  buyers' identical strings never meet at a stateful seller either (D3, D53).
+  buyers' identical strings never meet at a stateful seller either (D3, D53). The context id of an upstream
+  `Message` answer is recorded the same way, on an attempt that then has no upstream task id, so a message-only
+  agent's context continues too (D362).
 - **Referenced tasks.** A caller's `referenceTaskIds` are replaced by the upstream ids of the caller's own
   tasks in the same gate context and backend, and dropped otherwise. In both bullets, an attempt is on the same
   direct backend only if it started after the service row last changed (`services.updated_at`): 0001 records no
@@ -684,7 +694,7 @@ over an `http.Client` whose dialer opens a tunnel stream (or the SSRF-safe diale
 | A `Task` (later, from polling, or the first one after a re-attach, §6.4) | The difference from the gate's projection: a `status` event if the status changed, an `artifact` event per new or grown artifact (`a2aevent.Recover` semantics). Nothing already in the log is logged twice. |
 | `statusUpdate` | `status`, ids rewritten. |
 | `artifactUpdate` | `artifact`, ids rewritten. A first chunk with `append: true` for an artifact the gate has not seen is logged with `append: false`; an empty artifact is dropped. |
-| A `Message` (no task) | A terminal `status` event: `completed`, with the upstream message (ids rewritten, `taskId` set to the gate task) as `status.message` (D5), its origin the callee's `Message` with `converted_to` `TaskStatusUpdateEvent` (§5.2, D357). The caller always gets a task. |
+| A `Message` (no task) | A terminal `status` event: `completed`, with the upstream message (ids rewritten, `taskId` set to the gate task) as `status.message` (D5), its origin the callee's `Message` with `converted_to` `TaskStatusUpdateEvent` (§5.2, D357). It leaves a provisional record unexposed (§4): the caller receives that `Message`, with the gate's `contextId` and no `taskId`, on a blocking `SendMessage`, a stream (§9) and a resend. Only a task already exposed (the caller asked `returnImmediately`, or an earlier answer was a task) ends `completed` carrying it (D362). |
 | A JSON-RPC/HTTP error **before** the first upstream task id | Depends on the error: see §6.4. |
 | A JSON-RPC/HTTP error **after** it | A terminal `status` event `failed` with a status message carrying the upstream error text. |
 | `rejected` / `failed` status | Logged as is; terminal; no retry. An upstream terminal status without a message gets a gate-written agent message naming the upstream state, so every relayed failure carries a message. |
@@ -915,8 +925,8 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
   `SendMessage` (§15) and no `/mcp` plain wait (§12.2); the re-attach's `resumed` status neither, unless its state
   ends the turn (D341).
 - **What a stream carries.** A2A streams carry only `task`, `status` and `artifact` rows: a task stream is a
-  `Task` followed by status and artifact updates (spec §3.1.2), and a `Message` in a stream would mean the
-  message-only pattern. `message`, `metadata` and the MCP kinds are never sent on A2A streams; their effect
+  `Task` followed by status and artifact updates (spec §3.1.2), and a `Message` in a stream is the message-only
+  pattern, sent only as a new message's one answer (below, D362). `message`, `metadata` and the MCP kinds are never sent on A2A streams; their effect
   shows in the next snapshot (GetTask, the resume snapshot, push).
 - **Framing.** One SSE event per carried row: `id: <seq>` then one line `data: <JSON>` (the JSON-RPC envelope
   `{"jsonrpc":"2.0","id":…,"result":<StreamResponse>}` on JSON-RPC, the bare `StreamResponse` on HTTP+JSON).
@@ -925,16 +935,22 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
 - **Errors before the stream.** Unknown task, terminal task without resume, version or extension errors are
   returned as ordinary JSON-RPC/HTTP errors **before** SSE headers are written (the TCK fails a `200` stream
   that carries an error).
-- **`SendStreamingMessage`, new task.** Admits and creates the task (as `SendMessage` does), then streams the
-  creation snapshot (`id: 1`) and every later carried row. It closes after the first row whose state is
-  terminal or `input-required`.
+- **`SendStreamingMessage`, new task.** Admits and creates the task (as `SendMessage` does). Its record is
+  provisional (§4, D362), and the stream sends nothing but keep-alives until the callee's first answer. When the
+  record is exposed while the stream waits, the first event is the task snapshot at that version, with its seq as
+  its `id:`, then every later carried row; a record already exposed when the stream starts (a callee that answered
+  first) streams the creation snapshot (`id: 1`) and every
+  later carried row. When the callee answers with a `Message`, the stream's one event is that `Message` (the
+  gate's `contextId`, no `taskId`, no `id:` line) and the stream closes. Otherwise it closes after the first row
+  whose state is terminal or `input-required`.
 - **`SendStreamingMessage`, follow-up** (to an `input-required` task). The first event is the task snapshot
   at the version V current when the `kontra.message` Update was accepted, sent without an `id:` line; then
   rows with seq > V. The leading snapshot never closes the stream; it closes after the first row with
   seq > V whose state is terminal or `input-required`.
 - **`SendStreamingMessage`, resend** (no `taskId`, answered with the task it repeats, §15). The snapshot at the
   task's current version without an `id:` line; the stream closes after it if it already ends a turn, and
-  otherwise after the first later row that does (D108).
+  otherwise after the first later row that does (D108). A resend of a record still provisional waits as a new
+  message's stream does, and one answered with a `Message` is that `Message` (D362).
 - **`SubscribeToTask` without `Last-Event-ID`.** Terminal task: `UnsupportedOperationError` (spec §3.1.6; TCK
   `STREAM-SUB-003`). Otherwise the current snapshot as a `Task` event **without** an `id:` line, then every
   carried row with seq greater than the snapshot's version. The stream stays open through `input-required`
@@ -954,7 +970,9 @@ reads `Last-Event-ID`, which is why the gate cannot use it here.
   the task.
 
 Non-streaming `SendMessage` returns on the first terminal, `input-required` or `auth-required` state (A2A
-§3.1.1), or at once with `returnImmediately: true` (the `submitted` snapshot), as a2a-go does; a blocking call
+§3.1.1), or at once with `returnImmediately: true` (the `submitted` snapshot), as a2a-go does; a new message whose
+callee answered with a `Message` returns that `Message`, with the gate's `contextId` and no `taskId` (D362), and a
+resend of it returns the same `Message` without dispatching anything; a blocking call
 is bounded only by the task's deadline and the caller's own connection (§15). A resend (no `taskId`, answered with
 the task it repeats, §15) whose task stands at `input-required` or `auth-required` is answered at once with
 the task as it stands, since the turn it repeats is over (D108, D290). A resend of a terminal task is answered with it once the
@@ -974,7 +992,10 @@ on each turn neither duplicates rows nor starts a second delivery. At most 10 co
 delivering configs per buyer; beyond that, `InvalidParams`. The `anonymous` principal cannot set push
 configs (§2.3). The upstream's own push configs are never used: the gate is the agent's only client. A
 config set on a task that has already ended starts at its terminal row: it is
-stored, listed and deletable, receives nothing, and does not count as delivering (D111).
+stored, listed and deletable, receives nothing, and does not count as delivering (D111). An inline config on a
+new message receives nothing while its record is provisional (§4): delivery starts at exposure, and a record the
+callee answers with a `Message` is never exposed, so its configs are deleted when it ends (they hold credentials,
+and nothing would reach them; D362).
 
 ### 10.2 Delivery
 
@@ -2278,8 +2299,8 @@ This section records the implementation plan the M0 probes support. It is not no
 | `taskstore.Store` | Postgres store (§5.2). Owner scoping from `CallContext.User` (the principal's `buyer_id`); `List` scoped to `(tenant, service, buyer)`, ordered by `status_at`, with a2a-go's page-token shape; versions start at 1; `PrevVersion == 0` refused; writes on `context.WithoutCancel`. A per-process registry of running dispatches records every terminal event the relay executor yields for `(task, n)`; while a dispatch is registered, a `failed` write without a status message that the registry does not hold as relay-emitted (a2a-go's own `SetTaskFailed`, on any of its error paths, which never carries one; the relay's failures always do, D93) is refused, and the dispatch returns its outcome from the registry (`retryable`, `tunnel_lost`, `interrupted`, or `context_lost`, which for a direct backend triggers the re-attach of §6.4; a handler or executor error that is not a lost upstream context is `upstream_error`, §6.4); the workflow writes any terminal event through `write_terminal` (D8). |
 | `eventqueue.Puller` | Postgres puller: created at the log's tail (`max(seq)` when the reader is created, because a2a-go always passes a nil first cursor), long-polls on `LISTEN`, skips `message` rows with `role = ROLE_USER` and `metadata` rows (a2a-go's reader stops at the first final event and would otherwise return the caller's own message), returns `eventqueue.Message{Event, TaskVersion: seq}`. Behind `eventqueue.NewPullQueueManager` with `PollInterval` 100 ms and `InactivityTimeout` 0 (the puller already polls), so a blocking `SendMessage` on a quiet task keeps waiting. |
 | `workqueue.Queue` | `workqueue.NewPushQueue(kontraWrite)`. `kontraWrite` for a new task pre-creates the gate task (gate ids, `submitted`), stores the sanitized payload in `work_items`, calls `UpdateWithStart` (`kontra.message`) on `TaskLifecycle`, and sets `payload.TaskID`; a resend (same principal, service and `messageId`, the same request hash (below), the first task younger than 24 h) is answered with the existing task and re-issues the start (§14.5); a reused `messageId` with a different request is a new task (the TCK reuses message ids). For a follow-up it stores the work item and sends the `kontra.message` Update; a refusal becomes `UnsupportedOperationError` and deletes the work item, and an Update not accepted within 10 s becomes `-32603` (HTTP `503`) and keeps it (§14.1, D66). The returned `HandlerFn` is what the `dispatch` activity calls, with a heartbeater attached (`workqueue.AttachHeartbeater`, 5 s); the activity's context reaches the executor, so `abort` stops it. The handler's concurrency limiter is off; the Temporal worker's activity slots bound concurrency. |
-| `AgentExecutor` | The relay executor (§6.2–§6.4): never yields a `Task` (the gate task exists), never yields a bare `Message`, rewrites ids deeply, strips Kontra's keys, emits explicit terminal events. |
-| `a2asrv.NewHandler(…, WithClusterMode(…))` | One handler per service, built on first use and cached, with `WithPushNotifications(pgPushConfigStore, noopSender)` (push is the lifecycle's, §10) and call interceptors for authentication, admission, the follow-up state checks of §7 (a message to an ended task is refused there, so a2a-go never sees it), cancel (§8) and inline push configs (§10.1). A blocking `SendMessage` that a2a-go answers "queue is closed" (a turn that ended before its subscription read the store) gets the stored task (D121). |
+| `AgentExecutor` | The relay executor (§6.2–§6.4): never yields a `Task` (the gate task exists), never yields a bare `Message` (an upstream one is the completed status of §6.3, which the interceptors turn back into the caller's `Message`, D362), rewrites ids deeply, strips Kontra's keys, emits explicit terminal events. |
+| `a2asrv.NewHandler(…, WithClusterMode(…))` | One handler per service, built on first use and cached, with `WithPushNotifications(pgPushConfigStore, noopSender)` (push is the lifecycle's, §10) and call interceptors for authentication, admission, the follow-up state checks of §7 (a message to an ended task is refused there, so a2a-go never sees it), cancel (§8) and inline push configs (§10.1). A blocking `SendMessage` that a2a-go answers "queue is closed" (a turn that ended before its subscription read the store) gets the stored task (D121). The same interceptor answers a new message whose record ended provisional with the callee's `Message` instead of the task (D362): a call interceptor may answer `SendMessage` with a bare `Message` on both bindings, so a2a-go's path is kept and only the answer changes. `GetTask` and the push config methods are checked for exposure there first, since a2a-go's own reads of the store (which a dispatch needs) do not filter. |
 | transports | `NewJSONRPCHandler` and `NewRESTHandler` behind the middleware of §2.2–§2.5, except `SendStreamingMessage` and `SubscribeToTask`, which the gate's own SSE writer serves (§9). |
 | cards | Raw-JSON card producer (`AgentCardJSONProducer`); the gate's own JWS signer (§3), since a2a-go's `a2acrypto.Signer` has a fixed protected header. |
 | client | `a2aclient` with `WithJSONRPCTransport`/`WithRESTTransport` over an `http.Client` that dials tunnel streams, no client timeout (deadlines from the context), bodies read through byte limits (§6.6), HTTP/1.1 only; `a2av0` transports for 0.3 upstreams. |

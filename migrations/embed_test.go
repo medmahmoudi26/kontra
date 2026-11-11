@@ -8,7 +8,7 @@ import (
 )
 
 // The embedded set is exactly the files in this directory, numbered from 0001 with no gap (one per milestone that
-// changes the schema: 0001 M1, 0002 M3, 0003 M4, 0004 M5; then 0005 the tools of /mcp, D338; 0006 the local console and the A2A traffic record; 0007 the A2A wire), and each is a goose
+// changes the schema: 0001 M1, 0002 M3, 0003 M4, 0004 M5; then 0005 the tools of /mcp, D338; 0006 the local console and the A2A traffic record; 0007 the A2A wire; 0008 exposed tasks, D362), and each is a goose
 // single-file migration.
 func TestEmbeddedMigrations(t *testing.T) {
 	names, err := fs.Glob(FS, "*.sql")
@@ -18,7 +18,7 @@ func TestEmbeddedMigrations(t *testing.T) {
 	if len(names) == 0 || names[0] != "0001_init.sql" {
 		t.Fatalf("embedded migrations = %v, want 0001_init.sql first", names)
 	}
-	want := []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql"}
+	want := []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql"}
 	if len(names) != len(want) {
 		t.Fatalf("embedded migrations = %v, want %v", names, want)
 	}

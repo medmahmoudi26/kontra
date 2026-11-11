@@ -70,7 +70,7 @@ func listStates(ts a2a.TaskState) ([]string, error) {
 	return []string{string(st)}, nil
 }
 
-const listFilter = `t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3
+const listFilter = `t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.exposed_at is not null
 	and ($4::text is null or t.context_id = $4::text)
 	and ($5::text[] is null or t.state = any($5::text[]))
 	and ($6::timestamptz is null or t.status_at >= $6::timestamptz)`

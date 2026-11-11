@@ -66,7 +66,7 @@ func applied(t *testing.T, m *migrate.Migrator) []int64 {
 	return v
 }
 
-// `migrate up` on an empty database creates schema kontra and kontra.goose_db_version and applies 0001 to 0007, in
+// `migrate up` on an empty database creates schema kontra and kontra.goose_db_version and applies 0001 to 0008, in
 // order; nothing lands in public.
 func TestUpOnEmptyDatabase(t *testing.T) {
 	dsn := pgtest.Database(t)
@@ -81,10 +81,10 @@ func TestUpOnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 7 {
-		t.Fatalf("Up = %v, want 0001 to 0007 applied", res)
+	if len(res) != 8 {
+		t.Fatalf("Up = %v, want 0001 to 0008 applied", res)
 	}
-	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql"} {
+	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql"} {
 		r := res[i]
 		if r.Source.Version != int64(i+1) || r.Direction != "up" || r.Error != nil || r.Empty || !strings.HasSuffix(r.Source.Path, name) {
 			t.Errorf("Up[%d] = %v, want %s applied", i, r, name)
@@ -101,8 +101,8 @@ func TestUpOnEmptyDatabase(t *testing.T) {
 	if n := relations(t, c, "public"); n != 0 {
 		t.Errorf("%d relations in public, want 0 (D37)", n)
 	}
-	if got := applied(t, m); len(got) != 7 || got[0] != 1 || got[1] != 2 || got[2] != 3 || got[3] != 4 || got[4] != 5 || got[5] != 6 || got[6] != 7 {
-		t.Errorf("applied = %v, want [1 2 3 4 5 6 7]", got)
+	if got := applied(t, m); len(got) != 8 || got[0] != 1 || got[1] != 2 || got[2] != 3 || got[3] != 4 || got[4] != 5 || got[5] != 6 || got[6] != 7 || got[7] != 8 {
+		t.Errorf("applied = %v, want [1 2 3 4 5 6 7 8]", got)
 	}
 	if err := m.Check(ctx); err != nil {
 		t.Errorf("Check after up: %v", err)
@@ -122,12 +122,12 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st) != 7 {
-		t.Fatalf("Status on an empty database = %+v, want 0001 to 0007 pending", st)
+	if len(st) != 8 {
+		t.Fatalf("Status on an empty database = %+v, want 0001 to 0008 pending", st)
 	}
 	for i, s := range st {
 		if s.State != goose.StatePending || s.Source.Version != int64(i+1) {
-			t.Fatalf("Status on an empty database = %+v, want 0001 to 0007 pending", st)
+			t.Fatalf("Status on an empty database = %+v, want 0001 to 0008 pending", st)
 		}
 	}
 	if _, err := m.Up(ctx); err != nil {
@@ -137,8 +137,8 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql"} {
-		if len(st) != 7 || st[i].State != goose.StateApplied || st[i].AppliedAt.IsZero() || !strings.HasSuffix(st[i].Source.Path, name) {
+	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql"} {
+		if len(st) != 8 || st[i].State != goose.StateApplied || st[i].AppliedAt.IsZero() || !strings.HasSuffix(st[i].Source.Path, name) {
 			t.Fatalf("Status after up = %+v, want %s applied with a time", st, name)
 		}
 	}
@@ -159,8 +159,21 @@ func TestDownThenUp(t *testing.T) {
 	}
 	afterUp := relations(t, c, "kontra")
 
-	// 0007: its down drops the exchanges' frames, the callee leg, the bodies and the events' origins, and nothing else.
+	// 0008: its down drops tasks.exposed_at and makes tasks_by_caller whole again, and nothing else.
 	res, err := m.Down(ctx)
+	if err != nil || res.Source.Version != 8 || res.Direction != "down" {
+		t.Fatalf("0008's Down = %v, %v", res, err)
+	}
+	if scalar[bool](t, c, "select exists (select 1 from information_schema.columns where table_schema = 'kontra' and table_name = 'tasks' and column_name = 'exposed_at')") ||
+		scalar[bool](t, c, "select indexdef like '% WHERE %' from pg_indexes where schemaname = 'kontra' and indexname = 'tasks_by_caller'") {
+		t.Error("0008's down did not remove exposed_at and the partial tasks_by_caller")
+	}
+	if err := m.Check(ctx); !errors.Is(err, migrate.ErrSchemaNotCurrent) || !strings.Contains(err.Error(), "at version 7") {
+		t.Errorf("Check at version 7 = %v", err)
+	}
+
+	// 0007: its down drops the exchanges' frames, the callee leg, the bodies and the events' origins, and nothing else.
+	res, err = m.Down(ctx)
 	if err != nil || res.Source.Version != 7 || res.Direction != "down" {
 		t.Fatalf("0007's Down = %v, %v", res, err)
 	}
@@ -320,7 +333,7 @@ func TestDownThenUp(t *testing.T) {
 	}
 
 	res2, err := m.Up(ctx)
-	if err != nil || len(res2) != 7 {
+	if err != nil || len(res2) != 8 {
 		t.Fatalf("Up after down = %v, %v", res2, err)
 	}
 	if n := relations(t, c, "kontra"); n != afterUp {
@@ -347,10 +360,10 @@ func TestConcurrentUpAppliesOnce(t *testing.T) {
 		if errs[0] != nil || errs[1] != nil {
 			t.Fatalf("concurrent Up: %v / %v", errs[0], errs[1])
 		}
-		if n := len(results[0]) + len(results[1]); n != 7 {
-			t.Fatalf("concurrent Up applied %d migrations in total (%v, %v), want 7", n, results[0], results[1])
+		if n := len(results[0]) + len(results[1]); n != 8 {
+			t.Fatalf("concurrent Up applied %d migrations in total (%v, %v), want 8", n, results[0], results[1])
 		}
-		if got := applied(t, a); len(got) != 7 {
+		if got := applied(t, a); len(got) != 8 {
 			t.Fatalf("applied = %v", got)
 		}
 	}
@@ -387,7 +400,7 @@ func TestUpWaitsForTheLock(t *testing.T) {
 	}
 	select {
 	case r := <-done:
-		if r.err != nil || len(r.res) != 7 {
+		if r.err != nil || len(r.res) != 8 {
 			t.Fatalf("Up after the lock was released = %v, %v", r.res, r.err)
 		}
 	case <-time.After(15 * time.Second):
@@ -395,7 +408,7 @@ func TestUpWaitsForTheLock(t *testing.T) {
 	}
 }
 
-// Check fails at version 0 and passes at 7, the latest; it is read-only, and it refuses a database ahead of
+// Check fails at version 0 and passes at 8, the latest; it is read-only, and it refuses a database ahead of
 // the binary.
 func TestCheck(t *testing.T) {
 	dsn := pgtest.Database(t)
@@ -410,16 +423,16 @@ func TestCheck(t *testing.T) {
 	if scalar[bool](t, c, "select exists (select 1 from pg_namespace where nspname = 'kontra')") {
 		t.Error("Check created schema kontra")
 	}
-	if m.Latest() != 7 {
-		t.Errorf("Latest = %d, want 7", m.Latest())
+	if m.Latest() != 8 {
+		t.Errorf("Latest = %d, want 8", m.Latest())
 	}
 	if _, err := m.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Check(ctx); err != nil {
-		t.Errorf("Check at version 7 = %v", err)
+		t.Errorf("Check at version 8 = %v", err)
 	}
-	if _, err := c.Exec(ctx, "insert into kontra.goose_db_version (version_id, is_applied) values (8, true)"); err != nil {
+	if _, err := c.Exec(ctx, "insert into kontra.goose_db_version (version_id, is_applied) values (9, true)"); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Check(ctx); !errors.Is(err, migrate.ErrSchemaNotCurrent) || !strings.Contains(err.Error(), "does not know") {
@@ -458,13 +471,13 @@ func TestM4ScansTasksOnce(t *testing.T) {
 	if _, err := m.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for range 5 { // 0007, 0006, 0005, 0004, then 0003
+	for range 6 { // 0008, 0007, 0006, 0005, 0004, then 0003
 		if _, err := m.Down(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got := applied(t, m); len(got) != 2 || got[1] != 2 {
-		t.Fatalf("applied after five downs = %v, want [1 2]", got)
+		t.Fatalf("applied after six downs = %v, want [1 2]", got)
 	}
 	b, err := fs.ReadFile(migrations.FS, "0003_m4.sql")
 	if err != nil {
