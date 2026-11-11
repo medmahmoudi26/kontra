@@ -773,6 +773,9 @@ func TestProxyProtocol(t *testing.T) {
 		if err != nil || got != tc.want {
 			t.Errorf("%s: client %q (%v), want %s", tc.name, got, err, tc.want)
 		}
+		// The server releases a closed connection's slot on its own time, and IPv6 is counted per /64 (the two
+		// tcp6 cases share one under conns_per_ip 1): each case starts once the last one's slot is back.
+		waitOpen(t, s, 0)
 	}
 	waitOpen(t, s, 0)
 	// A malformed header closes the connection.
