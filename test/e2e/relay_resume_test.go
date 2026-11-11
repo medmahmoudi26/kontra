@@ -51,8 +51,10 @@ func TestRelayResume(t *testing.T) {
 	if err := s1.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if *got1[0].ID != 1 || got1[0].Kind != "task" {
-		t.Fatalf("a new task's stream starts with the creation snapshot at id 1, got id %d %s", *got1[0].ID, got1[0].Kind)
+	if *got1[0].ID < 1 || got1[0].Kind != "task" {
+		// D362: the snapshot once the seller's first answer exposed the task, with its seq as its id (or the creation
+		// row, id 1, when the seller answered before the stream began).
+		t.Fatalf("a new task's stream starts with a task snapshot with its id, got id %d %s", *got1[0].ID, got1[0].Kind)
 	}
 	checkStrictlyIncreasing(t, "stream 1", ids(got1))
 	K := *got1[len(got1)-1].ID

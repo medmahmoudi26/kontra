@@ -121,9 +121,25 @@ func checkCarried(t *testing.T, h *Harness, taskID a2a.TaskID, got []int64) {
 		t.Fatal(err)
 	}
 	checkStrictlyIncreasing(t, "the buyer's ids", got)
+	// A new task's stream leads with the snapshot at its exposure, with that seq as its id (D362): the rows before it
+	// are in that snapshot, not sent one by one.
+	for len(got) > 0 && len(want) > 0 && want[0] < got[0] {
+		want = want[1:]
+	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("the buyer's ids are not the log's carried seqs:\n got %v\nwant %v", got, want)
 	}
+}
+
+// taskOfMessage is the gate's record of a buyer's message, by its messageId: a new message's stream sends nothing
+// until the seller's first answer (D362), so a test that acts before that answer finds the record here.
+func taskOfMessage(t *testing.T, ctx context.Context, h *Harness, messageID string) a2a.TaskID {
+	t.Helper()
+	var id string
+	eventually(t, 30*time.Second, "the gate records the message", func() bool {
+		return h.Pool.QueryRow(ctx, `select id::text from kontra.tasks where first_message_id = $1`, messageID).Scan(&id) == nil
+	})
+	return a2a.TaskID(id)
 }
 
 // canonical is a task as JSON, for comparisons.
