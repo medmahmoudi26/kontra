@@ -380,6 +380,9 @@ td.wrap{white-space:normal;overflow-wrap:anywhere}
 .wire-callee{background:var(--ok-soft);border-color:transparent;color:var(--ok)}
 .wire-gate{background:var(--warn-soft);border-color:transparent;color:var(--warn)}
 .msg .by .wire{margin-left:auto}
+.wire .party{font-weight:700}
+.wire .ty{font-weight:400;opacity:.72;font-size:10px}
+.idrow .leg{font-family:var(--mono);font-size:11px;color:var(--ink-3);white-space:nowrap}
 .idrow{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;font-size:12px;min-width:0}
 .idrow b{color:var(--ink-3);font-weight:600;min-width:7.5em}
 .idrow .mono{font-family:var(--mono);overflow-wrap:anywhere;min-width:0}

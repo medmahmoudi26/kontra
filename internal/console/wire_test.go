@@ -146,6 +146,9 @@ func TestContexts(t *testing.T) {
 		}
 	}
 	tl := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/ctx-g/timeline", e.buyer), "", 200)
+	if tl["principal"] != "anonymous" { // the console labels the context's items by this name
+		t.Errorf("timeline principal %v", tl["principal"])
+	}
 	if op := tl["opening"].(map[string]any); op["assigned"] != true || op["task_id"] != a.String() {
 		t.Errorf("opening %v", op)
 	}

@@ -389,6 +389,14 @@ func (c *Console) contextTimeline(w http.ResponseWriter, r *http.Request) {
 		c.answer(w, r, nil, err)
 		return
 	}
+	// The principal that called, by name, for the console's labels: its latest interaction's (one caller id may be
+	// several principals only for anonymous ones, which all read "anonymous").
+	var principal string
+	if err := c.d.DB.QueryRow(ctx, `select principal from kontra.tasks where id = any($1) order by created_at desc limit 1`,
+		tasks).Scan(&principal); err != nil && !isNoRows(err) {
+		c.answer(w, r, nil, err)
+		return
+	}
 	hidden, err := c.provisional(ctx, tasks)
 	if err != nil {
 		c.answer(w, r, nil, err)
@@ -412,7 +420,7 @@ func (c *Console) contextTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 		cc.TaskIDs = kept
 	}
-	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": buyer.String(), "context_id": contextID,
+	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": buyer.String(), "principal": principal, "context_id": contextID,
 		"task_ids": ids, "opening": op, "callee_contexts": callee, "items": items, "more": more}, nil)
 }
 

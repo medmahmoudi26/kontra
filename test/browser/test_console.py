@@ -293,13 +293,13 @@ def test_thread_labels_every_item(stack: Stack, page: Page) -> None:
         1 for x in stack.api("GET", f"/v1/exchanges?task={task}&method=GetTask&leg=caller")["items"]) >= 2)
     page.goto(stack.base + f"/#/t/{task}")
     expect(page.locator("#thread")).to_contain_text("hello wire", timeout=15000)
-    eventually("the timeline has the GetTask calls", lambda: timeline(page).count("Caller · GetTask") >= 2, within=15)
+    eventually("the timeline has the GetTask calls", lambda: timeline(page).count("anonymous · GetTask") >= 2, within=15)
     labels = timeline(page)
-    assert labels[0] == "Caller · SendMessage", labels
-    assert "Callee · Task" in labels, labels
-    expect(page.locator('#eventlog .tl-row[data-wire="Callee · Task"] .conv').first).to_contain_text(
-        re.compile(r"the caller received a Task(Status|Artifact)UpdateEvent \(converted by the gate\)"))
-    expect(page.locator('#eventlog .tl-row[data-wire="Caller · SendMessage"] .conv')).to_contain_text("the caller received a Task")
+    assert labels[0] == "anonymous · SendMessage", labels
+    assert "notes · Task" in labels, labels
+    expect(page.locator('#eventlog .tl-row[data-wire="notes · Task"] .conv').first).to_contain_text(
+        re.compile(r"anonymous received a Task(Status|Artifact)UpdateEvent \(converted by the gate\)"))
+    expect(page.locator('#eventlog .tl-row[data-wire="anonymous · SendMessage"] .conv')).to_contain_text("anonymous received a Task")
     expect(page.locator("#eventlog .vmark.ok").first).to_be_visible()
     assert page.locator("#thread [data-wire]").count() > 0, "no card carries an A2A label"
     row = page.locator('#ctxfoot [data-id="taskId"]')
@@ -314,7 +314,7 @@ def test_thread_labels_every_item(stack: Stack, page: Page) -> None:
 def test_message_answer_passes_through(stack: Stack, page: Page) -> None:
     """D362: an agent that answers with a bare Message. A stock client's blocking SendMessage receives that Message,
     with the gate's contextId and no taskId; the interaction is in no Tasks list, and its context's timeline shows
-    Caller · SendMessage and Callee · Message, the caller having received the Message as it was sent."""
+    anonymous · SendMessage and notes · Message, anonymous having received the Message as it was sent."""
     code, got = stack.a2a("notes", "SendMessage", {"message": {"messageId": str(uuid.uuid4()), "role": "ROLE_USER",
                                                                "parts": [{"text": "message only"}]}})
     assert code == 200 and "message" in got["result"], got
@@ -327,9 +327,9 @@ def test_message_answer_passes_through(stack: Stack, page: Page) -> None:
     page.goto(stack.base + f"/#/c/notes/{conv['caller']}/{ctx}")
     rows = page.locator("#ctxtimeline .tl-row")
     expect(rows.nth(1)).to_be_visible(timeout=15000)
-    assert rows.evaluate_all("rs => rs.map(r => r.dataset.wire)") == ["Caller · SendMessage", "Callee · Message"]
-    answer = page.locator('#ctxtimeline .tl-row[data-wire="Callee · Message"] .conv')
-    expect(answer).to_have_text("the caller received a Message")
+    assert rows.evaluate_all("rs => rs.map(r => r.dataset.wire)") == ["anonymous · SendMessage", "notes · Message"]
+    answer = page.locator('#ctxtimeline .tl-row[data-wire="notes · Message"] .conv')
+    expect(answer).to_have_text("anonymous received a Message")
     expect(page.locator("#ctxtasks tbody tr")).to_have_count(0)
     expect(page.locator('#ctxtimeline a[href^="#/t/"]')).to_have_count(0)
     no_trouble(page)
@@ -337,7 +337,7 @@ def test_message_answer_passes_through(stack: Stack, page: Page) -> None:
 
 def test_console_prompt_message_answer(stack: Stack, page: Page) -> None:
     """D362: the console prompts with message:stream, as the A2A Inspector does, so a Message answer reaches it as it
-    reaches any client: the console's interaction shows Callee · Message, the caller (the console) having received
+    reaches any client: the console's interaction shows notes · Message, anonymous (the console's shared caller) having received
     that Message, and no task."""
     started = stack.api("POST", "/v1/tasks", {"service": "notes", "text": "message only"})
     eventually("the answer arrives", lambda: stack.state(started["task_id"]) == "completed")
@@ -345,9 +345,9 @@ def test_console_prompt_message_answer(stack: Stack, page: Page) -> None:
     assert view["exposed"] is False and view["actions"] == ["continue"], view
     page.goto(stack.base + f"/#/t/{started['task_id']}")
     expect(page.locator("#thread")).to_contain_text("A plain answer.", timeout=15000)
-    eventually("the Message is labelled", lambda: "Callee · Message" in timeline(page), within=15)
-    row = page.locator('#eventlog .tl-row[data-wire="Callee · Message"] .conv')
-    expect(row).to_have_text("the caller received a Message")
+    eventually("the Message is labelled", lambda: "notes · Message" in timeline(page), within=15)
+    row = page.locator('#eventlog .tl-row[data-wire="notes · Message"] .conv')
+    expect(row).to_have_text("anonymous received a Message")
     no_trouble(page)
 
 
@@ -366,13 +366,15 @@ def test_contexts_page(stack: Stack, page: Page) -> None:
     page.goto(stack.base + "/")
     expect(page.locator(f'[data-context="{ctx}"]')).to_be_visible(timeout=15000)
     page.goto(stack.base + f"/#/c/notes/{caller}/{ctx}")
-    expect(page.locator('#ctxopening [data-opening="caller"]')).to_contain_text("contextId sent by the caller", timeout=15000)
+    expect(page.locator('#ctxopening [data-opening="caller"]')).to_contain_text("contextId sent by anonymous", timeout=15000)
     expect(page.locator("#ctxopening [data-callee]")).to_have_count(1)
+    expect(page.locator("#ctxopening [data-callee]")).to_have_attribute("data-leg", "gate → notes")
+    expect(page.locator('#ctxopening [data-opening="caller"] [data-id="contextId"]')).to_have_attribute("data-leg", "anonymous → gate")
     expect(page.locator("#ctxtasks tbody tr")).to_have_count(2)
     rows = page.locator("#ctxtimeline .tl-row")
     expect(rows.first).to_be_visible()
-    assert rows.evaluate_all("rs => rs.map(r => r.dataset.wire)").count("Caller · SendMessage") == 2
-    refine = page.locator('#ctxtimeline .tl-row[data-wire="Caller · SendMessage"]').nth(1)
+    assert rows.evaluate_all("rs => rs.map(r => r.dataset.wire)").count("anonymous · SendMessage") == 2
+    refine = page.locator('#ctxtimeline .tl-row[data-wire="anonymous · SendMessage"]').nth(1)
     expect(refine.locator('[data-id="taskId"]')).to_contain_text("none")
     expect(refine.locator(f'a[href="#/t/{first}"]')).to_have_text(first)
     # A message with no contextId: the gate assigned one.
@@ -403,7 +405,7 @@ def test_traffic_and_exchange(stack: Stack, page: Page) -> None:
     page.locator("#failedonly").click()
     send = next(x for x in stack.api("GET", f"/v1/exchanges?task={task}&leg=caller&method=SendMessage")["items"])
     page.goto(stack.base + f"/#/x/{send['id']}")
-    expect(page.locator("#exchangetitle")).to_have_text("Caller · SendMessage", timeout=15000)
+    expect(page.locator("#exchangetitle")).to_have_text("anonymous · SendMessage", timeout=15000)
     expect(page.locator("#exchangerequest")).to_contain_text('"text": "traffic"')
     expect(page.locator("#exchangerequest .vmark.ok")).to_be_visible()
     expect(page.locator("#exchangeresponse .vmark.ok")).to_be_visible()

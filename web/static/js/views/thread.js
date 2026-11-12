@@ -35,7 +35,7 @@ import { CATALOGS, FormBook, actionMessage, actionReply, answerOf, formReply, su
 import { collect, formSpec, refusal } from "../agentschema.js";
 import { answeredValues, fulfilledValues, normalizeForm, requestedForm, valueRows } from "../agentstack.js";
 import { agentForm } from "../agentform.js";
-import { gate, offers } from "../app.js";
+import { gate, offers, partiesOf } from "../app.js";
 import { GateError, errorFrom } from "../api.js";
 import { $, errorText, fill, h, icon, toast } from "../dom.js";
 import { fieldNode } from "../formfields.js";
@@ -47,7 +47,7 @@ import { VIA_WORDS, failure, isTerminal, serviceAvatar, shortId, stateChip, when
 import { dataView, fileRow, sealedRow, textView } from "./outputs.js";
 import { requestCard, requestRow, requestRows } from "./request.js";
 import { ap2Card } from "./ap2.js";
-import { idRow as wireIdRow, labelChip, openingNodes, timelineRow } from "./wire.js";
+import { idRow as wireIdRow, labelChip, legOf, openingNodes, timelineRow } from "./wire.js";
 
 const TASK_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -248,6 +248,8 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     resultCount: 0,
     metaKey: { composer: null },
   };
+  /** The two parties of this task by name (the principal that called, the service), for every label. */
+  const parties = () => partiesOf(P.t && P.t.caller, P.t && P.t.service);
 
   // ---- The column: the cards, then the composer.
   const list = h("div", { class: "stack", id: "messages" });
@@ -258,7 +260,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const againSlot = h("div", { class: "stack" });
   tail.append(composerSlot, againSlot);
   const head = from
-    ? h("p", { class: "small", id: "continues" }, ["Continues ", h("a", { href: `#/t/${from}`, text: shortId(from) })])
+    ? h("p", { class: "small", id: "continues" }, ["Continues ", h("a", { href: `#/t/${from}`, title: from, text: shortId(from) })])
     : null;
   fill(root, [head, list, tail]);
   const scroller = root.closest(".thread-scroll");
@@ -467,11 +469,11 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     const tl = P.timeline;
     const ctxHref = t.context_id && t.caller_id ? `#/c/${encodeURIComponent(t.service)}/${encodeURIComponent(t.caller_id)}/${encodeURIComponent(t.context_id)}` : null;
     fill(footTerms, [
-      wireIdRow("taskId", t.task_id),
-      t.context_id ? wireIdRow("contextId", t.context_id, { href: ctxHref }) : null,
-      ...(tl ? openingNodes(null, (tl.callee_contexts || []).filter((c) => (c.task_ids || []).includes(t.task_id))) : []),
+      wireIdRow("taskId", t.task_id, { leg: legOf(parties(), false) }),
+      t.context_id ? wireIdRow("contextId", t.context_id, { href: ctxHref, leg: legOf(parties(), false) }) : null,
+      ...(tl ? openingNodes(null, (tl.callee_contexts || []).filter((c) => (c.task_ids || []).includes(t.task_id)), parties()) : []),
       tl && tl.opening && tl.opening.task_id === t.task_id ? h("p", { class: "small muted", id: "ctxopened",
-        text: tl.opening.assigned === true ? "This task opened its context: the gate assigned the contextId." : tl.opening.assigned === false ? "This task opened its context: the caller sent the contextId." : "" }) : null,
+        text: tl.opening.assigned === true ? "This task opened its context: the gate assigned the contextId." : tl.opening.assigned === false ? `This task opened its context: ${parties().principal || "the principal"} sent the contextId.` : "" }) : null,
       h("div", { class: "tr" }, [h("b", { text: "started" }), h("span", { text: when(t.created_at) })]),
       h("div", { class: "tr" }, [h("b", { text: "duration" }), h("span", { id: "ctxduration", text: "" })]),
       h("div", { class: "tr" }, [h("b", { text: "caller" }), h("span", { text: [t.caller, VIA_WORDS[t.via] || t.via].filter(Boolean).join(" · ") || "—" })]),
@@ -482,7 +484,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const runRow = (item, current) => {
     const [w, c] = stateChip(item.state);
     const said = runSummary(item.summary);
-    const row = h("a", { class: "ctxrun", href: `#/t/${item.task_id}`, dataset: { task: item.task_id }, title: item.summary || shortId(item.task_id) }, [
+    const row = h("a", { class: "ctxrun", href: `#/t/${item.task_id}`, dataset: { task: item.task_id }, title: item.summary ? `${item.summary} (${item.task_id})` : item.task_id }, [
       h("span", { class: `jchip ${c}`, text: w }),
       h("span", { class: "minw0", text: said ? said.slice(0, 40) : shortId(item.task_id) }),
       h("span", { class: "id", text: hm(item.created_at) }),
@@ -532,7 +534,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   };
   const logLine = (ev) => {
     P.events += 1;
-    timelineItem(timelineRow({ ...ev, type: "event", task_id: P.taskId }), ev.at);
+    timelineItem(timelineRow({ ...ev, type: "event", task_id: P.taskId }, { parties: parties() }), ev.at);
   };
   /** The task's timeline: its exchanges that carried no event join the A2A timeline; its context's opening and the
    * callee's ids join the sidebar's ids. */
@@ -546,7 +548,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       P.timeline = tl;
       for (const it of Array.isArray(tl.items) ? tl.items : []) {
         if (it.type !== "exchange" || $(`[data-exchange="${it.id}"]`, log)) continue;
-        timelineItem(timelineRow(it), it.at);
+        timelineItem(timelineRow(it, { parties: parties() }), it.at);
       }
       footRows();
     } catch {
@@ -1467,7 +1469,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     P.lastEventAt = Date.now() < P.replayUntil && at ? Math.min(Date.now(), at) : Date.now();
     const d = describe(ev);
     logLine(ev);
-    P.wire = wireOf(ev);
+    P.wire = wireOf(ev, parties());
     try {
       onContent(ev, d);
     } finally {
