@@ -23,7 +23,7 @@ const said = (text) => (text.length > 60 ? `${text.slice(0, 59)}…` : text);
 export function taskRow(t) {
   return h("tr", { dataset: { task: t.task_id } }, [
     h("td", {}, [h("span", { class: "tag", text: t.kind || "a2a" })]),
-    h("td", {}, [t.kind === "a2a" || !t.kind ? h("a", { href: `#/run/${encodeURIComponent(t.service)}`, title: `Start a task on ${t.service}`, text: t.service }) : t.service]),
+    h("td", {}, [t.kind === "a2a" || !t.kind ? h("a", { href: `#/run/${encodeURIComponent(t.service)}`, title: `Send a message to ${t.service}`, text: t.service }) : t.service]),
     h("td", {}, [
       h("a", { href: `#/t/${t.task_id}`, title: t.summary || t.task_id, text: t.summary ? said(t.summary) : shortId(t.task_id) }),
       t.summary ? h("span", { class: "muted mono", title: t.task_id, text: ` ${shortId(t.task_id)}` }) : null,

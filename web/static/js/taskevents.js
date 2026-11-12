@@ -371,7 +371,7 @@ function idsOf(payload) {
 }
 
 /** The A2A members that place a caller's message (D360): its contextId, its taskId (null: it named
- * none, so the agent may answer it with a new task or a Message), and the tasks it refers to. */
+ * none, so the agent may answer it by creating a task or with a Message), and the tasks it refers to. */
 export function routingOf(m) {
   if (!isObj(m)) return null;
   return {

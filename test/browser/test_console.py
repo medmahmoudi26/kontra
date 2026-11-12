@@ -311,7 +311,7 @@ def test_cards_show_the_agents_cards(stack: Stack, page: Page) -> None:
     expect(notes.locator(".nm .v")).to_have_text("v1.0.0")
     expect(notes.locator(".skills .tag")).to_have_text(["Echo"])
     expect(notes).to_contain_text("http://127.0.0.1")
-    expect(notes.get_by_role("link", name="Start a task")).to_have_attribute("href", "#/run/notes")
+    expect(notes.get_by_role("link", name="Send message")).to_have_attribute("href", "#/run/notes")
     desc = notes.locator(".desc")
     closed = desc.evaluate("e => e.clientHeight")
     assert desc.evaluate("e => e.scrollHeight > e.clientHeight + 2"), "the long description is not clamped"
@@ -337,7 +337,7 @@ def test_cards_show_the_agents_cards(stack: Stack, page: Page) -> None:
     if stack.mcp:
         files = page.locator('article[data-service="files"]')
         expect(files).to_contain_text("mcp server")
-        expect(files.get_by_role("link", name="Start a task")).to_have_count(0)
+        expect(files.get_by_role("link", name="Send message")).to_have_count(0)
     no_trouble(page)
 
 

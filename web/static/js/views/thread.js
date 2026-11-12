@@ -1,6 +1,6 @@
 // A task's page: from the request to what the agent delivers.
 //
-//   #/run/<service>   a new task on that service: the request card in the thread, nothing sent
+//   #/run/<service>   a new conversation with that service: the request card in the thread, nothing sent
 //   #/t/<task>        a task's thread
 //
 // One page for both. Sending the request (POST /v1/tasks, which the console API sends to the gate's
@@ -75,11 +75,11 @@ const flowing = (state) => LIVE.has(state || "submitted");
 
 let generation = 0;
 let stop = () => {};
-/** The task the page shows (null on a new task): main.js does not rebuild it for its own hash. */
+/** The task the page shows (null on a new conversation): main.js does not rebuild it for its own hash. */
 let shown = null;
 /** A task a Continue started -> the task it continues (this tab only). */
 const continued = new Map();
-/** What a Run again or a Continue sent, for the new task's page to show at once. */
+/** What a Run again or a Continue sent, for the next page to show at once. */
 let handoff = null;
 
 export const shownTask = () => shown;
@@ -171,7 +171,7 @@ async function follow(taskId, after, signal, { onOpen, onEvent, onEnd, onTrouble
 
 // ------------------------------------------------------------------ the routes
 
-/** #/run/<service>: a new task on that service. `prefill`: { text, data, values }. */
+/** #/run/<service>: a new conversation with that service (a message with no contextId). `prefill`: { text, data, values }. */
 export async function showRun(name, { prefill = null } = {}) {
   leaveThread();
   const mine = ++generation;
@@ -447,7 +447,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   // ------------------------------------------------------------------ the sidebar
 
   const dot = h("span", { class: "dot idle" });
-  const chipText = h("span", { text: "new task" });
+  const chipText = h("span", { text: "new conversation" });
   const chipTime = h("span", { class: "mono" });
   const chip = h("span", { class: "statechip", id: "threadstate", dataset: { state: "new" } }, [dot, chipText, chipTime]);
   const plainChip = () => {
@@ -474,9 +474,9 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const runsList = h("div", { class: "ctxruns", id: "ctxruns" });
   const runs = h("div", { class: "ctxsec", id: "recenttasks", hidden: true }, [h("h3", { text: "Recent tasks" }), runsList]);
   const runHref = `#/run/${encodeURIComponent(name)}`;
-  const newRun = h("a", { class: "newbtn", id: "newrun", href: runHref }, [icon("plus", 13), "New task"]);
+  const newRun = h("a", { class: "newbtn", id: "newrun", href: runHref }, [icon("plus", 13), "New conversation"]);
   const newSec = h("div", { class: "ctxsec", hidden: kind !== "a2a" || !taskId }, [newRun]);
-  const newSmall = h("a", { class: "btn sm", id: "newrunsm", href: runHref, text: "New task", hidden: true });
+  const newSmall = h("a", { class: "btn sm", id: "newrunsm", href: runHref, text: "New conversation", hidden: true });
   newSmall.style.textDecoration = "none";
   const footTerms = h("div", { class: "terms2", id: "ctxfoot" });
   const logCount = h("span", { text: "A2A timeline" });
@@ -1779,7 +1779,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       runItems = [{ task_id: ho.taskId, state: ho.state, created_at: ho.at, summary: ho.summary.text || null, local: true }];
       drawRuns();
     },
-    /** The request card of a new task (#/run). */
+    /** The request card of a new conversation (#/run). */
     async newRun(prefill) {
       fill(list, [h("p", { class: "empty", text: "Loading…" })]);
       loadRuns();
@@ -1794,7 +1794,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       if (!alive()) return;
       setBlurb(form.description);
       if (form.name) $("#ctxname", side).textContent = form.name;
-      chipText.textContent = "new task";
+      chipText.textContent = "new conversation";
       const card = requestCard(form, {
         service: name,
         prefill,
@@ -1817,7 +1817,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
               held.hidden = false;
               plainChip();
               dot.className = "dot idle";
-              chipText.textContent = "new task";
+              chipText.textContent = "new conversation";
               chipTime.textContent = "";
             }
             throw e;
