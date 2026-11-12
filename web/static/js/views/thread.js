@@ -907,6 +907,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       artCount.textContent = String(P.resultCount);
       drawEntry(r, false);
       place(artLine(r, at));
+      if (P.terminalAt) endedToArtifacts(); // an ended task's result read after its end (a replay) still gets the eye
       return;
     }
     Object.assign(known, foldResult(known, a));
@@ -1339,11 +1340,15 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       } else {
         holder.dataset.a2ui = nodes.length ? "surface" : "update";
       }
-      if (!nodes.length && surfacesOf(listMsgs).some((id) => before.has(id) && ui.boxes.has(id))) {
-        nodes.push(h("p", { class: "small", text: "Updated the form above." }));
-      }
-      if (!nodes.length) holder.hidden = true;
       grew(() => fill(holder, nodes));
+      if (!nodes.length) {
+        // Only updates to surfaces already drawn (spec: A2UI Rendering): they changed in place, and the transcript
+        // gains no item for them; the message's card goes too when nothing else of it shows.
+        holder.hidden = true;
+        const bd = holder.parentElement;
+        const card = holder.closest(".msg");
+        if (card && bd && [...bd.children].every((c) => c.hidden)) card.hidden = true;
+      }
       liven();
     }).catch((e) => {
       if (!alive()) return;

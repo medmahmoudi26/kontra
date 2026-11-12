@@ -225,7 +225,10 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
         a2ui = s.start("a2ui", [str(bindir / "a2ui"), "--port", "0"], first_line=True)
         merchant = s.start("merchant", [str(bindir / "ap2-merchant"), "--port", "0"], first_line=True)
         echo = s.start("echo", [str(bindir / "echoagent")], first_line=True)
-        serves = ["--serve", f"a2a:booking-form={a2ui}", "--serve", f"a2a:merchant={merchant}", "--serve", f"a2a:notes={echo}"]
+        # live: the same agent declaring streaming, so the gate logs each of its events as it comes.
+        live = s.start("echolive", [str(bindir / "echoagent"), "--streaming"], first_line=True)
+        serves = ["--serve", f"a2a:booking-form={a2ui}", "--serve", f"a2a:merchant={merchant}", "--serve", f"a2a:notes={echo}",
+                  "--serve", f"a2a:live={live}"]
         npm = shutil.which("npm")
         node = shutil.which("node")
         s.mcp = False
@@ -248,10 +251,10 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
 
         def reachable():
             names = {x["name"]: x["reachable"] for x in s.api("GET", "/v1/services")["items"]}
-            want = ["booking-form", "merchant", "notes"] + (["files"] if s.mcp else [])
+            want = ["booking-form", "merchant", "notes", "live"] + (["files"] if s.mcp else [])
             # A session serves each, and the gate holds each A2A agent's card (its keeper fetches it after the session).
             return all(names.get(n) for n in want) and all(
-                s.api("GET", f"/v1/services/{n}").get("card") for n in ["booking-form", "merchant", "notes"])
+                s.api("GET", f"/v1/services/{n}").get("card") for n in ["booking-form", "merchant", "notes", "live"])
         eventually("every service is reachable, with its card", reachable, within=90)
         yield s
     finally:

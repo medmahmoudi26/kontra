@@ -118,7 +118,7 @@ def test_artifacts_column(stack: Stack, page: Page) -> None:
     message. On a narrow screen a Transcript | Artifacts switch shows one of the two, and moves to Artifacts when the
     task ends."""
     page.set_viewport_size({"width": 1280, "height": 900})
-    started = stack.api("POST", "/v1/tasks", {"service": "notes", "text": "stream test"})
+    started = stack.api("POST", "/v1/tasks", {"service": "live", "text": "stream test"})
     task = started["task_id"]
     page.goto(stack.base + f"/#/t/{task}")
     eventually("it completes", lambda: stack.state(task) == "completed")
@@ -126,7 +126,7 @@ def test_artifacts_column(stack: Stack, page: Page) -> None:
     expect(col).to_be_visible(timeout=15000)
     entries = col.locator(".art")
     expect(entries).to_have_count(2)
-    live = col.locator('.art:has(h4:text-is("live"))')
+    live = col.locator('.art:has(h4:text-is("log"))')
     expect(live.locator(".artext")).to_have_count(1)
     expect(live.locator(".artext")).to_have_text("Read the code. Then curl it")
     expect(live.locator("[data-artstate]")).to_have_text("complete")
@@ -139,12 +139,11 @@ def test_artifacts_column(stack: Stack, page: Page) -> None:
     expect(thread.locator("[data-artline]")).to_have_count(2)
     expect(thread).to_contain_text("Streamed.")
     expect(thread).not_to_contain_text("curl it")
-    expect(thread.locator("[data-artline] [data-wire]").first).to_contain_text("notes")
+    expect(thread.locator("[data-artline] [data-wire]").first).to_contain_text("live")
     no_side_scroll(page)
     # A narrow screen: the switch, at Artifacts since the task ended; Transcript, then a line's link brings it back.
     page.set_viewport_size({"width": 400, "height": 800})
-    page.goto(stack.base + "/#/")
-    page.goto(stack.base + f"/#/t/{task}")
+    page.reload()  # the thread opened again, narrow (a hash change back to the same route may not re-route)
     switch = page.locator("#artswitch")
     expect(switch).to_be_visible(timeout=15000)
     expect(page.locator(".run")).to_have_attribute("data-pane", "artifacts")
@@ -158,6 +157,23 @@ def test_artifacts_column(stack: Stack, page: Page) -> None:
     expect(col).to_be_visible()
     expect(report).to_be_in_viewport()
     no_side_scroll(page)
+    no_trouble(page)
+
+
+def test_form_updates_add_nothing(stack: Stack, page: Page) -> None:
+    """console-wire-polish 4.1: messages that only update an A2UI surface already drawn change it in place and add no
+    item to the transcript; there is no "Updated the form above." line."""
+    started = stack.api("POST", "/v1/tasks", {"service": "live", "text": "form updates"})
+    task = started["task_id"]
+    page.goto(stack.base + f"/#/t/{task}")
+    eventually("it completes", lambda: stack.state(task) == "completed")
+    expect(page.locator("#thread")).to_contain_text("Done.", timeout=15000)
+    surface = page.locator('#thread [data-surface^="progress-"]')  # the agent names it by its own task id
+    expect(surface).to_contain_text("step 5")
+    expect(page.locator("#thread")).not_to_contain_text("Updated the form above")
+    # Of the six status messages carrying A2UI, only the one that drew the surface is an item of the transcript.
+    shown = page.locator("#messages > .msg:visible:has([data-a2ui])")
+    expect(shown).to_have_count(1)
     no_trouble(page)
 
 
