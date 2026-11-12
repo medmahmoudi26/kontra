@@ -169,7 +169,7 @@ func main() {
 			`<img src=x onerror="window.__pwned = 4"> stays text. Use it to check how a thread renders results.`,
 		SupportedInterfaces: []*a2a.AgentInterface{a2a.NewAgentInterface(base, a2a.TransportProtocolJSONRPC)},
 		DefaultInputModes:   []string{"text/plain"}, DefaultOutputModes: []string{"text/markdown"},
-		Capabilities:        a2a.AgentCapabilities{Streaming: *streaming},
+		Capabilities: a2a.AgentCapabilities{Streaming: *streaming},
 		Skills: []a2a.AgentSkill{{ID: "echo", Name: "Echo", Description: "Echoes Markdown.", Examples: []string{"**hello**"},
 			Tags: []string{"markdown"}, InputModes: []string{"text/plain"}, OutputModes: []string{"text/markdown"}}},
 	}
