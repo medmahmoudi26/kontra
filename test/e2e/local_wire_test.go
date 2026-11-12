@@ -162,6 +162,14 @@ func TestLocalProfileWire(t *testing.T) {
 		})
 	}
 
+	// The exchange writer is batched: wait for the push config call's row before reading what is stored.
+	eventually(t, 10*time.Second, "the push config call recorded", func() bool {
+		var n int
+		_ = h.Pool.QueryRow(ctx, `select count(*) from kontra.a2a_exchanges
+			where method like '%PushNotificationConfig%' and request_body is not null`).Scan(&n)
+		return n > 0
+	})
+
 	// No stored row holds the credential, a header, or the push config's token.
 	var dump string
 	if err := h.Pool.QueryRow(ctx, `select coalesce(string_agg(x::text, ' '), '') from (
