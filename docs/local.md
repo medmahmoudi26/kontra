@@ -50,8 +50,10 @@ The console is an A2A inspector with history: everything it shows is what the ga
   timeline** labels every item `<Actor> · <A2A type>`: `Caller · SendMessage` (or `SendStreamingMessage`),
   `Callee · Task`, `Callee · TaskStatusUpdateEvent`, `Callee · TaskArtifactUpdateEvent`, `Callee · Message`, and
   `Gate · TaskStatusUpdateEvent` for what the gate wrote itself (a failure, a reconnect wait). Where the gate delivered
-  another object than the agent sent (an agent's `Message` reaches the caller as a completed task carrying it; a polled
-  `Task` as status and artifact updates), the item says so. Your client's other calls on the task (`GetTask`,
+  another object than the agent sent (a polled `Task` as status and artifact updates; an agent's `Message` after the
+  caller asked `returnImmediately`, as a completed task carrying it), the item says so. An agent that answers with a
+  `Message` is answered to your client as that `Message`, with no task: the interaction shows in its context's timeline
+  as `Caller · SendMessage` and `Callee · Message`, and in no task list. Your client's other calls on the task (`GetTask`,
   `SubscribeToTask`, push configurations) and the gate's calls to your agent that carried nothing new are in the
   timeline too. Each item is checked against the pinned A2A specification (1.0, or 0.3 for a 0.3 agent), and the
   task's `taskId` and `contextId`, and your agent's own ids, are shown in full with Copy.

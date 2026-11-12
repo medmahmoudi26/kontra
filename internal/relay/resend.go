@@ -29,6 +29,9 @@ import (
 // the work queue (a lost start is re-issued, and the call waits for the turn). It runs after Admission and the other
 // checks, as the work queue's own resend lookup does, and its lookup is the work queue's (store.Log.FindResend, the
 // request's hash as the interceptors before it left it).
+//
+// A resend of a message answered with the callee's Message (a provisional record that ended, D362) is answered with
+// that same Message, without the work queue: nothing is dispatched again.
 func (i *Interceptors) resendAnswer(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
 	if cc.Method() != "SendMessage" {
 		return ctx, nil, nil // a stream of a resend: D108 (internal/sse)
@@ -48,6 +51,18 @@ func (i *Interceptors) resendAnswer(ctx context.Context, cc *a2asrv.CallContext,
 	prev, err := i.Log.FindResend(ctx, i.Svc, o, r.Message.ID, hash, time.Now().Add(-lifecycle.ResendWindow))
 	if err != nil || prev == nil || prev.Snapshot == nil {
 		return ctx, nil, err
+	}
+	if msg, ok := store.MessageAnswer(prev); ok {
+		// D362: the earlier request was answered with the callee's Message, and its record has ended: the resend gets
+		// the same Message, and nothing is dispatched again.
+		if msg, err = i.Render.Message(ctx, prev.ID, msg); err != nil {
+			return ctx, nil, a2a.NewError(a2a.ErrInternalError, "the message's parts could not be rendered")
+		}
+		msg.TaskID = ""
+		return ctx, msg, nil
+	}
+	if prev.ExposedAt == nil {
+		return ctx, nil, nil // still provisional: the work queue answers it, and finishedTurn settles the answer
 	}
 	switch prev.State {
 	case store.StateInputRequired, store.StateAuthRequired:

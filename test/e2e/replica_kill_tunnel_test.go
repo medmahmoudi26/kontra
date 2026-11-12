@@ -133,11 +133,7 @@ func TestReplicaKillTunnel(t *testing.T) {
 		}
 		defer s.Close()
 		eventually(t, 30*time.Second, "the seller holds the task", func() bool { return sendsOf(h.Upstream, req.Message.ID) == 1 })
-		ev, err := s.Next(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		task := ev.Event.TaskInfo().TaskID
+		task := taskOfMessage(t, ctx, h, req.Message.ID) // the stream holds its first event until the seller answers (D362)
 		if as, err := h.Attempts(ctx, task); err != nil || len(as) != 1 || as[0].FirstUpstreamIDAt != nil || as[0].ReplicaID != a.ReplicaID {
 			t.Fatalf("before the kill: attempts %+v %v, want one on A with no upstream id", as, err)
 		}

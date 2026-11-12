@@ -67,6 +67,7 @@ const (
 // logReader is what the writer reads; *store.Log implements it.
 type logReader interface {
 	LoadScoped(ctx context.Context, svc store.ServiceRef, o store.Owner, taskID uuid.UUID) (*store.TaskRow, error)
+	LoadScopedAll(ctx context.Context, svc store.ServiceRef, o store.Owner, taskID uuid.UUID) (*store.TaskRow, error)
 	EventsWithin(ctx context.Context, taskID uuid.UUID, after int64, limit int, maxBytes int) ([]store.Event, bool, error)
 	SnapshotAt(ctx context.Context, taskID uuid.UUID, seq int64) (*a2a.Task, error)
 	Tail(ctx context.Context, taskID uuid.UUID) (int64, error)
@@ -232,6 +233,13 @@ type plan struct {
 	followUp bool
 	after    int64
 	closes   func(a2a.TaskState) bool
+	// hold is a stream that answers a new message (or a resend of one): it sends nothing until the record is exposed
+	// (D362), then the snapshot at that version with its id, and the rows after it; a record that ends unexposed is
+	// answered with one Message event, the callee's, and the stream closes. Until then, keep-alives.
+	hold  bool
+	isNew bool
+	owner store.Owner
+	svc   store.ServiceRef
 }
 
 // endsTurn is SendStreamingMessage's rule: terminal, input-required, or quoted (which A2A shows as
@@ -264,13 +272,16 @@ func (w *Writer) SendStreaming(rw http.ResponseWriter, r *http.Request, s Stream
 		w.opts.Logger.Warn("sse: a2a-go failed after the turn was accepted; serving the turn's stream from the log",
 			"task", id, "after", st.After, "error", st.Late)
 	}
-	// The turn was accepted, so from here on the answer is its stream: the leading snapshot at V is read once
-	// the stream has begun and retried within ReadGrace like every read of the log. Answering a read that
-	// failed would make a running turn look refused (the same database blip that made a2a-go fail, Late,
-	// often fails this read too), and the caller's retry would be refused because the turn is running.
+	// The turn was accepted, so from here on the answer is its stream: the leading snapshot is read once the stream
+	// has begun and retried within ReadGrace like every read of the log. Answering a read that failed would make a
+	// running turn look refused (the same database blip that made a2a-go fail, Late, often fails this read too), and
+	// the caller's retry would be refused because the turn is running.
 	p := plan{task: id, after: st.After, closes: endsTurn, followUp: st.FollowUp}
-	if !st.New {
+	if st.FollowUp {
 		p.leadAt = st.After
+	} else {
+		// A new message, or a resend of one: what the caller sees waits for the callee's first answer (D362).
+		p.hold, p.isNew, p.svc, p.owner = true, st.New, s.Service, s.Owner
 	}
 	w.serve(rw, r, s, p)
 }
@@ -391,6 +402,33 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 	sw := w.begin(rw, r, s)
 	keep := time.NewTicker(w.opts.KeepAlive)
 	defer keep.Stop()
+	if p.hold {
+		row, waited, ok := w.awaitExposure(ctx, sw, keep.C, wake, p)
+		if !ok {
+			return
+		}
+		switch {
+		case waited:
+			// Exposed while the stream waited: the snapshot at that version leads, with the version as its id, so a
+			// caller that loses the stream resumes from it (Last-Event-ID); the rows after it follow.
+			lead, err := w.opts.Render.Task(ctx, row.Snapshot)
+			if err != nil {
+				w.opts.Logger.Warn("sse: the snapshot's parts could not be rendered; ending the stream", "task", p.task, "error", err)
+				_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the task's parts could not be rendered; subscribe to the task again"))
+				return
+			}
+			if sw.event(row.Version, mustStreamResponse(lead)) != nil || endsTurn(row.Snapshot.Status.State) {
+				return
+			}
+			p.after = row.Version
+		case !p.isNew:
+			// A resend of an exposed task: its snapshot as it stands leads, without an id, and closes the stream
+			// when it already ends a turn, since nothing more of that turn will come.
+			p.lead, p.after, p.leadCloses = row.Snapshot, row.Version, endsTurn(row.Snapshot.Status.State)
+		}
+		// A new task exposed already (returnImmediately, a hire, or a callee faster than the stream): its rows from
+		// the creation row on, each with its seq.
+	}
 	if p.lead == nil && p.leadAt > 0 {
 		lead, ok := w.readLead(ctx, sw, keep.C, p)
 		if !ok {
@@ -481,6 +519,59 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 		}
 		if !w.wait(ctx, sw, keep.C, wake, w.opts.Reread) {
 			return
+		}
+	}
+}
+
+// awaitExposure waits, with keep-alives, until the stream's record is exposed (D362), and returns it, waited true when
+// it was not exposed at the first read. A record that ends unexposed has been answered with the callee's Message: that Message is the stream's one event, without an id
+// (it is no event of a task), and false ends the stream, as does the caller's disconnect or a log that cannot be read
+// for ReadGrace (an error event).
+func (w *Writer) awaitExposure(ctx context.Context, sw *streamWriter, keep <-chan time.Time, wake <-chan struct{}, p plan) (row *store.TaskRow, waited, ok bool) {
+	var failingSince time.Time
+	backoff := 100 * time.Millisecond
+	for first := true; ; first = false {
+		row, err := w.log.LoadScopedAll(ctx, p.svc, p.owner, p.task)
+		switch {
+		case err == nil && row.ExposedAt != nil:
+			return row, !first, true
+		case err == nil:
+			if msg, ok := store.MessageAnswer(row); ok {
+				msg, err := w.opts.Render.Message(ctx, p.task, msg)
+				if err != nil {
+					w.opts.Logger.Warn("sse: the message's parts could not be rendered; ending the stream", "task", p.task, "error", err)
+					_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the message's parts could not be rendered"))
+					return nil, false, false
+				}
+				msg.TaskID = "" // no task was made, and the record's id is never sent
+				b, err := json.Marshal(a2a.StreamResponse{Event: msg})
+				if err != nil {
+					_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the message could not be encoded"))
+					return nil, false, false
+				}
+				_ = sw.event(0, b)
+				return nil, false, false
+			}
+			failingSince, backoff = time.Time{}, 100*time.Millisecond
+			if !w.wait(ctx, sw, keep, wake, w.opts.Reread) {
+				return nil, false, false
+			}
+		default:
+			if ctx.Err() != nil {
+				return nil, false, false
+			}
+			if failingSince.IsZero() {
+				failingSince = time.Now()
+			}
+			if time.Since(failingSince) >= w.opts.ReadGrace {
+				w.opts.Logger.Warn("sse: the task could not be read; ending the stream", "task", p.task, "error", err)
+				_ = sw.error(a2a.NewError(a2a.ErrInternalError, "the message's answer could not be read; send the message again"))
+				return nil, false, false
+			}
+			if !w.wait(ctx, sw, keep, nil, backoff) {
+				return nil, false, false
+			}
+			backoff = min(2*backoff, 5*time.Second)
 		}
 	}
 }

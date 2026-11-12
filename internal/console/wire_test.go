@@ -258,3 +258,41 @@ func TestInfoFeatures(t *testing.T) {
 		t.Errorf("traffic %v", tr)
 	}
 }
+
+// D362: a message-only interaction (the agent answered the console's prompt with a Message): its record is no task,
+// so the Tasks list leaves it out, and its context's timeline shows the caller's SendMessage and the callee's Message,
+// the caller having received that Message, with no taskId on either.
+func TestMessageOnlyInteraction(t *testing.T) {
+	e := newEnv(t, nil)
+	id := e.taskWith("submitted", "hi", "c9", true, &store.Origin{Actor: "caller", Type: "SendMessage", Method: "SendStreamingMessage"})
+	e.exec(`update kontra.tasks set exposed_at = null where id = $1`, id)
+	origin := `{"actor":"callee","type":"Message","method":"SendMessage","converted_to":"TaskStatusUpdateEvent"}`
+	e.originEvent(id, "status", fmt.Sprintf(`{"statusUpdate":{"taskId":"%s","contextId":"c9","status":{"state":"TASK_STATE_COMPLETED","message":{"messageId":"m2","role":"ROLE_AGENT","parts":[{"text":"hello"}]}}}}`, id),
+		&origin, time.Now())
+	e.exec(`update kontra.tasks set state = 'completed', terminal_at = now() where id = $1`, id)
+
+	for _, it := range items(e.json("GET", "/v1/tasks", "", 200)) {
+		if it["task_id"] == id.String() {
+			t.Fatal("the Tasks list shows a message-only interaction")
+		}
+	}
+	tl := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/c9/timeline", e.buyer), "", 200)
+	if ids, _ := tl["task_ids"].([]any); len(ids) != 0 {
+		t.Errorf("the context's tasks %v, want none", ids)
+	}
+	var got []string
+	for _, it := range items(tl) {
+		if it["task_id"] != nil {
+			t.Errorf("a message-only item names a task: %v", it)
+		}
+		o, _ := it["origin"].(map[string]any)
+		got = append(got, fmt.Sprintf("%v·%v→%v", o["actor"], o["type"], it["caller_type"]))
+	}
+	if want := []string{"caller·SendMessage→", "callee·Message→Message"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("timeline %v, want %v", got, want)
+	}
+	v := e.json("GET", "/v1/tasks/"+id.String(), "", 200)
+	if v["exposed"] != false || fmt.Sprint(v["actions"]) != "[continue]" {
+		t.Errorf("the interaction %v: want exposed false and only continue", v)
+	}
+}

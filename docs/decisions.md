@@ -60,6 +60,9 @@ In cluster mode a bare `Message` never reaches the caller and `SendMessage` hang
 relay converts it to a terminal `completed` status whose message is the upstream's. The caller always gets
 a task ([`relay.md`](../spec/relay.md) §6.3).
 
+Superseded by D362, except for a caller that asked `returnImmediately`: the log still holds the `Message` as that
+status, but the caller who awaits the answer receives the `Message` itself.
+
 ### D6. The work queue's payload stays out of Temporal, by reference
 
 PRD §10: events never enter Temporal history. a2a-go's `workqueue.Payload` carries the whole request
@@ -6305,3 +6308,32 @@ rule staying ([`relay.md`](../spec/relay.md) §10.3, §18.1). Elsewhere, an anon
 says `capabilities.pushNotifications: false` (§3), and an anonymous push config is refused with
 `PushNotificationNotSupportedError`, A2A's error for exactly that, instead of `UnsupportedOperationError`: a client that
 trusts the card is told the same thing by the error. Amends D20.
+
+### D362. A callee's `Message` passes through; the gate's record of it stays hidden until it is a task
+
+In A2A every message belongs to a context and a task is optional: an agent answers `SendMessage` with a `Message` or a
+`Task`. D5 made every answer a task, so a stateless agent looked stateful through the gate, callers saw task ids no
+agent made, and the TCK's DM-MSG-001 failed. D5 was a workaround for P1, not a protocol choice, and a gateway passes
+through what the agent returned. Decision: the gate still records each accepted message as a task row at admission
+(fences, attempts, retries, re-attach, resend and retention hang on it), but the row is provisional, `tasks.exposed_at`
+null (0008), and no caller method sees it until it is exposed: in the transaction of the event that causes it, when
+the callee answers with a `Task` or a task event, when a gate-written status ends or answers the turn first (a failure,
+a timeout, a cancel), and at admission when the caller asked `returnImmediately` or the task is a `/mcp` hire's. A
+callee's `Message` is logged as D5 logs it (a completed status, origin `Message`, `converted_to`) and leaves the row
+provisional for good: the caller is answered that `Message`, with the gate's `contextId` and no `taskId`, on a blocking
+`SendMessage` (the `After` of the interceptor that already settles a blocking answer, D121), on a stream (one event
+without an `id:`, then the stream closes; a new message's stream sends nothing but keep-alives until the callee's first
+answer) and on a resend (the same `Message`, nothing dispatched). `GetTask`, `ListTasks`, `SubscribeToTask`, cancel,
+follow-ups and the push config methods answer `TaskNotFoundError` for a provisional row, as for an unknown id; its
+inline push configs receive nothing and are deleted when it ends. The `Message`'s context id is recorded on the attempt
+without an upstream task id, so the next message of the gate context reaches the same upstream context (spec §4).
+
+The route was probed on a2a-go v2.7.0 first: a call interceptor may answer `SendMessage` with a bare `*a2a.Message`
+(the handler's result type is `SendMessageResult`), and a2a-go's JSON-RPC and HTTP+JSON transports and clients carry
+it on both bindings. So the gate keeps a2a-go's path for a blocking `SendMessage` (which reads the record's log to its
+terminal status, as for a task) and changes only the answer, rather than serving the method itself from the log as the
+design first proposed; P1 is avoided, not patched. *Alternative:* a separate `interactions` table, with tasks created
+only when the callee answers with one. Rejected: it duplicates every durable mechanism up to the first answer, and a
+crash in that window would need two recovery paths. Only `tasks_by_caller` (ListTasks) becomes partial on exposed
+rows; `tasks_by_context` stays whole, since the local console reads a context's message-only interactions through it.
+Supersedes D5 except for `returnImmediately` ([`relay.md`](../spec/relay.md) §4, §6.3, §9, §10.1, §15).

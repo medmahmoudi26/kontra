@@ -45,6 +45,8 @@ type Canceller interface {
 //     scope may call no service (§2.3).
 //  2. Anonymous refusals (spec §2.3): ListTasks and push configs (inline ones included) are
 //     UnsupportedOperationError for the anonymous principal.
+//     Then exposure (D362; exposedOnly): GetTask and the push config methods name an exposed task of the caller's,
+//     or are TaskNotFoundError, as for an unknown id (cancel, follow-ups and SubscribeToTask read the same way).
 //  3. Caller keys (spec §2.5): every kontra. key leaves message, part and request metadata, except the
 //     sealing keys. A url part in the gate's reserved kontra-blob: scheme is
 //     InvalidRequest (D181), and so is a part claiming the sealed envelope type in another form than raw
@@ -143,6 +145,7 @@ func (i *Interceptors) Chain() []a2asrv.CallInterceptor {
 		interceptor(ii.identity),
 		&finishedTurn{i: &ii},
 		interceptor(ii.anonymous),
+		interceptor(ii.exposedOnly),
 		interceptor(ii.callerKeys),
 		interceptor(ii.anonStorage),
 		interceptor(ii.admission),
@@ -192,6 +195,50 @@ func (i *Interceptors) anonymous(ctx context.Context, cc *a2asrv.CallContext, re
 		if r, ok := req.Payload.(*a2a.SendMessageRequest); ok && r.Config != nil && r.Config.PushConfig != nil {
 			return ctx, nil, noPush()
 		}
+	}
+	return ctx, nil, nil
+}
+
+// exposedOnly refuses GetTask and the push config methods on a task the caller cannot see: unknown, another
+// caller's, or a provisional record (D362: a new message the callee has not answered with a task, or answered with a
+// Message). a2a-go's own reads of the task store (which a dispatch needs, provisional or not) do not filter, so the
+// caller's are checked here first: TaskNotFoundError, as for an id never minted.
+func (i *Interceptors) exposedOnly(ctx context.Context, cc *a2asrv.CallContext, req *a2asrv.Request) (context.Context, any, error) {
+	var id a2a.TaskID
+	switch p := req.Payload.(type) {
+	case *a2a.GetTaskRequest:
+		if p != nil {
+			id = p.ID
+		}
+	case *a2a.GetTaskPushConfigRequest:
+		if p != nil {
+			id = p.TaskID
+		}
+	case *a2a.ListTaskPushConfigRequest:
+		if p != nil {
+			id = p.TaskID
+		}
+	case *a2a.PushConfig:
+		if p != nil {
+			id = p.TaskID
+		}
+	case *a2a.DeleteTaskPushConfigRequest:
+		if p != nil {
+			id = p.TaskID
+		}
+	default:
+		return ctx, nil, nil
+	}
+	tid, err := ids.ParseTaskID(string(id))
+	if err != nil {
+		return ctx, nil, err
+	}
+	o, err := CallerOwner(ctx)
+	if err != nil {
+		return ctx, nil, err
+	}
+	if _, err := i.Log.LoadScoped(ctx, i.Svc, o, tid); err != nil {
+		return ctx, nil, err
 	}
 	return ctx, nil, nil
 }
@@ -825,13 +872,20 @@ func (a *renderAnswers) After(ctx context.Context, _ *a2asrv.CallContext, resp *
 	return nil
 }
 
-// finishedTurn works around a race in a2a-go v2.7.0's remote subscription (contract test P15): when a turn
-// ends at input-required before the subscription of a blocking SendMessage reads the store, the snapshot
-// it reads is already input-required (not terminal, so it keeps reading), every queued event is older than
-// the snapshot and skipped, and the pull reader, having delivered its final event, closes: SendMessage
-// answers eventqueue.ErrQueueClosed instead of the task. The answer a blocking SendMessage owes then is
-// exactly the stored task (A2A §3.1.1: it returns on the first input-required state), so this interceptor
-// answers it, for the task the request named or Admission pre-minted.
+// finishedTurn settles a blocking SendMessage's answer on the way out.
+//
+// It works around a race in a2a-go v2.7.0's remote subscription (contract test P15): when a turn ends at
+// input-required before the subscription of a blocking SendMessage reads the store, the snapshot it reads is already
+// input-required (not terminal, so it keeps reading), every queued event is older than the snapshot and skipped, and
+// the pull reader, having delivered its final event, closes: SendMessage answers eventqueue.ErrQueueClosed instead of
+// the task. The answer a blocking SendMessage owes then is exactly the stored task (A2A §3.1.1: it returns on the first
+// input-required state), so this interceptor answers it, for the task the request named or Admission pre-minted.
+//
+// And it passes a callee's Message through (D362): a new message whose record ended without being exposed (the
+// callee answered with a Message, which the log holds as a completed status carrying it, D5) is answered with that
+// Message, with the gate's contextId and no taskId, never with the task. a2a-go reads the record's log as it reads a
+// task's (it stops at the terminal status), so this is the one place the answer changes. A resend of such a message
+// (the work queue answers it with its record, which has ended) is answered the same Message, and dispatches nothing.
 type finishedTurn struct {
 	a2asrv.PassthroughCallInterceptor
 	i *Interceptors
@@ -847,10 +901,18 @@ func (f *finishedTurn) Before(ctx context.Context, cc *a2asrv.CallContext, req *
 }
 
 func (f *finishedTurn) After(ctx context.Context, cc *a2asrv.CallContext, resp *a2asrv.Response) error {
-	if cc.Method() != "SendMessage" || resp.Err == nil || !errors.Is(resp.Err, eventqueue.ErrQueueClosed) {
+	if cc.Method() != "SendMessage" {
+		return nil
+	}
+	closed := resp.Err != nil && errors.Is(resp.Err, eventqueue.ErrQueueClosed)
+	answered, _ := resp.Payload.(*a2a.Task)
+	if !closed && (resp.Err != nil || answered == nil) {
 		return nil
 	}
 	id, _ := ctx.Value(requestTaskKey{}).(a2a.TaskID)
+	if id == "" && answered != nil {
+		id = answered.ID
+	}
 	if id == "" {
 		if adm, ok := hooks.AdmittedFrom(ctx); ok {
 			id = a2a.TaskID(adm.TaskID)
@@ -864,10 +926,44 @@ func (f *finishedTurn) After(ctx context.Context, cc *a2asrv.CallContext, resp *
 	if err != nil {
 		return nil
 	}
-	row, err := f.i.Log.LoadScoped(ctx, f.i.Svc, o, tid)
-	if err != nil {
+	if answered != nil && !f.mayBeProvisional(ctx, answered) {
 		return nil
 	}
-	resp.Payload, resp.Err = row.Snapshot, nil
+	row, err := f.i.Log.LoadScopedAll(ctx, f.i.Svc, o, tid)
+	if err != nil {
+		if closed {
+			return nil
+		}
+		resp.Payload, resp.Err = nil, err
+		return nil
+	}
+	if msg, ok := store.MessageAnswer(row); ok {
+		if msg, err = f.i.Render.Message(ctx, row.ID, msg); err != nil {
+			slog.Default().Warn("relay: an answer's parts could not be rendered", "error", err)
+			resp.Payload, resp.Err = nil, a2a.NewError(a2a.ErrInternalError, "the message's parts could not be rendered")
+			return nil
+		}
+		msg.TaskID = "" // D362: no task was made, and its record's id is never sent
+		resp.Payload, resp.Err = msg, nil
+		return nil
+	}
+	if row.ExposedAt == nil {
+		// a2a-go answered a turn that has not ended (it never does for a provisional record, which ends or is
+		// exposed first): the record is not the caller's to see.
+		resp.Payload, resp.Err = nil, a2a.NewError(a2a.ErrInternalError, "the message's answer could not be read")
+		return nil
+	}
+	if closed {
+		resp.Payload, resp.Err = row.Snapshot, nil
+	}
 	return nil
+}
+
+// mayBeProvisional reports whether the task a2a-go answered may be a provisional record: a new message's (the one
+// Admission pre-minted, or the earlier one a resend repeats) that has ended. A follow-up names an exposed task.
+func (f *finishedTurn) mayBeProvisional(ctx context.Context, t *a2a.Task) bool {
+	if _, followUp := ctx.Value(requestTaskKey{}).(a2a.TaskID); followUp {
+		return false
+	}
+	return t.Status.State.Terminal()
 }

@@ -85,8 +85,11 @@ export function timelineRow(item, { taskLinks = false } = {}) {
   const state = stateOf(item.payload);
   const detail = [];
   if (w.callerType && (w.convertedTo || w.callerType !== w.type)) {
-    detail.push(h("span", { class: "conv", dataset: { converted: w.convertedTo || w.callerType },
-      text: `the caller received a ${w.callerType}${w.convertedTo ? " (converted by the gate)" : ""}` }));
+    // The gate converted what the callee sent when the caller received the converted type; a message-only
+    // interaction's Message reached the caller as it was sent, though the log holds it converted (D362).
+    const converted = Boolean(w.convertedTo) && w.convertedTo === w.callerType;
+    detail.push(h("span", { class: "conv", dataset: { converted: converted ? w.convertedTo : w.callerType },
+      text: `the caller received a ${w.callerType}${converted ? " (converted by the gate)" : ""}` }));
   }
   if (w.method && w.method !== w.type) detail.push(h("span", { class: "muted small", text: `in ${w.method}` }));
   if (state) detail.push(h("span", { class: "muted small", text: state }));

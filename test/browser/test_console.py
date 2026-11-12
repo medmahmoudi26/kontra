@@ -311,16 +311,43 @@ def test_thread_labels_every_item(stack: Stack, page: Page) -> None:
     no_trouble(page)
 
 
-def test_message_answer_is_shown_converted(stack: Stack, page: Page) -> None:
-    """7.2: an agent that answers with a bare Message: Callee · Message, and the caller received a completed
-    TaskStatusUpdateEvent carrying it, converted by the gate (D5)."""
-    task = stack.send("notes", "message only")
-    eventually("it completes", lambda: stack.state(task) == "completed")
-    page.goto(stack.base + f"/#/t/{task}")
+def test_message_answer_passes_through(stack: Stack, page: Page) -> None:
+    """D362: an agent that answers with a bare Message. A stock client's blocking SendMessage receives that Message,
+    with the gate's contextId and no taskId; the interaction is in no Tasks list, and its context's timeline shows
+    Caller · SendMessage and Callee · Message, the caller having received the Message as it was sent."""
+    code, got = stack.a2a("notes", "SendMessage", {"message": {"messageId": str(uuid.uuid4()), "role": "ROLE_USER",
+                                                               "parts": [{"text": "message only"}]}})
+    assert code == 200 and "message" in got["result"], got
+    msg = got["result"]["message"]
+    assert "taskId" not in msg and msg["contextId"] and msg["parts"][0]["text"] == "A plain answer.", msg
+    ctx = msg["contextId"]
+    conv = next(c for c in stack.api("GET", "/v1/conversations?service=notes&limit=100")["items"] if c["context_id"] == ctx)
+    assert conv["tasks"] == 0, conv
+    assert all(t["context_id"] != ctx for t in stack.api("GET", "/v1/tasks?service=notes&limit=100")["items"])
+    page.goto(stack.base + f"/#/c/notes/{conv['caller']}/{ctx}")
+    rows = page.locator("#ctxtimeline .tl-row")
+    expect(rows.nth(1)).to_be_visible(timeout=15000)
+    assert rows.evaluate_all("rs => rs.map(r => r.dataset.wire)") == ["Caller · SendMessage", "Callee · Message"]
+    answer = page.locator('#ctxtimeline .tl-row[data-wire="Callee · Message"] .conv')
+    expect(answer).to_have_text("the caller received a Message")
+    expect(page.locator("#ctxtasks tbody tr")).to_have_count(0)
+    expect(page.locator('#ctxtimeline a[href^="#/t/"]')).to_have_count(0)
+    no_trouble(page)
+
+
+def test_console_prompt_message_answer(stack: Stack, page: Page) -> None:
+    """D362: the console prompts with message:stream, as the A2A Inspector does, so a Message answer reaches it as it
+    reaches any client: the console's interaction shows Callee · Message, the caller (the console) having received
+    that Message, and no task."""
+    started = stack.api("POST", "/v1/tasks", {"service": "notes", "text": "message only"})
+    eventually("the answer arrives", lambda: stack.state(started["task_id"]) == "completed")
+    view = stack.api("GET", f"/v1/tasks/{started['task_id']}")
+    assert view["exposed"] is False and view["actions"] == ["continue"], view
+    page.goto(stack.base + f"/#/t/{started['task_id']}")
     expect(page.locator("#thread")).to_contain_text("A plain answer.", timeout=15000)
     eventually("the Message is labelled", lambda: "Callee · Message" in timeline(page), within=15)
-    row = page.locator('#eventlog .tl-row[data-wire="Callee · Message"]')
-    expect(row).to_contain_text("the caller received a TaskStatusUpdateEvent (converted by the gate)")
+    row = page.locator('#eventlog .tl-row[data-wire="Callee · Message"] .conv')
+    expect(row).to_have_text("the caller received a Message")
     no_trouble(page)
 
 

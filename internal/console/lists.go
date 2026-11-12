@@ -76,7 +76,8 @@ func (c *Console) conversations(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := c.d.DB.Query(ctx, `
 		select service, buyer_id, principal, via, context_id, n, state, last_at, first_at from (
-			select t.service, t.buyer_id, t.context_id, count(*) as n, max(t.status_at) as last_at, min(t.created_at) as first_at,
+			select t.service, t.buyer_id, t.context_id, count(*) filter (where t.exposed_at is not null) as n,
+			       max(t.status_at) as last_at, min(t.created_at) as first_at,
 			       (array_agg(t.state order by t.id desc))[1] as state, (array_agg(t.principal order by t.id desc))[1] as principal,
 			       (array_agg(t.via order by t.id desc))[1] as via
 			  from kontra.tasks t
@@ -148,8 +149,15 @@ func (c *Console) conversation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sortByCreated(tasks) // oldest first by creation
+	principal := tasks[len(tasks)-1].Caller
+	exposed := []*taskView{} // a message-only interaction is no task (D362): the context's timeline shows it
+	for _, t := range tasks {
+		if t.Exposed {
+			exposed = append(exposed, t)
+		}
+	}
 	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": buyer.String(), "context_id": r.PathValue("context"),
-		"principal": tasks[len(tasks)-1].Caller, "tasks": tasks}, nil)
+		"principal": principal, "tasks": exposed}, nil)
 }
 
 func sortByCreated(ts []*taskView) {

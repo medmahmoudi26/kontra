@@ -128,7 +128,14 @@ services:
 				}
 			}
 		case *a2a.Task:
+			// The lead is the task as the seller's first answer exposed it (D362): already completed when the seller
+			// was faster than the stream, its status message the answer.
 			final = v.Status.State
+			if v.Status.Message != nil {
+				for _, p := range v.Status.Message.Parts {
+					texts = append(texts, p.Text())
+				}
+			}
 		}
 	}
 	scancel()

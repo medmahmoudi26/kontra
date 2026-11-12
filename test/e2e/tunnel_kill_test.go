@@ -127,14 +127,7 @@ func TestTunnelKill(t *testing.T) {
 	}
 	defer s3.Close()
 	eventually(t, 30*time.Second, "the delayed seller received the task", func() bool { return sendsOf(delayed, req3.Message.ID) == 1 })
-	task3 := s3.TaskID()
-	if task3 == "" {
-		ev, err := s3.Next(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		task3 = ev.Event.TaskInfo().TaskID
-	}
+	task3 := taskOfMessage(t, ctx, h, req3.Message.ID) // the stream holds its first event until the seller answers (D362)
 	if as, err := h.Attempts(ctx, task3); err != nil || len(as) != 1 || as[0].FirstUpstreamIDAt != nil || as[0].TunnelSession != second {
 		t.Fatalf("before the kill, task 3's attempts %+v %v: want one on %s with no upstream id", as, err, second)
 	}

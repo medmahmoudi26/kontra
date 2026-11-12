@@ -1136,6 +1136,13 @@ func (r *run) handle(ctx context.Context, ev a2a.Event) bool {
 		r.fail(store.ReasonUpstreamError, "the service sent an event without its task id")
 		return true
 	}
+	if _, isMsg := ev.(*a2a.Message); isMsg && upTask == "" && upCtx != "" && r.ids.UpstreamTaskID == "" {
+		// D362: a Message answer makes no upstream task, but its context continues (spec §4): the next message in
+		// this gate context reaches it.
+		if err := r.e.log.SetUpstreamContext(ctx, r.d.fence, upCtx); err != nil {
+			r.logger.Warn("the upstream context of a Message answer could not be recorded", "error", err)
+		}
+	}
 	if upTask != "" {
 		if r.ids.UpstreamTaskID == "" {
 			if !r.recordFirst(ctx, upTask, upCtx) {

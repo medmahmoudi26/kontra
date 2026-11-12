@@ -30,8 +30,8 @@ type agent struct{}
 
 func (agent) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
-		// "message only": a stateless answer, a bare Message and no task (A2A allows either; the gate logs it as a
-		// completed task carrying it, D5, and the console shows Callee · Message, converted).
+		// "message only": a stateless answer, a bare Message and no task (A2A allows either). The caller receives that
+		// Message and the gate's record of it is no task (D362); the console shows Callee · Message.
 		if ec.StoredTask == nil && len(ec.Message.Parts) > 0 {
 			if t, ok := ec.Message.Parts[0].Content.(a2a.Text); ok && string(t) == "message only" {
 				yield(a2a.NewMessage(a2a.MessageRoleAgent, a2a.NewTextPart("A plain answer.")), nil)

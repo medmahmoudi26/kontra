@@ -242,6 +242,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		if _, err := q.log.CreateTask(ctx, tx, store.NewTask{
 			ID: taskID, Service: q.svc, Protocol: store.ProtocolA2A, Owner: owner, ContextID: contextID, State: state,
 			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, Origin: origin,
+			Provisional: provisional(req, hired),
 		}); err != nil {
 			return err
 		}
@@ -280,6 +281,14 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	fillStreamStart(ctx, StreamStart{TaskID: a2a.TaskID(taskID.String()), Version: 0, New: true})
 	p.TaskID = a2a.TaskID(taskID.String())
 	return p.TaskID, nil
+}
+
+// provisional reports whether a new task starts unexposed (D362): a caller awaiting the answer to its message (a
+// blocking SendMessage, a stream) sees a task only once the callee's first answer is one, and a Message otherwise. A
+// caller that asked returnImmediately is answered the task now, and a /mcp hire's task is the gate's own: both are
+// exposed at creation.
+func provisional(req *a2a.SendMessageRequest, hired bool) bool {
+	return !hired && (req.Config == nil || !req.Config.ReturnImmediately)
 }
 
 // errResent rolls back a new task's transaction that found, under the resend key's lock, the task an

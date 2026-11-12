@@ -239,4 +239,20 @@ type TaskRow struct {
 	SubmittedAt    *time.Time
 	TerminalAt     *time.Time
 	RetentionUntil *time.Time
+	// ExposedAt is when the task became visible to its caller (D362); nil while it is provisional: a new message's
+	// record before the callee's first answer, and for good when that answer was a Message.
+	ExposedAt *time.Time
+}
+
+// MessageAnswer is the Message a provisional record that has ended answers its caller with (D362): the callee's
+// Message, which the log holds as the record's completed status message (D5), with the gate's contextId and the
+// record's id still in TaskID, for rendering its parts; the caller is sent none. ok is false for an exposed task, a
+// record still running, or one whose end carries no message.
+func MessageAnswer(row *TaskRow) (*a2a.Message, bool) {
+	if row == nil || row.ExposedAt != nil || !row.State.Terminal() || row.Snapshot == nil || row.Snapshot.Status.Message == nil {
+		return nil, false
+	}
+	m := *row.Snapshot.Status.Message
+	m.ContextID = row.ContextID
+	return &m, true
 }

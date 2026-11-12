@@ -114,6 +114,21 @@ func (e *env) task(state store.State, text, ctxID string, console bool) uuid.UUI
 	return e.taskWith(state, text, ctxID, console, nil)
 }
 
+// streamed is the gate's answer to the console's message:stream (D362): it records the message as the gate's Write
+// does (its first_message_id the console's messageId), and writes the stream's headers.
+func (e *env) streamed(w http.ResponseWriter, body map[string]any, state store.State, ctxID string) uuid.UUID {
+	e.t.Helper()
+	msg, _ := body["message"].(map[string]any)
+	id := e.task(state, "hi", ctxID, false)
+	e.exec(`update kontra.tasks set first_message_id = $2, first_request = $3 where id = $1`, id, msg["messageId"], make([]byte, 32))
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return id
+}
+
 // taskWith is task with the first event's origin (D357).
 func (e *env) taskWith(state store.State, text, ctxID string, console bool, origin *store.Origin) uuid.UUID {
 	e.t.Helper()
@@ -664,16 +679,14 @@ func TestPrompting(t *testing.T) {
 		if ctxID == "" {
 			ctxID = "ctx-new"
 		}
-		made = e.task(store.StateSubmitted, "hi", ctxID, false)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"task":{"id":%q,"contextId":%q,"status":{"state":"TASK_STATE_SUBMITTED"}}}`, made, ctxID)
+		made = e.streamed(w, body, store.StateSubmitted, ctxID)
 	}
 	got := e.json("POST", "/v1/tasks", `{"service":"hello","text":"hi there","a2ui_catalogs":["https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"]}`, 200)
 	if got["task_id"] != made.String() || got["state"] != "submitted" || got["message_id"] == "" {
 		t.Fatalf("start %v", got)
 	}
 	r := e.gotReq[0]
-	if r.URL.Path != "/agents/hello/message:send" || r.Header.Get("A2A-Version") != "1.0" ||
+	if r.URL.Path != "/agents/hello/message:stream" || r.Header.Get("A2A-Version") != "1.0" ||
 		!strings.Contains(r.Header.Get("A2A-Extensions"), ExtA2UI091) || !strings.Contains(r.Header.Get("A2A-Extensions"), ExtAP2) ||
 		r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
 		t.Fatalf("the gate saw %s %v", r.URL.Path, r.Header)
@@ -681,7 +694,7 @@ func TestPrompting(t *testing.T) {
 	msg := e.gotMsg[0]["message"].(map[string]any)
 	if msg["role"] != "ROLE_USER" || !strings.Contains(fmt.Sprint(msg["parts"]), "hi there") ||
 		!strings.Contains(fmt.Sprint(msg["metadata"]), "supportedCatalogIds") ||
-		fmt.Sprint(e.gotMsg[0]["configuration"]) != "map[returnImmediately:true]" {
+		e.gotMsg[0]["configuration"] != nil {
 		t.Fatalf("message %v", e.gotMsg[0])
 	}
 	if n := e.count(`select count(*) from kontra.console_tasks where task_id = $1`, made); n != 1 {
@@ -726,9 +739,7 @@ func TestPrompting(t *testing.T) {
 	e.exec(`update kontra.tasks set state = 'completed', terminal_at = now() where id = $1`, made)
 	e.answer = func(w http.ResponseWriter, r *http.Request, body map[string]any) {
 		msg := body["message"].(map[string]any)
-		made = e.task(store.StateSubmitted, "again", msg["contextId"].(string), false)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"task":{"id":%q,"contextId":%q,"status":{"state":"TASK_STATE_SUBMITTED"}}}`, made, msg["contextId"])
+		made = e.streamed(w, body, store.StateSubmitted, msg["contextId"].(string))
 	}
 	cont := e.json("POST", "/v1/tasks/"+reply.String()+"/continue", `{"text":"again"}`, 200)
 	if cont["task_id"] != made.String() || cont["context_id"] != "ctx-new" || e.count(`select count(*) from kontra.console_tasks where task_id = $1`, made) != 1 {

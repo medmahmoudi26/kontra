@@ -429,8 +429,10 @@ func (q *fakeQueue) Write(ctx context.Context, p *workqueue.Payload) (a2a.TaskID
 		msg.TaskID, msg.ContextID = a2a.TaskID(id.String()), ctxID
 		snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: ctxID, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{&msg}}
 		err = pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
+			// D362: provisional as lifecycle.Queue makes it, unless the caller asked returnImmediately.
+			provisional := req.Config == nil || !req.Config.ReturnImmediately
 			if _, err := e.log.CreateTask(ctx, tx, store.NewTask{ID: id, Service: e.svc, Protocol: store.ProtocolA2A, Owner: o,
-				ContextID: ctxID, State: store.StateSubmitted, Snapshot: snap}); err != nil {
+				ContextID: ctxID, State: store.StateSubmitted, Snapshot: snap, Provisional: provisional}); err != nil {
 				return err
 			}
 			return e.log.InsertWorkItem(ctx, tx, store.WorkItem{ID: wid, TaskID: id, Kind: store.WorkExecute,
