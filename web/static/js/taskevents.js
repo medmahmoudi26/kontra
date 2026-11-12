@@ -301,6 +301,35 @@ export function foldResult(prev, a) {
   return r;
 }
 
+/** The kind of a folded result's part, as its Artifacts entry draws it: text, data (a plain data part), file, or other
+ * (an A2UI surface, a form, an actions part: drawn by the part renderer). */
+export function partKind(p) {
+  if (!isObj(p)) return "other";
+  if (p.file) return "file";
+  if (p.text !== undefined) return "text";
+  if (p.data !== undefined && !p.a2ui && !p.form && !p.actions) return "data";
+  return "other";
+}
+
+/** A folded result's parts as its Artifacts entry draws them (spec: Streamed Text Shown Continuously): runs of
+ * consecutive parts of one kind. A text run is the parts' texts joined as they came, nothing trimmed or put
+ * between them, so a stream sent in pieces reads as the one text it is; its `type` is its first part's. A run of
+ * another kind keeps its parts. Pure: [{ kind, parts, text?, type? }]. */
+export function runsOf(parts) {
+  const out = [];
+  for (const p of Array.isArray(parts) ? parts : []) {
+    const kind = partKind(p);
+    const last = out[out.length - 1];
+    if (last && last.kind === kind && kind !== "other") {
+      last.parts.push(p);
+      if (kind === "text") last.text += String(p.text);
+      continue;
+    }
+    out.push(kind === "text" ? { kind, parts: [p], text: String(p.text), type: p.type || null } : { kind, parts: [p] });
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ the A2A wire (D357, D360)
 
 /** The actors of the A2A wire, as the gate records an origin: the caller (the client that called the gate), the

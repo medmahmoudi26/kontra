@@ -1,6 +1,7 @@
 // Command echoagent is the browser tests' agent (test/browser): a plain A2A 1.0 agent, a2a-go v2.7.0, that answers
 // every message with one result, report.md, holding the message's text as Markdown, and completes; "message only" it
-// answers with a bare Message and no task. The tests send it
+// answers with a bare Message and no task; "stream test" it streams a text result, live, in three appended chunks
+// cut mid-word, and sends a result report twice, the second replacing the first. The tests send it
 // Markdown that carries HTML (a script, an onerror handler) to check that the console shows agent content as text and
 // runs none of it.
 //
@@ -20,6 +21,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
@@ -41,6 +43,12 @@ func (agent) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2
 		if ec.StoredTask == nil && !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}
+		if len(ec.Message.Parts) > 0 {
+			if t, ok := ec.Message.Parts[0].Content.(a2a.Text); ok && string(t) == "stream test" {
+				streamTest(ec, yield)
+				return
+			}
+		}
 		var text []string
 		for _, p := range ec.Message.Parts {
 			if t, ok := p.Content.(a2a.Text); ok {
@@ -56,6 +64,40 @@ func (agent) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2
 		}
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("Echoed."))), nil)
 	}
+}
+
+// streamTest is "stream test": the console's Artifacts column draws live as one text "Read the code. Then curl it"
+// (spec: Streamed Text Shown Continuously) and report as one entry holding "final" (spec: Artifacts Column).
+func streamTest(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+	if !yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateWorking, nil), nil) {
+		return
+	}
+	first := a2a.NewArtifactEvent(ec, a2a.NewTextPart("Read the co"))
+	first.Artifact.Name = "live"
+	if !yield(first, nil) {
+		return
+	}
+	for i, chunk := range []string{"de. Then", " curl it"} {
+		time.Sleep(300 * time.Millisecond)
+		up := a2a.NewArtifactUpdateEvent(ec, first.Artifact.ID, a2a.NewTextPart(chunk))
+		up.Artifact.Name = "live"
+		up.LastChunk = i == 1
+		if !yield(up, nil) {
+			return
+		}
+	}
+	report := a2a.NewArtifactEvent(ec, a2a.NewTextPart("draft"))
+	report.Artifact.Name = "report"
+	if !yield(report, nil) {
+		return
+	}
+	again := a2a.NewArtifactUpdateEvent(ec, report.Artifact.ID, a2a.NewTextPart("final"))
+	again.Artifact.Name = "report"
+	again.Append = false
+	if !yield(again, nil) {
+		return
+	}
+	yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("Streamed."))), nil)
 }
 
 func (agent) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {

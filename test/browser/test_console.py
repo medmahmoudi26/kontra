@@ -96,13 +96,68 @@ def test_agent_markdown_runs_nothing(stack: Stack, page: Page) -> None:
     started = stack.api("POST", "/v1/tasks", {"service": "notes", "text": evil})
     eventually("the echo completes", lambda: stack.state(started["task_id"]) == "completed")
     page.goto(stack.base + f"/#/t/{started['task_id']}")
-    expect(page.locator("#thread")).to_contain_text("Report", timeout=15000)
-    expect(page.locator("#thread")).to_contain_text("<script>window.__pwned = 1</script>")
+    # The result is drawn in the Artifacts column (spec: Artifacts Column), as text: its markup runs nothing.
+    expect(page.locator("#threadart")).to_contain_text("Report", timeout=15000)
+    expect(page.locator("#threadart")).to_contain_text("<script>window.__pwned = 1</script>")
     page.wait_for_timeout(500)
-    for link in page.locator("#thread a").all():
+    for link in page.locator("#thread a, #threadart a").all():
         assert not (link.get_attribute("href") or "").lower().startswith("javascript:")
     assert page.evaluate("window.__pwned") is None
-    assert page.locator("#thread script, #thread img[onerror]").count() == 0
+    assert page.locator("#thread script, #thread img[onerror], #threadart script, #threadart img[onerror]").count() == 0
+    no_trouble(page)
+
+
+def no_side_scroll(page: Page) -> None:
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), "the page scrolls sideways"
+
+
+def test_artifacts_column(stack: Stack, page: Page) -> None:
+    """console-wire-polish 3.1–3.4: a task's artifacts are drawn in the Artifacts column, not the transcript: one entry
+    per artifact id, updated in place (an append grows it, a replacement swaps it), "complete" once its last chunk came;
+    a streamed text is one continuous text. The transcript has one linked line per artifact and the agent's last
+    message. On a narrow screen a Transcript | Artifacts switch shows one of the two, and moves to Artifacts when the
+    task ends."""
+    page.set_viewport_size({"width": 1280, "height": 900})
+    started = stack.api("POST", "/v1/tasks", {"service": "notes", "text": "stream test"})
+    task = started["task_id"]
+    page.goto(stack.base + f"/#/t/{task}")
+    eventually("it completes", lambda: stack.state(task) == "completed")
+    col = page.locator("#threadart")
+    expect(col).to_be_visible(timeout=15000)
+    entries = col.locator(".art")
+    expect(entries).to_have_count(2)
+    live = col.locator('.art:has(h4:text-is("live"))')
+    expect(live.locator(".artext")).to_have_count(1)
+    expect(live.locator(".artext")).to_have_text("Read the code. Then curl it")
+    expect(live.locator("[data-artstate]")).to_have_text("complete")
+    report = col.locator('.art:has(h4:text-is("report"))')
+    expect(report).to_have_count(1)
+    expect(report.locator(".in")).to_contain_text("final")
+    expect(report.locator(".in")).not_to_contain_text("draft")
+    # The transcript: a line per artifact and the last message, never the artifacts' content.
+    thread = page.locator("#thread")
+    expect(thread.locator("[data-artline]")).to_have_count(2)
+    expect(thread).to_contain_text("Streamed.")
+    expect(thread).not_to_contain_text("curl it")
+    expect(thread.locator("[data-artline] [data-wire]").first).to_contain_text("notes")
+    no_side_scroll(page)
+    # A narrow screen: the switch, at Artifacts since the task ended; Transcript, then a line's link brings it back.
+    page.set_viewport_size({"width": 400, "height": 800})
+    page.goto(stack.base + "/#/")
+    page.goto(stack.base + f"/#/t/{task}")
+    switch = page.locator("#artswitch")
+    expect(switch).to_be_visible(timeout=15000)
+    expect(page.locator(".run")).to_have_attribute("data-pane", "artifacts")
+    expect(col).to_be_visible()
+    expect(page.locator(".thread")).to_be_hidden()
+    no_side_scroll(page)
+    switch.get_by_role("button", name="Transcript").click()
+    expect(page.locator(".thread")).to_be_visible()
+    expect(col).to_be_hidden()
+    page.locator('#thread [data-artline] button:text-is("report")').click()
+    expect(col).to_be_visible()
+    expect(report).to_be_in_viewport()
+    no_side_scroll(page)
     no_trouble(page)
 
 
