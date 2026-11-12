@@ -53,6 +53,48 @@ type taskView struct {
 	Exposed  bool            `json:"exposed"`
 	Actions  []string        `json:"actions"`
 	Snapshot json.RawMessage `json:"snapshot,omitempty"`
+	// Attempts (the task view only): each dispatch of the task to its service, with the service's own ids on it, so
+	// the service's state (named by its own task id) can be connected to this task. Never the gate's dispatch
+	// internals (key, replica, dispatch fence).
+	Attempts []attemptView `json:"attempts,omitempty"`
+}
+
+// attemptView is one attempt as the task page lists it (spec: Task View).
+type attemptView struct {
+	N         int        `json:"n"`
+	Backend   string     `json:"backend"` // tunnel | direct
+	Session   *string    `json:"session"` // the tunnel session it ran on
+	Outcome   *string    `json:"outcome"` // null while it runs
+	StartedAt time.Time  `json:"started_at"`
+	EndedAt   *time.Time `json:"ended_at"`
+	TaskID    *string    `json:"task_id"`    // the service's own task id, once it sent one
+	ContextID *string    `json:"context_id"` // the service's own context id, once it sent one
+}
+
+// attemptsOf reads a task's attempts, first first.
+func (c *Console) attemptsOf(ctx context.Context, id uuid.UUID) ([]attemptView, error) {
+	rows, err := c.d.DB.Query(ctx, `select n, backend, tunnel_session, outcome, started_at, ended_at, upstream_task_id,
+		upstream_context_id from kontra.attempts where task_id = $1 order by n`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []attemptView{}
+	for rows.Next() {
+		var (
+			a       attemptView
+			session *uuid.UUID
+		)
+		if err := rows.Scan(&a.N, &a.Backend, &session, &a.Outcome, &a.StartedAt, &a.EndedAt, &a.TaskID, &a.ContextID); err != nil {
+			return nil, err
+		}
+		if session != nil {
+			s := session.String()
+			a.Session = &s
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // taskColumns are what every task read selects: never a payload of another table, never first_request.
@@ -228,6 +270,9 @@ func (c *Console) task(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		var v *taskView
 		v, err = c.loadTask(ctx, id, true)
+		if err == nil {
+			v.Attempts, err = c.attemptsOf(ctx, id)
+		}
 		if err == nil {
 			c.answer(w, r, v, nil)
 			return

@@ -45,18 +45,30 @@ The console is an A2A inspector with history: everything it shows is what the ga
   A context's page says how it was opened (the `contextId` your client sent, or the one the gate assigned in its
   answer) and which context your agent knows it by, lists the tasks the agent created in it, and draws one timeline of
   every interaction: each caller message with its `contextId`, its `taskId` (or none) and its `referenceTaskIds`.
-- **Tasks**, and a task's thread drawn from its event log as it happens: messages, results, A2UI surfaces, AP2
-  checkouts, mandates and receipts as cards (decoded for display, never verified), sealed parts as envelopes. Its **A2A
-  timeline** labels every item `<Actor> · <A2A type>`: `Caller · SendMessage` (or `SendStreamingMessage`),
-  `Callee · Task`, `Callee · TaskStatusUpdateEvent`, `Callee · TaskArtifactUpdateEvent`, `Callee · Message`, and
-  `Gate · TaskStatusUpdateEvent` for what the gate wrote itself (a failure, a reconnect wait). Where the gate delivered
-  another object than the agent sent (a polled `Task` as status and artifact updates; an agent's `Message` after the
-  caller asked `returnImmediately`, as a completed task carrying it), the item says so. An agent that answers with a
-  `Message` is answered to your client as that `Message`, with no task: the interaction shows in its context's timeline
-  as `Caller · SendMessage` and `Callee · Message`, and in no task list. Your client's other calls on the task (`GetTask`,
-  `SubscribeToTask`, push configurations) and the gate's calls to your agent that carried nothing new are in the
-  timeline too. Each item is checked against the pinned A2A specification (1.0, or 0.3 for a 0.3 agent), and the
-  task's `taskId` and `contextId`, and your agent's own ids, are shown in full with Copy.
+- **Tasks**, and a task's thread drawn from its event log as it happens. The transcript holds the messages, the
+  agent's questions with their forms and A2UI surfaces, AP2 checkouts, mandates and receipts as cards (decoded for
+  display, never verified), sealed parts as envelopes, and status changes; a message that only updates a form already
+  shown changes it in place and adds nothing. What the agent returns, its artifacts, is in the **Artifacts** column
+  beside it: one entry per artifact, updated in place as it arrives (an append grows it, a replacement swaps it),
+  marked receiving or complete, text streamed in chunks drawn as one continuous text, data as tables, files with Open
+  and Download; the transcript has one line per artifact that links to it. Below 1080 px a Transcript | Artifacts
+  switch shows one of the two, and moves to Artifacts when the task ends.
+- Every item is labelled by **who sent it, by name**, and its A2A type: the principal that called (`anonymous` in
+  this profile, `key:…` with an API key), your service's name, or `Gate` for what the gate wrote itself (a failure, a
+  reconnect wait). For a service `red`: `anonymous · SendMessage` (or `SendStreamingMessage`), `red · Task`,
+  `red · TaskStatusUpdateEvent`, `red · TaskArtifactUpdateEvent`, `red · Message`, `Gate · TaskStatusUpdateEvent`.
+  Where the gate delivered another object than the agent sent (a polled `Task` as status and artifact updates; an
+  agent's `Message` after the caller asked `returnImmediately`, as a completed task carrying it), the item says so. An
+  agent that answers with a `Message` is answered to your client as that `Message`, with no task: the interaction shows
+  in its context's timeline as `anonymous · SendMessage` and `red · Message`, and in no task list. Your client's other
+  calls on the task (`GetTask`, `SubscribeToTask`, push configurations) and the gate's calls to your agent that carried
+  nothing new are in the timeline too. Each item is checked against the pinned A2A specification (1.0, or 0.3 for a
+  0.3 agent).
+- **Ids** are shown in full with Copy, each labelled with the two parties of its leg: the gate's `taskId` and
+  `contextId` as `anonymous → gate`, your agent's own as `gate → red`. The task page lists each **attempt** (the gate
+  retries a task whose node went away) with its outcome and your agent's task and context ids on it, so your agent's
+  state, which it names by its own ids, can be found from the gate's task. A shortened id shows its end (`…7c8d9e0f`):
+  ids minted in the same millisecond share their start.
 - **Traffic**: one row per A2A call on both legs (your client to the gate, the gate to your agent), refused calls
   included (a missing `A2A-Version`, an unknown service, a body over the limit, a required extension missing), with its
   binding, method, `contextId` and outcome; filter by leg, method or `contextId`. A row opens the exchange: in this
@@ -71,8 +83,9 @@ The console is an A2A inspector with history: everything it shows is what the ga
 - **Playground**: any of A2A 1.0's eleven methods, on JSON-RPC or HTTP+JSON, from a JSON body prefilled with what the
   method requires, sent to the service's own A2A route as any client sends it; the raw answer or the stream's frames,
   then the exchange the gate recorded with its validation.
-- **Run a task**: start a task on a service from its card (its skills, examples and AgentStack initial form), answer
-  it when it asks for input (text, a form, an A2UI action), cancel it, or continue its conversation. The console acts
+- **Send message**: send a message to a service from its card (its skills, examples and AgentStack initial form); the
+  agent decides whether to answer with a task or a plain message. Answer a task when it asks for input (text, a form,
+  an A2UI action), cancel it, continue its conversation, or start a **New conversation**. The console acts
   only on the tasks it started; a task another client started is watch-only.
 
 ## Keeping history

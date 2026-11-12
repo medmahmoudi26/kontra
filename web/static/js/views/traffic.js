@@ -3,7 +3,7 @@
 // each with its binding, A2A method, contextId and outcome, linking to its exchange (#/x/<id>: bodies, frames,
 // validation) and to its task. Filters: leg, method, contextId, failed only. How long they are kept is /v1/info's.
 
-import { gate, offers, state } from "../app.js";
+import { gate, offers, partiesOf, state } from "../app.js";
 import { $, fill, h } from "../dom.js";
 import { showView } from "../nav.js";
 import { wireOfExchange } from "../taskevents.js";
@@ -36,7 +36,7 @@ const METHODS = ["SendMessage", "SendStreamingMessage", "GetTask", "ListTasks", 
   "DeleteTaskPushNotificationConfig", "GetExtendedAgentCard", "card", "upstream_card"];
 
 function row(x) {
-  const w = wireOfExchange(x);
+  const w = wireOfExchange(x, partiesOf(x.principal, x.service));
   return h("tr", { dataset: { exchange: x.id || "", failed: failed(x) ? "1" : "", leg: x.leg || "caller" } }, [
     h("td", { class: "muted", title: x.at || "", text: ago(x.at) }),
     h("td", {}, [h("a", { href: `#/x/${x.id}`, title: "Open this exchange" }, [labelChip(w)])]),
@@ -46,7 +46,7 @@ function row(x) {
     h("td", { class: "mono small", title: x.context_id || "", text: x.context_id ? shortId(x.context_id) : "—" }),
     h("td", { class: failed(x) ? "err" : "", text: outcome(x) }),
     h("td", { class: "m", text: typeof x.duration_ms === "number" ? `${x.duration_ms} ms` : "—" }),
-    h("td", {}, [x.task_id ? h("a", { href: `#/t/${x.task_id}`, text: shortId(x.task_id) }) : h("span", { class: "muted", text: "—" })]),
+    h("td", {}, [x.task_id ? h("a", { href: `#/t/${x.task_id}`, title: x.task_id, text: shortId(x.task_id) }) : h("span", { class: "muted", text: "—" })]),
   ]);
 }
 
@@ -75,7 +75,7 @@ export async function showTraffic() {
   const current = () => mine === generation;
   const toggle = h("button", { class: "btn sm", type: "button", "aria-pressed": String(failedOnly), id: "failedonly", text: "Failed only" });
   toggle.addEventListener("click", () => { failedOnly = !failedOnly; showTraffic(); });
-  const legs = select("legfilter", "Leg", leg, [["", "Both legs"], ["caller", "Caller → gate"], ["callee", "Gate → callee"]], (v) => { leg = v; showTraffic(); });
+  const legs = select("legfilter", "Leg", leg, [["", "Both legs"], ["caller", "Principal → gate"], ["callee", "Gate → service"]], (v) => { leg = v; showTraffic(); });
   const methods = select("methodfilter", "Method", method, [["", "Every method"], ...METHODS.map((m) => [m, m])], (v) => { method = v; showTraffic(); });
   const ctx = h("input", { id: "contextfilter", type: "search", placeholder: "contextId", "aria-label": "contextId", value: context });
   ctx.addEventListener("change", () => { context = ctx.value.trim(); showTraffic(); });
@@ -86,7 +86,7 @@ export async function showTraffic() {
       fill(root, [h("div", { class: "row filters" }, [legs, methods, ctx, toggle, horizon()]), list.error && !list.items.length
         ? failure(list.error, "The gate's exchanges")
         : h("div", { class: "card", id: "trafficcard" }, [h("div", { class: "bd stack" }, [
-          table(["When", "A2A", "Service", "Binding", "Caller", "contextId", "Outcome", "Took", "Task"], list.items.map(row), failedOnly ? "No failed exchange." : "No exchange yet."),
+          table(["When", "A2A", "Service", "Binding", "Principal", "contextId", "Outcome", "Took", "Task"], list.items.map(row), failedOnly ? "No failed exchange." : "No exchange yet."),
           h("div", { class: "row" }, [list.more]),
         ])])]);
     },

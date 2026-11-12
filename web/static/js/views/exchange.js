@@ -3,13 +3,13 @@
 // (traffic.bodies, D358), its request body and its answer or its stream's frames as sent, credentials redacted, each
 // with its validation against the pinned A2A specification. Bodies are shown as text, never parsed as markup.
 
-import { gate } from "../app.js";
+import { gate, partiesOf } from "../app.js";
 import { $, fill, fmtBytes, h } from "../dom.js";
 import { showView } from "../nav.js";
 import { wireOfExchange } from "../taskevents.js";
 import { jsonBox } from "./cards.js";
 import { failure, shortId, when } from "./common.js";
-import { idRow, labelChip, validationMark } from "./wire.js";
+import { idRow, labelChip, legOf, validationMark } from "./wire.js";
 
 let generation = 0;
 
@@ -56,7 +56,8 @@ export async function showExchange(id) {
     return () => {};
   }
   if (mine !== generation) return () => {};
-  const w = wireOfExchange(x);
+  const parties = partiesOf(x.principal, x.service);
+  const w = wireOfExchange(x, parties);
   $("#exchangetitle").textContent = w.label;
   $("#exchangesub").textContent = `${x.leg === "callee" ? "The gate's call to the agent" : "A call the gate received"}, ${when(x.at)}`;
   const facts = [
@@ -68,9 +69,9 @@ export async function showExchange(id) {
     h("div", { class: "card", id: "exchangefacts" }, [h("div", { class: "hd" }, [labelChip(w)]), h("div", { class: "bd stack" }, [
       ...facts.map(([k, v]) => h("div", { class: "idrow" }, [h("b", { text: k }), h("span", { text: String(v) })])),
       idRow("exchange id", x.id),
-      x.task_id ? idRow(x.leg === "callee" ? "gate taskId" : "taskId", x.task_id, { href: `#/t/${x.task_id}` }) : null,
-      x.callee_task_id ? idRow("callee taskId", x.callee_task_id) : null,
-      x.context_id ? idRow(x.leg === "callee" ? "callee contextId" : "contextId", x.context_id) : null,
+      x.task_id ? idRow("taskId", x.task_id, { href: `#/t/${x.task_id}`, leg: legOf(parties, false) }) : null,
+      x.callee_task_id ? idRow("taskId", x.callee_task_id, { leg: legOf(parties, true) }) : null,
+      x.context_id ? idRow("contextId", x.context_id, { leg: legOf(parties, x.leg === "callee") }) : null,
     ])]),
   ];
   if (!x.bodies_kept) {

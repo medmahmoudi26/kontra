@@ -54,7 +54,12 @@
   <section class="view" id="view-thread" hidden>
     <div class="run">
       <aside class="ctx" id="threadctx"></aside>
+      <div class="artswitch" id="artswitch" role="group" aria-label="Show" hidden>
+        <button type="button" class="btn sm" data-pane="transcript" aria-pressed="true">Transcript</button>
+        <button type="button" class="btn sm" data-pane="artifacts" aria-pressed="false">Artifacts</button>
+      </div>
       <div class="thread"><div class="thread-scroll"><div class="thread-inner" id="thread"></div></div></div>
+      <aside class="arts" id="threadart" aria-label="Artifacts" hidden></aside>
     </div>
   </section>
 

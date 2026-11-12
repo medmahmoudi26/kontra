@@ -1,6 +1,6 @@
 // A task's page: from the request to what the agent delivers.
 //
-//   #/run/<service>   a new task on that service: the request card in the thread, nothing sent
+//   #/run/<service>   a new conversation with that service: the request card in the thread, nothing sent
 //   #/t/<task>        a task's thread
 //
 // One page for both. Sending the request (POST /v1/tasks, which the console API sends to the gate's
@@ -35,19 +35,20 @@ import { CATALOGS, FormBook, actionMessage, actionReply, answerOf, formReply, su
 import { collect, formSpec, refusal } from "../agentschema.js";
 import { answeredValues, fulfilledValues, normalizeForm, requestedForm, valueRows } from "../agentstack.js";
 import { agentForm } from "../agentform.js";
-import { gate, offers } from "../app.js";
+import { gate, offers, partiesOf } from "../app.js";
 import { GateError, errorFrom } from "../api.js";
 import { $, errorText, fill, h, icon, toast } from "../dom.js";
 import { fieldNode } from "../formfields.js";
 import { crumb, showView } from "../nav.js";
 import { readEvents } from "../sse.js";
-import { FORM_MAX, describe, foldResult, wireOf } from "../taskevents.js";
+import { FORM_MAX, describe, foldResult, runsOf, wireOf } from "../taskevents.js";
 import { byCard, chipRow, enterSends, hm, hms, jsonBox, mss, oneLine, phone, plainText, rawToggle, reducedMotion } from "./cards.js";
 import { VIA_WORDS, failure, isTerminal, serviceAvatar, shortId, stateChip, when } from "./common.js";
-import { dataView, fileRow, sealedRow, textView } from "./outputs.js";
+import { dataView, fileRow, sealedRow } from "./outputs.js";
 import { requestCard, requestRow, requestRows } from "./request.js";
 import { ap2Card } from "./ap2.js";
-import { idRow as wireIdRow, labelChip, openingNodes, timelineRow } from "./wire.js";
+import { isMarkdown, markdownNodes } from "../results.js";
+import { idRow as wireIdRow, labelChip, legOf, openingNodes, timelineRow } from "./wire.js";
 
 const TASK_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
@@ -74,11 +75,11 @@ const flowing = (state) => LIVE.has(state || "submitted");
 
 let generation = 0;
 let stop = () => {};
-/** The task the page shows (null on a new task): main.js does not rebuild it for its own hash. */
+/** The task the page shows (null on a new conversation): main.js does not rebuild it for its own hash. */
 let shown = null;
 /** A task a Continue started -> the task it continues (this tab only). */
 const continued = new Map();
-/** What a Run again or a Continue sent, for the new task's page to show at once. */
+/** What a Run again or a Continue sent, for the next page to show at once. */
 let handoff = null;
 
 export const shownTask = () => shown;
@@ -88,9 +89,18 @@ export function leaveThread() {
   shown = null;
   stop();
   stop = () => {};
-  for (const id of ["#thread", "#threadctx"]) {
+  for (const id of ["#thread", "#threadctx", "#threadart"]) {
     const n = $(id);
     if (n) fill(n, []); // a hidden view keeps nothing of what it showed
+  }
+  const art = $("#threadart");
+  if (art) art.hidden = true;
+  const sw = $("#artswitch");
+  if (sw) sw.hidden = true;
+  const run = art && art.closest(".run");
+  if (run) {
+    run.classList.remove("has-art");
+    delete run.dataset.pane;
   }
 }
 
@@ -161,7 +171,7 @@ async function follow(taskId, after, signal, { onOpen, onEvent, onEnd, onTrouble
 
 // ------------------------------------------------------------------ the routes
 
-/** #/run/<service>: a new task on that service. `prefill`: { text, data, values }. */
+/** #/run/<service>: a new conversation with that service (a message with no contextId). `prefill`: { text, data, values }. */
 export async function showRun(name, { prefill = null } = {}) {
   leaveThread();
   const mine = ++generation;
@@ -173,6 +183,23 @@ export async function showRun(name, { prefill = null } = {}) {
   const page = openPage(mine, { name, taskId: null });
   await page.newRun(prefill);
   return () => {};
+}
+
+/** A task's attempts (spec: Task View): each one's number, how it ended or that it runs, where it ran, and the
+ * service's own taskId and contextId on it, labelled with their leg (`gate → red`). */
+export function attemptNodes(attempts, parties) {
+  const leg = legOf(parties, true);
+  return attempts.map((a) => {
+    const where = a.backend === "tunnel" && a.session
+      ? h("span", { class: "muted small", title: a.session, text: `on tunnel session ${shortId(a.session)}` })
+      : h("span", { class: "muted small", text: `on the ${a.backend} backend` });
+    return h("div", { class: "attempt stack", dataset: { attempt: String(a.n) } }, [
+      h("div", { class: "row" }, [h("b", { class: "small", text: `attempt ${a.n}` }),
+        h("span", { class: a.outcome && a.outcome !== "completed" ? "small err" : "small muted", text: a.outcome || "running" }), where]),
+      wireIdRow("taskId", a.task_id || null, { leg }),
+      wireIdRow("contextId", a.context_id || null, { leg }),
+    ]);
+  });
 }
 
 /** #/t/<task>: a task's thread. */
@@ -239,7 +266,6 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     events: 0,
     req: null,
     live: null,
-    resultsCard: null,
     results: new Map(),
     inputs: [],
     ended: false,
@@ -248,6 +274,8 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     resultCount: 0,
     metaKey: { composer: null },
   };
+  /** The two parties of this task by name (the principal that called, the service), for every label. */
+  const parties = () => partiesOf(P.t && P.t.caller, P.t && P.t.service);
 
   // ---- The column: the cards, then the composer.
   const list = h("div", { class: "stack", id: "messages" });
@@ -258,11 +286,63 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const againSlot = h("div", { class: "stack" });
   tail.append(composerSlot, againSlot);
   const head = from
-    ? h("p", { class: "small", id: "continues" }, ["Continues ", h("a", { href: `#/t/${from}`, text: shortId(from) })])
+    ? h("p", { class: "small", id: "continues" }, ["Continues ", h("a", { href: `#/t/${from}`, title: from, text: shortId(from) })])
     : null;
   fill(root, [head, list, tail]);
   const scroller = root.closest(".thread-scroll");
   const column = root.closest(".thread");
+
+  // ---- The Artifacts column (spec: Artifacts Column): beside the transcript on a wide screen, behind a
+  // "Transcript | Artifacts" switch on a narrow one. Shown once the task has an artifact.
+  const artCol = $("#threadart");
+  const artSwitch = $("#artswitch");
+  const runGrid = artCol ? artCol.closest(".run") : null;
+  const artCount = h("span", { class: "r", text: "" });
+  const artList = h("div", { class: "stack", id: "artlist" });
+  artList.style.gap = "10px";
+  if (artCol) fill(artCol, [h("div", { class: "arthd" }, [icon("download", 14), h("h3", { text: "Artifacts" }), artCount]), artList]);
+  const PANE_KEY = "kontra.console.pane";
+  const isNarrow = () => typeof matchMedia === "function" && matchMedia("(max-width:1080px)").matches;
+  let paneChosen = false; // the person pressed the switch on this page: the console no longer moves it
+  const setPane = (pane, { chosen = false } = {}) => {
+    if (!runGrid) return;
+    runGrid.dataset.pane = pane;
+    if (artSwitch) for (const b of artSwitch.querySelectorAll("button[data-pane]")) b.setAttribute("aria-pressed", String(b.dataset.pane === pane));
+    if (chosen) {
+      paneChosen = true;
+      try {
+        sessionStorage.setItem(PANE_KEY, pane);
+      } catch {
+        // no storage: the choice lasts this page
+      }
+    }
+  };
+  let remembered = null;
+  try {
+    remembered = sessionStorage.getItem(PANE_KEY);
+  } catch {
+    remembered = null;
+  }
+  setPane(remembered === "artifacts" ? "artifacts" : "transcript");
+  if (artSwitch) for (const b of artSwitch.querySelectorAll("button[data-pane]")) b.onclick = () => setPane(b.dataset.pane, { chosen: true });
+  const showArtifacts = () => {
+    if (!artCol || !artCol.hidden) return;
+    artCol.hidden = false;
+    if (artSwitch) artSwitch.hidden = false;
+    if (runGrid) runGrid.classList.add("has-art");
+  };
+  /** Bring an artifact's entry into view: the column on a narrow screen, then the entry. */
+  const focusArtifact = (r) => {
+    if (isNarrow()) setPane("artifacts", { chosen: true });
+    r.node.scrollIntoView({ block: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+    r.node.classList.add("flash");
+    setTimeout(() => r.node.classList.remove("flash"), 1200);
+  };
+  /** When a task ends, the eye lands on its result: on a narrow screen the switch moves to Artifacts by itself,
+   * unless the person chose a pane on this page. */
+  const endedToArtifacts = () => {
+    if (P.results.size && isNarrow() && !paneChosen) setPane("artifacts");
+  };
 
   // ---- Following new content, or saying it came.
   const pill = h("button", { class: "btn sm primary", type: "button", id: "newactivity", text: "New activity ↓", hidden: true });
@@ -367,7 +447,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   // ------------------------------------------------------------------ the sidebar
 
   const dot = h("span", { class: "dot idle" });
-  const chipText = h("span", { text: "new task" });
+  const chipText = h("span", { text: "new conversation" });
   const chipTime = h("span", { class: "mono" });
   const chip = h("span", { class: "statechip", id: "threadstate", dataset: { state: "new" } }, [dot, chipText, chipTime]);
   const plainChip = () => {
@@ -394,9 +474,9 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const runsList = h("div", { class: "ctxruns", id: "ctxruns" });
   const runs = h("div", { class: "ctxsec", id: "recenttasks", hidden: true }, [h("h3", { text: "Recent tasks" }), runsList]);
   const runHref = `#/run/${encodeURIComponent(name)}`;
-  const newRun = h("a", { class: "newbtn", id: "newrun", href: runHref }, [icon("plus", 13), "New task"]);
+  const newRun = h("a", { class: "newbtn", id: "newrun", href: runHref }, [icon("plus", 13), "New conversation"]);
   const newSec = h("div", { class: "ctxsec", hidden: kind !== "a2a" || !taskId }, [newRun]);
-  const newSmall = h("a", { class: "btn sm", id: "newrunsm", href: runHref, text: "New task", hidden: true });
+  const newSmall = h("a", { class: "btn sm", id: "newrunsm", href: runHref, text: "New conversation", hidden: true });
   newSmall.style.textDecoration = "none";
   const footTerms = h("div", { class: "terms2", id: "ctxfoot" });
   const logCount = h("span", { text: "A2A timeline" });
@@ -467,14 +547,17 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     const tl = P.timeline;
     const ctxHref = t.context_id && t.caller_id ? `#/c/${encodeURIComponent(t.service)}/${encodeURIComponent(t.caller_id)}/${encodeURIComponent(t.context_id)}` : null;
     fill(footTerms, [
-      wireIdRow("taskId", t.task_id),
-      t.context_id ? wireIdRow("contextId", t.context_id, { href: ctxHref }) : null,
-      ...(tl ? openingNodes(null, (tl.callee_contexts || []).filter((c) => (c.task_ids || []).includes(t.task_id))) : []),
+      wireIdRow("taskId", t.task_id, { leg: legOf(parties(), false) }),
+      t.context_id ? wireIdRow("contextId", t.context_id, { href: ctxHref, leg: legOf(parties(), false) }) : null,
+      // The service's own ids, per attempt (spec: Task View): what the service names its state by.
+      ...(Array.isArray(t.attempts) && t.attempts.length
+        ? attemptNodes(t.attempts, parties())
+        : tl ? openingNodes(null, (tl.callee_contexts || []).filter((c) => (c.task_ids || []).includes(t.task_id)), parties()) : []),
       tl && tl.opening && tl.opening.task_id === t.task_id ? h("p", { class: "small muted", id: "ctxopened",
-        text: tl.opening.assigned === true ? "This task opened its context: the gate assigned the contextId." : tl.opening.assigned === false ? "This task opened its context: the caller sent the contextId." : "" }) : null,
+        text: tl.opening.assigned === true ? "This task opened its context: the gate assigned the contextId." : tl.opening.assigned === false ? `This task opened its context: ${parties().principal || "the principal"} sent the contextId.` : "" }) : null,
       h("div", { class: "tr" }, [h("b", { text: "started" }), h("span", { text: when(t.created_at) })]),
       h("div", { class: "tr" }, [h("b", { text: "duration" }), h("span", { id: "ctxduration", text: "" })]),
-      h("div", { class: "tr" }, [h("b", { text: "caller" }), h("span", { text: [t.caller, VIA_WORDS[t.via] || t.via].filter(Boolean).join(" · ") || "—" })]),
+      h("div", { class: "tr" }, [h("b", { text: "principal" }), h("span", { text: [parties().principal, VIA_WORDS[t.via] || t.via].filter(Boolean).join(" · ") || "—" })]),
     ]);
     tick();
   };
@@ -482,7 +565,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   const runRow = (item, current) => {
     const [w, c] = stateChip(item.state);
     const said = runSummary(item.summary);
-    const row = h("a", { class: "ctxrun", href: `#/t/${item.task_id}`, dataset: { task: item.task_id }, title: item.summary || shortId(item.task_id) }, [
+    const row = h("a", { class: "ctxrun", href: `#/t/${item.task_id}`, dataset: { task: item.task_id }, title: item.summary ? `${item.summary} (${item.task_id})` : item.task_id }, [
       h("span", { class: `jchip ${c}`, text: w }),
       h("span", { class: "minw0", text: said ? said.slice(0, 40) : shortId(item.task_id) }),
       h("span", { class: "id", text: hm(item.created_at) }),
@@ -532,7 +615,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
   };
   const logLine = (ev) => {
     P.events += 1;
-    timelineItem(timelineRow({ ...ev, type: "event", task_id: P.taskId }), ev.at);
+    timelineItem(timelineRow({ ...ev, type: "event", task_id: P.taskId }, { parties: parties() }), ev.at);
   };
   /** The task's timeline: its exchanges that carried no event join the A2A timeline; its context's opening and the
    * callee's ids join the sidebar's ids. */
@@ -546,7 +629,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       P.timeline = tl;
       for (const it of Array.isArray(tl.items) ? tl.items : []) {
         if (it.type !== "exchange" || $(`[data-exchange="${it.id}"]`, log)) continue;
-        timelineItem(timelineRow(it), it.at);
+        timelineItem(timelineRow(it, { parties: parties() }), it.at);
       }
       footRows();
     } catch {
@@ -724,7 +807,6 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       return P.live;
     }
     P.live = liveCard(at, phase);
-    P.resultsCard = null; // a new turn's results come under it
     wireTag(P.live.node);
     grew(() => list.appendChild(P.live.node));
     P.live.cancel(Boolean(P.t && P.t.actions.includes("cancel")));
@@ -750,112 +832,87 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     }
   }
 
-  // ---- The results of a turn, then what it delivered.
+  // ---- What the agent returned: one Artifacts entry per artifact id, and one line in the transcript.
 
-  function resultsCard(at) {
-    const ic = icon("download", 14);
-    const title = h("h3", { text: "Results" });
-    const right = h("span", { class: "r", text: "" });
-    const hd = h("div", { class: "hd" }, [ic, title, right]);
-    const secs = h("div", {});
-    const last = h("div", { class: "bd topline", hidden: true, dataset: { final: "1" } });
-    last.style.padding = "12px 15px";
-    const card = h("div", { class: "card", dataset: { results: "1" } }, [hd, secs, last]);
-    const msg = byCard(who, at, card);
-    const c = {
-      node: msg.node,
-      card,
-      secs,
-      add(node) { grew(() => secs.appendChild(node)); },
-      receiving(on) { if (!c.delivered) right.textContent = on ? "receiving…" : ""; },
-      deliver(when, m, artifactTexts) {
-        c.delivered = true;
-        card.dataset.delivered = "1";
-        card.id = "delivered";
-        const check = icon("check", 15);
-        check.style.color = "var(--ok)";
-        ic.replaceWith(check);
-        title.textContent = "Delivered";
-        const end = Date.parse(when) || Date.now();
-        const from = P.createdAt || end;
-        right.textContent = `in ${mss((end - from) / 1000)}`;
-        msg.time.textContent = hm(when);
-        if (m) {
-          // The agent's last words, once: not again when they repeat a result's text.
-          const parts = m.parts.filter((p) => p.text === undefined || !artifactTexts.has(p.text.trim()));
-          if (parts.length) {
-            last.hidden = false;
-            grew(() => last.append(...partNodes(parts, "svc", partCtx).filter(Boolean)));
-          }
-        }
-        if (!secs.childElementCount && last.hidden) hd.style.borderBottom = "0";
-      },
-    };
-    return c;
-  }
-  const ensureResults = (at) => {
-    if (P.resultsCard) return P.resultsCard;
-    P.resultsCard = resultsCard(at);
-    wireTag(P.resultsCard.node);
-    grew(() => list.appendChild(P.resultsCard.node));
-    return P.resultsCard;
+  /** The transcript's line for an artifact, at its first arrival: its name, linked to its entry. */
+  const artLine = (r) => {
+    const link = h("button", { class: "linkbtn", type: "button", dataset: { artlink: r.id || "" }, text: r.name || "artifact" });
+    link.addEventListener("click", () => focusArtifact(r));
+    r.link = link;
+    return h("div", { class: "artline", dataset: { artline: r.id || "" } }, [icon("download", 13), link]);
   };
 
-  /** One result's section: its name, "receiving" while its chunks come, its "{}", its parts. */
-  const drawResult = (r) => {
-    const receiving = r.chunked && r.lastChunk !== true && flowing(P.state);
-    const raw = rawToggle(`${r.name}: as the agent sent it`, () => r.raw);
-    const files = r.parts.filter((p) => p.file);
-    const fileOnly = files.length === r.parts.length && files.length > 0;
-    const ctx = { taskId: P.taskId, signal: ctrl.signal };
-    const nodes = [];
-    for (const part of r.parts) {
-      if (part.file) nodes.push(fileRow(part.file, ctx, { under: r.name, receiving, extra: fileOnly && part === files[files.length - 1] ? [raw.button] : [] }));
-      else if (part.text !== undefined) nodes.push(textView(part, r.name));
-      else if (part.data !== undefined && !part.a2ui && !part.form && !part.actions) nodes.push(dataView(part.data));
-      else nodes.push(...partNodes([part], "svc", partCtx));
+  /** One run of an entry: text as one continuous text (live while receiving, Markdown once complete when its type or
+   * name says so), data by its shape, files with Open and Download, anything else by the part renderer. */
+  const runNodes = (r, run, live, receiving, ctx) => {
+    if (run.kind === "text") {
+      if (live) {
+        const text = document.createTextNode(run.text);
+        return { nodes: [h("pre", { class: "artext", dataset: { live: "1" } }, [text])], text };
+      }
+      const md = isMarkdown(run.type, r.name);
+      const box = h(md ? "div" : "pre", { class: md ? "plain" : "artext" }, md ? markdownNodes(run.text) : [run.text]);
+      return { nodes: [box], text: null };
     }
-    const inner = h("div", { class: "in stack" }, [...nodes, raw.box]);
-    inner.style.gap = "8px";
-    const header = fileOnly ? null : h("header", {}, [
-      h("h4", { text: r.name }),
-      receiving ? h("span", { class: "tag", text: "receiving" }) : null,
-      h("span", { class: "ty", text: r.parts.some((p) => p.data !== undefined) ? "data" : "text" }),
+    if (run.kind === "file") return { nodes: run.parts.map((p) => fileRow(p.file, ctx, { under: r.name, receiving })), text: null };
+    if (run.kind === "data") return { nodes: run.parts.map((p) => dataView(p.data)), text: null };
+    return { nodes: run.parts.flatMap((p) => partNodes([p], "svc", partCtx)), text: null };
+  };
+
+  /** Draw an artifact's entry. A stream of text appends grows the entry's text in place (one text node, nothing
+   * rebuilt); anything else (a replacement, a new kind, the last chunk) draws it again. */
+  const drawEntry = (r, appended) => {
+    const receiving = r.chunked && r.lastChunk !== true && flowing(P.state);
+    const v = r.view;
+    if (appended && v && v.text && v.receiving === receiving && receiving && r.parts.length > v.count
+      && r.parts.slice(v.count).every((p) => p.file === undefined && p.text !== undefined)
+      && r.parts[v.count - 1] && r.parts[v.count - 1].text !== undefined) {
+      const box = v.text.parentNode;
+      const follow = box && box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+      v.text.appendData(r.parts.slice(v.count).map((p) => String(p.text)).join(""));
+      v.count = r.parts.length;
+      if (follow && box) box.scrollTop = box.scrollHeight;
+      return;
+    }
+    const raw = rawToggle(`${r.name}: as the agent sent it`, () => r.raw);
+    const ctx = { taskId: P.taskId, signal: ctrl.signal };
+    const runs = runsOf(r.parts);
+    let text = null;
+    const nodes = [];
+    runs.forEach((run, i) => {
+      const got = runNodes(r, run, receiving && i === runs.length - 1, receiving, ctx);
+      if (got.text) text = got.text;
+      nodes.push(...got.nodes);
+    });
+    const header = h("header", {}, [
+      h("h4", { text: r.name || "artifact" }),
+      h("span", { class: receiving ? "tag" : "tag done", dataset: { artstate: receiving ? "receiving" : "complete" }, text: receiving ? "receiving" : "complete" }),
+      h("span", { class: "ty", text: runs.map((x) => x.kind).filter((k, i, all) => all.indexOf(k) === i).join(" + ") }),
       raw.button,
     ]);
-    // Files one after another read as one list: no rule and 8px between their rows.
-    const prev = r.node.previousElementSibling;
-    const joined = fileOnly && Boolean(prev && prev.dataset.fileonly === "1");
-    if (fileOnly) {
-      r.node.dataset.fileonly = "1";
-      inner.style.padding = joined ? "0 15px 8px" : "10px 15px 8px";
-    } else delete r.node.dataset.fileonly;
-    r.node.style.borderTop = joined ? "0" : "";
-    r.node.replaceChildren(...[header, inner].filter(Boolean));
-    // The card this result is in says "receiving…" while one of its own results is: a file that
-    // began in an earlier turn (an appended log) ends there, not in the turn that is drawn now.
-    if (r.card) r.card.receiving([...P.results.values()].some((x) => x.card === r.card && x.chunked && x.lastChunk !== true && flowing(P.state)));
+    r.node.replaceChildren(header, h("div", { class: "in" }, [...nodes, raw.box]));
+    r.view = { count: r.parts.length, text, receiving };
+    if (r.link) r.link.textContent = r.name || "artifact";
   };
+
   const addArtifact = (a, at) => {
     const known = a.id !== null && P.results.get(a.id);
     if (!known) {
-      const card = ensureResults(at);
-      const node = h("section", { class: "sec", dataset: { result: a.id || "" } });
-      const r = { node, card, id: a.id, raw: [...a.source], ...foldResult(null, a) };
+      const node = h("section", { class: "art", dataset: { artifact: a.id || "" } });
+      const r = { node, id: a.id, raw: [...a.source], view: null, link: null, ...foldResult(null, a) };
       if (a.id !== null) P.results.set(a.id, r);
       P.resultCount += 1;
-      card.add(node);
-      drawResult(r);
+      showArtifacts();
+      artList.appendChild(node);
+      artCount.textContent = String(P.resultCount);
+      drawEntry(r, false);
+      place(artLine(r, at));
+      if (P.terminalAt) endedToArtifacts(); // an ended task's result read after its end (a replay) still gets the eye
       return;
     }
     Object.assign(known, foldResult(known, a));
     known.raw = a.append ? [...known.raw, ...a.source] : [...a.source];
-    drawResult(known);
-  };
-  const artifactTexts = () => {
-    const out = new Set();
-    for (const r of P.results.values()) for (const p of r.parts) if (p.text !== undefined && p.text.trim()) out.add(p.text.trim());
-    return out;
+    drawEntry(known, a.append);
   };
 
   // ---- The ends.
@@ -1283,11 +1340,15 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       } else {
         holder.dataset.a2ui = nodes.length ? "surface" : "update";
       }
-      if (!nodes.length && surfacesOf(listMsgs).some((id) => before.has(id) && ui.boxes.has(id))) {
-        nodes.push(h("p", { class: "small", text: "Updated the form above." }));
-      }
-      if (!nodes.length) holder.hidden = true;
       grew(() => fill(holder, nodes));
+      if (!nodes.length) {
+        // Only updates to surfaces already drawn (spec: A2UI Rendering): they changed in place, and the transcript
+        // gains no item for them; the message's card goes too when nothing else of it shows.
+        holder.hidden = true;
+        const bd = holder.parentElement;
+        const card = holder.closest(".msg");
+        if (card && bd && [...bd.children].every((c) => c.hidden)) card.hidden = true;
+      }
       liven();
     }).catch((e) => {
       if (!alive()) return;
@@ -1396,7 +1457,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     P.state = state;
     // A result whose last chunk has not come is "receiving" only while the run runs: not while it
     // waits for an answer, nor once it ended (a canceled run's log).
-    if (flowing(state) !== flowing(was)) for (const r of P.results.values()) if (r.chunked && r.lastChunk !== true) drawResult(r);
+    if (flowing(state) !== flowing(was)) for (const r of P.results.values()) if (r.chunked && r.lastChunk !== true) drawEntry(r, false);
     if (LIVE.has(state)) {
       const live = ensureLive(at, state);
       if (m) {
@@ -1420,11 +1481,13 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     } else if (state === "completed") {
       settleLive(at, state);
       P.terminalAt = Date.parse(at) || Date.now();
-      ensureResults(at).deliver(at, m, artifactTexts());
+      if (m) agentCard(m, at); // the agent's last words: a message, as any other
+      endedToArtifacts();
     } else if (isTerminal(state)) {
       settleLive(at, state);
       P.terminalAt = Date.parse(at) || Date.now();
       endCard(state, m, at);
+      endedToArtifacts();
     }
     drawChip();
   };
@@ -1467,7 +1530,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     P.lastEventAt = Date.now() < P.replayUntil && at ? Math.min(Date.now(), at) : Date.now();
     const d = describe(ev);
     logLine(ev);
-    P.wire = wireOf(ev);
+    P.wire = wireOf(ev, parties());
     try {
       onContent(ev, d);
     } finally {
@@ -1716,7 +1779,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       runItems = [{ task_id: ho.taskId, state: ho.state, created_at: ho.at, summary: ho.summary.text || null, local: true }];
       drawRuns();
     },
-    /** The request card of a new task (#/run). */
+    /** The request card of a new conversation (#/run). */
     async newRun(prefill) {
       fill(list, [h("p", { class: "empty", text: "Loading…" })]);
       loadRuns();
@@ -1731,7 +1794,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
       if (!alive()) return;
       setBlurb(form.description);
       if (form.name) $("#ctxname", side).textContent = form.name;
-      chipText.textContent = "new task";
+      chipText.textContent = "new conversation";
       const card = requestCard(form, {
         service: name,
         prefill,
@@ -1754,7 +1817,7 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
               held.hidden = false;
               plainChip();
               dot.className = "dot idle";
-              chipText.textContent = "new task";
+              chipText.textContent = "new conversation";
               chipTime.textContent = "";
             }
             throw e;

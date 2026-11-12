@@ -301,11 +301,51 @@ export function foldResult(prev, a) {
   return r;
 }
 
+/** The kind of a folded result's part, as its Artifacts entry draws it: text, data (a plain data part), file, or other
+ * (an A2UI surface, a form, an actions part: drawn by the part renderer). */
+export function partKind(p) {
+  if (!isObj(p)) return "other";
+  if (p.file) return "file";
+  if (p.text !== undefined) return "text";
+  if (p.data !== undefined && !p.a2ui && !p.form && !p.actions) return "data";
+  return "other";
+}
+
+/** A folded result's parts as its Artifacts entry draws them (spec: Streamed Text Shown Continuously): runs of
+ * consecutive parts of one kind. A text run is the parts' texts joined as they came, nothing trimmed or put
+ * between them, so a stream sent in pieces reads as the one text it is; its `type` is its first part's. A run of
+ * another kind keeps its parts. Pure: [{ kind, parts, text?, type? }]. */
+export function runsOf(parts) {
+  const out = [];
+  for (const p of Array.isArray(parts) ? parts : []) {
+    const kind = partKind(p);
+    const last = out[out.length - 1];
+    if (last && last.kind === kind && kind !== "other") {
+      last.parts.push(p);
+      if (kind === "text") last.text += String(p.text);
+      continue;
+    }
+    out.push(kind === "text" ? { kind, parts: [p], text: String(p.text), type: p.type || null } : { kind, parts: [p] });
+  }
+  return out;
+}
+
 // ------------------------------------------------------------------ the A2A wire (D357, D360)
 
-/** The actors of the A2A wire, as an item's label names them: the caller (the client that called the
- * gate), the callee (the service's agent) and the gate itself. */
-export const ACTORS = Object.freeze({ caller: "Caller", callee: "Callee", gate: "Gate" });
+/** The actors of the A2A wire, as the gate records an origin: the caller (the client that called the gate), the
+ * callee (the service's agent) and the gate itself. A label never shows these role words: it names the party. */
+export const ACTORS = Object.freeze({ caller: "caller", callee: "callee", gate: "gate" });
+
+/** Who an actor is, by name (spec: A2A Labels On Every Item): the calling principal as the gate stores it
+ * (`anonymous`, `key:<prefix>`, `oidc:sub:<sub>`, `node:<key id>`), the service's name, or `Gate`. `parties`
+ * is { principal, service }, already in the host's display form; a party the record does not name is "unknown". */
+export function partyOf(actor, parties) {
+  const p = isObj(parties) ? parties : {};
+  if (actor === "gate") return "Gate";
+  if (actor === "caller") return str(p.principal) || "unknown";
+  if (actor === "callee") return str(p.service) || "unknown";
+  return null;
+}
 
 /** A2A's own names of a logged event's StreamResponse member: the object the caller received. */
 const MEMBER_TYPES = Object.freeze({ task: "Task", message: "Message", statusUpdate: "TaskStatusUpdateEvent", artifactUpdate: "TaskArtifactUpdateEvent" });
@@ -331,7 +371,7 @@ function idsOf(payload) {
 }
 
 /** The A2A members that place a caller's message (D360): its contextId, its taskId (null: it named
- * none, so the agent may answer it with a new task or a Message), and the tasks it refers to. */
+ * none, so the agent may answer it by creating a task or with a Message), and the tasks it refers to. */
 export function routingOf(m) {
   if (!isObj(m)) return null;
   return {
@@ -348,7 +388,7 @@ export function routingOf(m) {
  * { actor, type, method, callerType, convertedTo, exchangeId, contextAssigned, ids, validation,
  *   recorded, label } -- `recorded` false for an event logged before origins were (its label then
  * names the caller-facing object only). */
-export function wireOf(ev) {
+export function wireOf(ev, parties) {
   const payload = isObj(ev && ev.payload) ? ev.payload : null;
   const callerType = str(ev && ev.caller_type) || callerTypeOf(payload);
   const o = isObj(ev && ev.origin) ? ev.origin : null;
@@ -366,21 +406,28 @@ export function wireOf(ev) {
     validation: isObj(ev && ev.validation) ? ev.validation : null,
     recorded: Boolean(actor),
   };
-  out.label = actor ? `${ACTORS[actor]} · ${type || ev.kind}` : (type || String((ev && ev.kind) || "event"));
+  out.party = actor ? partyOf(actor, parties) : null;
+  out.typeName = type || String((ev && ev.kind) || "event");
+  out.label = actor ? `${out.party} · ${out.typeName}` : out.typeName;
   return out;
 }
 
-/** One exchange of a timeline (a call that carried no event) as the wire labels it: the caller's
- * call to the gate, or the gate's call to the callee. */
-export function wireOfExchange(x) {
+/** One exchange of a timeline (a call that carried no event) as the wire labels it, by name: the principal's
+ * call to the gate (`anonymous · GetTask`), or the gate's call to the service (`Gate → red · GetTask`).
+ * `parties` as partyOf takes it; an exchange's own `principal` and `service` fill what it lacks. */
+export function wireOfExchange(x, parties) {
   const callee = x && x.leg === "callee";
   const method = str(x && x.method) || "unknown";
+  const p = { principal: str(x && x.principal), service: str(x && x.service), ...(isObj(parties) ? Object.fromEntries(Object.entries(parties).filter(([, v]) => str(v))) : {}) };
+  const party = callee ? `Gate → ${partyOf("callee", p)}` : partyOf("caller", p);
   return {
     actor: callee ? "gate" : "caller",
     type: method,
     method,
+    party,
+    typeName: method,
     exchangeId: str(x && x.id),
-    label: callee ? `Gate → Callee · ${method}` : `Caller · ${method}`,
+    label: `${party} · ${method}`,
     failed: Boolean(x && x.failed),
     outcome: x ? [x.http_status ? String(x.http_status) : null, x.rpc_code !== null && x.rpc_code !== undefined ? `rpc ${x.rpc_code}` : null, str(x.reason)].filter(Boolean).join(" · ") : "",
   };

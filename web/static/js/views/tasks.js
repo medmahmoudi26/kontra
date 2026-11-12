@@ -23,10 +23,10 @@ const said = (text) => (text.length > 60 ? `${text.slice(0, 59)}…` : text);
 export function taskRow(t) {
   return h("tr", { dataset: { task: t.task_id } }, [
     h("td", {}, [h("span", { class: "tag", text: t.kind || "a2a" })]),
-    h("td", {}, [t.kind === "a2a" || !t.kind ? h("a", { href: `#/run/${encodeURIComponent(t.service)}`, title: `Start a task on ${t.service}`, text: t.service }) : t.service]),
+    h("td", {}, [t.kind === "a2a" || !t.kind ? h("a", { href: `#/run/${encodeURIComponent(t.service)}`, title: `Send a message to ${t.service}`, text: t.service }) : t.service]),
     h("td", {}, [
       h("a", { href: `#/t/${t.task_id}`, title: t.summary || t.task_id, text: t.summary ? said(t.summary) : shortId(t.task_id) }),
-      t.summary ? h("span", { class: "muted mono", text: ` ${shortId(t.task_id)}` }) : null,
+      t.summary ? h("span", { class: "muted mono", title: t.task_id, text: ` ${shortId(t.task_id)}` }) : null,
     ]),
     h("td", {}, [chip(stateChip(t.state))]),
     h("td", { class: "muted", text: [t.caller, VIA_WORDS[t.via] || t.via].filter(Boolean).join(" · ") || "—" }),
@@ -34,7 +34,7 @@ export function taskRow(t) {
   ]);
 }
 
-export const TASK_HEAD = Object.freeze(["Kind", "Service", "Task", "State", "Caller", "Age"]);
+export const TASK_HEAD = Object.freeze(["Kind", "Service", "Task", "State", "Principal", "Age"]);
 
 function filterBar(onChange) {
   const sel = (key, label, options) => {

@@ -101,7 +101,7 @@ export class Gate {
   taskFile(taskId, ref, { signal } = {}) {
     return this.send("task_file", { path: { task_id: taskId, ref }, signal, accept: "application/octet-stream" });
   }
-  /** Start a task: { service, text?, data? | form?, a2ui_catalogs? } (`form`: { values } of the
+  /** Send a message to a service (a new conversation): { service, text?, data? | form?, a2ui_catalogs? } (`form`: { values } of the
    * card's AgentStack initial form); { task_id, state, message_id }. */
   startTask(body) { return this.call("start_task", { body }); }
   /** What starting a task on service `name` takes, read from its card: { name, description,
@@ -124,7 +124,7 @@ export class Gate {
   /** A2A CancelTask (cancel offered): { state } after the call (409 task_not_cancelable once it
    * ended or when the agent refuses). */
   cancelTask(taskId) { return this.call("cancel_task", { path: { task_id: taskId } }); }
-  /** A new task in an ended task's context (continue offered): { text?, data?, a2ui_catalogs? };
+  /** A message in an ended task's context (continue offered): { text?, data?, a2ui_catalogs? };
    * { task_id, state, message_id }. */
   continueTask(taskId, body) { return this.call("continue_task", { path: { task_id: taskId }, body }); }
   /** The gate's services: kind, served card (A2A), connected sessions, retention. */
