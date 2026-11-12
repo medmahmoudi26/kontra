@@ -299,3 +299,38 @@ func TestMessageOnlyInteraction(t *testing.T) {
 		t.Errorf("the interaction %v: want exposed false and only continue", v)
 	}
 }
+
+// The task view lists its attempts with the service's own ids (spec: Task View, "Task retried on a second attempt"),
+// never the gate's dispatch internals.
+func TestTaskAttempts(t *testing.T) {
+	e := newEnv(t, nil)
+	id := e.task("completed", "retry me", "ctx-r", false)
+	s1, s2 := uuid.New(), uuid.New()
+	e.exec(`insert into kontra.attempts (task_id, n, backend, tunnel_session, key_id, replica_id, upstream_task_id, upstream_context_id,
+		first_upstream_id_at, started_at, ended_at, outcome)
+		values ($1, 1, 'tunnel', $2, 'k1_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'r1', 'red-task-1', 'red-ctx', now() - interval '9 s', now() - interval '10 s', now() - interval '8 s', 'interrupted'),
+		       ($1, 2, 'tunnel', $3, 'k1_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'r2', 'red-task-2', 'red-ctx', now() - interval '5 s', now() - interval '6 s', now(), 'completed')`, id, s1, s2)
+	v := e.json("GET", "/v1/tasks/"+id.String(), "", 200)
+	got, _ := v["attempts"].([]any)
+	if len(got) != 2 {
+		t.Fatalf("attempts %v", v["attempts"])
+	}
+	for i, want := range []struct{ outcome, task, session string }{{"interrupted", "red-task-1", s1.String()}, {"completed", "red-task-2", s2.String()}} {
+		a := got[i].(map[string]any)
+		if a["n"] != float64(i+1) || a["outcome"] != want.outcome || a["task_id"] != want.task || a["context_id"] != "red-ctx" ||
+			a["backend"] != "tunnel" || a["session"] != want.session || a["ended_at"] == nil {
+			t.Errorf("attempt %d: %v", i+1, a)
+		}
+		for _, internal := range []string{"key_id", "replica_id", "dispatch_id"} {
+			if _, ok := a[internal]; ok {
+				t.Errorf("attempt %d answers %s", i+1, internal)
+			}
+		}
+	}
+	// The list routes answer no attempts.
+	for _, it := range items(e.json("GET", "/v1/tasks", "", 200)) {
+		if _, ok := it["attempts"]; ok {
+			t.Errorf("the task list answers attempts: %v", it)
+		}
+	}
+}

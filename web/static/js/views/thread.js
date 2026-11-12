@@ -175,6 +175,23 @@ export async function showRun(name, { prefill = null } = {}) {
   return () => {};
 }
 
+/** A task's attempts (spec: Task View): each one's number, how it ended or that it runs, where it ran, and the
+ * service's own taskId and contextId on it, labelled with their leg (`gate → red`). */
+export function attemptNodes(attempts, parties) {
+  const leg = legOf(parties, true);
+  return attempts.map((a) => {
+    const where = a.backend === "tunnel" && a.session
+      ? h("span", { class: "muted small", title: a.session, text: `on tunnel session ${shortId(a.session)}` })
+      : h("span", { class: "muted small", text: `on the ${a.backend} backend` });
+    return h("div", { class: "attempt stack", dataset: { attempt: String(a.n) } }, [
+      h("div", { class: "row" }, [h("b", { class: "small", text: `attempt ${a.n}` }),
+        h("span", { class: a.outcome && a.outcome !== "completed" ? "small err" : "small muted", text: a.outcome || "running" }), where]),
+      wireIdRow("taskId", a.task_id || null, { leg }),
+      wireIdRow("contextId", a.context_id || null, { leg }),
+    ]);
+  });
+}
+
 /** #/t/<task>: a task's thread. */
 export async function showThread(taskId) {
   leaveThread();
@@ -471,12 +488,15 @@ function openPage(mine, { name, taskId, kind = "a2a", from = null }) {
     fill(footTerms, [
       wireIdRow("taskId", t.task_id, { leg: legOf(parties(), false) }),
       t.context_id ? wireIdRow("contextId", t.context_id, { href: ctxHref, leg: legOf(parties(), false) }) : null,
-      ...(tl ? openingNodes(null, (tl.callee_contexts || []).filter((c) => (c.task_ids || []).includes(t.task_id)), parties()) : []),
+      // The service's own ids, per attempt (spec: Task View): what the service names its state by.
+      ...(Array.isArray(t.attempts) && t.attempts.length
+        ? attemptNodes(t.attempts, parties())
+        : tl ? openingNodes(null, (tl.callee_contexts || []).filter((c) => (c.task_ids || []).includes(t.task_id)), parties()) : []),
       tl && tl.opening && tl.opening.task_id === t.task_id ? h("p", { class: "small muted", id: "ctxopened",
         text: tl.opening.assigned === true ? "This task opened its context: the gate assigned the contextId." : tl.opening.assigned === false ? `This task opened its context: ${parties().principal || "the principal"} sent the contextId.` : "" }) : null,
       h("div", { class: "tr" }, [h("b", { text: "started" }), h("span", { text: when(t.created_at) })]),
       h("div", { class: "tr" }, [h("b", { text: "duration" }), h("span", { id: "ctxduration", text: "" })]),
-      h("div", { class: "tr" }, [h("b", { text: "caller" }), h("span", { text: [t.caller, VIA_WORDS[t.via] || t.via].filter(Boolean).join(" · ") || "—" })]),
+      h("div", { class: "tr" }, [h("b", { text: "principal" }), h("span", { text: [parties().principal, VIA_WORDS[t.via] || t.via].filter(Boolean).join(" · ") || "—" })]),
     ]);
     tick();
   };

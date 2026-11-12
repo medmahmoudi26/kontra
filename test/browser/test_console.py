@@ -302,12 +302,20 @@ def test_thread_labels_every_item(stack: Stack, page: Page) -> None:
     expect(page.locator('#eventlog .tl-row[data-wire="anonymous · SendMessage"] .conv')).to_contain_text("anonymous received a Task")
     expect(page.locator("#eventlog .vmark.ok").first).to_be_visible()
     assert page.locator("#thread [data-wire]").count() > 0, "no card carries an A2A label"
-    row = page.locator('#ctxfoot [data-id="taskId"]')
+    row = page.locator('#ctxfoot > [data-id="taskId"]')
     expect(row.locator(".mono")).to_have_text(task)
     row.get_by_role("button", name="Copy").click()
     assert page.evaluate("navigator.clipboard.readText()") == task
     ctx = stack.api("GET", f"/v1/tasks/{task}")["context_id"]
-    expect(page.locator('#ctxfoot [data-id="contextId"] .mono')).to_have_text(ctx)
+    expect(page.locator('#ctxfoot > [data-id="contextId"] .mono')).to_have_text(ctx)
+    expect(page.locator('#ctxfoot > [data-id="taskId"]')).to_have_attribute("data-leg", "anonymous → gate")
+    # Its attempts, with the agent's own ids (spec: Task View).
+    attempts = stack.api("GET", f"/v1/tasks/{task}")["attempts"]
+    assert attempts and attempts[0]["n"] == 1 and attempts[0]["task_id"], attempts
+    first = page.locator('#ctxfoot [data-attempt="1"]')
+    expect(first).to_contain_text("attempt 1")
+    expect(first.locator('[data-id="taskId"] .mono')).to_have_text(attempts[0]["task_id"])
+    expect(first.locator('[data-id="taskId"]')).to_have_attribute("data-leg", "gate → notes")
     no_trouble(page)
 
 
