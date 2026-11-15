@@ -1,7 +1,7 @@
 // Cards (#/cards, GET /v1/services): one card per service behind this gate, as Kontra Cloud's catalog
 // draws them. An A2A service shows its served agent card (the `agent` summary: name, version,
 // description, provider, skills); an MCP server its URL. Each says whether an agent is reachable
-// now and how long its ended tasks are kept; an A2A service has Start a task. The description is
+// now and how long its ended tasks are kept; an A2A service has Send message (the agent decides whether a task exists). The description is
 // clamped to two lines: a small down arrow under the card, shown only when there is more than the
 // card shows, opens the full description and each skill's details, and turns up to close them.
 // Everything a card says comes from the agent: it is set as text, never as markup.
@@ -80,7 +80,7 @@ function card(s) {
     details,
     s.url ? h("div", { class: "url" }, [h("code", { text: s.url }), copyButton(s.url, "Copy", note)]) : null,
     h("div", { class: "foot" }, [
-      s.kind === "a2a" && !s.disabled ? h("a", { class: "btn sm", href: `#/run/${encodeURIComponent(s.name)}`, text: "Start a task" }) : null,
+      s.kind === "a2a" && !s.disabled ? h("a", { class: "btn sm", href: `#/run/${encodeURIComponent(s.name)}`, text: "Send message" }) : null,
       s.kind === "a2a" && offers("cards_compare") ? h("a", { class: "btn sm ghost", href: `#/cards/${encodeURIComponent(s.name)}`, dataset: { act: "compare" }, text: "Compare cards" }) : null,
       s.kind === "a2a" && !s.disabled && offers("playground") ? h("a", { class: "btn sm ghost", href: `#/play/${encodeURIComponent(s.name)}`, dataset: { act: "play" }, text: "Playground" }) : null,
       h("span", { class: "tag", text: s.kind === "mcp" ? "mcp server" : "a2a agent" }),

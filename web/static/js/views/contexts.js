@@ -4,12 +4,12 @@
 // (#/c/<service>/<caller>/<context>): how it was opened, the callee's own contexts for it, its tasks oldest first, and
 // one timeline of every interaction in it, each item labelled as A2A names it.
 
-import { gate, offers } from "../app.js";
+import { gate, offers, partiesOf } from "../app.js";
 import { $, fill, h } from "../dom.js";
 import { showView } from "../nav.js";
 import { TASK_HEAD, taskRow } from "./tasks.js";
 import { ago, chip, failure, pager, shortId, stateChip, table } from "./common.js";
-import { idRow, openingNodes, timelineRow } from "./wire.js";
+import { idRow, legOf, openingNodes, timelineRow } from "./wire.js";
 
 let generation = 0;
 
@@ -52,7 +52,7 @@ export async function showContexts() {
       fill(root, [list.error && !list.items.length
         ? failure(list.error, "The gate's contexts")
         : h("div", { class: "card", id: "ctxcard" }, [h("div", { class: "bd stack" }, [
-          table(["contextId", "Service", "Caller", "Tasks", "Latest", "Active"], list.items.map(ctxRow), "No context yet."),
+          table(["contextId", "Service", "Principal", "Tasks", "Latest", "Active"], list.items.map(ctxRow), "No context yet."),
           h("div", { class: "row" }, [list.more]),
         ])])]);
     },
@@ -84,17 +84,19 @@ export async function showContext(service, caller, context) {
   }
   if (mine !== generation) return () => {};
   const tasks = Array.isArray(c.tasks) ? c.tasks : Array.isArray(c.items) ? c.items : [];
+  // The context's two parties by name: its principal (the timeline's, else its latest task's) and its service.
+  const parties = partiesOf((tl && tl.principal) || (tasks[0] && tasks[0].caller) || null, service);
   const parts = [
     h("div", { class: "card", id: "ctxopening" }, [h("div", { class: "bd stack" }, tl
-      ? openingNodes(tl.opening, tl.callee_contexts)
-      : [idRow("contextId", context)])]),
+      ? openingNodes(tl.opening, tl.callee_contexts, parties)
+      : [idRow("contextId", context, { leg: legOf(parties, false) })])]),
     h("div", { class: "card", id: "ctxtasks" }, [h("div", { class: "hd" }, [h("h3", { text: "Tasks the agent created in it" })]),
       h("div", { class: "bd stack" }, [table(TASK_HEAD, tasks.map(taskRow), "No task in this context.")])]),
   ];
   if (tl) {
     const items = Array.isArray(tl.items) ? tl.items : [];
     parts.push(h("div", { class: "card", id: "ctxtimeline" }, [h("div", { class: "hd" }, [h("h3", { text: "Timeline" })]),
-      h("div", { class: "bd stack timeline" }, items.length ? items.map((it) => timelineRow(it, { taskLinks: true })) : [h("p", { class: "empty", text: "Nothing yet." })]),
+      h("div", { class: "bd stack timeline" }, items.length ? items.map((it) => timelineRow(it, { taskLinks: true, parties })) : [h("p", { class: "empty", text: "Nothing yet." })]),
       tl.more ? h("p", { class: "small muted", text: "Only the first 2000 items are shown." }) : null]));
   }
   fill(root, parts);

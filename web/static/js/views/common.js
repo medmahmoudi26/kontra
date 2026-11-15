@@ -70,8 +70,9 @@ export const chip = ([text, cls]) => h("span", { class: `jchip ${cls}`, text });
 /** How a caller reached the gate (a task's `via`), in words. */
 export const VIA_WORDS = Object.freeze({ console: "this console", api_key: "an API key", mcp: "an MCP client", node: "a node", anonymous: "anonymous" });
 
-/** A UUIDv7 task id, short: "019a3c…e71b". */
-export const shortId = (id) => (typeof id === "string" && id.length > 12 ? `${id.slice(0, 6)}…${id.slice(-4)}` : String(id || ""));
+/** An id, short: its end, "…6f0ac9dd". A UUIDv7 starts with its millisecond, so ids minted together share their
+ * start and differ only at the end (its random part); the full id goes in the element's title and copy button. */
+export const shortId = (id) => (typeof id === "string" && id.length > 12 ? `…${id.slice(-8)}` : String(id || ""));
 
 /** Seconds -> "24h", "30m", "1d 2h", "90s". */
 export function span(seconds) {

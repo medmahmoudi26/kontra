@@ -1,4 +1,4 @@
-// The request card of a new task: what the person sends an agent to start a task, in the thread
+// The request card of a new conversation: the message the person sends an agent (the agent decides whether it makes a task), in the thread
 // itself. A first message is text: the card's skill examples are chips that fill it, and a JSON
 // object of parameters can go with it when the card takes application/json. When the card offers an
 // AgentStack initial form (js/agentstack.js, drawn by js/agentform.js), that form is the request and
@@ -94,7 +94,7 @@ export function requestCard(form, { service, prefill = null, send, discard = nul
   const sendBtn = h("button", { class: "btn primary", type: "button", id: "startsend", text: verb });
 
   if (form.unsupported_extensions && form.unsupported_extensions.length) {
-    parts.push(h("p", { class: "small", id: "startext", text: `Needs ${form.unsupported_extensions.join(", ")}: the gate may refuse a task from here.` }));
+    parts.push(h("p", { class: "small", id: "startext", text: `Needs ${form.unsupported_extensions.join(", ")}: the gate may refuse a message sent from here.` }));
   }
 
   const text = h("textarea", { rows: "3", id: "startmessage", "aria-label": "Message", maxlength: "65536", placeholder: `What should ${form.name || service} do?` });
@@ -182,7 +182,7 @@ export function requestCard(form, { service, prefill = null, send, discard = nul
     close.addEventListener("click", discard);
   }
   const node = h("div", { class: "card reqform", id: "startform" }, [
-    h("div", { class: "hd" }, [h("h3", { text: "New task" }), close]),
+    h("div", { class: "hd" }, [h("h3", { text: "Send message" }), close]),
     h("div", { class: "bd" }, parts),
   ]);
   // Enter in a one-line field runs it, Ctrl+Enter in a text box.

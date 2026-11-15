@@ -1,6 +1,6 @@
 // The top bar's sections and breadcrumb (#crumb), and the views' sections in the page: one place
 // that hides every view before the router shows one, and says where the person is. A task's thread
-// (#/t/<task>), a conversation (#/c/...) and a new task (#/run/<service>) show under their section
+// (#/t/<task>), a conversation (#/c/...) and a new conversation (#/run/<service>) show under their section
 // as a trail. Below 720px console.css hides the crumb; the section links stay.
 
 import { offers } from "./app.js";

@@ -6,7 +6,7 @@
 //   #/c/<service>/<caller>/<context> one context: how it was opened, its tasks, its timeline
 //   #/tasks                          the gate's tasks, newest first
 //   #/t/<task>                       a task's thread, built live from its events
-//   #/run/<service>                  start a task on an A2A service, from its card
+//   #/run/<service>                  send a message to an A2A service, from its card (a new conversation)
 //   #/traffic                        the gate's A2A exchanges, both legs
 //   #/x/<exchange>                   one exchange: its bodies or frames, validated
 //   #/calls                          the gate's MCP tool calls
@@ -52,7 +52,7 @@ const part = (s) => {
 };
 
 async function route() {
-  // A new task's page became that task's (history.replaceState once it started), or a link to
+  // A new conversation's page became its task's (history.replaceState once it started), or a link to
   // the task it shows was followed: the page stays as it is, never drawn again.
   const same = /^#\/t\/([^/?#]+)$/.exec(location.hash);
   if (same && shownTask() !== null && shownTask() === same[1].toLowerCase() && !$("#view-thread").hidden) return;

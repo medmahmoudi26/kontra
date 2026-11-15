@@ -26,7 +26,7 @@ function row(c) {
     h("td", { class: "m", text: `${bytes(c.bytes_in)} / ${bytes(c.bytes_out)}` }),
     h("td", { class: "m", text: typeof c.duration_ms === "number" ? `${c.duration_ms} ms` : "—" }),
     h("td", { class: bad ? "err" : "", text: c.outcome || c.error || "—" }),
-    h("td", {}, [c.task_id ? h("a", { href: `#/t/${c.task_id}`, text: shortId(c.task_id) }) : h("span", { class: "muted", text: "—" })]),
+    h("td", {}, [c.task_id ? h("a", { href: `#/t/${c.task_id}`, title: c.task_id, text: shortId(c.task_id) }) : h("span", { class: "muted", text: "—" })]),
   ]);
 }
 
@@ -43,7 +43,7 @@ export async function showCalls() {
       fill(root, [list.error && !list.items.length
         ? failure(list.error, "The gate's MCP calls")
         : h("div", { class: "card", id: "callscard" }, [h("div", { class: "bd stack" }, [
-          table(["When", "Service", "Tool", "Caller", "In / out", "Took", "Outcome", "Task"], list.items.map(row), "No MCP call yet."),
+          table(["When", "Service", "Tool", "Principal", "In / out", "Took", "Outcome", "Task"], list.items.map(row), "No MCP call yet."),
           h("div", { class: "row" }, [list.more]),
         ])])]);
     },

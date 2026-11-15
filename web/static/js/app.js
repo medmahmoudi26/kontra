@@ -7,6 +7,20 @@ import { Gate } from "./api.js";
 /** The gate that served this page: same origin, no credential. */
 export const gate = new Gate({ base: "" });
 
+/** The host's names for the two parties of a call (spec: A2A Labels On Every Item). The local gate shows each as it
+ * is stored, the principal (`anonymous`, `key:kk_…`, `node:…`) and the service's name; a host embedding this console
+ * (Kontra Cloud) may replace `displayName` to show its own handle or key label: still the party's name, never a role. */
+export const host = {
+  /** kind: "principal" | "service"; id: the gate's string for it. */
+  displayName: (kind, id) => id,
+};
+
+/** { principal, service } in the host's display form, for taskevents.js's wireOf and wireOfExchange. */
+export function partiesOf(principal, service) {
+  const name = (kind, id) => (typeof id === "string" && id ? String(host.displayName(kind, id) || id) : null);
+  return { principal: name("principal", principal), service: name("service", service) };
+}
+
 export const state = {
   /** GET /v1/info once read: { profile, features, retention, ... }; null before, or when it failed. */
   info: null,

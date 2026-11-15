@@ -1,5 +1,5 @@
 // An AgentStack form drawn (js/agentstack.js's normalised FormRender): the card's initial form on
-// a new task, or a form an agent asks with on the thread. Built from
+// a new conversation, or a form an agent asks with on the thread. Built from
 // console.css as shipped (`.form`, `.field`, `.sel`, `.check`, `.sw`/`.swrow`, `.artin`); its
 // columns and spans, and what the stylesheet lacks, through the CSSOM. A file is read in the page as
 // a data: URI, at most FILE_MAX each. Every control keeps `state` current; `collect()` gives the
