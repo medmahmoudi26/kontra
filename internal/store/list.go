@@ -70,7 +70,7 @@ func listStates(ts a2a.TaskState) ([]string, error) {
 	return []string{string(st)}, nil
 }
 
-const listFilter = `t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.exposed_at is not null
+const listFilter = `t.tenant_id = $1 and t.service = $2 and t.caller_id = $3 and t.exposed_at is not null
 	and ($4::text is null or t.context_id = $4::text)
 	and ($5::text[] is null or t.state = any($5::text[]))
 	and ($6::timestamptz is null or t.status_at >= $6::timestamptz)`
@@ -82,7 +82,7 @@ const listFilter = `t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and 
 // read ListPageBytes of snapshots (a2a-go: pageSize is the most a page holds). A bad page token, page
 // size, history length or status is InvalidParams; a contextId no task can have (U+0000 or invalid
 // UTF-8, which no text column holds) matches nothing. The anonymous principal is refused,
-// UnsupportedOperation: its tasks share one buyer (spec §2.3, D20).
+// UnsupportedOperation: its tasks share one caller (spec §2.3, D20).
 func (s *Store) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListTasksResponse, error) {
 	if req == nil {
 		req = &a2a.ListTasksRequest{}
@@ -131,7 +131,7 @@ func (s *Store) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListT
 	if req.ContextID != "" && !storableText(req.ContextID) {
 		return resp, nil
 	}
-	args := []any{s.svc.TenantID, s.svc.Name, o.BuyerID, contextID, states, after}
+	args := []any{s.svc.TenantID, s.svc.Name, o.CallerID, contextID, states, after}
 
 	// One snapshot for the count, the page and the snapshots read, so they agree with each other.
 	err = pgx.BeginTxFunc(ctx, s.db, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
@@ -152,7 +152,7 @@ func (s *Store) List(ctx context.Context, req *a2a.ListTasksRequest) (*a2a.ListT
 		if err != nil {
 			return fmt.Errorf("store: list tasks: %w", err)
 		}
-		if err := s.readPage(ctx, tx, o.BuyerID, keys[:min(len(keys), pageSize)], history, req.IncludeArtifacts, resp); err != nil {
+		if err := s.readPage(ctx, tx, o.CallerID, keys[:min(len(keys), pageSize)], history, req.IncludeArtifacts, resp); err != nil {
 			return err
 		}
 		if n := len(resp.Tasks); n < len(keys) {
@@ -176,7 +176,7 @@ type listKey struct {
 // readPage appends the tasks of keys to resp in order, trimmed, until it has read s.listBytes of
 // snapshots (at least one task). It fetches them in batches of at most s.listBatch bytes on disk and reads
 // and decodes one row at a time, so it holds about the budget plus one snapshot whatever the compression.
-func (s *Store) readPage(ctx context.Context, tx pgx.Tx, buyer uuid.UUID, keys []listKey, history int, artifacts bool, resp *a2a.ListTasksResponse) error {
+func (s *Store) readPage(ctx context.Context, tx pgx.Tx, caller uuid.UUID, keys []listKey, history int, artifacts bool, resp *a2a.ListTasksResponse) error {
 	read := 0
 	for i := 0; i < len(keys) && read < s.listBytes; {
 		j, stored := i+1, keys[i].stored
@@ -189,8 +189,8 @@ func (s *Store) readPage(ctx context.Context, tx pgx.Tx, buyer uuid.UUID, keys [
 			ids = append(ids, k.id)
 		}
 		rows, err := tx.Query(ctx, `select t.id, t.snapshot from kontra.tasks t
-			where t.id = any($1::uuid[]) and t.tenant_id = $2 and t.service = $3 and t.buyer_id = $4
-			order by t.status_at desc, t.id desc`, ids, s.svc.TenantID, s.svc.Name, buyer)
+			where t.id = any($1::uuid[]) and t.tenant_id = $2 and t.service = $3 and t.caller_id = $4
+			order by t.status_at desc, t.id desc`, ids, s.svc.TenantID, s.svc.Name, caller)
 		if err != nil {
 			return fmt.Errorf("store: list tasks: %w", err)
 		}

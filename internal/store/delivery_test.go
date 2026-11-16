@@ -28,7 +28,7 @@ func (e *env) followUpItem(task *a2a.Task, text string) uuid.UUID {
 	e.t.Helper()
 	wid := uuid.Must(uuid.NewV7())
 	if err := e.log.InsertWorkItem(context.Background(), nil, WorkItem{ID: wid, TaskID: uid(e.t, task.ID), Kind: WorkExecute,
-		Payload: workPayload(task, text, buyerA)}); err != nil {
+		Payload: workPayload(task, text, callerA)}); err != nil {
 		e.t.Fatal(err)
 	}
 	return wid
@@ -55,8 +55,8 @@ func (e *env) sameTransaction(wid, taskID uuid.UUID, seq int64) bool {
 func TestFollowUpDelivery(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "book a room")
+	ctx := asOwner(context.Background(), callerA)
+	task := e.newTask(e.svc, callerA, "", "book a room")
 	id := uid(t, task.ID)
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestFollowUpDelivery(t *testing.T) {
 	}
 
 	// A Deliver naming another task's work item sets nothing.
-	other := e.newTask(e.svc, buyerA, "", "other")
+	other := e.newTask(e.svc, callerA, "", "other")
 	wo := e.followUpItem(other, "not yours")
 	row, _ = e.log.Load(ctx, id)
 	wr := write("cross")
@@ -180,7 +180,7 @@ func TestFollowUpDelivery(t *testing.T) {
 func TestMarkDelivered(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	task := e.newTask(e.svc, buyerA, "", "q")
+	task := e.newTask(e.svc, callerA, "", "q")
 	id := uid(t, task.ID)
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestMarkDelivered(t *testing.T) {
 	if err := e.log.MarkDelivered(ctx, cur, uuid.Must(uuid.NewV7())); !errors.Is(err, ErrWorkItemNotFound) {
 		t.Errorf("an unknown item: %v", err)
 	}
-	other := e.newTask(e.svc, buyerA, "", "other")
+	other := e.newTask(e.svc, callerA, "", "other")
 	wo := e.followUpItem(other, "x")
 	if err := e.log.MarkDelivered(ctx, cur, wo); !errors.Is(err, ErrWorkItemNotFound) {
 		t.Errorf("another task's item: %v", err)
@@ -246,8 +246,8 @@ func TestMarkDelivered(t *testing.T) {
 func TestTurnStatusLogged(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "book\x00a room")
+	ctx := asOwner(context.Background(), callerA)
+	task := e.newTask(e.svc, callerA, "", "book\x00a room")
 	id := uid(t, task.ID)
 	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateInputRequired, "which\x00one?"))
 	since := func(wid uuid.UUID) int64 {

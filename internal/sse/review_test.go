@@ -235,7 +235,7 @@ func TestPublic(t *testing.T) {
 		{fmt.Errorf("lost: %w", context.DeadlineExceeded), "context deadline exceeded", true},
 		{a2a.NewError(a2a.ErrInternalError, "admission unavailable"), "admission unavailable", false},
 		{a2a.ErrInternalError, "internal error", false},
-		{fmt.Errorf("store: task 0192 of buyer b: %w", a2a.ErrTaskNotFound), "store: task 0192 of buyer b: task not found", false},
+		{fmt.Errorf("store: task 0192 of caller b: %w", a2a.ErrTaskNotFound), "store: task 0192 of caller b: task not found", false},
 		{a2a.NewError(a2a.ErrUnsupportedOperation, "a turn is running: refused"), "a turn is running: refused", false},
 	} {
 		pub, redacted := Public(c.err)

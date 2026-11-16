@@ -23,9 +23,9 @@ type SessionRequest struct {
 	Service  string
 	TaskID   uuid.UUID
 	N        int
-	// BuyerID and ContextID scope the gate context (spec §4): for a new task in a known context the
+	// CallerID and ContextID scope the gate context (spec §4): for a new task in a known context the
 	// session of the context's previous task is preferred while it is a candidate (§6.1, §7).
-	BuyerID   uuid.UUID
+	CallerID  uuid.UUID
 	ContextID string
 	// Avoid is the session a lost attempt used: another candidate is preferred when one exists (§6.4,
 	// "retry on another session if one exists").

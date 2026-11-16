@@ -28,15 +28,15 @@ import (
 // sealed_replay (ext-sealed.md §5–§7, §9; D175): sealed parts sent straight to the gate with an API key, as kontra
 // seal prints them (the binary, ext-sealed.md §5.1), to sealedecho hosted by a node:
 //
-//   - a first message M1 opens task T1 (input-required); the same message sent by buyer B is a new task T2, which
+//   - a first message M1 opens task T1 (input-required); the same message sent by caller B is a new task T2, which
 //     the hosting node refuses replayed (its replyTo opened T1's job): T2 fails sealed_rejected;
 //   - T1's sealed follow-up (kontra seal --task T1, once --open bound the job to T1) sent into T3, another live job,
 //     is refused wrong_job: T3 fails sealed_rejected; the same follow-up into T1 completes it;
-//   - a sealed MCP tools/call (sealed here as a hiring node seals it) resent on the same session is refused replayed,
+//   - a sealed MCP tools/call (sealed here as a calling node seals it) resent on the same session is refused replayed,
 //     and on another session wrong_message: each a JSON-RPC error carrying the reason;
 //   - each rejection has its audit row, the A2A ones an attempt whose outcome is sealed_rejected and no second
-//     attempt; the seller and the MCP upstream received none of the refused requests;
-//   - the gate's own retry: with the seller unreachable the node answers 502 target_unreachable, which ends attempt 1
+//     attempt; the service and the MCP upstream received none of the refused requests;
+//   - the gate's own retry: with the service unreachable the node answers 502 target_unreachable, which ends attempt 1
 //     tunnel_lost (relay.md §6.4's row for a response the node wrote itself; the gate's log shows the node's reason
 //     for that attempt), and the gate's next attempt, once it is back, is accepted and completes (a request the node
 //     answered itself opens no job).
@@ -49,11 +49,11 @@ func TestSealedReplay(t *testing.T) {
 		MCP:    map[string]MCPService{"dbl": {Sealed: "true"}},
 	})
 	ctx := ctxFor(t, 10*time.Minute)
-	seller, err := h.StartEchoSeller()
+	service, err := h.StartEchoService()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cut, err := NewProxy(strings.TrimPrefix(seller.URL, "http://"))
+	cut, err := NewProxy(strings.TrimPrefix(service.URL, "http://"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestSealedReplay(t *testing.T) {
 	}
 	send := func(key string, msg []byte) *a2a.Task {
 		t.Helper()
-		b := &Buyer{Key: key}
+		b := &Caller{Key: key}
 		r, err := b.RPC(ctx, g, "vault", "SendMessage", map[string]any{"message": json.RawMessage(msg)})
 		if err != nil {
 			t.Fatal(err)
@@ -91,16 +91,16 @@ func TestSealedReplay(t *testing.T) {
 	if out := seal("--open", writeFile(t, sealHome, "t1.json", string(answer))); !strings.Contains(string(out), "which one of "+echoAskPrefix+" first?") {
 		t.Fatalf("kontra seal --open of T1's answer: %q", out)
 	}
-	before := seller.Requests()
+	before := service.Requests()
 
-	// T2: the same message from another buyer, a new task: replayed.
+	// T2: the same message from another caller, a new task: replayed.
 	t2 := send(h.APIKeyB, m1)
 	if t2.ID == t1.ID {
-		t.Fatalf("buyer B's resend is buyer A's task %s", t1.ID)
+		t.Fatalf("caller B's resend is caller A's task %s", t1.ID)
 	}
 	waitSealedRejected(t, ctx, h, t2.ID, "replayed")
-	if n := seller.Requests(); n != before {
-		t.Fatalf("the seller received %d requests from the replayed first message", n-before)
+	if n := service.Requests(); n != before {
+		t.Fatalf("the service received %d requests from the replayed first message", n-before)
 	}
 
 	// T3: another live job in the same context; T1's follow-up sent into it: wrong_job.
@@ -109,7 +109,7 @@ func TestSealedReplay(t *testing.T) {
 	if t3.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("T3: %+v", t3.Status)
 	}
-	before = seller.Requests()
+	before = service.Requests()
 	f1 := seal("--task", string(t1.ID), "--media-type", "text/plain", writeFile(t, sealHome, "f1.txt", "the answer"))
 	var into3 map[string]any
 	if err := json.Unmarshal(f1, &into3); err != nil {
@@ -122,8 +122,8 @@ func TestSealedReplay(t *testing.T) {
 	b3, _ := json.Marshal(into3)
 	send(h.APIKey, b3)
 	waitSealedRejected(t, ctx, h, t3.ID, "wrong_job")
-	if n := seller.Requests(); n != before {
-		t.Fatalf("the seller received %d requests from the refused replays", n-before)
+	if n := service.Requests(); n != before {
+		t.Fatalf("the service received %d requests from the refused replays", n-before)
 	}
 	// The same follow-up into T1, its own job: accepted.
 	done := send(h.APIKey, f1)
@@ -134,9 +134,9 @@ func TestSealedReplay(t *testing.T) {
 		s, _ := h.TaskState(ctx, t1.ID)
 		return s == "completed"
 	})
-	last := seller.Turns()
+	last := service.Turns()
 	if got := last[len(last)-1]; len(got) != 1 || string(got[0].Raw()) != "the answer" || got[0].MediaType != "text/plain" {
-		t.Fatalf("the seller's last turn is not the follow-up's plaintext: %d parts", len(got))
+		t.Fatalf("the service's last turn is not the follow-up's plaintext: %d parts", len(got))
 	}
 
 	// MCP: a sealed tools/call resent on the same session, and on another.
@@ -182,12 +182,12 @@ func TestSealedReplay(t *testing.T) {
 		}
 	}
 
-	// The gate's own retry after the node's 502: the seller unreachable, then back.
+	// The gate's own retry after the node's 502: the service unreachable, then back.
 	cut.Cut()
 	m4 := seal("--media-type", "text/plain", writeFile(t, sealHome, "m4.txt", "retried"))
 	got := make(chan *a2a.Task, 1)
 	go func() {
-		b := &Buyer{Key: h.APIKey}
+		b := &Caller{Key: h.APIKey}
 		r, err := b.RPC(ctx, g, "vault", "SendMessage", map[string]any{"message": json.RawMessage(m4)})
 		if err != nil {
 			t.Error(err)
@@ -245,7 +245,7 @@ func TestSealedReplay(t *testing.T) {
 	t.Logf("the gate's retry: attempt 1 %s, attempt %d %s", atts[0].Outcome, len(atts), atts[len(atts)-1].Outcome)
 	t.Logf("ext-sealed.md §7's residual, not tested as a pass: a first message replayed within max_age to another " +
 		"hosting node of the service, which has not seen its replyTo, is executed again there; the reply still goes " +
-		"to the original buyer's key")
+		"to the original caller's key")
 }
 
 // upstreamFailures counts the records of both replicas' logs where the dispatch of the task's attempt n logged a
@@ -273,7 +273,7 @@ func upstreamFailures(t *testing.T, h *Harness, task a2a.TaskID, n int, reason s
 }
 
 // kontraSeal runs the kontra binary's `seal` with HOME home and, unless args name --open, --service the Front's vault
-// URL and --api-key the harness's buyer A key (kontra seal reads no key from the environment), and returns its stdout.
+// URL and --api-key the harness's caller A key (kontra seal reads no key from the environment), and returns its stdout.
 func kontraSeal(t *testing.T, h *Harness, home string, args ...string) []byte {
 	t.Helper()
 	bin, err := nodeBinary()
@@ -362,11 +362,11 @@ func auditRows(t *testing.T, h *Harness, substrs ...string) int {
 	return n
 }
 
-// mcpSealer seals tools/call arguments as a hiring node does (ext-sealed.md §3, hiring rule 3), for a test that
+// mcpSealer seals tools/call arguments as a calling node does (ext-sealed.md §3, calling rule 3), for a test that
 // sends sealed bodies straight to the gate: the recipients from the initialize result's
 // capabilities.experimental["sh.kontra/sealed"], one per-job key and rk.
 type mcpSealer struct {
-	service    string // the hired service, as the gate's URL path names it (D221)
+	service    string // the called service, as the gate's URL path names it (D221)
 	recipients []age.Recipient
 	kids       []string
 	job        *age.X25519Identity

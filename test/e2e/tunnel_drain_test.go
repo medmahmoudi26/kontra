@@ -44,7 +44,7 @@ func TestTunnelDrain(t *testing.T) {
 	if err := h.WaitCard(ctx, "slow", time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	s, err := h.BuyerA().SendStreaming(ctx, b, newMessage("tunnel drain"), Call{})
+	s, err := h.CallerA().SendStreaming(ctx, b, newMessage("tunnel drain"), Call{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestTunnelDrain(t *testing.T) {
 		time.Since(termed).Seconds(), time.Since(released).Seconds())
 
 	// A task sent now runs on the B session.
-	s2, err := h.BuyerA().SendStreaming(ctx, b, newMessage("tunnel drain 2"), Call{})
+	s2, err := h.CallerA().SendStreaming(ctx, b, newMessage("tunnel drain 2"), Call{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -274,17 +274,17 @@ type Tunnel struct {
 // unless it says enabled: false. Off, the gate opens no anonymous session, but a multi-tenant gate still applies the
 // limits to the anonymous tenants that live and ends and purges them: an object with enabled: false keeps its limits
 // for that (its ttl and purge_after, typically), where false is §6.2's defaults. On, it needs tenancy: multi. The
-// integers are at least 1 and hiring_streams at most 32; ttl, purge_after and parts_bytes are positive (a zero is
+// integers are at least 1 and calling_streams at most 32; ttl, purge_after and parts_bytes are positive (a zero is
 // refused when decoded, so after decoding a zero always means "absent, use the default").
 type AnonymousSessions struct {
 	Enabled           bool     `yaml:"enabled"`             // the object form's default true; false and an absent block are off
 	TTL               Duration `yaml:"ttl"`                 // default 2h
 	TenantsPerNetwork int      `yaml:"tenants_per_network"` // default 3: live anonymous tenants per IPv4 /24 or IPv6 /48
 	Services          int      `yaml:"services"`            // default 4: a tenant's services that are not disabled
-	Tasks             int      `yaml:"tasks"`               // default 4: concurrent tasks as host and as hirer, each
+	Tasks             int      `yaml:"tasks"`               // default 4: concurrent tasks as host and as caller, each
 	Calls             int      `yaml:"calls"`               // default 8: concurrent MCP requests relayed to its services (D287, D304)
 	Streams           int      `yaml:"streams"`             // default 8: GET and subscriptions/listen streams open to them (D308)
-	HiringStreams     int      `yaml:"hiring_streams"`      // default 8, at most 32: node-opened streams per session
+	CallingStreams    int      `yaml:"calling_streams"`     // default 8, at most 32: node-opened streams per session
 	PartsBytes        ByteSize `yaml:"parts_bytes"`         // default 64 MiB: parts stored per tenant
 	PurgeAfter        Duration `yaml:"purge_after"`         // default 24h after expiry
 	MaxTenants        int      `yaml:"max_tenants"`         // default 1000: live anonymous tenants gate-wide (D287)
@@ -292,12 +292,12 @@ type AnonymousSessions struct {
 
 // anonymousKeys are the keys of tunnel.anonymous's object form, which UnmarshalYAML decodes one by one.
 var anonymousKeys = map[string]bool{"enabled": true, "ttl": true, "tenants_per_network": true, "services": true, "tasks": true,
-	"calls": true, "streams": true, "hiring_streams": true, "parts_bytes": true, "purge_after": true, "max_tenants": true}
+	"calls": true, "streams": true, "calling_streams": true, "parts_bytes": true, "purge_after": true, "max_tenants": true}
 
 // UnmarshalYAML accepts true, false or the limits object. An unknown key, a repeated key and an integer below 1 are
 // refused, as Load refuses them everywhere else.
 func (a *AnonymousSessions) UnmarshalYAML(n *yaml.Node) error {
-	const want = "tunnel.anonymous: want true, false or {enabled, ttl, tenants_per_network, services, tasks, calls, streams, hiring_streams, parts_bytes, purge_after, max_tenants}"
+	const want = "tunnel.anonymous: want true, false or {enabled, ttl, tenants_per_network, services, tasks, calls, streams, calling_streams, parts_bytes, purge_after, max_tenants}"
 	switch n.Kind {
 	case yaml.ScalarNode:
 		if n.ShortTag() != "!!bool" {
@@ -351,8 +351,8 @@ func (a *AnonymousSessions) UnmarshalYAML(n *yaml.Node) error {
 					out.Calls = n
 				case "streams":
 					out.Streams = n
-				case "hiring_streams":
-					out.HiringStreams = n
+				case "calling_streams":
+					out.CallingStreams = n
 				case "max_tenants":
 					out.MaxTenants = n
 				}
@@ -391,8 +391,8 @@ func (a *AnonymousSessions) applyDefaults() {
 	if a.Streams == 0 {
 		a.Streams = DefaultAnonStreams
 	}
-	if a.HiringStreams == 0 {
-		a.HiringStreams = DefaultAnonHiringStreams
+	if a.CallingStreams == 0 {
+		a.CallingStreams = DefaultAnonCallingStreams
 	}
 	if a.PartsBytes == 0 {
 		a.PartsBytes = DefaultAnonPartsBytes
@@ -419,7 +419,7 @@ type Service struct {
 	Tools       *Tools     `yaml:"tools"` // mcp only (§11.3)
 	Tasks       string     `yaml:"tasks"` // mcp only: durable (default) | required | passthrough | off (§11.5, D322)
 	Sealed      Sealed     `yaml:"sealed"`
-	SellerKeys  JSON       `yaml:"seller_keys"` // inline JWKS {"keys": […]} or {"url": "https://…"} (§3); M3
+	ServiceKeys JSON       `yaml:"service_keys"` // inline JWKS {"keys": […]} or {"url": "https://…"} (§3); M3
 	SessionIdle Seconds    `yaml:"session_idle_s"`
 	Task        TaskPolicy `yaml:"task"`
 	Listed      bool       `yaml:"listed"`
@@ -698,7 +698,7 @@ func (s *Sealed) UnmarshalYAML(n *yaml.Node) error {
 	return fmt.Errorf("line %d: sealed: want true, false or {required: true|false}", n.Line)
 }
 
-// JSON is a YAML value carried as JSON (seller_keys, annotations): the gate stores it in a jsonb column
+// JSON is a YAML value carried as JSON (service_keys, annotations): the gate stores it in a jsonb column
 // and never interprets it here. A mapping key must be a string; a YAML alias, merge key, NaN or infinity
 // has no JSON form and is refused.
 type JSON json.RawMessage
@@ -852,6 +852,10 @@ func Parse(b []byte, baseDir string, opts ...Option) (*Config, error) {
 		}
 	}
 
+	if err := renamedKey(top); err != nil {
+		return nil, err
+	}
+
 	c := Defaults()
 	c.applyProfileDefaults(profileOf(top))
 	dec := yaml.NewDecoder(bytes.NewReader(b))
@@ -875,6 +879,27 @@ func Parse(b []byte, baseDir string, opts ...Option) (*Config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// renamedKeys are configuration keys the caller-callee rename gave new names (D363). A file that still uses one
+// fails to load and names the new key, rather than failing as an unknown field.
+var renamedKeys = map[string]string{"seller_keys": "service_keys", "hiring_streams": "calling_streams"}
+
+// renamedKey returns the first mapping key under n that renamedKeys names, as an error.
+func renamedKey(n *yaml.Node) error {
+	if n.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if to, ok := renamedKeys[n.Content[i].Value]; ok {
+				return fmt.Errorf("line %d: %s was renamed %s", n.Content[i].Line, n.Content[i].Value, to)
+			}
+		}
+	}
+	for _, c := range n.Content {
+		if err := renamedKey(c); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // resolvePaths makes the file's relative paths relative to baseDir.

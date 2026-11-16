@@ -1,6 +1,6 @@
 # A team gate on one machine, for server-filesystem@1.0.0 over stdio hosted through the tunnel (M3): `kontra
 # connect` runs the server, one process per MCP session, and the gate never reaches the node's files except
-# through the server's tools. Postgres and Temporal are the repository's compose.dev.yaml, as for the sellers.
+# through the server's tools. Postgres and Temporal are the repository's compose.dev.yaml, as for the services.
 listen: 127.0.0.1:8080
 public_url: http://localhost:8080 # a node's --gate must be this origin (spec/tunnel.md §4: bad_origin otherwise)
 postgres: postgres://kontra:kontra@localhost:5432/kontra

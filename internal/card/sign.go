@@ -17,7 +17,7 @@ import (
 
 // JWSSigner is the gate's Signer (spec/relay.md §3, D13, D166): ES256 over the JCS of the served card without
 // signatures, with the protected header {alg, kid, typ JOSE, jku: {public_url}/.well-known/jwks.json,
-// kontra.upstream: {sha256, url, verified, jwks when verified (D223)}}. The served card carries exactly this one signature; the seller's
+// kontra.upstream: {sha256, url, verified, jwks when verified (D223)}}. The served card carries exactly this one signature; the service's
 // stay on the upstream card, served verbatim.
 //
 // Work package: M3 WP-02.
@@ -53,7 +53,7 @@ func (s *JWSSigner) Sign(_ context.Context, served []byte, upstreamSHA256 [32]by
 
 // UpstreamHash is the SHA-256 over the JCS of the upstream card: kontra.upstream.sha256 and services.card_hash
 // (D166 fills the column M1 left null). The whole card is hashed, its signatures included: they are what a
-// verifier checks against the seller's keys once it has the bytes the hash binds.
+// verifier checks against the service's keys once it has the bytes the hash binds.
 func UpstreamHash(upstream []byte) ([32]byte, error) {
 	canon, err := jcs.Transform(upstream)
 	if err != nil {

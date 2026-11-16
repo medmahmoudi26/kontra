@@ -67,7 +67,7 @@ func TestEndReconnect(t *testing.T) {
 		t.Fatalf("kontra.failure lost: %v", failed.Metadata)
 	}
 	if _, ok := failed.Status.Message.Metadata[store.MetaReconnect]; ok {
-		t.Fatal("the message's metadata changed: a sealed job's hiring node reads it (ext-sealed.md rule 4a)")
+		t.Fatal("the message's metadata changed: a sealed job's calling node reads it (ext-sealed.md rule 4a)")
 	}
 	working := a2a.NewStatusUpdateEvent(waiting, a2a.TaskStateWorking, nil)
 	store.EndReconnect(waiting, working)

@@ -79,7 +79,7 @@ jobs:
   # The pinned Temporal CLI (spec/relay.md §0: CLI 1.9.1, Server 1.32.0) is installed for the tests that
   # start a dev server; they read its path from KONTRA_TEMPORAL_CLI. Pebble likewise, KONTRA_TEST_PEBBLE. uv
   # and a2a-samples at the commit run.sh pins (KONTRA_A2A_SAMPLES) are for run.sh's guards
-  # (examples/sellers/helloworld), which KONTRA_REQUIRE_HELLOWORLD keeps from skipping.
+  # (examples/agents/helloworld), which KONTRA_REQUIRE_HELLOWORLD keeps from skipping.
   integration:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -124,7 +124,7 @@ jobs:
         with:
           version: "0.11.7"
           python-version: "3.12"
-      # The a2a-samples checkout at the commit examples/sellers/helloworld/run.sh pins (D154). With
+      # The a2a-samples checkout at the commit examples/agents/helloworld/run.sh pins (D154). With
       # KONTRA_REQUIRE_HELLOWORLD the helloworld tests fail, instead of skipping, without it, uv or a free
       # 127.0.0.1:9999 (M2 review): hello-world unmodified behind the tunnel is a hard rule of M2.
       - name: Fetch a2a-samples at the pinned commit

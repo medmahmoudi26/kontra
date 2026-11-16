@@ -16,9 +16,9 @@ import (
 // The hosting node reads every request and reply of a service with sealed jobs as the gate's a2a-go and the
 // service's a2a-go read them (D172; ext-sealed.md §5, "Hosting node"), so that no part passes it unread.
 
-// openedJob opens a sealed job for gate task task of buyer b, which the service accepted and answered with upstream
+// openedJob opens a sealed job for gate task task of caller b, which the service accepted and answered with upstream
 // task up-1 (input required): the service then has sealed state.
-func openedJob(t *testing.T, f *fixture, b buyer, task, ctx string) {
+func openedJob(t *testing.T, f *fixture, b caller, task, ctx string) {
 	t.Helper()
 	body := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "SECRET-IN")))
 	_, x, r := f.request(pre(task, ctx), body)
@@ -68,7 +68,7 @@ func TestHostingLoneCaseVariantReplies(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t)
-			b := newBuyer(t)
+			b := newCaller(t)
 			const task, ctx = "0193c0de-0000-7000-8000-0000000000e1", "ctx-e"
 			_, x, r := f.request(pre(task, ctx), send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x"))))
 			if r != "" {
@@ -83,7 +83,7 @@ func TestHostingLoneCaseVariantReplies(t *testing.T) {
 	}
 	// An unsealed exchange of a service with a sealed job: a reply naming the job's task under "Task" is refused too.
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	openedJob(t, f, b, "0193c0de-0000-7000-8000-0000000000e2", "ctx-e2")
 	_, ux, r := f.request(pre("0193c0de-0000-7000-8000-0000000000e3", "c"), send("m9", "c", "", "", `{"text":"plain"}`))
 	if r != "" {
@@ -118,7 +118,7 @@ func TestHostingLoneCaseVariantReplies(t *testing.T) {
 // CancelTask cancelled it. Each is refused bad_header now.
 func TestHostingLoneCaseVariantRequests(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	openedJob(t, f, b, "0193c0de-0000-7000-8000-0000000000e5", "ctx-e5")
 	other := pre("0193c0de-0000-7000-8000-0000000000e6", "ctx-other")
 	for name, body := range map[string]string{
@@ -161,7 +161,7 @@ func TestHostingClassifiesByRoute(t *testing.T) {
 	forged := []byte(`{"jsonrpc":"2.0","message":{"messageId":"evil","role":"ROLE_USER","taskId":"up-1","contextId":"upctx-1","parts":[{"text":"forged follow-up"}]}}`)
 	for _, required := range [][]string{{"echo"}, nil} {
 		f := newFixture(t, required...)
-		b := newBuyer(t)
+		b := newCaller(t)
 		openedJob(t, f, b, "0193c0de-0000-7000-8000-0000000000d1", "ctx-d")
 		other := pre("0193c0de-0000-7000-8000-0000000000d9", "ctx-other")
 		for _, path := range []string{"/message:send", "/message:stream", "/v1/MESSAGE:SEND", "/tenant/message:send"} {
@@ -204,7 +204,7 @@ func TestHostingClassifiesByRoute(t *testing.T) {
 // --sealed-required) every push config is refused bad_header now, and a sealed send never carries one.
 func TestHostingPushConfigs(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-0000000000f1", "ctx-f"
 	inline := func(body []byte) []byte {
 		return bytes.Replace(body, []byte(`"params":{`), []byte(`"params":{"configuration":{"taskPushNotificationConfig":{"url":"https://attacker.example/hook"}},`), 1)
@@ -265,7 +265,7 @@ func TestHostingReadsEveryReply(t *testing.T) {
 		}
 		return out, readAll(t, out)
 	}
-	open := func(f *fixture, b buyer, task, ctx string, stream bool) *Exchange {
+	open := func(f *fixture, b caller, task, ctx string, stream bool) *Exchange {
 		t.Helper()
 		body := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "SECRET-IN")))
 		if stream {
@@ -279,7 +279,7 @@ func TestHostingReadsEveryReply(t *testing.T) {
 	}
 	for _, ct := range []string{"text/plain; charset=utf-8", "application/octet-stream", "", "text/event-stream"} {
 		f := newFixture(t)
-		b := newBuyer(t)
+		b := newCaller(t)
 		x := open(f, b, "0193c0de-0000-7000-8000-0000000000c1", "ctx-c", false)
 		resp, got := reply(f, x, ct, answer)
 		if resp.StatusCode != 200 || strings.Contains(got, "SECRET") || len(openReplies(t, b, got)) != 2 || resp.Header.Get("Content-Type") != "application/json" {
@@ -295,7 +295,7 @@ func TestHostingReadsEveryReply(t *testing.T) {
 		{"", "data: " + answer + "\n\n", true},
 	} {
 		f := newFixture(t)
-		b := newBuyer(t)
+		b := newCaller(t)
 		x := open(f, b, "0193c0de-0000-7000-8000-0000000000c2", "ctx-c", tc.stream)
 		resp, got := reply(f, x, tc.ct, tc.body)
 		if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != "bad_header" || strings.Contains(got, "SECRET") {
@@ -304,7 +304,7 @@ func TestHostingReadsEveryReply(t *testing.T) {
 	}
 	// An unsealed exchange of a service with a sealed job: a text/plain reply naming the job's task is refused.
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	openedJob(t, f, b, "0193c0de-0000-7000-8000-0000000000c3", "ctx-c3")
 	_, ux, r := f.request(pre("0193c0de-0000-7000-8000-0000000000c4", "c"), send("m9", "c", "", "", `{"text":"plain"}`))
 	if r != "" {

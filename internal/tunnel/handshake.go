@@ -59,9 +59,9 @@ type Hello struct {
 	Recipient  string    `json:"recipient"`             // the active key, age1…
 	Name       string    `json:"name"`                  // 1–64 characters; --name, default the hostname
 	Nonce      string    `json:"nonce"`                 // base64url, 32 random bytes
-	Services   []Service `json:"services"`              // may be empty (a node that only hires)
+	Services   []Service `json:"services"`              // may be empty (a node that only calls)
 	Enroll     []string  `json:"enroll,omitempty"`      // one-time enrollment tokens (§5)
-	Auth       string    `json:"auth,omitempty"`        // an API key: the hiring principal, and with an enroll: scope an authority to enroll
+	Auth       string    `json:"auth,omitempty"`        // an API key: the calling principal, and with an enroll: scope an authority to enroll
 	RotateFrom *KeyRef   `json:"rotate_from,omitempty"` // the key this one replaces (§12)
 	Public     []string  `json:"public,omitempty"`      // anonymous sessions only (§6, M4)
 	Anonymous  bool      `json:"anonymous,omitempty"`   // true only: the node asks for an anonymous session (§4, §6, D285)

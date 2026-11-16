@@ -49,7 +49,7 @@ func TestPendingBlobRowsGoWithTheirWrite(t *testing.T) {
 	msg := a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.URL(first.Ref.URL())})
 	msg.TaskID, msg.ContextID = a2a.TaskID(id.String()), "ctx"
 	task := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: "ctx", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{msg}}
-	if _, err := e.log.CreateTask(pctx, nil, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "ctx",
+	if _, err := e.log.CreateTask(pctx, nil, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: callerA, ContextID: "ctx",
 		State: StateSubmitted, Snapshot: task}); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestPendingBlobRowsGoWithTheirWrite(t *testing.T) {
 	pending.Add(artifact)
 	ev := a2a.NewArtifactEvent(task, &a2a.Part{Content: a2a.URL(artifact.Ref.URL())})
 	s := e.store(nil)
-	sctx := asOwner(pctx, buyerA)
+	sctx := asOwner(pctx, callerA)
 	st, err := s.Get(sctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestPendingBlobRowsGoWithTheirWrite(t *testing.T) {
 	fm := a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.URL(followUp.Ref.URL())}, &a2a.Part{Content: a2a.URL(other.Ref.URL())})
 	fm.TaskID = task.ID
 	if err := e.log.InsertWorkItem(pctx, nil, WorkItem{ID: uuid.Must(uuid.NewV7()), TaskID: id, Kind: WorkExecute,
-		Payload: WorkPayload{Request: &a2a.SendMessageRequest{Message: fm}, Owner: buyerA}}); err != nil {
+		Payload: WorkPayload{Request: &a2a.SendMessageRequest{Message: fm}, Owner: callerA}}); err != nil {
 		t.Fatal(err)
 	}
 	if n := e.blobCount(id); n != 3 {
@@ -135,7 +135,7 @@ func TestDropUnnamedBlobs(t *testing.T) {
 	msg := a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.URL(created.Ref.URL())})
 	msg.TaskID, msg.ContextID = a2a.TaskID(id.String()), "ctx"
 	task := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: "ctx", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{msg}}
-	if _, err := e.log.CreateTask(pctx, nil, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "ctx",
+	if _, err := e.log.CreateTask(pctx, nil, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: callerA, ContextID: "ctx",
 		State: StateSubmitted, Snapshot: task}); err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestDropUnnamedBlobs(t *testing.T) {
 		m.TaskID = task.ID
 		wid := uuid.Must(uuid.NewV7())
 		if err := e.log.InsertWorkItem(pctx, nil, WorkItem{ID: wid, TaskID: id, Kind: WorkExecute,
-			Payload: WorkPayload{Request: &a2a.SendMessageRequest{Message: m}, Owner: buyerA}}); err != nil {
+			Payload: WorkPayload{Request: &a2a.SendMessageRequest{Message: m}, Owner: callerA}}); err != nil {
 			t.Fatal(err)
 		}
 		if r == refused {

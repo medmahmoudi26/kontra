@@ -1,6 +1,6 @@
 // Package sealing is the nodes' half of the sealed extension (spec/ext-sealed.md §4–§7, D31, D61, D62, D162,
 // D165): the hosting node unseals what the gate forwards to a sealed service and seals what the service
-// answers, the hiring node seals what a local client sends to a sealed service and opens what comes back, and
+// answers, the calling node seals what a local client sends to a sealed service and opens what comes back, and
 // kontra seal is the escape hatch for scripting (§5.1).
 //
 // Both nodes read and write the A2A 1.0 shapes only, JSON-RPC and HTTP+JSON, unary and SSE (D165), and for MCP
@@ -94,7 +94,7 @@ type HostingConfig struct {
 // set is for requests only: a server's ids are another space than the client's. In a job whose request was
 // sealed, a response whose id is that of an InputRequest MUST itself be sealed and pass rule 4b: one without an
 // exact {v, envelope} in result._meta["sh.kontra/sealed"] is refused bad_header and nothing of it is forwarded
-// to the service, so a gate cannot answer the service's question in plaintext for the buyer (spec §5, "Answers
+// to the service, so a gate cannot answer the service's question in plaintext for the caller (spec §5, "Answers
 // must be sealed").
 //
 // SPEC-CONFLICT (D217; ext-sealed.md §5, rules 1–5): the rules bind the sealed parts of a request, and say nothing
@@ -171,7 +171,7 @@ func (h *Hosting) servicePath(name string) string {
 }
 
 // checkService is D221's check of a request header: its service is the one the preamble names, as the gate's URL
-// path names it. A sealed request the buyer sealed for another service of this node is that service's job's, never
+// path names it. A sealed request the caller sealed for another service of this node is that service's job's, never
 // this one's (wrong_job).
 func (h *Hosting) checkService(hd sealed.Header, service string) error {
 	if hd.Service == "" || hd.Service != h.servicePath(service) {
@@ -954,9 +954,9 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		return out, x.unsealedSend(svc, msgTask, msgCtx, unsealed)
 	}
 	if unsealed > 0 {
-		// A message with a sealed part is the hiring node's, which seals every part of it (§5, hiring rule 3): an
-		// unsealed part beside sealed ones is the gate's, written into the buyer's message (an instruction to the
-		// service about the buyer's sealed content), whatever --sealed-required says (security review: the A2A half of
+		// A message with a sealed part is the calling node's, which seals every part of it (§5, calling rule 3): an
+		// unsealed part beside sealed ones is the gate's, written into the caller's message (an instruction to the
+		// service about the caller's sealed content), whatever --sealed-required says (security review: the A2A half of
 		// D175's "answers must be sealed").
 		return nil, reject(sealed.RejectBadHeader, "an unsealed part beside sealed ones")
 	}
@@ -1012,8 +1012,8 @@ func (x *Exchange) send(svc *serviceState, body []byte, guarded bool) ([]byte, e
 		}
 		// The job's binding is the first request's from the node's checks on, not from its record only: a first message
 		// of another replyTo for the same gate task while one is in flight would otherwise pass too, and whichever the
-		// service accepted last would bind the job, so that the buyer's replies were sealed to the other's key (rules 2–4,
-		// §7 "cannot continue another buyer's job").
+		// service accepted last would bind the job, so that the caller's replies were sealed to the other's key (rules 2–4,
+		// §7 "cannot continue another caller's job").
 		if b, ok := x.h.inFlight(flightKey("j", x.service, x.pre.Task)); ok && b != bindOf(h.ReplyTo, h.RK) {
 			return nil, reject(sealed.RejectWrongJob, "the gate task's job is being opened with another replyTo")
 		}
@@ -1102,7 +1102,7 @@ func referenceTaskIDs(msg map[string]json.RawMessage) ([]string, error) {
 // replyToElsewhere reports a replyTo that opened a job of another service this node hosts: one identity key opens
 // every service's requests, so rule 2's replyTo set and rule 5's (session, messageId) set are checked across every
 // service of the node (D221, ext-sealed.md §5), beside the header's service member, which binds a sealed request to
-// the service the buyer hired (checkService). It reads the node-wide index (nmu), never another service's state.
+// the service the caller called (checkService). It reads the node-wide index (nmu), never another service's state.
 func (h *Hosting) replyToElsewhere(service, replyTo string) bool {
 	h.nmu.Lock()
 	defer h.nmu.Unlock()
@@ -1132,9 +1132,9 @@ func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, _ int
 	}
 	_, opening := x.h.inFlight(flightKey("j", x.service, x.pre.Task))
 	if j != nil || opening {
-		// A job opened by a sealed request is the hiring node's, which seals every message of it: an unsealed follow-up
-		// is the gate's own (answering the service's question for the buyer, say), and its replies would reach the buyer
-		// sealed and authenticated as the service's answer to the buyer. The A2A half of D175's "answers must be
+		// A job opened by a sealed request is the calling node's, which seals every message of it: an unsealed follow-up
+		// is the gate's own (answering the service's question for the caller, say), and its replies would reach the caller
+		// sealed and authenticated as the service's answer to the caller. The A2A half of D175's "answers must be
 		// sealed", whatever --sealed-required says (security review).
 		return reject(sealed.RejectBadHeader, "an unsealed message on a sealed job's exchange")
 	}
@@ -1143,8 +1143,8 @@ func (x *Exchange) unsealedSend(svc *serviceState, msgTask, msgCtx string, _ int
 	}
 	if _, ok := svc.UpstreamContexts[msgCtx]; ok && msgCtx != "" {
 		// An unsealed message into a sealed job's upstream context, under any gate task, the job's own gate context
-		// included: the hiring node seals every message to a sealed service, and an agent that keeps a conversation per
-		// context would answer it from the buyer's sealed conversation, unsealed (round 2 sealing-fixes-6).
+		// included: the calling node seals every message to a sealed service, and an agent that keeps a conversation per
+		// context would answer it from the caller's sealed conversation, unsealed (round 2 sealing-fixes-6).
 		return reject(sealed.RejectBadHeader, "an unsealed message into a sealed job's upstream context")
 	}
 	return nil
@@ -1311,7 +1311,7 @@ const sealedErrorText = "the service returned an error (its text stays on the no
 // SPEC-CONFLICT (D195; ext-sealed.md §2, §7): §2 lists what is sealed (parts, MCP arguments and results) and says
 // nothing of errors, while §7 promises that the gate's database and logs hold ciphertext only, and the gate stores
 // and logs a service's error text. The closest faithful behaviour: on a sealed job the hosting node keeps an error's
-// code and replaces its message and data with fixed text; sealing them for the hiring node to open would need §3 to
+// code and replaces its message and data with fixed text; sealing them for the calling node to open would need §3 to
 // define an error's envelope.
 func (h *Hosting) errorResponse(x *Exchange, resp *http.Response) *http.Response {
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
@@ -1586,7 +1586,7 @@ func (x *Exchange) reply(b []byte) ([]byte, error) {
 // SPEC-CONFLICT (D216; ext-sealed.md §3's table, chunk: "for artifact updates, the 0-based count of updates for that
 // artifactId this node sealed; 0 for a whole artifact"): a whole artifact reuses the ciphertext of the parts the gate
 // already holds (§5, so that polling sees identical bytes), and those carry the chunk they were sealed as; its new
-// parts cannot be chunk 0 again once a chunk 0 was sealed, since the hiring node refuses a (chunk, part) seen before
+// parts cannot be chunk 0 again once a chunk 0 was sealed, since the calling node refuses a (chunk, part) seen before
 // with other bytes (rule 4). The closest faithful behaviour: chunk counts every chunk this node sealed for the
 // artifactId, an update or the new parts of a whole artifact, so that a whole artifact sealed first is chunk 0 and
 // the updates that follow count on from it; §3 now says so.

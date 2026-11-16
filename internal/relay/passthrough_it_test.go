@@ -34,7 +34,7 @@ func (r *resendRig) useAgent(exec a2asrv.AgentExecutor) *upstreamAgent {
 
 // call is a blocking SendMessage bounded by 10 s, answering what the caller received.
 func (r *resendRig) call(req *a2a.SendMessageRequest) (a2a.SendMessageResult, error) {
-	cctx, cancel := context.WithTimeout(asCaller(buyerA), 10*time.Second)
+	cctx, cancel := context.WithTimeout(asCaller(callerA), 10*time.Second)
 	defer cancel()
 	return r.h.SendMessage(cctx, req)
 }
@@ -74,17 +74,17 @@ func TestMessagePassthrough(t *testing.T) {
 		from kontra.attempts where task_id = $1 and n = 1`, uuid.MustParse(string(record))).Scan(&upCtx, new(bool)); err != nil || upCtx == "" {
 		t.Fatalf("attempt 1's upstream context %q: %v", upCtx, err)
 	}
-	if _, err := r.h.GetTask(asCaller(buyerA), &a2a.GetTaskRequest{ID: record}); !errors.Is(err, a2a.ErrTaskNotFound) {
+	if _, err := r.h.GetTask(asCaller(callerA), &a2a.GetTaskRequest{ID: record}); !errors.Is(err, a2a.ErrTaskNotFound) {
 		t.Errorf("GetTask of the message-only record: %v, want TaskNotFound", err)
 	}
-	list, err := r.h.ListTasks(asCaller(buyerA), &a2a.ListTasksRequest{})
+	list, err := r.h.ListTasks(asCaller(callerA), &a2a.ListTasksRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(list.Tasks) != 0 {
 		t.Errorf("ListTasks lists %d tasks, want none", len(list.Tasks))
 	}
-	if _, err := r.h.CancelTask(asCaller(buyerA), &a2a.CancelTaskRequest{ID: record}); !errors.Is(err, a2a.ErrTaskNotFound) {
+	if _, err := r.h.CancelTask(asCaller(callerA), &a2a.CancelTaskRequest{ID: record}); !errors.Is(err, a2a.ErrTaskNotFound) {
 		t.Errorf("CancelTask of the message-only record: %v, want TaskNotFound", err)
 	}
 
@@ -137,7 +137,7 @@ func TestTaskAnswersStay(t *testing.T) {
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		got, err := r.h.GetTask(asCaller(buyerA), &a2a.GetTaskRequest{ID: task.ID})
+		got, err := r.h.GetTask(asCaller(callerA), &a2a.GetTaskRequest{ID: task.ID})
 		if err != nil {
 			t.Fatal(err)
 		}

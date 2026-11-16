@@ -14,10 +14,10 @@
     "extendedAgentCard": true,
     "extensions": [
       {"uri": "https://kontra.sh/ext/input-schema/v1", "params": {"schema": {"type": "object"}}},
-      {"uri": "https://kontra.sh/ext/escrow/v1", "description": "seller's own claim", "required": false},
-      {"uri": "https://example.com/ext/seller", "required": true}
+      {"uri": "https://kontra.sh/ext/escrow/v1", "description": "service's own claim", "required": false},
+      {"uri": "https://example.com/ext/service", "required": true}
     ],
-    "x-cap": "seller"
+    "x-cap": "service"
   },
   "securitySchemes": {"internal": {"apiKeySecurityScheme": {"location": "header", "name": "X-Internal"}}},
   "securityRequirements": [{"schemes": {"internal": {"list": []}}}],

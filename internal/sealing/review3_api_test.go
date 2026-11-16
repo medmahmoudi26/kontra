@@ -24,7 +24,7 @@ import (
 // CreateTaskResult at the top of result) is never relayed.
 func TestReview3ModernRefusedOnSealedService(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-modern")
 	x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
 	if _, reason := fromClient(t, x, f.sealedCallBody(b, s1, "ask", "1", `{"secret":"SECRET"}`, false)); reason != "" {
@@ -57,13 +57,13 @@ func TestReview3ModernRefusedOnSealedService(t *testing.T) {
 func TestReview3TwoServicesOneUpstreamA2A(t *testing.T) {
 	f := newFixture(t)
 	f.h.cfg.Shared = map[string]string{"echo": "echo", "echo2": "echo"}
-	r3Buyer(t, f)
+	r3Caller(t, f)
 	get := []byte(`{"jsonrpc":"2.0","id":7,"method":"GetTask","params":{"id":"up-B","historyLength":10}}`)
 	for _, svc := range []string{"echo", "echo2"} {
 		p := pre("0193c0de-0000-7000-8000-0000000000e1", "ctx-gate")
 		p.Service = svc
 		if _, _, r := f.request(p, get); r != sealed.RejectWrongTask {
-			t.Fatalf("GetTask of the buyer's upstream task on %s: %q", svc, r)
+			t.Fatalf("GetTask of the caller's upstream task on %s: %q", svc, r)
 		}
 	}
 	// A reply naming it on an exchange of echo2 is refused too.
@@ -74,8 +74,8 @@ func TestReview3TwoServicesOneUpstreamA2A(t *testing.T) {
 		t.Fatal(r)
 	}
 	out := readAll(t, f.answer(x, http.StatusOK, `{"jsonrpc":"2.0","id":7,"result":{"id":"up-B","contextId":"upctx-B","status":{"state":"TASK_STATE_COMPLETED"},`+
-		`"artifacts":[{"artifactId":"a1","parts":[{"text":"BUYER-SECRET-RESULT"}]}]}}`))
-	if strings.Contains(out, "BUYER-SECRET") {
+		`"artifacts":[{"artifactId":"a1","parts":[{"text":"CALLER-SECRET-RESULT"}]}]}}`))
+	if strings.Contains(out, "CALLER-SECRET") {
 		t.Fatalf("echo's sealed task read through echo2: %s", out)
 	}
 }
@@ -101,11 +101,11 @@ func sealReplyFor(t *testing.T, callHdr sealed.Header, op sealed.Op, msgID, task
 	return ct
 }
 
-// r3-hiring-6 (D241): a sealed call that outlasts the gate's session_idle_s across a sweep keeps its session's key:
+// r3-calling-6 (D241): a sealed call that outlasts the gate's session_idle_s across a sweep keeps its session's key:
 // the honest gate's sealed result opens.
 func TestReview3SweepKeepsAnOpenCallsKey(t *testing.T) {
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{})
+	hr := newCallingNode(t, f, pins.Options{})
 	const sid = "gate-session-long"
 	_, initJob := mcpLocal(t, hr, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`)
 	mcpAnswer(t, hr, initJob, `{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"experimental":{"sh.kontra/sealed":`+
@@ -119,12 +119,12 @@ func TestReview3SweepKeepsAnOpenCallsKey(t *testing.T) {
 	}
 }
 
-// r3-hiring-5 (D239): the envelope's op tells the four MCP roles apart. The buyer's sealed answer to an input request
+// r3-calling-5 (D239): the envelope's op tells the four MCP roles apart. The caller's sealed answer to an input request
 // (server id 7), sent by the gate as a tools/call with id 7, is wrong_message at the hosting node; an input request's
-// envelope whose server id equals a later call's id, delivered as that call's result, is refused at the hiring node.
+// envelope whose server id equals a later call's id, delivered as that call's result, is refused at the calling node.
 func TestReview3RolesAreNotSpliced(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-p7b")
 	x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
 	if _, reason := fromClient(t, x, f.sealedCallBody(b, s1, "transfer", "1", `{"to":"alice"}`, false)); reason != "" {
@@ -135,7 +135,7 @@ func TestReview3RolesAreNotSpliced(t *testing.T) {
 	answerCT := f.seal(f.answerHeader(b, s1, "transfer", "7", ""), `{"action":"accept","content":{"amount":"9999"}}`)
 	call := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"transfer","arguments":{},"_meta":{"sh.kontra/sealed":` + envelope(answerCT) + `}}}`)
 	if out, r := fromClient(t, f.h.MCPOn(mcpPre(s1, "7", ""), "up-1"), call); r != sealed.RejectWrongMessage {
-		t.Fatalf("the buyer's sealed answer as a tools/call: %q %s", r, out)
+		t.Fatalf("the caller's sealed answer as a tools/call: %q %s", r, out)
 	}
 
 	fh, hr, sid := sealedMCPSession(t)
@@ -147,7 +147,7 @@ func TestReview3RolesAreNotSpliced(t *testing.T) {
 	}
 }
 
-// r3-hiring-4 (D243): two input requests of the session delivered with one gate request id: the second is dropped,
+// r3-calling-4 (D243): two input requests of the session delivered with one gate request id: the second is dropped,
 // and the client's answer to the first is sealed as the first's; a second answer to the id is refused here.
 func TestReview3InputRequestIDReuse(t *testing.T) {
 	f, hr, sid := sealedMCPSession(t)
@@ -182,7 +182,7 @@ func TestReview3InputRequestIDReuse(t *testing.T) {
 	}
 }
 
-// r3-hiring-8 (D243): an input request with no taskId is opened once per session, whichever call's stream it comes
+// r3-calling-8 (D243): an input request with no taskId is opened once per session, whichever call's stream it comes
 // on; and a durable task's input request that names no task is not the task's.
 func TestReview3InputRequestReplayedAcrossCalls(t *testing.T) {
 	f, hr, sid := sealedMCPSession(t)
@@ -198,8 +198,8 @@ func TestReview3InputRequestReplayedAcrossCalls(t *testing.T) {
 	}
 }
 
-// r3-hiring-9 (D246): a client's error answer to a sealed input request (a rejected sampling) reaches the service with
-// its code and fixed text: the hiring node sends it so, the hosting node takes it once for that request.
+// r3-calling-9 (D246): a client's error answer to a sealed input request (a rejected sampling) reaches the service with
+// its code and fixed text: the calling node sends it so, the hosting node takes it once for that request.
 func TestReview3ErrorAnswerToSealedInputRequest(t *testing.T) {
 	f, hr, sid := sealedMCPSession(t)
 	sent, job := mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sampleLLM","arguments":{"prompt":"x"}}}`)
@@ -211,7 +211,7 @@ func TestReview3ErrorAnswerToSealedInputRequest(t *testing.T) {
 	}
 
 	// The hosting node: a plain call's sampling request, then the client's error answer, once.
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-decline")
 	x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
 	if _, reason := fromClient(t, x, f.sealedCallBody(b, s1, "sampleLLM", "1", `{"prompt":"SECRET"}`, false)); reason != "" {
@@ -231,9 +231,9 @@ func TestReview3ErrorAnswerToSealedInputRequest(t *testing.T) {
 	}
 }
 
-// r3-hosting-1 (D232), the hiring half: a sealed plain call's input request on the session's GET stream (the stdio
+// r3-hosting-1 (D232), the calling half: a sealed plain call's input request on the session's GET stream (the stdio
 // bridge's route) opens for the local client while the call is unanswered, and its answer is sealed for it.
-func TestReview3HiringOpensPlainCallInputOnGET(t *testing.T) {
+func TestReview3CallingOpensPlainCallInputOnGET(t *testing.T) {
 	f, hr, sid := sealedMCPSession(t)
 	get := httptest.NewRequest(http.MethodGet, "/mcp/fs", nil)
 	get.Header.Set(mcpwire.HeaderSessionID, sid)

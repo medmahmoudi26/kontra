@@ -3,7 +3,7 @@
 # spec/tunnel.md §16). The harness starts, per test, a Temporal development server from $KONTRA_TEMPORAL_CLI
 # (the pinned CLI 1.9.1, Server 1.32.0), two kontra-gate replicas as processes, the tunnel tests' nodes
 # (`kontra connect` processes of the binary built once from ./cmd/kontra) and, for TestHelloworldTunnel, the
-# a2a-samples helloworld seller (examples/sellers/helloworld/run.sh; $KONTRA_A2A_SAMPLES names its checkout,
+# a2a-samples helloworld service (examples/agents/helloworld/run.sh; $KONTRA_A2A_SAMPLES names its checkout,
 # else the test clones the pinned commit), and a database on $KONTRA_TEST_PG (a server where the user may
 # create databases) or a postgres:17-alpine container when it is unset; it removes all of them when the
 # test ends, pass or fail. Every process it starts carries KONTRA_E2E_RUN and this script's
@@ -53,7 +53,7 @@ status=0
 
 leaked=0
 dir="${TMPDIR:-/tmp}/kontra-e2e-$KONTRA_E2E_SESSION"
-# what names a leftover process for the report: a gate replica, a node, the seller, Temporal, or other.
+# what names a leftover process for the report: a gate replica, a node, the service, Temporal, or other.
 what() {
   local cmd="$1"
   case "$cmd" in
@@ -61,8 +61,8 @@ what() {
     *kontra\ connect*) echo "a node (kontra connect)" ;;
     *server-everything*|*server-filesystem*|*node_modules*|*npm*) echo "a stock MCP server (npm) or a node's stdio child" ;;
     *stdioserver*) echo "a node's stdio child" ;;
-    *helloworld*|*__main__.py*|*uv\ run*) echo "the helloworld seller" ;;
-    */tck\ --host*|*/booking\ --host*|*/a2ui\ --host*|*/ap2-merchant\ --host*) echo "an example seller (examples/sellers)" ;;
+    *helloworld*|*__main__.py*|*uv\ run*) echo "the helloworld service" ;;
+    */tck\ --host*|*/booking\ --host*|*/a2ui\ --host*|*/ap2-merchant\ --host*) echo "an example service (examples/agents)" ;;
     *temporal*) echo "the Temporal server" ;;
     *) echo "a process" ;;
   esac

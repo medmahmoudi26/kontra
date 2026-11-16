@@ -81,7 +81,7 @@ func TestTunnelLifecycleOverTemporal(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("no_session, then a session", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		picker.mu.Lock()
 		picker.none = map[int]bool{1: true}
 		picker.mu.Unlock()
@@ -111,7 +111,7 @@ func TestTunnelLifecycleOverTemporal(t *testing.T) {
 	})
 
 	t.Run("cancel with the session gone", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		picker.mu.Lock()
 		picker.none = map[int]bool{}
 		picker.mu.Unlock()
@@ -144,7 +144,7 @@ func TestTunnelLifecycleOverTemporal(t *testing.T) {
 	e.exec(`insert into kontra.gate_replicas (replica_id, version) values ('it-replica', 'test')`)
 
 	t.Run("the node reconnects", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		d.set(pre, turn{state: a2a.TaskStateWorking, outcome: DispatchTunnelLost, reason: string(store.ReasonTunnelLost)},
 			turn{state: a2a.TaskStateCompleted, outcome: DispatchTerminal})
 		if _, err := q.Write(cctx, payloadOf(requestOf("r-1", "scan"))); err != nil {
@@ -184,7 +184,7 @@ func TestTunnelLifecycleOverTemporal(t *testing.T) {
 	t.Run("the node does not come back", func(t *testing.T) {
 		grace := 2 * time.Second
 		q2 := NewQueue(e.svc, e.log, lc, QueueOptions{Owner: ownerFrom, Hooks: HooksSnapshot{LifecycleQueue: QueueLifecycle}, ReattachGrace: &grace})
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		d.set(pre, turn{state: a2a.TaskStateWorking, outcome: DispatchTunnelLost, reason: string(store.ReasonTunnelLost)})
 		if _, err := q2.Write(cctx, payloadOf(requestOf("r-2", "scan"))); err != nil {
 			t.Fatal(err)

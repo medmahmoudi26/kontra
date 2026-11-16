@@ -84,8 +84,8 @@ func TestSessionsPerPrincipal(t *testing.T) {
 	e := newEnv(t)
 	r := e.replica("a", replicaOpts{})
 	up := e.tunnelService(r, "fs", func(s *Service) { s.MaxSessionsPerPrincipal = 2 })
-	keyA, _ := e.apiKey("buyer-a")
-	keyB, _ := e.apiKey("buyer-b")
+	keyA, _ := e.apiKey("caller-a")
+	keyB, _ := e.apiKey("caller-b")
 	u := r.url + "/mcp/fs"
 	open := func(key string) *client {
 		c := newClient(t, key)
@@ -173,7 +173,7 @@ func TestSessionsCapLeavesAnonymousAlone(t *testing.T) {
 	if n := len(up.Sessions()); n != 5 {
 		t.Errorf("%d upstream sessions, want 5", n)
 	}
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	k1, k2 := newClient(t, key), newClient(t, key)
 	k1.initialize(u)
 	k2.initialize(u)
@@ -187,7 +187,7 @@ func TestSessionsCapLeavesDirectBackendsAlone(t *testing.T) {
 	up, url := upstreamDouble(t)
 	e.service("web", url, func(s *Service) { s.MaxSessionsPerPrincipal = 2 })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	u := r.url + "/mcp/web"
 	var cs []*client
 	for i := range 4 {
@@ -232,7 +232,7 @@ func TestSessionsCapNeverClosesASessionInUse(t *testing.T) {
 			<-release
 		}
 	}
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	ua, ub := a.url+"/mcp/tun", b.url+"/mcp/tun"
 	s1, s2, s3 := newClient(t, key), newClient(t, key), newClient(t, key)
 	for _, c := range []*client{s1, s2, s3} {
@@ -287,7 +287,7 @@ func TestSessionsCapConcurrentInitializes(t *testing.T) {
 	e := newEnv(t)
 	r := e.replica("a", replicaOpts{})
 	up := e.tunnelService(r, "fs", func(s *Service) { s.MaxSessionsPerPrincipal = 2 })
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	u := r.url + "/mcp/fs"
 	const n = 6
 	statuses := make(chan int, n)
@@ -315,7 +315,7 @@ func TestSessionsCapConcurrentInitializes(t *testing.T) {
 }
 
 // D231 (M3 review D225-4): the cap counts one principal, the credential a session is bound to: two keys minted for
-// one buyer each hold it. (Keys of one buyer and a buyer's durable tasks are outside the cap, as D231 records.)
+// one caller each hold it. (Keys of one caller and a caller's durable tasks are outside the cap, as D231 records.)
 func TestSessionsCapCountsTheCredential(t *testing.T) {
 	e := newEnv(t)
 	r := e.replica("a", replicaOpts{})
@@ -325,9 +325,9 @@ func TestSessionsCapCountsTheCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m2, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "second", BuyerID: &m1.BuyerID, Actor: "test"})
-	if err != nil || m2.BuyerID != m1.BuyerID {
-		t.Fatalf("a second key of the buyer: %v", err)
+	m2, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "second", CallerID: &m1.CallerID, Actor: "test"})
+	if err != nil || m2.CallerID != m1.CallerID {
+		t.Fatalf("a second key of the caller: %v", err)
 	}
 	u := r.url + "/mcp/fs"
 	for _, key := range []string{m1.Secret, m2.Secret} {

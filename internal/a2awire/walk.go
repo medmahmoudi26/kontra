@@ -8,7 +8,7 @@ import (
 	"kontra.sh/kontra/internal/strictjson"
 )
 
-// The sealing levels (spec/ext-sealed.md §5 "Hosting node", plan corrections WP-08; D172): the hosting and hiring
+// The sealing levels (spec/ext-sealed.md §5 "Hosting node", plan corrections WP-08; D172): the hosting and calling
 // nodes read every A2A body they seal or open with exact keys at the levels they read, and re-encode what they parsed.
 // Walker is the part walker of Rewrite with what sealing needs besides the parts: the message or artifact that holds
 // them (its ids, its role, an update's append and lastChunk) and the object that holds that (a Task, a status update,

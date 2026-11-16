@@ -85,11 +85,11 @@ func TestMCPPeerHop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var tenant, buyer uuid.UUID
+	var tenant, caller uuid.UUID
 	if err := h.Pool.QueryRow(ctx, `select tenant_id from kontra.services where name = 'tun'`).Scan(&tenant); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.Pool.QueryRow(ctx, `select buyer_id from kontra.mcp_sessions where client_sid_hash = sha256(convert_to($1, 'UTF8'))`, mc.SID).Scan(&buyer); err != nil {
+	if err := h.Pool.QueryRow(ctx, `select caller_id from kontra.mcp_sessions where client_sid_hash = sha256(convert_to($1, 'UTF8'))`, mc.SID).Scan(&caller); err != nil {
 		t.Fatal(err)
 	}
 	body := []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hop"}}}`)
@@ -99,7 +99,7 @@ func TestMCPPeerHop(t *testing.T) {
 	_, hh := peer.ForwardedHeaders(hdr)
 	assertion := func(at time.Time) peer.Assertion {
 		return peer.Assertion{Replica: A.ReplicaID, TenantID: tenant, Service: "tun", TunnelSession: uuid.MustParse(fake.Session),
-			Principal: principalOf(t, h, h.APIKey), BuyerID: buyer, Via: "api_key", MCPSession: hex.EncodeToString(sum[:]),
+			Principal: principalOf(t, h, h.APIKey), CallerID: caller, Via: "api_key", MCPSession: hex.EncodeToString(sum[:]),
 			MCPRequestID: "9", UpstreamSID: upSID, Headers: hex.EncodeToString(hh[:]),
 			Nonce: base64.RawURLEncoding.EncodeToString([]byte(uuid.NewString())), At: at.UTC()}
 	}

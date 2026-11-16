@@ -5,8 +5,8 @@
 //
 // The same verification serves three readers: kontra connect and kontra seal verify the gate's signature with
 // a `jku` equal to the origin they dialed (spec/tunnel.md §9, spec/ext-sealed.md §5.1), and the gate verifies a
-// seller's signatures on the upstream card against the keys the operator configured (spec/relay.md §3,
-// services.<name>.seller_keys; internal/card SellerKeys). The gate signs with its own code because a2a-go's
+// service's signatures on the upstream card against the keys the operator configured (spec/relay.md §3,
+// services.<name>.service_keys; internal/card ServiceKeys). The gate signs with its own code because a2a-go's
 // signer cannot add the `kontra.upstream` header parameter (D13); card_passthrough checks the result against
 // a2a-go's verifier.
 //
@@ -74,9 +74,9 @@ type Signature struct {
 }
 
 // Upstream is the kontra.upstream header parameter: the hex SHA-256 over the JCS of the upstream card, the URL
-// it is served at ({public_url}{svc}/.well-known/agent-card.upstream.json), whether the gate verified a seller
-// signature on it against configured keys, and, when it did, the URL on its origin where it serves the seller key set
-// it verified with ({public_url}{svc}/.well-known/seller-jwks.json; D223), absent otherwise.
+// it is served at ({public_url}{svc}/.well-known/agent-card.upstream.json), whether the gate verified a service
+// signature on it against configured keys, and, when it did, the URL on its origin where it serves the service key set
+// it verified with ({public_url}{svc}/.well-known/service-jwks.json; D223), absent otherwise.
 type Upstream struct {
 	SHA256   string `json:"sha256"`
 	URL      string `json:"url"`
@@ -334,13 +334,13 @@ func CardPayload(card []byte) ([]byte, error) {
 	return out, nil
 }
 
-// KeySetPublic is a parsed public JWK Set: the gate's (fetched from jku) or a seller's (seller_keys).
+// KeySetPublic is a parsed public JWK Set: the gate's (fetched from jku) or a service's (service_keys).
 type KeySetPublic struct {
 	keys map[string]*ecdsa.PublicKey // by kid
 }
 
 // ParseJWKS parses a JWK Set, keeping the EC P-256 keys (and refusing none at all). Keys of other types are
-// skipped: a seller's set may hold keys the gate does not verify with.
+// skipped: a service's set may hold keys the gate does not verify with.
 //
 // Members are read with exact keys. A key is kept when kty is "EC" and crv "P-256", its use (when present) is
 // "sig" and its alg (when present) "ES256"; x and y must then be 32 bytes each, base64url, of a point on the
@@ -428,7 +428,7 @@ func ParseJWKS(b []byte) (*KeySetPublic, error) {
 }
 
 // JWKS is the set's public JWK Set, its keys sorted by kid, each {kty EC, crv P-256, x, y, kid, use sig, alg ES256}:
-// what the gate serves at kontra.upstream.jwks of a seller key set it verified with (D223). Only public members are
+// what the gate serves at kontra.upstream.jwks of a service key set it verified with (D223). Only public members are
 // written: the set holds nothing else.
 func (s *KeySetPublic) JWKS() ([]byte, error) {
 	if s == nil || len(s.keys) == 0 {
@@ -452,7 +452,7 @@ func (s *KeySetPublic) JWKS() ([]byte, error) {
 	return json.Marshal(set)
 }
 
-// Thumbprints are the RFC 7638 thumbprints of the set's keys, sorted (pins record a seller's, ext-sealed §7).
+// Thumbprints are the RFC 7638 thumbprints of the set's keys, sorted (pins record a service's, ext-sealed §7).
 func (s *KeySetPublic) Thumbprints() ([]string, error) {
 	if s == nil {
 		return nil, errors.New("jws: empty key set")

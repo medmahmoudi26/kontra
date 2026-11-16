@@ -39,7 +39,7 @@ type KeyRules struct {
 }
 
 // IsKontraKey reports whether a metadata key is one of Kontra's: it starts with "kontra.", compared
-// without regard to case, so a seller or a caller cannot slip "Kontra.failure" past a consumer that
+// without regard to case, so a service or a caller cannot slip "Kontra.failure" past a consumer that
 // folds case.
 func IsKontraKey(k string) bool {
 	return len(k) >= len(KontraPrefix) && strings.EqualFold(k[:len(KontraPrefix)], KontraPrefix)

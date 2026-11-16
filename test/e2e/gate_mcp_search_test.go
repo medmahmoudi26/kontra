@@ -14,10 +14,10 @@ import (
 )
 
 // gate_mcp_search (spec/relay.md §16; §12.2; D271, D293). Multi-tenant: the services are rows (D116), refs are
-// <tenant>/<name>, and the caller is buyer A, an API key of the team tenant default (principal org:default). Seeded:
+// <tenant>/<name>, and the caller is caller A, an API key of the team tenant default (principal org:default). Seeded:
 // acme/pub (a2a, another tenant's, listed, with the retired annotations.search {price, price_model}, D351),
 // default/team (a2a, allow org:default), default/open (a2a, allow anonymous only, not listed), default/fs (mcp, its tools cached on replica A by a client's tools/list
-// through the relay), default/cold (mcp, nothing cached), 60 default/page-NN (a2a, one seller) for paging, an anonymous tenant's
+// through the relay), default/cold (mcp, nothing cached), 60 default/page-NN (a2a, one service) for paging, an anonymous tenant's
 // service that every rule but the anonymous-tenant one would show (listed, allow anonymous, its own org and
 // org:default), and the harness's default/slow. Asserted:
 //
@@ -30,8 +30,8 @@ import (
 //   - describe of fs answers the cached tools with no upstream request during the call; describe of cold answers
 //     toolsCached false and, however many describes are sent, starts exactly one background drain on that replica.
 func TestGateMCPSearch(t *testing.T) {
-	sellers := map[string]*Seller{"pub": StartSeller(t), "team": StartSeller(t), "open": StartSeller(t), "anon": StartSeller(t),
-		"page": StartSeller(t)}
+	services := map[string]*Service{"pub": StartService(t), "team": StartService(t), "open": StartService(t), "anon": StartService(t),
+		"page": StartService(t)}
 	fsUp, coldUp := mcptest.New(), mcptest.New()
 	fsUp.Tools = []json.RawMessage{mcptest.Tool("read_file", ""), mcptest.Tool("list_dir", "")}
 	coldUp.Tools = []json.RawMessage{mcptest.Tool("freeze", "")}
@@ -45,16 +45,16 @@ func TestGateMCPSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	svcs := []SeededService{
-		{Tenant: "acme", Name: "pub", URL: sellers["pub"].URL, Listed: true, Annotations: map[string]any{"search": map[string]any{"price": "0.05 USD a call", "price_model": "per_call"}}},
-		{Tenant: TeamTenant, Name: "team", URL: sellers["team"].URL},
-		{Tenant: TeamTenant, Name: "open", URL: sellers["open"].URL, Allow: []string{"anonymous"}},
+		{Tenant: "acme", Name: "pub", URL: services["pub"].URL, Listed: true, Annotations: map[string]any{"search": map[string]any{"price": "0.05 USD a call", "price_model": "per_call"}}},
+		{Tenant: TeamTenant, Name: "team", URL: services["team"].URL},
+		{Tenant: TeamTenant, Name: "open", URL: services["open"].URL, Allow: []string{"anonymous"}},
 		{Tenant: TeamTenant, Name: "fs", Kind: "mcp", URL: doubleURL(t, fsUp)},
 		{Tenant: TeamTenant, Name: "cold", Kind: "mcp", URL: doubleURL(t, coldUp)},
-		// Visible by every other rule (listed, and its allow names buyer A's org): only the anonymous-tenant rule hides it.
-		{Tenant: anonSlug, Name: "shown", URL: sellers["anon"].URL, Allow: []string{"anonymous", "org:" + anonSlug, "org:" + TeamTenant}, Listed: true},
+		// Visible by every other rule (listed, and its allow names caller A's org): only the anonymous-tenant rule hides it.
+		{Tenant: anonSlug, Name: "shown", URL: services["anon"].URL, Allow: []string{"anonymous", "org:" + anonSlug, "org:" + TeamTenant}, Listed: true},
 	}
 	for i := range 60 {
-		svcs = append(svcs, SeededService{Tenant: TeamTenant, Name: fmt.Sprintf("page-%02d", i), URL: sellers["page"].URL})
+		svcs = append(svcs, SeededService{Tenant: TeamTenant, Name: fmt.Sprintf("page-%02d", i), URL: services["page"].URL})
 	}
 	if err := h.SeedServices(ctx, svcs...); err != nil {
 		t.Fatal(err)
@@ -174,7 +174,7 @@ func TestGateMCPSearch(t *testing.T) {
 			t.Errorf("search %s:\n got %v\nwant %v", c.args, got, c.want)
 		}
 	}
-	// The seller card's description: every service whose served card it is (acme/pub, default/team and the pages
+	// The service card's description: every service whose served card it is (acme/pub, default/team and the pages
 	// once their card was read), and nothing else.
 	if got := all(`{"query":"every kind"}`); !slices.Contains(got, "acme/pub") || !slices.Contains(got, "default/team") ||
 		slices.ContainsFunc(got, func(r string) bool {

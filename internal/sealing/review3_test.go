@@ -17,7 +17,7 @@ import (
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// M3 review round 3: regression tests for the hosting and hiring nodes' sealing.
+// M3 review round 3: regression tests for the hosting and calling nodes' sealing.
 
 // r3-hosting-1 (D232): a sealed plain call's input request that reaches the session on another exchange than the
 // call's own (a GET stream: the stdio bridge routes every request without a related task there; a URL server resumed
@@ -25,7 +25,7 @@ import (
 // plaintext answer to it is refused.
 func TestReview3PlainCallInputOnGET(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-get")
 	x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
 	if _, reason := fromClient(t, x, f.sealedCallBody(b, s1, "sampleLLM", "1", `{"prompt":"SECRET-PROMPT"}`, false)); reason != "" {
@@ -55,7 +55,7 @@ func TestReview3PlainCallInputOnGET(t *testing.T) {
 // the GET is: it is not relayed, and any answer to it is refused.
 func TestReview3UnattributableInputIsNotRelayed(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-two")
 	for _, id := range []string{"1", "2"} {
 		x := f.h.MCPOn(mcpPre(s1, id, ""), "up-1")
@@ -86,7 +86,7 @@ func TestReview3UnattributableInputIsNotRelayed(t *testing.T) {
 // acceptance of that call: the call is recorded and the request sealed as its.
 func TestReview3InputWhileFirstCallInFlight(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-first")
 	x := f.h.MCPOn(mcpPre(s1, "1", ""), "up-1")
 	if _, reason := fromClient(t, x, f.sealedCallBody(b, s1, "sampleLLM", "1", `{"prompt":"SECRET-PROMPT"}`, false)); reason != "" {
@@ -105,7 +105,7 @@ func TestReview3InputWhileFirstCallInFlight(t *testing.T) {
 }
 
 // openInputFor opens a sealed input request's envelope (params._meta["sh.kontra/sealed"]) with b's key.
-func openInputFor(t *testing.T, b buyer, m *mcpwire.Message) (sealed.Header, []byte) {
+func openInputFor(t *testing.T, b caller, m *mcpwire.Message) (sealed.Header, []byte) {
 	t.Helper()
 	meta, _ := mcpwire.Member(m.Params, "_meta")
 	env, _ := mcpwire.Member(meta, mcpwire.MetaSealed)
@@ -119,26 +119,26 @@ func openInputFor(t *testing.T, b buyer, m *mcpwire.Message) (sealed.Header, []b
 
 // answerHeader is the header of b's answer to the input request msgID (of the gate task taskID, "" for a plain
 // call's).
-func (f *fixture) answerHeader(b buyer, session, tool, msgID, taskID string) sealed.Header {
+func (f *fixture) answerHeader(b caller, session, tool, msgID, taskID string) sealed.Header {
 	hd := f.mcpHeader(b, session, tool, msgID)
 	hd.TaskID, hd.Op = taskID, sealed.OpAnswer
 	return hd
 }
 
-// r3Buyer opens the buyer's sealed job T1 in gate context ctx-buyer on service echo, answered with upstream task up-B
+// r3Caller opens the caller's sealed job T1 in gate context ctx-caller on service echo, answered with upstream task up-B
 // in upstream context upctx-B.
-func r3Buyer(t *testing.T, f *fixture) buyer {
+func r3Caller(t *testing.T, f *fixture) caller {
 	t.Helper()
-	b := newBuyer(t)
-	const task, ctx = "0193c0de-0000-7000-8000-0000000000b1", "ctx-buyer"
-	body := send("mB", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "mB", 0, 1), "BUYER-SECRET-INPUT")))
+	b := newCaller(t)
+	const task, ctx = "0193c0de-0000-7000-8000-0000000000b1", "ctx-caller"
+	body := send("mB", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "mB", 0, 1), "CALLER-SECRET-INPUT")))
 	_, x, r := f.request(pre(task, ctx), body)
 	if r != "" {
 		t.Fatal(r)
 	}
-	out := readAll(t, f.answer(x, http.StatusOK, taskAnswer("up-B", "upctx-B", "TASK_STATE_COMPLETED", "done", "BUYER-SECRET-RESULT")))
-	if strings.Contains(out, "BUYER-SECRET") {
-		t.Fatalf("the buyer's own reply: %s", out)
+	out := readAll(t, f.answer(x, http.StatusOK, taskAnswer("up-B", "upctx-B", "TASK_STATE_COMPLETED", "done", "CALLER-SECRET-RESULT")))
+	if strings.Contains(out, "CALLER-SECRET") {
+		t.Fatalf("the caller's own reply: %s", out)
 	}
 	return b
 }
@@ -159,9 +159,9 @@ func (f *fixture) r3Do(p tunnel.Preamble, method, target string) (*Exchange, sea
 // task list (D227) nor a push config route (D217).
 func TestReview3DotSegmentRoutes(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
-	const t1, ctx = "0193c0de-0000-7000-8000-0000000000b9", "ctx-buyer"
-	body := send("mB", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "mB", 0, 1), "BUYER-SECRET-INPUT")))
+	b := newCaller(t)
+	const t1, ctx = "0193c0de-0000-7000-8000-0000000000b9", "ctx-caller"
+	body := send("mB", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "mB", 0, 1), "CALLER-SECRET-INPUT")))
 	_, x, r := f.request(pre(t1, ctx), body)
 	if r != "" {
 		t.Fatal(r)
@@ -175,11 +175,11 @@ func TestReview3DotSegmentRoutes(t *testing.T) {
 		}
 	}
 	f2 := newFixture(t)
-	r3Buyer(t, f2)
+	r3Caller(t, f2)
 	const tb = "0193c0de-0000-7000-8000-0000000000b1"
 	for _, target := range []string{"/tasks/up-B/pushNotificationConfigs", "/tasks/up-B/./pushNotificationConfigs",
 		"/tasks/up-B/x/../pushNotificationConfigs", "/tasks/up-B//pushNotificationConfigs"} {
-		if _, r := f2.r3Do(pre(tb, "ctx-buyer"), http.MethodPost, target); r != sealed.RejectBadHeader {
+		if _, r := f2.r3Do(pre(tb, "ctx-caller"), http.MethodPost, target); r != sealed.RejectBadHeader {
 			t.Errorf("POST %s: %q", target, r)
 		}
 	}
@@ -189,7 +189,7 @@ func TestReview3DotSegmentRoutes(t *testing.T) {
 // sealed or not; an unsealed message with any reference, to a service with sealed jobs, is bad_header.
 func TestReview3ReferenceTaskIDs(t *testing.T) {
 	f := newFixture(t)
-	r3Buyer(t, f)
+	r3Caller(t, f)
 	msg := func(ref string) []byte {
 		m := map[string]any{"messageId": "mR", "role": "ROLE_USER", "referenceTaskIds": []string{ref},
 			"parts": []any{map[string]any{"text": "summarize the referenced task"}}}
@@ -197,13 +197,13 @@ func TestReview3ReferenceTaskIDs(t *testing.T) {
 		return b
 	}
 	if fwd, _, r := f.request(pre("0193c0de-0000-7000-8000-0000000000e3", "ctx-other"), msg("up-B")); r != sealed.RejectWrongTask {
-		t.Fatalf("an unsealed message referencing the buyer's sealed task: %q %s", r, fwd)
+		t.Fatalf("an unsealed message referencing the caller's sealed task: %q %s", r, fwd)
 	}
 	if fwd, _, r := f.request(pre("0193c0de-0000-7000-8000-0000000000e4", "ctx-other"), msg("up-unknown")); r != sealed.RejectBadHeader {
 		t.Fatalf("an unsealed message with a reference, to a service with sealed jobs: %q %s", r, fwd)
 	}
-	// The gate's own sealed first message referencing the buyer's task.
-	g := newBuyer(t)
+	// The gate's own sealed first message referencing the caller's task.
+	g := newCaller(t)
 	const gtask, gctx = "0193c0de-0000-7000-8000-0000000000e5", "ctx-g"
 	body := send("mG", "", "", g.replyTo(), sealedPartJSON(f.seal(f.reqHeader(g, "", gctx, "mG", 0, 1), "summarize the referenced task")))
 	var m map[string]any
@@ -219,8 +219,8 @@ func TestReview3ReferenceTaskIDs(t *testing.T) {
 // exchange was cut), a request naming another sealed job's upstream task is wrong_task.
 func TestReview3OtherChecksIndexWithoutUpstreamTask(t *testing.T) {
 	f := newFixture(t)
-	r3Buyer(t, f)
-	g := newBuyer(t)
+	r3Caller(t, f)
+	g := newCaller(t)
 	const tg, gctx = "0193c0de-0000-7000-8000-0000000000ef", "ctx-gate"
 	body := send("mG", "", "", g.replyTo(), sealedPartJSON(f.seal(f.reqHeader(g, "", gctx, "mG", 0, 1), "x")))
 	_, x, r := f.request(pre(tg, gctx), body)
@@ -231,11 +231,11 @@ func TestReview3OtherChecksIndexWithoutUpstreamTask(t *testing.T) {
 	x.End()
 	cancel := []byte(`{"jsonrpc":"2.0","id":7,"method":"CancelTask","params":{"id":"up-B"}}`)
 	if fwd, _, r := f.request(pre(tg, gctx), cancel); r != sealed.RejectWrongTask {
-		t.Fatalf("CancelTask of the buyer's upstream task on the gate's own job's exchange: %q %s", r, fwd)
+		t.Fatalf("CancelTask of the caller's upstream task on the gate's own job's exchange: %q %s", r, fwd)
 	}
 }
 
-// r3-hiring-3 (D244): a CreateTaskResult answers only a sealed call that asked for a task, and holds nothing a client
+// r3-calling-3 (D244): a CreateTaskResult answers only a sealed call that asked for a task, and holds nothing a client
 // would read as the tool's result: a plain call answered with {"task", "content"} is refused, as JSON and as SSE.
 func TestReview3ForgedCreateTaskResult(t *testing.T) {
 	_, hr, sid := sealedMCPSession(t)
@@ -260,14 +260,14 @@ func TestReview3ForgedCreateTaskResult(t *testing.T) {
 	}
 }
 
-// r3-hiring-6 (D241): a session's job is never dropped while one of its exchanges is open (the sweep with the gate's
+// r3-calling-6 (D241): a session's job is never dropped while one of its exchanges is open (the sweep with the gate's
 // session_idle_s, a gate 404 on another exchange), and a result that answers no tracked request is never relayed on a
 // GET, or on a session the node no longer holds: the gate's plaintext result for the pending sealed call is refused.
 func TestReview3OpenGETAfterSessionJobDropped(t *testing.T) {
 	for _, how := range []string{"sweep", "404"} {
 		t.Run(how, func(t *testing.T) {
 			f := newFixture(t)
-			hr := newHirer(t, f, pins.Options{})
+			hr := newCallingNode(t, f, pins.Options{})
 			const sid = "gate-session-drop"
 			_, initJob := mcpLocal(t, hr, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`)
 			mcpAnswer(t, hr, initJob, `{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"experimental":{"sh.kontra/sealed":`+
@@ -298,7 +298,7 @@ func TestReview3OpenGETAfterSessionJobDropped(t *testing.T) {
 	}
 }
 
-// r3-hiring-7 (D245): the gate cannot put a second local client into a sealed session (an initialize result naming a
+// r3-calling-7 (D245): the gate cannot put a second local client into a sealed session (an initialize result naming a
 // session id the node holds is refused), and a request reusing a sealed call's id is refused here rather than deleting
 // its record: the gate's plaintext result for the call never passes on the session's GET.
 func TestReview3SessionFixation(t *testing.T) {
@@ -327,12 +327,12 @@ func TestReview3SessionFixation(t *testing.T) {
 	}
 }
 
-// r3-hiring-2 (D240): an MCP session id is never an A2A service's path: a gate that answers an MCP initialize with
+// r3-calling-2 (D240): an MCP session id is never an A2A service's path: a gate that answers an MCP initialize with
 // Mcp-Session-Id "/agents/echo" gets the initialize refused, and the pinned sealed A2A service's next message is
 // still sealed.
 func TestReview3SessionIDCollidesWithA2APath(t *testing.T) {
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{PinRecipients: true})
+	hr := newCallingNode(t, f, pins.Options{PinRecipients: true})
 	path, body := localSend("jsonrpc", "FIRST")
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
 	sreq, _, err := hr.h.Request(context.Background(), "/agents/echo", req)
@@ -367,11 +367,11 @@ func TestReview3SessionIDCollidesWithA2APath(t *testing.T) {
 	}
 }
 
-// r3-hiring-10 (D242): an MCP session the client left without a DELETE, with no job (an unsealed service's), is
+// r3-calling-10 (D242): an MCP session the client left without a DELETE, with no job (an unsealed service's), is
 // forgotten once idle past its bound: kontra connect does not grow with every session.
 func TestReview3UnsealedSessionEntryIsSwept(t *testing.T) {
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{})
+	hr := newCallingNode(t, f, pins.Options{})
 	const sid = "gate-session-unsealed"
 	_, initJob := mcpLocal(t, hr, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`)
 	mcpAnswer(t, hr, initJob, `{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"s","version":"1"}}}`, false, http.Header{mcpwire.HeaderSessionID: {sid}})

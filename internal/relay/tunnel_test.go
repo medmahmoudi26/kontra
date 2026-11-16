@@ -183,8 +183,8 @@ func (s *sessions) drop(id uuid.UUID) {
 	s.mu.Unlock()
 }
 
-// sellerHandler is an a2a-go seller's JSON-RPC handler at /a2a/.
-func sellerHandler(exec a2asrv.AgentExecutor) http.Handler {
+// serviceHandler is an a2a-go service's JSON-RPC handler at /a2a/.
+func serviceHandler(exec a2asrv.AgentExecutor) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/a2a/", http.StripPrefix("/a2a", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(exec))))
 	return mux
@@ -198,7 +198,7 @@ func tunnelEnv(t *testing.T, o envOptions, streaming bool, exec a2asrv.AgentExec
 		info: upstream.Info{ProtocolVersion: "1.0", Binding: a2a.TransportProtocolJSONRPC, Path: "/a2a/", Streaming: streaming}}
 	nodes := map[uuid.UUID]*testNode{}
 	for _, id := range ids {
-		n := &testNode{svc: sellerHandler(exec)}
+		n := &testNode{svc: serviceHandler(exec)}
 		ss.nodes[id], nodes[id] = n, n
 	}
 	e.backends.use(ss)
@@ -214,7 +214,7 @@ func TestTunnelDispatch(t *testing.T) {
 	for _, streaming := range []bool{true, false} {
 		s1 := newSession()
 		e, _, nodes := tunnelEnv(t, envOptions{}, streaming, askingAgent(), s1)
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room", session: &s1})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room", session: &s1})
 		if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 			t.Fatalf("streaming=%v: turn 1 %+v", streaming, res)
 		}
@@ -241,7 +241,7 @@ func TestTunnelDispatch(t *testing.T) {
 func TestTunnelSessionMissing(t *testing.T) {
 	s1, gone := newSession(), newSession()
 	e, _, nodes := tunnelEnv(t, envOptions{}, true, askingAgent(), s1)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q", session: &gone})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q", session: &gone})
 	before := e.events(id)
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	if res.Outcome != lifecycle.DispatchTunnelLost || res.Reason != "tunnel_lost" {
@@ -286,7 +286,7 @@ func TestTunnelLostBeforeFirstUpstreamID(t *testing.T) {
 			n.gone.Store(false)
 			n.setAnswer(nil)
 			arm()
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "q", session: &s1})
 			res := e.dispatch(context.Background(), id, 1, wid, false)
 			if res.Outcome != lifecycle.DispatchRetryable || res.Reason != "tunnel_lost" {
 				t.Fatalf("result %+v", res)
@@ -360,7 +360,7 @@ func TestTunnelLostAfterFirstUpstreamID(t *testing.T) {
 			s1 := newSession()
 			e, _, nodes := tunnelEnv(t, envOptions{}, tc.streaming, working, s1)
 			tc.arm(nodes[s1])
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "q", session: &s1})
 			res := e.dispatch(context.Background(), id, 1, wid, false)
 			p := projection(t, e, id)
 			if !tc.fails {
@@ -411,7 +411,7 @@ func TestTunnelNodeFullWhilePolling(t *testing.T) {
 		}
 		return false
 	})
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q", session: &s1})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	if p := projection(t, e, id); res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("%+v %+v", res, p.Status)
@@ -431,7 +431,7 @@ func TestTunnelNodeFullWhilePolling(t *testing.T) {
 		}
 		return false
 	})
-	id2, wid2 := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
+	id2, wid2 := e.newTask(taskSpec{owner: callerA, text: "q", session: &s1})
 	began := time.Now()
 	res = e.dispatch(context.Background(), id2, 1, wid2, false)
 	if p := projection(t, e, id2); res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "tunnel_lost" {
@@ -451,7 +451,7 @@ func TestTunnelFollowUp(t *testing.T) {
 	agent := askingAgent()
 	e, ss, nodes := tunnelEnv(t, envOptions{}, false, agent, s1)
 	n := nodes[s1]
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room", session: &s1})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room", session: &s1})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 		t.Fatalf("turn 1: %+v", res)
 	}
@@ -479,7 +479,7 @@ func TestTunnelFollowUp(t *testing.T) {
 		}
 		recording.ServeHTTP(w, r)
 	}))
-	wid2 := e.followUp(id, buyerA, "the blue one")
+	wid2 := e.followUp(id, callerA, "the blue one")
 	res := e.dispatch(context.Background(), id, 1, wid2, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted || p.Status.Message.Parts[0].Text() != "done: the blue one" {
@@ -494,13 +494,13 @@ func TestTunnelFollowUp(t *testing.T) {
 
 	// Another task waits at input-required; its session goes away.
 	n.setAnswer(nil)
-	id2, w1 := e.newTask(taskSpec{owner: buyerA, text: "book a car", session: &s1})
+	id2, w1 := e.newTask(taskSpec{owner: callerA, text: "book a car", session: &s1})
 	if res := e.dispatch(context.Background(), id2, 1, w1, false); res.Outcome != lifecycle.DispatchInterrupted {
 		t.Fatalf("turn 1 of the second task: %+v", res)
 	}
 	ss.drop(s1)
 	opens := n.opens.Load()
-	w2 := e.followUp(id2, buyerA, "the red one")
+	w2 := e.followUp(id2, callerA, "the red one")
 	res = e.dispatch(context.Background(), id2, 1, w2, false)
 	p = projection(t, e, id2)
 	// The follow-up waits for the node (D340): nothing logged, the attempt open, the question still the status.
@@ -540,7 +540,7 @@ func TestTunnelForwardCancel(t *testing.T) {
 	s1 := newSession()
 	e, ss, nodes := tunnelEnv(t, envOptions{}, true, g, s1)
 	n := nodes[s1]
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q", session: &s1})
 	done := make(chan lifecycle.DispatchResult, 1)
 	go func() { done <- e.dispatch(context.Background(), id, 1, wid, false) }()
 	waitFor(t, "the first upstream id", func() bool { return e.attempt(id, 1).FirstUpstreamIDAt != nil })
@@ -564,7 +564,7 @@ func TestTunnelForwardCancel(t *testing.T) {
 	}
 
 	// The session gone: tunnel_lost, nothing opened.
-	id2, _ := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
+	id2, _ := e.newTask(taskSpec{owner: callerA, text: "q", session: &s1})
 	e.firstID(id2, 1, "up-x", "c")
 	ss.drop(s1)
 	opens := n.opens.Load()
@@ -591,7 +591,7 @@ func TestTunnelForwardCancelSessionUp(t *testing.T) {
 	n := nodes[s1]
 	waiting := func(session *uuid.UUID) a2a.TaskID {
 		t.Helper()
-		id, _ := e.newTask(taskSpec{owner: buyerA, text: "q", session: session})
+		id, _ := e.newTask(taskSpec{owner: callerA, text: "q", session: session})
 		e.firstID(id, 1, "up-"+string(id), "c-"+string(id))
 		return id
 	}
@@ -700,31 +700,31 @@ func TestUpstreamContextsStayOnTheirSession(t *testing.T) {
 		}
 		return id
 	}
-	t1 := run(taskSpec{owner: buyerA, contextID: "conv", text: "one", session: &s1})
+	t1 := run(taskSpec{owner: callerA, contextID: "conv", text: "one", session: &s1})
 	up1 := e.attempt(t1, 1)
-	t2 := run(taskSpec{owner: buyerA, contextID: "conv", text: "two", refs: []a2a.TaskID{t1}, session: &s1})
+	t2 := run(taskSpec{owner: callerA, contextID: "conv", text: "two", refs: []a2a.TaskID{t1}, session: &s1})
 	if got := sent(s1); len(got) != 2 || got[0].ContextID != "" || got[1].ContextID != up1.UpstreamContextID ||
 		fmt.Sprint(got[1].ReferenceTasks) != fmt.Sprint([]a2a.TaskID{a2a.TaskID(up1.UpstreamTaskID)}) {
 		t.Fatalf("on the same session: %+v", got)
 	}
-	t3 := run(taskSpec{owner: buyerA, contextID: "conv", text: "three", refs: []a2a.TaskID{t1, t2}, session: &s2})
+	t3 := run(taskSpec{owner: callerA, contextID: "conv", text: "three", refs: []a2a.TaskID{t1, t2}, session: &s2})
 	got := sent(s2)
 	if len(got) != 1 || got[0].ContextID != "" || len(got[0].ReferenceTasks) != 0 {
 		t.Fatalf("session 2 got session 1's ids: %+v", got)
 	}
 	up3 := e.attempt(t3, 1)
-	run(taskSpec{owner: buyerA, contextID: "conv", text: "four", refs: []a2a.TaskID{t3, t1}, session: &s2})
+	run(taskSpec{owner: callerA, contextID: "conv", text: "four", refs: []a2a.TaskID{t3, t1}, session: &s2})
 	if got := sent(s2); len(got) != 2 || got[1].ContextID != up3.UpstreamContextID ||
 		fmt.Sprint(got[1].ReferenceTasks) != fmt.Sprint([]a2a.TaskID{a2a.TaskID(up3.UpstreamTaskID)}) {
 		t.Fatalf("session 2's own context: %+v", got)
 	}
 	// A direct attempt in the same context finds no tunnel attempt's ids either.
-	seller, b, info := newAgent(t, echo, agentConfig{})
+	service, b, info := newAgent(t, echo, agentConfig{})
 	e.backends.use(nil)
 	e.backends.set(b, info, nil)
-	td, wd := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "five", refs: []a2a.TaskID{t1, t3}})
+	td, wd := e.newTask(taskSpec{owner: callerA, contextID: "conv", text: "five", refs: []a2a.TaskID{t1, t3}})
 	e.dispatch(context.Background(), td, 1, wd, false)
-	if got := seller.sentMessages(t); len(got) != 1 || got[0].ContextID != "" || len(got[0].ReferenceTasks) != 0 {
+	if got := service.sentMessages(t); len(got) != 1 || got[0].ContextID != "" || len(got[0].ReferenceTasks) != 0 {
 		t.Fatalf("a direct attempt got a tunnel session's ids: %+v", got)
 	}
 }
@@ -771,7 +771,7 @@ func TestTunnelResumeAfterReconnect(t *testing.T) {
 				}
 				return false
 			})
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "scan", session: &s1})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "scan", session: &s1})
 			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTunnelLost {
 				t.Fatalf("the lost session: %+v %+v %v", res, projection(t, e, id).Status, e.states(id))
 			}
@@ -858,7 +858,7 @@ func TestTunnelMessageContextContinues(t *testing.T) {
 	}))
 	run := func(text string) a2a.TaskID {
 		t.Helper()
-		id, wid := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: text, session: &s1})
+		id, wid := e.newTask(taskSpec{owner: callerA, contextID: "conv", text: text, session: &s1})
 		if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
 			t.Fatalf("dispatch %+v", res)
 		}

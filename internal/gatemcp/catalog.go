@@ -38,11 +38,11 @@ const DrainEvery = 10 * time.Minute
 // Visibility (§12.2): a service whose allow: admits the principal by an entry other than anonymous (oidc:* included,
 // which names every principal of the configured OIDC issuer as key:* names every API key, D301), or one the operator
 // marks listed; never a service of an anonymous tenant (spec/tunnel.md §6.2), never a disabled one, nor one of a
-// tenant that has ended. hire reaches a service by ref when its allow: admits the principal at all (any entry,
+// tenant that has ended. send_message reaches a service by ref when its allow: admits the principal at all (any entry,
 // anonymous included), as the A2A route does.
 //
 // The rows are the services table's; with Served, only those this replica's registry serves, enabled, with the
-// registry's allow: (D303): /mcp lists and hires exactly what the A2A route and /mcp/{svc} serve. A row whose allow:
+// registry's allow: (D303): /mcp lists and send_message calls exactly what the A2A route and /mcp/{svc} serve. A row whose allow:
 // does not parse is left out, and logged, as the registry leaves it out: it never fails a request (D303).
 type Catalog struct {
 	db        *pgxpool.Pool
@@ -219,13 +219,13 @@ func (c *Catalog) unreadable(s *service, err error) {
 	}
 	c.mu.Unlock()
 	if !seen || now.Sub(last) >= unreadableLogEvery {
-		c.log.Error("gatemcp: a services row cannot be read; search, describe and hire leave it out", "service", key, "error", err)
+		c.log.Error("gatemcp: a services row cannot be read; search, describe and send_message leave it out", "service", key, "error", err)
 	}
 }
 
-// Hireable is the service a hire's ref names when p may hire it (its allow: admits p, by any entry), nil otherwise:
+// Callable is the service a send_message's ref names when p may send_message it (its allow: admits p, by any entry), nil otherwise:
 // the unknown-service answer (§12.2).
-func (c *Catalog) Hireable(ctx context.Context, p auth.Principal, ref Ref) (*service, error) {
+func (c *Catalog) Callable(ctx context.Context, p auth.Principal, ref Ref) (*service, error) {
 	s, err := c.lookup(ctx, ref)
 	if err != nil || s == nil || !s.allow.Admits(p) {
 		return nil, err
@@ -332,7 +332,7 @@ func (c *Catalog) Search(ctx context.Context, p auth.Principal, args SearchArgs)
 }
 
 // searchable leaves out the services the operator hides from search, annotations.search.hidden true (§12.2, D321):
-// reachable by ref (describe and hire, as allow: decides), never listed, for every principal. Any other value of the
+// reachable by ref (describe and send_message, as allow: decides), never listed, for every principal. Any other value of the
 // member, a string included, hides nothing; a team gate's configuration refuses one that is not a boolean.
 const searchable = ` and (s.annotations -> 'search' -> 'hidden') is distinct from 'true'::jsonb`
 

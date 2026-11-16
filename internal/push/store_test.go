@@ -37,7 +37,7 @@ func TestSaveIsIdempotent(t *testing.T) {
 	sig := &signals{}
 	cs := NewConfigStore(e.pool, sig, private, nil)
 	ctx := context.Background()
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 
 	first, err := cs.Save(ctx, tid(id), pushConfig("http://127.0.0.1:9/hook"))
 	if err != nil {
@@ -113,9 +113,9 @@ func TestSaveInlineThenResave(t *testing.T) {
 		inserted bool
 	)
 	if err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		id = e.newTaskTx(tx, buyerA)
+		id = e.newTaskTx(tx, callerA)
 		var err error
-		cid, inserted, err = cs.SaveInline(ctx, tx, id, buyerA, pushConfig("http://127.0.0.1:9/hook"))
+		cid, inserted, err = cs.SaveInline(ctx, tx, id, callerA, pushConfig("http://127.0.0.1:9/hook"))
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -138,12 +138,12 @@ func TestSaveInlineThenResave(t *testing.T) {
 	}
 	// A second SaveInline of the same config (a resend that reached Write) inserts nothing, and has
 	// nothing to announce.
-	if c2, ins := e.saveInline(cs, id, buyerA, pushConfig("http://127.0.0.1:9/hook")); c2 != "" || ins {
+	if c2, ins := e.saveInline(cs, id, callerA, pushConfig("http://127.0.0.1:9/hook")); c2 != "" || ins {
 		t.Fatalf("SaveInline again: %q %v", c2, ins)
 	}
 	// A rolled-back transaction leaves nothing (a refused request stores nothing, spec §10.1).
 	_ = pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		if _, _, err := cs.SaveInline(ctx, tx, id, buyerA, pushConfig("http://127.0.0.1:9/other")); err != nil {
+		if _, _, err := cs.SaveInline(ctx, tx, id, callerA, pushConfig("http://127.0.0.1:9/other")); err != nil {
 			t.Fatal(err)
 		}
 		return errors.New("rollback")
@@ -152,7 +152,7 @@ func TestSaveInlineThenResave(t *testing.T) {
 		t.Fatalf("%d rows after a rolled-back SaveInline", n)
 	}
 	// DeleteInline removes what SaveInline inserted for a refused follow-up, without kontra.push.
-	c3, _ := e.saveInline(cs, id, buyerA, pushConfig("http://127.0.0.1:9/refused"))
+	c3, _ := e.saveInline(cs, id, callerA, pushConfig("http://127.0.0.1:9/refused"))
 	if err := cs.DeleteInline(ctx, id, c3); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestSaveInlineThenResave(t *testing.T) {
 	// SaveInline refuses a private literal even offline, and the anonymous principal.
 	strict := NewConfigStore(e.pool, sig, ssrf.Policy{}, nil)
 	err = pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		_, _, err := strict.SaveInline(ctx, tx, id, buyerA, pushConfig("https://10.0.0.1/hook"))
+		_, _, err := strict.SaveInline(ctx, tx, id, callerA, pushConfig("https://10.0.0.1/hook"))
 		return err
 	})
 	if !errors.Is(err, a2a.ErrInvalidParams) {
@@ -182,7 +182,7 @@ func TestSaveInlineThenResave(t *testing.T) {
 func TestInitialPosition(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	e.status(id, store.StateWorking)           // 2
 	art := e.artifact(id, "a1", "part", false) // 3
 	e.metadata(id, map[string]any{"x": "y"})   // 4
@@ -195,7 +195,7 @@ func TestInitialPosition(t *testing.T) {
 	}
 }
 
-// TestLimits: the 11th config of a task and the 257th delivering config of a buyer are InvalidParams
+// TestLimits: the 11th config of a task and the 257th delivering config of a caller are InvalidParams
 // (spec §10.1); a failed config, and one whose terminal snapshot was delivered, are not delivering.
 func TestLimits(t *testing.T) {
 	e := newEnv(t)
@@ -203,7 +203,7 @@ func TestLimits(t *testing.T) {
 	cs := NewConfigStore(e.pool, sig, private, nil)
 	ctx := context.Background()
 
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	for i := range MaxPerTask {
 		if _, err := cs.Save(ctx, tid(id), &a2a.PushConfig{URL: fmt.Sprintf("http://127.0.0.1:9/h%d", i)}); err != nil {
 			t.Fatalf("config %d: %v", i+1, err)
@@ -218,7 +218,7 @@ func TestLimits(t *testing.T) {
 		var ins bool
 		err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
 			var err error
-			c, ins, err = cs.SaveInline(ctx, tx, id, buyerA, &a2a.PushConfig{URL: "http://127.0.0.1:9/inline11"})
+			c, ins, err = cs.SaveInline(ctx, tx, id, callerA, &a2a.PushConfig{URL: "http://127.0.0.1:9/inline11"})
 			return err
 		})
 		return c, ins, err
@@ -234,26 +234,26 @@ func TestLimits(t *testing.T) {
 		t.Fatalf("%d configs on the task", n)
 	}
 
-	// Buyer A has 10 delivering configs; fill up to 256 over more tasks.
-	need := MaxPerBuyer - MaxPerTask
+	// Caller A has 10 delivering configs; fill up to 256 over more tasks.
+	need := MaxPerCaller - MaxPerTask
 	var last uuid.UUID
 	for need > 0 {
-		last = e.newTask(buyerA)
+		last = e.newTask(callerA)
 		for i := 0; i < MaxPerTask && need > 0; i++ {
 			if _, err := cs.Save(ctx, tid(last), &a2a.PushConfig{URL: fmt.Sprintf("http://127.0.0.1:9/b%d", i)}); err != nil {
-				t.Fatalf("delivering config %d: %v", MaxPerBuyer-need+1, err)
+				t.Fatalf("delivering config %d: %v", MaxPerCaller-need+1, err)
 			}
 			need--
 		}
 	}
-	next := e.newTask(buyerA)
+	next := e.newTask(callerA)
 	if _, err := cs.Save(ctx, tid(next), &a2a.PushConfig{URL: "http://127.0.0.1:9/257"}); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Fatalf("the 257th delivering config: %v, want InvalidParams", err)
 	}
-	// Another buyer is not affected.
-	idB := e.newTask(buyerB)
+	// Another caller is not affected.
+	idB := e.newTask(callerB)
 	if _, err := cs.Save(ctx, tid(idB), &a2a.PushConfig{URL: "http://127.0.0.1:9/b"}); err != nil {
-		t.Fatalf("buyer B: %v", err)
+		t.Fatalf("caller B: %v", err)
 	}
 	// A failed config stops delivering: one slot frees.
 	e.exec(`update kontra.push_configs set failed_at = now() where task_id = $1 and config->>'url' = 'http://127.0.0.1:9/h0'`, id)
@@ -264,7 +264,7 @@ func TestLimits(t *testing.T) {
 		t.Fatalf("over the limit again: %v", err)
 	}
 	// A config whose terminal snapshot was delivered is done: the task ends, the deliveries reach its
-	// terminal row, and the buyer has room again.
+	// terminal row, and the caller has room again.
 	term := e.status(id, store.StateCompleted)
 	e.exec(`update kontra.push_configs set delivered_seq = $2 where task_id = $1`, id, term)
 	if _, err := cs.Save(ctx, tid(next), &a2a.PushConfig{URL: "http://127.0.0.1:9/258"}); err != nil {
@@ -288,8 +288,8 @@ func TestAnonymousIsRefused(t *testing.T) {
 	if _, err := cs.Save(ctx, tid(id), pushConfig("http://127.0.0.1:9/hook")); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("Save on an anonymous task: %v", err)
 	}
-	mine := e.newTask(buyerA)
-	actx := auth.WithPrincipal(ctx, auth.Anonymous(anon.BuyerID))
+	mine := e.newTask(callerA)
+	actx := auth.WithPrincipal(ctx, auth.Anonymous(anon.CallerID))
 	if _, err := cs.Save(actx, tid(mine), pushConfig("http://127.0.0.1:9/hook")); !errors.Is(err, a2a.ErrPushNotificationNotSupported) {
 		t.Errorf("Save by the anonymous principal: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestGetListDelete(t *testing.T) {
 	sig := &signals{}
 	cs := NewConfigStore(e.pool, sig, private, nil)
 	ctx := context.Background()
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	a, _ := cs.Save(ctx, tid(id), &a2a.PushConfig{ID: "a", URL: "http://127.0.0.1:9/a", Token: "ta"})
 	b, _ := cs.Save(ctx, tid(id), &a2a.PushConfig{URL: "http://127.0.0.1:9/b"})
 
@@ -328,7 +328,7 @@ func TestGetListDelete(t *testing.T) {
 	if err != nil || len(list) != 2 || list[0].ID != a.ID || list[1].ID != b.ID {
 		t.Fatalf("List: %+v %v", list, err)
 	}
-	if l, err := cs.List(ctx, tid(e.newTask(buyerA))); err != nil || l == nil || len(l) != 0 {
+	if l, err := cs.List(ctx, tid(e.newTask(callerA))); err != nil || l == nil || len(l) != 0 {
 		t.Errorf("List of a task without configs: %#v %v (want an empty, non-nil slice)", l, err)
 	}
 	if _, err := cs.Save(ctx, tid(uuid.Must(uuid.NewV7())), pushConfig("http://127.0.0.1:9/x")); !errors.Is(err, a2a.ErrTaskNotFound) {
@@ -385,7 +385,7 @@ func TestSSRFWebhookRefusedWhenSet(t *testing.T) {
 	}
 	cs := NewConfigStore(e.pool, sig, ssrf.Policy{Resolver: res}, nil)
 	ctx := context.Background()
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	for _, u := range []string{
 		"https://169.254.169.254/hook",
 		"https://10.0.0.1/hook",
@@ -419,7 +419,7 @@ func TestResaveSkipsTheDNSCheck(t *testing.T) {
 	res := fakeResolver{"hooks.example": {"93.184.215.14"}}
 	cs := NewConfigStore(e.pool, nil, ssrf.Policy{Resolver: res}, nil)
 	ctx := context.Background()
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	s, err := cs.Save(ctx, tid(id), pushConfig("https://hooks.example/hook"))
 	if err != nil {
 		t.Fatal(err)
@@ -444,15 +444,15 @@ func TestResaveSkipsTheDNSCheck(t *testing.T) {
 // TestConfigsOnEndedTasksAreDone: a config set on a task that has ended is done when it is set (an ended
 // task has nothing left to deliver, and once its workflow has closed nothing would deliver it): it is
 // stored, listed and deletable, but it is not delivering, so configs set on ended tasks never fill the
-// buyer's 256 and refuse a config on a live task.
+// caller's 256 and refuse a config on a live task.
 func TestConfigsOnEndedTasksAreDone(t *testing.T) {
 	e := newEnv(t)
 	sig := &signals{}
 	cs := NewConfigStore(e.pool, sig, private, nil)
 	ctx := context.Background()
 	made := 0
-	for made < MaxPerBuyer+MaxPerTask {
-		id := e.newTask(buyerA)
+	for made < MaxPerCaller+MaxPerTask {
+		id := e.newTask(callerA)
 		e.status(id, store.StateWorking)
 		term := e.status(id, store.StateCompleted)
 		e.metadata(id, map[string]any{"x": "y"}) // rows after the terminal one are not delivered
@@ -473,7 +473,7 @@ func TestConfigsOnEndedTasksAreDone(t *testing.T) {
 	if n := len(sig.list()); n != 0 {
 		t.Errorf("%d kontra.push signals for configs that have nothing to deliver", n)
 	}
-	live := e.newTask(buyerA)
+	live := e.newTask(callerA)
 	e.status(live, store.StateWorking)
 	if _, err := cs.Save(ctx, tid(live), &a2a.PushConfig{URL: "http://127.0.0.1:9/live"}); err != nil {
 		t.Fatalf("a config on a live task after %d configs on ended tasks: %v", made, err)
@@ -484,7 +484,7 @@ func TestConfigsOnEndedTasksAreDone(t *testing.T) {
 	// A push_webhook for one of them ends at once without a delivery.
 	d := NewDeliverer(e.log, private, fast())
 	rcv := newReceiver(t, nil)
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	e.status(id, store.StateCompleted)
 	s, err := cs.Save(ctx, tid(id), pushConfig(rcv.url("/hook")))
 	if err != nil {
@@ -495,9 +495,9 @@ func TestConfigsOnEndedTasksAreDone(t *testing.T) {
 		t.Fatalf("push_webhook of a config set after the end: %+v %v, %d requests", o.res, o.err, len(rcv.requests()))
 	}
 	// The same through the work queue's inline save (a follow-up racing the task's end).
-	ended := e.newTask(buyerA)
+	ended := e.newTask(callerA)
 	term := e.status(ended, store.StateCompleted)
-	cid, inserted := e.saveInline(cs, ended, buyerA, &a2a.PushConfig{URL: "http://127.0.0.1:9/inline"})
+	cid, inserted := e.saveInline(cs, ended, callerA, &a2a.PushConfig{URL: "http://127.0.0.1:9/inline"})
 	if seq, _ := e.deliveredSeq(ended, cid); !inserted || seq != term {
 		t.Fatalf("SaveInline on an ended task: %q inserted %v, delivered_seq %d, want %d", cid, inserted, seq, term)
 	}
@@ -505,13 +505,13 @@ func TestConfigsOnEndedTasksAreDone(t *testing.T) {
 
 // TestSetAgainRevivesAFailedConfig: a failed config set again on a task that has not ended delivers again,
 // from where it stopped: its failure is cleared, it is live, kontra.push announces it, and it counts
-// against the buyer's limit again. On an ended task it stays as it is (there is nothing left to deliver).
+// against the caller's limit again. On an ended task it stays as it is (there is nothing left to deliver).
 func TestSetAgainRevivesAFailedConfig(t *testing.T) {
 	e := newEnv(t)
 	sig := &signals{}
 	cs := NewConfigStore(e.pool, sig, private, nil)
 	ctx := context.Background()
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	e.status(id, store.StateWorking)
 	if _, err := cs.Save(ctx, tid(id), &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/broken"}); err != nil {
 		t.Fatal(err)
@@ -535,17 +535,17 @@ func TestSetAgainRevivesAFailedConfig(t *testing.T) {
 	}
 	// The same through the work queue's inline save: announced (its id), not inserted.
 	e.exec(`update kontra.push_configs set failed_at = now() where task_id = $1`, id)
-	if cid, ins := e.saveInline(cs, id, buyerA, &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/fixed-again"}); cid != "c" || ins {
+	if cid, ins := e.saveInline(cs, id, callerA, &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/fixed-again"}); cid != "c" || ins {
 		t.Fatalf("SaveInline of a failed config: %q inserted %v, want announced and not inserted", cid, ins)
 	}
 	if _, failed := e.deliveredSeq(id, "c"); failed {
 		t.Error("SaveInline left the config failed")
 	}
-	// A revived config counts again: at the buyer's limit it is refused, and stays failed.
+	// A revived config counts again: at the caller's limit it is refused, and stays failed.
 	e.exec(`update kontra.push_configs set failed_at = now() where task_id = $1`, id)
-	for n := 0; n < MaxPerBuyer; {
-		other := e.newTask(buyerA)
-		for i := 0; i < MaxPerTask && n < MaxPerBuyer; i++ {
+	for n := 0; n < MaxPerCaller; {
+		other := e.newTask(callerA)
+		for i := 0; i < MaxPerTask && n < MaxPerCaller; i++ {
 			if _, err := cs.Save(ctx, tid(other), &a2a.PushConfig{URL: fmt.Sprintf("http://127.0.0.1:9/f%d", i)}); err != nil {
 				t.Fatal(err)
 			}
@@ -553,13 +553,13 @@ func TestSetAgainRevivesAFailedConfig(t *testing.T) {
 		}
 	}
 	if _, err := cs.Save(ctx, tid(id), &a2a.PushConfig{ID: "c", URL: "http://127.0.0.1:9/fixed"}); !errors.Is(err, a2a.ErrInvalidParams) {
-		t.Fatalf("reviving a config over the buyer's limit: %v", err)
+		t.Fatalf("reviving a config over the caller's limit: %v", err)
 	}
 	if _, failed := e.deliveredSeq(id, "c"); !failed {
 		t.Error("a refused revival cleared the failure")
 	}
 	// On an ended task a failed config set again stays failed, and nothing is announced.
-	ended := e.newTask(buyerB)
+	ended := e.newTask(callerB)
 	if _, err := cs.Save(ctx, tid(ended), &a2a.PushConfig{ID: "d", URL: "http://127.0.0.1:9/broken"}); err != nil {
 		t.Fatal(err)
 	}
@@ -582,7 +582,7 @@ func TestCheckSet(t *testing.T) {
 	pol := ssrf.Policy{Resolver: res}
 	cs := NewConfigStore(e.pool, nil, pol, nil)
 	ctx := context.Background()
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	if _, err := cs.Save(ctx, tid(id), pushConfig("https://hooks.example/hook")); err != nil {
 		t.Fatal(err)
 	}
@@ -605,19 +605,19 @@ func TestCheckSet(t *testing.T) {
 		}
 	}
 	// On another task the URL is new.
-	if err := CheckSet(ctx, e.pool, e.newTask(buyerA), pushConfig("https://hooks.example/hook"), pol); !errors.Is(err, a2a.ErrInvalidParams) {
+	if err := CheckSet(ctx, e.pool, e.newTask(callerA), pushConfig("https://hooks.example/hook"), pol); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("CheckSet on another task: %v", err)
 	}
 }
 
-// TestDeliveringCountReachesTheBuyersTasksByIndex: the per-buyer count every new config runs under the
-// buyer's lock reaches the buyer's tasks by an index on (tenant_id, service, buyer_id) and their configs by
-// primary key, never by scanning every buyer's tasks or configs.
-func TestDeliveringCountReachesTheBuyersTasksByIndex(t *testing.T) {
+// TestDeliveringCountReachesTheCallersTasksByIndex: the per-caller count every new config runs under the
+// caller's lock reaches the caller's tasks by an index on (tenant_id, service, caller_id) and their configs by
+// primary key, never by scanning every caller's tasks or configs.
+func TestDeliveringCountReachesTheCallersTasksByIndex(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	// 50,000 tasks of 1,000 buyers, a push config on every tenth.
-	e.exec(`insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version, snapshot, status_at)
+	// 50,000 tasks of 1,000 callers, a push config on every tenth.
+	e.exec(`insert into kontra.tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state, version, snapshot, status_at)
 		select ('0192f0b4-0000-7000-8000-' || lpad(to_hex(g), 12, '0'))::uuid, $1, 'hello', 'a2a',
 			('0192f0b4-0000-7000-9000-' || lpad(to_hex(g % 1000), 12, '0'))::uuid, 'key:x', 'api_key', 'c', 'working', 1, '{}'::json, now()
 		from generate_series(1, 50000) g`, e.svc.TenantID)
@@ -625,20 +625,20 @@ func TestDeliveringCountReachesTheBuyersTasksByIndex(t *testing.T) {
 	e.exec(`insert into kontra.push_configs (task_id, id, config)
 		select id, 'c', '{"url":"https://x/"}'::jsonb from kontra.tasks where substr(id::text, 36, 1) = '0'`)
 	e.exec(`analyze`)
-	buyer := uuid.MustParse("0192f0b4-0000-7000-9000-000000000008") // 50 tasks, about half with a config
+	caller := uuid.MustParse("0192f0b4-0000-7000-9000-000000000008") // 50 tasks, about half with a config
 	var n int
-	if err := e.pool.QueryRow(ctx, deliveringSQL, buyer).Scan(&n); err != nil {
+	if err := e.pool.QueryRow(ctx, deliveringSQL, caller).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	var want int
 	if err := e.pool.QueryRow(ctx, `select count(*) from kontra.push_configs p join kontra.tasks t on t.id = p.task_id
-		where t.buyer_id = $1`, buyer).Scan(&want); err != nil {
+		where t.caller_id = $1`, caller).Scan(&want); err != nil {
 		t.Fatal(err)
 	}
 	if n != want || n == 0 {
 		t.Fatalf("delivering count %d, want %d", n, want)
 	}
-	rows, err := e.pool.Query(ctx, `explain (analyze, costs off) `+deliveringSQL, buyer)
+	rows, err := e.pool.Query(ctx, `explain (analyze, costs off) `+deliveringSQL, caller)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -648,8 +648,8 @@ func TestDeliveringCountReachesTheBuyersTasksByIndex(t *testing.T) {
 	}
 	text := strings.Join(plan, "\n")
 	if strings.Contains(text, "Seq Scan on tasks") || strings.Contains(text, "Seq Scan on push_configs") ||
-		!strings.Contains(text, "buyer_id = ") {
-		t.Fatalf("the per-buyer count scans every buyer's tasks or configs:\n%s", text)
+		!strings.Contains(text, "caller_id = ") {
+		t.Fatalf("the per-caller count scans every caller's tasks or configs:\n%s", text)
 	}
 	t.Logf("plan:\n%s", text)
 }
@@ -658,7 +658,7 @@ func TestDeliveringCountReachesTheBuyersTasksByIndex(t *testing.T) {
 func TestAnonymousAllowedLocally(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, &signals{}, private, nil).AllowAnonymous()
-	ctx := auth.WithPrincipal(context.Background(), auth.Anonymous(anon.BuyerID))
+	ctx := auth.WithPrincipal(context.Background(), auth.Anonymous(anon.CallerID))
 	id := e.newTask(anon)
 	if _, err := cs.Save(ctx, tid(id), pushConfig("http://127.0.0.1:9/hook")); err != nil {
 		t.Fatalf("Save by the local profile's caller: %v", err)

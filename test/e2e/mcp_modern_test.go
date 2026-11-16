@@ -28,7 +28,7 @@ const legacyNoSessionCode = -32000
 // (the dual-era double) makes a task that asks one question: a CreateTaskResult with a gate id; tasks/get is
 // input_required with one request keyed by a gate id, the same from either replica; tasks/update answers it, and a
 // second answer to the key is ignored; tasks/get then shows completed with the result; tasks/result is 404 with
-// -32601; another buyer's tasks/get is -32602. A request whose _meta protocolVersion differs from
+// -32601; another caller's tasks/get is -32602. A request whose _meta protocolVersion differs from
 // MCP-Protocol-Version is 400 with -32020 and reaches no upstream. A client that closes its response stream during
 // the 2 s wait gets neither answer, and its task ends canceled within 10 s, the upstream seeing the cancel.
 func TestMCPModernTask(t *testing.T) {
@@ -110,7 +110,7 @@ func TestMCPModernTask(t *testing.T) {
 	}
 	other := &ModernClient{Endpoint: A.URL + "/mcp/research", Key: h.APIKeyB, Tasks: true}
 	if r := get(A, other); func() bool { code, _, _, ok := r.Error(); return !ok || code != mcpwire.CodeInvalidParams }() {
-		t.Fatalf("another buyer's tasks/get: %d %s", r.Status, r.Text())
+		t.Fatalf("another caller's tasks/get: %d %s", r.Status, r.Text())
 	}
 
 	// A _meta version that differs from the header: 400 -32020, nothing forwarded.

@@ -26,7 +26,7 @@ func TestRealAdmissionConvertsAfterLogin(t *testing.T) {
 	if _, err := rg.pool.Exec(ctx, `insert into kontra.tenants (id, slug, kind) values ($1, 'acme', 'account')`, account); err != nil {
 		t.Fatal(err)
 	}
-	key, err := rg.keys.Mint(ctx, auth.MintRequest{TenantID: account, Name: "login", Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+	key, err := rg.keys.Mint(ctx, auth.MintRequest{TenantID: account, Name: "login", Scopes: []auth.Scope{auth.ScopeCall, auth.ScopeEnrollAll}})
 	if err != nil {
 		t.Fatal(err)
 	}

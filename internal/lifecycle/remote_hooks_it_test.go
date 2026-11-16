@@ -90,7 +90,7 @@ func TestRemoteLifecycleHooks(t *testing.T) {
 	t.Cleanup(hw.Stop)
 	q := NewQueue(e.svc, e.log, lc, QueueOptions{Owner: ownerFrom, Hooks: HooksSnapshot{LifecycleQueue: remoteQueue}})
 
-	cctx, id := caller(true)
+	cctx, id := callerCtx(true)
 	d.set(id, turn{state: a2a.TaskStateCompleted, outcome: DispatchTerminal})
 	if _, err := q.Write(cctx, payloadOf(requestOf("m-1", "the work"))); err != nil {
 		t.Fatal(err)

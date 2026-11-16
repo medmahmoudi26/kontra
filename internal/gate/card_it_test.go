@@ -47,10 +47,10 @@ func writeSigningKey(t *testing.T) string {
 	return path
 }
 
-// sellerSign returns cardJSON (an object without signatures) with one signature by keys appended.
-func sellerSign(t *testing.T, keys *jws.KeySet, cardJSON string) string {
+// serviceSign returns cardJSON (an object without signatures) with one signature by keys appended.
+func serviceSign(t *testing.T, keys *jws.KeySet, cardJSON string) string {
 	t.Helper()
-	sig, err := keys.Sign([]byte(cardJSON), "https://seller.example/.well-known/jwks.json", nil)
+	sig, err := keys.Sign([]byte(cardJSON), "https://service.example/.well-known/jwks.json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,42 +84,42 @@ func get(t *testing.T, base, path, key string) (int, http.Header, []byte) {
 	return resp.StatusCode, resp.Header, b
 }
 
-// card_passthrough (spec §3, §16; D13, D166): a seller card carrying the seller's signature, served by the gate,
+// card_passthrough (spec §3, §16; D13, D166): a service card carrying the service's signature, served by the gate,
 // has exactly one signature, the gate's, which a2a-go's verifier accepts once it resolves the jku to the gate's
 // JWKS. Its protected header binds the upstream card (kontra.upstream.sha256 is the hex SHA-256 of its JCS, url
-// names the upstream route) and says the seller's signature verified against the configured seller_keys; the
-// upstream route serves the seller's card byte for byte, signature included; the seller's fields are
+// names the upstream route) and says the service's signature verified against the configured service_keys; the
+// upstream route serves the service's card byte for byte, signature included; the service's fields are
 // byte-identical under JCS; services.card_hash holds the hash; the card routes keep their caching headers (the
-// TCK's). A service whose seller_keys verify no signature is unavailable: its card routes answer 503 with an
-// empty body and a new task fails service_unavailable at its first attempt. seller_keys {url} on a private
+// TCK's). A service whose service_keys verify no signature is unavailable: its card routes answer 503 with an
+// empty body and a new task fails service_unavailable at its first attempt. service_keys {url} on a private
 // address is refused by the SSRF dialer and leaves its service unavailable.
 func TestCardPassthrough(t *testing.T) {
 	e := newGateEnv(t)
-	seller, _ := jws.EphemeralKeySet()
+	service, _ := jws.EphemeralKeySet()
 	stranger, _ := jws.EphemeralKeySet()
-	upstreamCard := sellerSign(t, seller, e.seller.cardJSON)
-	e.seller.cardJSON = upstreamCard
+	upstreamCard := serviceSign(t, service, e.service.cardJSON)
+	e.service.cardJSON = upstreamCard
 	keyPath := writeSigningKey(t)
 	port := freePort(t)
-	base := e.seller.srv.URL + "/base"
+	base := e.service.srv.URL + "/base"
 	services := fmt.Sprintf(`services:
   hello:
     kind: a2a
     backend: { a2a: { url: %q, allow_private: true } }
     allow: ["org:default"]
-    seller_keys: %s
+    service_keys: %s
   forged:
     kind: a2a
     backend: { a2a: { url: %q, allow_private: true } }
     allow: ["org:default"]
-    seller_keys: %s
+    service_keys: %s
     task: { retries: 2 }
   remote:
     kind: a2a
     backend: { a2a: { url: %q, allow_private: true } }
     allow: ["org:default"]
-    seller_keys: { url: "https://127.0.0.1:%d/jwks.json" }
-`, base, jwksOf(t, seller), base, jwksOf(t, stranger), base, freePort(t))
+    service_keys: { url: "https://127.0.0.1:%d/jwks.json" }
+`, base, jwksOf(t, service), base, jwksOf(t, stranger), base, freePort(t))
 	path := e.replicaConfig(port, 10*time.Second, "signing_key: file:"+keyPath+"\n"+services)
 	run := e.start("a", path, fastTiming)
 	key := e.mintKey("cards")
@@ -161,14 +161,14 @@ func TestCardPassthrough(t *testing.T) {
 	sum := sha256.Sum256(canon)
 	if header.JKU != jku || header.Upstream.SHA256 != hex.EncodeToString(sum[:]) || !header.Upstream.Verified ||
 		header.Upstream.URL != publicURL+"/agents/hello/.well-known/agent-card.upstream.json" ||
-		header.Upstream.JWKS != publicURL+"/agents/hello/.well-known/seller-jwks.json" {
+		header.Upstream.JWKS != publicURL+"/agents/hello/.well-known/service-jwks.json" {
 		t.Fatalf("protected header %s", hb)
 	}
-	// The upstream route serves the seller's card byte for byte, signature included.
+	// The upstream route serves the service's card byte for byte, signature included.
 	if status, _, up := get(t, run.url, "/agents/hello/.well-known/agent-card.upstream.json", key); status != 200 || string(up) != upstreamCard {
 		t.Fatalf("upstream route: %d %s", status, up)
 	}
-	// Seller fields are byte-identical under JCS.
+	// Service fields are byte-identical under JCS.
 	strip := func(b []byte) string {
 		m, err := strictjson.Members(b)
 		if err != nil {
@@ -185,7 +185,7 @@ func TestCardPassthrough(t *testing.T) {
 		return string(out)
 	}
 	if strip(served) != strip([]byte(upstreamCard)) {
-		t.Errorf("seller fields differ under JCS:\n%s\n%s", strip(served), strip([]byte(upstreamCard)))
+		t.Errorf("service fields differ under JCS:\n%s\n%s", strip(served), strip([]byte(upstreamCard)))
 	}
 	eventually(t, 10*time.Second, "services.card_hash", func() bool {
 		var h []byte
@@ -205,7 +205,7 @@ func TestCardPassthrough(t *testing.T) {
 
 	// The forged service: its keys verify no signature.
 	for _, route := range []string{"/agents/forged", "/agents/forged/.well-known/agent-card.json", "/agents/forged/.well-known/agent-card.upstream.json",
-		"/agents/forged/.well-known/seller-jwks.json"} {
+		"/agents/forged/.well-known/service-jwks.json"} {
 		if status, _, body := get(t, run.url, route, key); status != http.StatusServiceUnavailable || len(body) != 0 {
 			t.Errorf("%s: %d %q, want 503 with an empty body", route, status, body)
 		}
@@ -218,8 +218,8 @@ func TestCardPassthrough(t *testing.T) {
 	if err := e.pool.QueryRow(context.Background(), `select count(*) from kontra.attempts where task_id = $1`, string(task.ID)).Scan(&attempts); err != nil || attempts != 1 {
 		t.Errorf("the task failed after %d attempts (%v), want its first", attempts, err)
 	}
-	if n := e.seller.count("SendMessage") + e.seller.count("SendStreamingMessage"); n != 0 {
-		t.Errorf("the forged service's seller was sent %d messages", n)
+	if n := e.service.count("SendMessage") + e.service.count("SendStreamingMessage"); n != 0 {
+		t.Errorf("the forged service's service was sent %d messages", n)
 	}
 	// The {url} set on a private address: the SSRF dialer refuses it, and the service is unavailable.
 	if status, _, _ := get(t, run.url, "/agents/remote/.well-known/agent-card.json", key); status != http.StatusServiceUnavailable {

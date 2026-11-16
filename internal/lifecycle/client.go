@@ -185,7 +185,7 @@ func (c *Client) Cancel(ctx context.Context, taskID a2a.TaskID) (res CancelResul
 }
 
 // CancelMCP is Cancel in MCP mode (CancelModeMCP): MCP's tasks/cancel of a task of any protocol (spec §11.6, D57), the
-// /mcp tasks/cancel of a hire task (relay.md §12.2). The workflow writes canceled within 10 s whatever the upstream
+// /mcp tasks/cancel of a send_message task (relay.md §12.2). The workflow writes canceled within 10 s whatever the upstream
 // answers; a task that has ended is an error wrapping a2a.ErrTaskNotCancelable.
 func (c *Client) CancelMCP(ctx context.Context, taskID a2a.TaskID) (res CancelResult, ok bool, err error) {
 	return c.cancel(ctx, taskID, CancelUpdate{Mode: CancelModeMCP})
@@ -193,7 +193,7 @@ func (c *Client) CancelMCP(ctx context.Context, taskID a2a.TaskID) (res CancelRe
 
 // RequestCancelMCP sends kontra.cancel in MCP mode and returns once the workflow has accepted it, within AcceptWait,
 // without waiting for its result: the workflow writes canceled within 10 s whatever the upstream answers (spec §11.6,
-// D57), so the /mcp cancels nobody waits for (a modern tasks/cancel, a modern hire whose client left; relay.md §12.5)
+// D57), so the /mcp cancels nobody waits for (a modern tasks/cancel, a modern send_message whose client left; relay.md §12.5)
 // need no more. A task that has ended is an error wrapping a2a.ErrTaskNotCancelable; a cancel not accepted in time
 // wraps ErrUnavailable.
 func (c *Client) RequestCancelMCP(ctx context.Context, taskID a2a.TaskID) error {

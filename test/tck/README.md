@@ -12,8 +12,8 @@ D279, D291): `make tck VARIANT=direct|tunnel|caddy|auth` ([`scripts/tck.sh`](../
 | `caddy` | [`examples/front/caddy`](../../examples/front/caddy/README.md) terminating TLS, the direct backend behind it (`gate-caddy.yaml`) | `tck_behind_caddy` |
 | `auth` | a loopback Caddy that adds `Authorization: Bearer <a tck API key>` (`front-auth.Caddyfile`, `gate-auth.yaml`) | nightly: ListTasks and push |
 
-The seller is [`examples/sellers/tck`](../../examples/sellers/tck/README.md) (a2a-go v2.7.0). Each run is one variant:
-a fresh database, a Temporal development server, the gate, the seller, the node and Caddy as processes from the run's
+The service is [`examples/agents/tck`](../../examples/agents/tck/README.md) (a2a-go v2.7.0). Each run is one variant:
+a fresh database, a Temporal development server, the gate, the service, the node and Caddy as processes from the run's
 directory, then the TCK once per binding (`--transport jsonrpc`, then `http_json`), then everything removed; the run
 fails if a process naming its directory survives (pgrep). It takes about 90 s.
 

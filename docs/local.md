@@ -27,8 +27,8 @@ connect. `--listen off`: this node only hosts (without it, it also lets local cl
 `127.0.0.1:7777`). To try it with an agent from this repository, start one first, e.g. the A2UI table-booking example:
 
 ```sh
-go run ./examples/sellers/a2ui --port 9995 &       # an A2A 1.0 agent with an A2UI form
-go run ./examples/sellers/ap2-merchant --port 9993 & # an AP2 v0.2.0 merchant (add --serve a2a:merchant=http://127.0.0.1:9993)
+go run ./examples/agents/a2ui --port 9995 &       # an A2A 1.0 agent with an A2UI form
+go run ./examples/agents/ap2-merchant --port 9993 & # an AP2 v0.2.0 merchant (add --serve a2a:merchant=http://127.0.0.1:9993)
 ```
 
 Any A2A client can then call `http://127.0.0.1:8080/agents/booking` with no credential (send `A2A-Version: 1.0`), and

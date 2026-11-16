@@ -93,7 +93,7 @@ func metricsText(t *testing.T, r *Replica) string {
 // own JWKS and revocation feed, auth.oidc and auth.mcp_oauth naming it:
 //
 //   - a token whose aud is kontra is a principal on the A2A routes: its task is via oidc, principal oidc:sub:alice,
-//     buyer UUIDv5(issuer ‖ sub), and the same token reads it back (GetTask); a token for an MCP route's canonical URI
+//     caller UUIDv5(issuer ‖ sub), and the same token reads it back (GetTask); a token for an MCP route's canonical URI
 //     is 401 there, and the kontra token is 401 on /mcp;
 //   - the tenant claim: a token naming default is admitted by org:default on A2A and on /mcp/{svc}, one without the
 //     claim is not (the unknown service), one naming a tenant the gate does not have is 401;
@@ -116,12 +116,12 @@ func TestGateA2AOIDC(t *testing.T) {
 	services := `services:
   hi:
     kind: a2a
-    backend: { a2a: { url: "` + e.seller.srv.URL + `/base", allow_private: true } }
+    backend: { a2a: { url: "` + e.service.srv.URL + `/base", allow_private: true } }
     allow: ["oidc:sub:alice", "key:*"]
     task: { timeout: 10m, retries: 1 }
   team:
     kind: a2a
-    backend: { a2a: { url: "` + e.seller.srv.URL + `/base", allow_private: true } }
+    backend: { a2a: { url: "` + e.service.srv.URL + `/base", allow_private: true } }
     allow: ["org:default"]
     task: { timeout: 10m, retries: 1 }
   fs:
@@ -145,8 +145,8 @@ func TestGateA2AOIDC(t *testing.T) {
 	if status != http.StatusOK || task == "" {
 		t.Fatalf("SendMessage with a kontra token: %d %s", status, body)
 	}
-	buyer, _ := ids.OIDCBuyer(as.Issuer(), "alice")
-	if !scalar[bool](t, e.pool, `select via = 'oidc' and principal = 'oidc:sub:alice' and buyer_id = $2 from kontra.tasks where id = $1`, task, buyer) {
+	caller, _ := ids.OIDCCaller(as.Issuer(), "alice")
+	if !scalar[bool](t, e.pool, `select via = 'oidc' and principal = 'oidc:sub:alice' and caller_id = $2 from kontra.tasks where id = $1`, task, caller) {
 		t.Error("the task is not the token's (via oidc, oidc:sub:alice, UUIDv5(issuer ‖ sub))")
 	}
 	get := fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":%q}}`, task)
@@ -202,7 +202,7 @@ func TestGateA2AOIDC(t *testing.T) {
 
 	// The feed down: fail closed past max_stale; an API key still works; then back.
 	as.FeedDown(http.StatusBadGateway)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	eventually(t, 10*time.Second, "the issuer's tokens refused on a stale feed", func() bool {
 		status, body := a2aSend(t, pub+"/agents/hi", other, send)
 		return status == http.StatusOK && strings.Contains(body, `"code":-32603`)
@@ -269,7 +269,7 @@ func TestGateA2AOIDCMultiTenant(t *testing.T) {
 	if _, err := e.pool.Exec(ctx, `insert into kontra.tenants (id, slug, kind) values ($1, 'acme', 'account')`, acme); err != nil {
 		t.Fatal(err)
 	}
-	backend := `{"a2a": {"url": "` + e.seller.srv.URL + `/base", "allow_private": true}}`
+	backend := `{"a2a": {"url": "` + e.service.srv.URL + `/base", "allow_private": true}}`
 	if _, err := e.pool.Exec(ctx, `insert into kontra.services (tenant_id, name, kind, backend, allow, source)
 		values ($1, 'hi', 'a2a', $2::jsonb, '{org:acme}', 'db')`, acme, backend); err != nil {
 		t.Fatal(err)

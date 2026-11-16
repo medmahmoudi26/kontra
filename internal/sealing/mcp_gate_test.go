@@ -19,8 +19,8 @@ import (
 	"kontra.sh/kontra/internal/strictjson"
 )
 
-// mcpLocal runs one local MCP request through the hiring node: what goes to the gate, and the job for its answer.
-func mcpLocal(t *testing.T, hr *hirer, sid, body string) ([]byte, *Job) {
+// mcpLocal runs one local MCP request through the calling node: what goes to the gate, and the job for its answer.
+func mcpLocal(t *testing.T, hr *callingNode, sid, body string) ([]byte, *Job) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/mcp/fs", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -30,7 +30,7 @@ func mcpLocal(t *testing.T, hr *hirer, sid, body string) ([]byte, *Job) {
 	req.Header.Set("Mcp-Param-City", "MARKER-header")
 	sreq, job, err := hr.h.Request(context.Background(), "/mcp/fs", req)
 	if err != nil {
-		t.Fatalf("hiring Request(%s): %v", body, err)
+		t.Fatalf("calling Request(%s): %v", body, err)
 	}
 	if sid != "" && sreq.Header.Get("Mcp-Param-City") != "" {
 		t.Error("an Mcp-Param-* header goes to the gate for a sealed session")
@@ -39,8 +39,8 @@ func mcpLocal(t *testing.T, hr *hirer, sid, body string) ([]byte, *Job) {
 	return b, job
 }
 
-// mcpAnswer has the hiring node open the gate's answer (JSON, or an event stream when sse).
-func mcpAnswer(t *testing.T, hr *hirer, job *Job, body string, sse bool, hdr http.Header) string {
+// mcpAnswer has the calling node open the gate's answer (JSON, or an event stream when sse).
+func mcpAnswer(t *testing.T, hr *callingNode, job *Job, body string, sse bool, hdr http.Header) string {
 	t.Helper()
 	h := http.Header{"Content-Type": {"application/json"}}
 	if sse {
@@ -51,10 +51,10 @@ func mcpAnswer(t *testing.T, hr *hirer, job *Job, body string, sse bool, hdr htt
 	}
 	out, err := hr.h.Response(context.Background(), job, &http.Response{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader(body))})
 	if err != nil {
-		t.Fatalf("hiring Response: %v", err)
+		t.Fatalf("calling Response: %v", err)
 	}
 	got := readAll(t, out)
-	job.Done() // the exchange's end, as the hiring server's
+	job.Done() // the exchange's end, as the calling server's
 	return got
 }
 
@@ -65,7 +65,7 @@ func mcpAnswer(t *testing.T, hr *hirer, job *Job, body string, sse bool, hdr htt
 // opened once (replayed, dropped).
 func TestFakeGateMCPDurable(t *testing.T) {
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{})
+	hr := newCallingNode(t, f, pins.Options{})
 	var gate bytes.Buffer
 	const sid = "gate-session-xyz"
 	session := sessionHash(sid)
@@ -109,7 +109,7 @@ func TestFakeGateMCPDurable(t *testing.T) {
 		t.Fatalf("the local client's stream: %s", local)
 	}
 
-	// The local client answers; the hiring node seals the answer as a request with the input request's messageId.
+	// The local client answers; the calling node seals the answer as a request with the input request's messageId.
 	ans, _ := mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":"`+gateID+`","result":{"action":"accept","content":{"seat":"MARKER-seat"}}}`)
 	gate.Write(ans)
 	m, err := mcpwire.Parse(ans, mcpwire.FromClient)
@@ -179,7 +179,7 @@ func openCall(t *testing.T, f *fixture, body []byte) sealed.Header {
 // refused (rule 4a) with a JSON-RPC error carrying sh.kontra/failure sealed_rejected.
 func TestFakeGateMCPPlain(t *testing.T) {
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{})
+	hr := newCallingNode(t, f, pins.Options{})
 	const sid = "gate-session-plain"
 	session := sessionHash(sid)
 	_, initJob := mcpLocal(t, hr, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`)

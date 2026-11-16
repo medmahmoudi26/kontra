@@ -52,7 +52,7 @@ func TestSessionsPerPrincipalThroughTheGate(t *testing.T) {
 		"--serve", "mcp:fs=stdio:'"+bin+"' -record '"+t.TempDir()+"'")
 	rn.local(t)
 	endpoint := run.url + "/mcp/fs"
-	keyA, keyB := e.mintKey("buyer-a"), e.mintKey("buyer-b")
+	keyA, keyB := e.mintKey("caller-a"), e.mintKey("caller-b")
 	initialize := func(key string) string {
 		t.Helper()
 		var sid string

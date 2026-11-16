@@ -15,12 +15,12 @@ import (
 // replica A. Task 1 streams from `slow`; once its first upstream task id is recorded and two chunks are
 // logged, N is SIGKILLed. The task waits task.reattach_grace (3 s here, shorter than N's restart; the wait that N's
 // return ends is tunnel_reattach's) and fails tunnel_lost (no retry after the first upstream id), on its one attempt,
-// and the seller saw its message once. N's tunnels row is gone within 5 s. N is restarted with
+// and the service saw its message once. N's tunnels row is gone within 5 s. N is restarted with
 // the same HOME and its original --enroll flag (M2 plan audit, gap 1: the token its first welcome confirmed
 // is not sent again), and its key has a new session within 60 s; task 2 completes on it. Then the variant
-// before the first upstream id (retries 3): N is SIGKILLed while the `delayed` seller holds the first event
+// before the first upstream id (retries 3): N is SIGKILLed while the `delayed` service holds the first event
 // back and restarted at once; attempt 1 ends with no upstream id (tunnel_lost or no_session), the task
-// completes on a later attempt on the new session, and the seller answered once per attempt that reached it.
+// completes on a later attempt on the new session, and the service answered once per attempt that reached it.
 func TestTunnelKill(t *testing.T) {
 	h := start(t, Options{
 		Upstream: slowagent.Config{Chunks: 20, Interval: 500 * time.Millisecond, Streaming: true},
@@ -42,9 +42,9 @@ func TestTunnelKill(t *testing.T) {
 		t.Fatalf("N's session is on %q, want replica A (%s): the Front routes to A", r, h.Gates[0].ReplicaID)
 	}
 
-	// Task 1 runs on N's session; the buyer follows it on replica B.
+	// Task 1 runs on N's session; the caller follows it on replica B.
 	req1 := newMessage("tunnel_kill 1")
-	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[1], req1, Call{})
+	s, err := h.CallerA().SendStreaming(ctx, h.Gates[1], req1, Call{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,11 +80,11 @@ func TestTunnelKill(t *testing.T) {
 		t.Fatalf("task 1's attempts %+v: want one attempt on %s ended tunnel_lost, and no attempt 2", as, first)
 	}
 	if got := sendsOf(slow, req1.Message.ID); got != 1 {
-		t.Fatalf("the seller received task 1's message %d times, want exactly 1", got)
+		t.Fatalf("the service received task 1's message %d times, want exactly 1", got)
 	}
 	rest, err := s.ReadAll(ctx)
 	if err != nil || len(rest) == 0 || rest[len(rest)-1].State != a2a.TaskStateFailed {
-		t.Fatalf("the buyer's stream of task 1 must end with the failed status: %d events, %v", len(rest), err)
+		t.Fatalf("the caller's stream of task 1 must end with the failed status: %d events, %v", len(rest), err)
 	}
 
 	// N restarts with its original command line, --enroll included: it reconnects within the backoff.
@@ -106,7 +106,7 @@ func TestTunnelKill(t *testing.T) {
 	}
 
 	// Task 2 completes on the new session.
-	res, err := h.BuyerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage("tunnel_kill 2"))
+	res, err := h.CallerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage("tunnel_kill 2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,15 +119,15 @@ func TestTunnelKill(t *testing.T) {
 	}
 	checkHistory(t, h, task1, "e2e_tunnel_kill", tunnelForbidden(h)...)
 
-	// The variant before the first upstream id: the seller holds its first event back 5 s.
+	// The variant before the first upstream id: the service holds its first event back 5 s.
 	req3 := newMessage("tunnel_kill before the first id")
-	s3, err := h.BuyerA().SendStreaming(ctx, h.Gates[1], req3, Call{Service: "delayed"})
+	s3, err := h.CallerA().SendStreaming(ctx, h.Gates[1], req3, Call{Service: "delayed"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s3.Close()
-	eventually(t, 30*time.Second, "the delayed seller received the task", func() bool { return sendsOf(delayed, req3.Message.ID) == 1 })
-	task3 := taskOfMessage(t, ctx, h, req3.Message.ID) // the stream holds its first event until the seller answers (D362)
+	eventually(t, 30*time.Second, "the delayed service received the task", func() bool { return sendsOf(delayed, req3.Message.ID) == 1 })
+	task3 := taskOfMessage(t, ctx, h, req3.Message.ID) // the stream holds its first event until the service answers (D362)
 	if as, err := h.Attempts(ctx, task3); err != nil || len(as) != 1 || as[0].FirstUpstreamIDAt != nil || as[0].TunnelSession != second {
 		t.Fatalf("before the kill, task 3's attempts %+v %v: want one on %s with no upstream id", as, err, second)
 	}
@@ -156,7 +156,7 @@ func TestTunnelKill(t *testing.T) {
 		}
 	}
 	if got := sendsOf(delayed, req3.Message.ID); got != reached {
-		t.Fatalf("the seller received task 3's message %d times over attempts %+v, want once per attempt that reached it (%d)", got, as, reached)
+		t.Fatalf("the service received task 3's message %d times over attempts %+v, want once per attempt that reached it (%d)", got, as, reached)
 	}
 	t.Logf("task 3: %d attempts, outcomes %v", len(as), outcomes(as))
 	checkHistory(t, h, task3, "e2e_tunnel_kill_before_first_id", tunnelForbidden(h)...)
@@ -266,7 +266,7 @@ func TestNodeRotateAfterLeak(t *testing.T) {
 	if s, err := h.Sessions(ctx, k1); err != nil || len(s) != 0 {
 		t.Fatalf("the revoked K1's sessions %v %v, want none", s, err)
 	}
-	res, err := h.BuyerA().Client(t, h.Gates[1], "").SendMessage(ctx, newMessage("after the rotation"))
+	res, err := h.CallerA().Client(t, h.Gates[1], "").SendMessage(ctx, newMessage("after the rotation"))
 	if err != nil {
 		t.Fatal(err)
 	}

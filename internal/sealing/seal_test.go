@@ -38,7 +38,7 @@ type sealGate struct {
 	keys     *jws.KeySet
 	card     []byte // served at /agents/echo/.well-known/agent-card.json
 	upstream []byte // served at /agents/echo/.well-known/agent-card.upstream.json when set
-	jwks     []byte // the seller key set, served at /agents/echo/.well-known/seller-jwks.json when set (D223)
+	jwks     []byte // the service key set, served at /agents/echo/.well-known/service-jwks.json when set (D223)
 	jwksGets atomic.Int32
 }
 
@@ -67,7 +67,7 @@ func newSealGate(t *testing.T, node *age.X25519Identity) *sealGate {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(g.upstream)
 	})
-	mux.HandleFunc("GET /agents/echo/.well-known/seller-jwks.json", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /agents/echo/.well-known/service-jwks.json", func(w http.ResponseWriter, r *http.Request) {
 		g.jwksGets.Add(1)
 		if g.jwks == nil {
 			http.NotFound(w, r)
@@ -88,11 +88,11 @@ func (g *sealGate) sign(t *testing.T, card []byte) []byte {
 	return g.signWith(t, card, &jws.Upstream{SHA256: strings.Repeat("0", 64), URL: g.srv.URL + "/agents/echo/.well-known/agent-card.upstream.json"})
 }
 
-// verifiedUpstream serves an upstream card signed by the seller (key id seller-1) and re-signs the served card
+// verifiedUpstream serves an upstream card signed by the service (key id service-1) and re-signs the served card
 // saying the gate verified that signature, so that kontra seal reads the upstream card too (ext-sealed.md §7).
 func (g *sealGate) verifiedUpstream(t *testing.T, node *age.X25519Identity) {
 	t.Helper()
-	prot := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"seller-1"}`))
+	prot := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"service-1"}`))
 	g.upstream = []byte(`{"name":"echo","signatures":[{"protected":"` + prot + `","signature":"c2ln"}]}`)
 	c, err := jcs.Transform(g.upstream)
 	if err != nil {

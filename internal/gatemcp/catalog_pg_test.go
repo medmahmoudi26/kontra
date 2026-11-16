@@ -72,7 +72,7 @@ const (
 
 func keyPrincipal(tenantID uuid.UUID, slug, prefix string) auth.Principal {
 	return auth.Principal{Kind: auth.KindKey, ID: "key:" + prefix, TenantID: &tenantID, TenantSlug: slug,
-		BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeHire}}
+		CallerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeCall}}
 }
 
 // mcpServices is the MCP relay's view of the services the catalog's tests describe.
@@ -234,18 +234,18 @@ func TestCatalogSingleTenant(t *testing.T) {
 		t.Errorf("the described tool: %s", got)
 	}
 
-	// hire reaches a service the allow: list admits by any entry (anonymous included), not one it does not admit.
+	// send_message reaches a service the allow: list admits by any entry (anonymous included), not one it does not admit.
 	for ref, ok := range map[string]bool{"pub": true, "hello": true, "other": false, "off": false} {
-		s, err := c.Hireable(ctx, p, Ref{Name: ref})
+		s, err := c.Callable(ctx, p, Ref{Name: ref})
 		if err != nil || (s != nil) != ok {
-			t.Errorf("Hireable(%s) = %v, %v; want %v", ref, s, err, ok)
+			t.Errorf("Callable(%s) = %v, %v; want %v", ref, s, err, ok)
 		}
 	}
 }
 
 // search on a multi-tenant gate: refs are <tenant>/<name>; an org: entry admits its tenant's keys; an anonymous
 // tenant's services never appear and cannot be described, listed or not (spec/tunnel.md §6.2), though a public one
-// is still hired by ref.
+// is still called by ref.
 func TestCatalogMultiTenant(t *testing.T) {
 	e := newCatalogEnv(t)
 	ctx := context.Background()
@@ -269,8 +269,8 @@ func TestCatalogMultiTenant(t *testing.T) {
 	if _, err := c.Describe(ctx, acme, Ref{Tenant: "anon-0123456789abcdef", Name: "laptop"}); !errors.Is(err, ErrUnknownService) {
 		t.Errorf("describe an anonymous tenant's service: %v", err)
 	}
-	if s, err := c.Hireable(ctx, acme, Ref{Tenant: "anon-0123456789abcdef", Name: "laptop"}); err != nil || s == nil {
-		t.Errorf("hire a public anonymous service by ref: %v %v", s, err)
+	if s, err := c.Callable(ctx, acme, Ref{Tenant: "anon-0123456789abcdef", Name: "laptop"}); err != nil || s == nil {
+		t.Errorf("send_message a public anonymous service by ref: %v %v", s, err)
 	}
 	if d, err := c.Describe(ctx, acme, Ref{Tenant: "acme", Name: "agent"}); err != nil || d.URLs[0] != "https://gate.example/agents/acme/agent" {
 		t.Errorf("describe acme/agent: %+v %v", d, err)
@@ -281,10 +281,10 @@ func TestCatalogMultiTenant(t *testing.T) {
 	}
 }
 
-// oidc:* on a multi-tenant gate (D301): a listing whose allow: is [key:*, oidc:*] is searched and hired by every
+// oidc:* on a multi-tenant gate (D301): a listing whose allow: is [key:*, oidc:*] is searched and called by every
 // signed-in user of the configured issuer (an MCP OAuth principal: no tenant, via mcp) and every API key, and by no
 // one else; [oidc:*] alone is not an API key's; neither is the anonymous principal's. An anonymous entry still admits
-// everyone to hire, without showing the service.
+// everyone to send_message, without showing the service.
 func TestCatalogOIDCAny(t *testing.T) {
 	e := newCatalogEnv(t)
 	ctx := context.Background()
@@ -293,13 +293,13 @@ func TestCatalogOIDCAny(t *testing.T) {
 	e.service(e.acme, "keys", "a2a", directA2A, []string{"key:*"}, false, "", "", false)
 	e.service(e.acme, "open", "a2a", directA2A, []string{"anonymous"}, false, "", "", false)
 	c := NewCatalog(CatalogConfig{DB: e.pool, Multi: true, PublicURL: "https://gate.example"})
-	user := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaMCP}
+	user := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", CallerID: uuid.Must(uuid.NewV7()), Via: auth.ViaMCP}
 	key := keyPrincipal(e.team, tenant.TeamSlug, "kk_default_ab12cd34")
 	for _, tc := range []struct {
 		who    string
 		p      auth.Principal
 		search string
-		hire   map[string]bool
+		send   map[string]bool
 	}{
 		{"a signed-in user", user, "[acme/listing acme/signedin]", map[string]bool{"listing": true, "signedin": true, "keys": false, "open": true}},
 		{"an API key", key, "[acme/keys acme/listing]", map[string]bool{"listing": true, "signedin": false, "keys": true, "open": true}},
@@ -316,10 +316,10 @@ func TestCatalogOIDCAny(t *testing.T) {
 		if fmt.Sprint(got) != tc.search {
 			t.Errorf("search as %s: %v, want %s", tc.who, got, tc.search)
 		}
-		for name, ok := range tc.hire {
-			s, err := c.Hireable(ctx, tc.p, Ref{Tenant: "acme", Name: name})
+		for name, ok := range tc.send {
+			s, err := c.Callable(ctx, tc.p, Ref{Tenant: "acme", Name: name})
 			if err != nil || (s != nil) != ok {
-				t.Errorf("Hireable(acme/%s) as %s = %v, %v; want %v", name, tc.who, s != nil, err, ok)
+				t.Errorf("Callable(acme/%s) as %s = %v, %v; want %v", name, tc.who, s != nil, err, ok)
 			}
 		}
 	}
@@ -369,7 +369,7 @@ func TestSearchBoundsTheRowsOneRequestReads(t *testing.T) {
 
 // annotations.search.hidden (§12.2, D321; issue #7): Cloud's unlisted listing, [key:*, oidc:*, anonymous] with listed
 // false, is left out of every principal's search once hidden, an API key's and a signed-in user's included, while
-// describe and hire by ref still answer as allow: decides; a listed service hidden is left out too, and a hidden
+// describe and send_message by ref still answer as allow: decides; a listed service hidden is left out too, and a hidden
 // member that is not the boolean true (false, the string "true") hides nothing.
 func TestSearchHidden(t *testing.T) {
 	e := newCatalogEnv(t)
@@ -380,7 +380,7 @@ func TestSearchHidden(t *testing.T) {
 	e.service(e.acme, "loose", "a2a", directA2A, unlisted, false, `{"search": {"hidden": "true"}}`, "", false)
 	e.service(e.acme, "listedhidden", "a2a", directA2A, []string{"anonymous"}, true, `{"search": {"hidden": true, "price_model": "per_task"}}`, "", false)
 	c := NewCatalog(CatalogConfig{DB: e.pool, Multi: true, PublicURL: "https://gate.example"})
-	user := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaOIDC}
+	user := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", CallerID: uuid.Must(uuid.NewV7()), Via: auth.ViaOIDC}
 	key := keyPrincipal(e.team, tenant.TeamSlug, "kk_default_ab12cd34")
 	for _, tc := range []struct {
 		who      string
@@ -406,8 +406,8 @@ func TestSearchHidden(t *testing.T) {
 		if _, err := c.Describe(ctx, tc.p, Ref{Tenant: "acme", Name: "link"}); (err == nil) != tc.describe {
 			t.Errorf("describe acme/link as %s: %v, want described %v", tc.who, err, tc.describe)
 		}
-		if s, err := c.Hireable(ctx, tc.p, Ref{Tenant: "acme", Name: "link"}); err != nil || s == nil {
-			t.Errorf("hire acme/link as %s: %v %v", tc.who, s, err)
+		if s, err := c.Callable(ctx, tc.p, Ref{Tenant: "acme", Name: "link"}); err != nil || s == nil {
+			t.Errorf("send_message acme/link as %s: %v %v", tc.who, s, err)
 		}
 	}
 	// The listed one hidden: described by ref as a listed service is, never searched.

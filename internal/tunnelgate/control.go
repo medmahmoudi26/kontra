@@ -141,12 +141,12 @@ func (r *Registry) revokeBinding(s *Session, service string) {
 }
 
 // APIKeyRevoked applies an API key revocation (auth.RevocationCache.Subscribe: NOTIFY kontra_revoke
-// 'apikey:<id>', or the re-read that found it), §12: every session of this replica hiring with that key gets 401
+// 'apikey:<id>', or the re-read that found it), §12: every session of this replica calling with that key gets 401
 // on each later stream it opens, and is told {"t": "auth_revoked"} on its control stream. Hosting on the
 // sessions is unaffected. It does not wait on the network (the message goes out on a goroutine of its own).
 func (r *Registry) APIKeyRevoked(id uuid.UUID) {
 	for _, s := range r.all() {
-		if s.hire != nil && s.hire.KeyID != nil && *s.hire.KeyID == id {
+		if s.call != nil && s.call.KeyID != nil && *s.call.KeyID == id {
 			s.authRevoked(r.log)
 		}
 	}

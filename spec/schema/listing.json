@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kontra.sh/schema/listing/v1.json",
   "title": "A listing file: what `kontra publish <listing.yaml>` sends to the operator's control plane (D323)",
-  "description": "How one of the publisher's A2A services is listed, as Kontra Cloud's PUT /v1/services/{name} takes it (kontra-cloud D-M5-95, D-M5-110): its visibility, sealing, state and task timeout. Listings are A2A only: an MCP service is not listed, and the control plane refuses a listing for one (D350). A listing has no price: a seller that charges declares AP2 in its agent card, and neither the gate nor the CLI holds an amount (D351). The file is YAML (or JSON). The CLI checks the file against this schema and sends it; the control plane decides what it accepts.",
+  "description": "How one of the publisher's A2A services is listed, as Kontra Cloud's PUT /v1/services/{name} takes it (kontra-cloud D-M5-95, D-M5-110): its visibility, sealing, state and task timeout. Listings are A2A only: an MCP service is not listed, and the control plane refuses a listing for one (D350). A listing has no price: a service that charges declares AP2 in its agent card, and neither the gate nor the CLI holds an amount (D351). The file is YAML (or JSON). The CLI checks the file against this schema and sends it; the control plane decides what it accepts.",
   "type": "object",
   "required": ["service"],
   "additionalProperties": false,

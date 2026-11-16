@@ -20,11 +20,11 @@
 //   - Backend (WP-05) is an upstream.Backend over one session: a fresh stream per exchange, its preamble
 //     naming the service (§8.1), one HTTP/1.1 exchange, never reused (§8.2).
 //
-// Node-opened streams (M3 WP-03, NodeStreams): hiring (§9), one HTTP/1.1 request served by the gate's own routes
-// with the session's principal (auth.HireSource), and blob streams (§8.3, Blobs), one object of a task the session
-// serves or hires. They are accepted promptly (§7), counted from Accept until both halves end, answered 429 over
+// Node-opened streams (M3 WP-03, NodeStreams): calling (§9), one HTTP/1.1 request served by the gate's own routes
+// with the session's principal (auth.CallSource), and blob streams (§8.3, Blobs), one object of a task the session
+// serves or calls. They are accepted promptly (§7), counted from Accept until both halves end, answered 429 over
 // the cap, and a node that keeps more than the cap of refused streams open loses its session (§14, D137, D182).
-// An API key revocation reaches the sessions hiring with it (Registry.APIKeyRevoked: 401 and auth_revoked, §12).
+// An API key revocation reaches the sessions calling with it (Registry.APIKeyRevoked: 401 and auth_revoked, §12).
 //
 // MCP hosting (M3 WP-04; relay.md §11): Picker.PickMCP chooses the tunnel session of a new MCP session, this
 // replica's own first and another replica's (through the peer hop, relay.md §11.2) only when this one runs a peer

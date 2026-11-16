@@ -15,8 +15,8 @@ import (
 // spec §2.4 (review round 2, D311): what a service declares is read from its served card with exact keys, the
 // capabilities object and each extension entry as the gate wrote them. A case variant that a decoder matching names
 // case-insensitively takes for "extensions" or "required" (the last of the variants wins there) declares nothing here:
-// a seller's "Extensions" after the gate's "extensions" can neither make the operator's optional entry required for
-// the A2A route and hire's activation (D300) nor hide its required one. card.Rewrite refuses such a card, so none is
+// a service's "Extensions" after the gate's "extensions" can neither make the operator's optional entry required for
+// the A2A route and call's activation (D300) nor hide its required one. card.Rewrite refuses such a card, so none is
 // served; this is the reader's half.
 func TestDeclaredReadsExactKeys(t *testing.T) {
 	const op = "https://operator.example/ext/escrow/v1"
@@ -43,7 +43,7 @@ func TestDeclaredReadsExactKeys(t *testing.T) {
 		}
 	}
 
-	// Through the install path: a card the gate signs declares, to the route and to hire, exactly what a2a-go reads of
+	// Through the install path: a card the gate signs declares, to the route and to call, exactly what a2a-go reads of
 	// it, the operator's entry included.
 	keys, err := jws.EphemeralKeySet()
 	if err != nil {
@@ -52,9 +52,9 @@ func TestDeclaredReadsExactKeys(t *testing.T) {
 	k := card.NewKeeper(nil, card.Input{PublicURL: "https://gate.example", ServicePath: "/agents/t/s",
 		CardExtensions: []json.RawMessage{json.RawMessage(`{"uri":"` + op + `","required":true}`)}},
 		card.WithSigner(&card.JWSSigner{Keys: keys, JWKSURL: "https://gate.example/.well-known/jwks.json"}))
-	up := `{"name":"s","description":"d","version":"1","supportedInterfaces":[{"url":"https://seller.example/a2a",` +
+	up := `{"name":"s","description":"d","version":"1","supportedInterfaces":[{"url":"https://service.example/a2a",` +
 		`"protocolBinding":"JSONRPC","protocolVersion":"1.0"}],"capabilities":{"extensions":[{"uri":"` + op + `","required":false},` +
-		`{"uri":"https://seller.example/ext","required":true}]},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"skills":[]}`
+		`{"uri":"https://service.example/ext","required":true}]},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"skills":[]}`
 	if err := k.Seed([]byte(up), time.Now()); err != nil {
 		t.Fatal(err)
 	}

@@ -26,11 +26,11 @@ const candidatesSQL = `select t.session_id, t.key_id, t.replica_id from kontra.t
 
 // previousSessionSQL is the session of the context's previous task (relay.md §6.1, §7): the latest attempt
 // placed on a tunnel session among the caller's earlier tasks in the same gate context and service.
-// Contexts are scoped by (tenant, service, buyer, context id), so another buyer's identical context string
+// Contexts are scoped by (tenant, service, caller, context id), so another caller's identical context string
 // never steers the choice (§4, D53).
 const previousSessionSQL = `select a.tunnel_session from kontra.tasks t
   join kontra.attempts a on a.task_id = t.id
- where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.context_id = $4 and t.id < $5
+ where t.tenant_id = $1 and t.service = $2 and t.caller_id = $3 and t.context_id = $4 and t.id < $5
    and a.backend = 'tunnel' and a.tunnel_session is not null
  order by t.id desc, a.n desc limit 1`
 
@@ -50,7 +50,7 @@ const previousSessionSQL = `select a.tunnel_session from kontra.tasks t
 // and each replica's Picker turns to the candidate after the one it chose last for the service (in session
 // id order, so a candidate set that changes between two choices is still walked in turn). The context's
 // previous session is read from Postgres, so it holds whichever replica prepares the task (M2 plan audit,
-// skeleton problem 2: SessionRequest carries the task's buyer and context, which prepare has read).
+// skeleton problem 2: SessionRequest carries the task's caller and context, which prepare has read).
 //
 // SPEC-CONFLICT (M2 plan, confirmed conflict on relay.md §6.1 and §14.2, "skipping replicas at their
 // dispatch capacity"): nothing in 0001 records a replica's dispatches in flight (gate_replicas has no such
@@ -112,7 +112,7 @@ func (p *Picker) PickSession(ctx context.Context, req lifecycle.SessionRequest) 
 	key := pickKey{req.TenantID, req.Service}
 	if req.ContextID != "" && req.TaskID != uuid.Nil {
 		var prev uuid.UUID
-		err := p.db.QueryRow(ctx, previousSessionSQL, req.TenantID, req.Service, req.BuyerID, req.ContextID, req.TaskID).Scan(&prev)
+		err := p.db.QueryRow(ctx, previousSessionSQL, req.TenantID, req.Service, req.CallerID, req.ContextID, req.TaskID).Scan(&prev)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 		case err != nil:

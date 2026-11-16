@@ -4,7 +4,7 @@
 // D-M5-95, D-M5-110), naming the version it replaces.
 //
 // It carries the publisher's declared listing and nothing else: a listing has no price, and the control plane decides
-// what it accepts. Payment, when a seller charges, is the seller's own AP2, which neither the gate nor the CLI sees
+// what it accepts. Payment, when a service charges, is the service's own AP2, which neither the gate nor the CLI sees
 // (D351).
 package publish
 

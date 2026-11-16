@@ -60,7 +60,7 @@ func pages(n, size int, calls *atomic.Int32) Pager {
 		}
 		var tools []string
 		for i := range size {
-			tools = append(tools, fmt.Sprintf(`{"name":"t%d-%d","_meta":{"sh.kontra/note":"seller","io.x/k":1},"execution":{"taskSupport":"optional"}}`, p, i))
+			tools = append(tools, fmt.Sprintf(`{"name":"t%d-%d","_meta":{"sh.kontra/note":"service","io.x/k":1},"execution":{"taskSupport":"optional"}}`, p, i))
 		}
 		res := `{"tools":[` + strings.Join(tools, ",") + `]`
 		if p+1 < n {

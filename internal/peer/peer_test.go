@@ -62,7 +62,7 @@ func TestForwardedHeaders(t *testing.T) {
 
 func assertion() Assertion {
 	return Assertion{Replica: "r-a", TenantID: uuid.New(), Service: "fs", TunnelSession: uuid.New(), Principal: "key:kk_t_x",
-		BuyerID: uuid.New(), Via: "api_key", MCPSession: "ab", UpstreamSID: "up-1", Headers: "00", Nonce: "n1",
+		CallerID: uuid.New(), Via: "api_key", MCPSession: "ab", UpstreamSID: "up-1", Headers: "00", Nonce: "n1",
 		At: time.Now().UTC()}
 }
 

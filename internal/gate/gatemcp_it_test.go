@@ -22,12 +22,12 @@ import (
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
 )
 
-// hireSeller is an a2a-go v2.7.0 agent for /mcp's hire (spec §12): "hi" completes with Hello World; "kinds" answers
-// the TCK seller's artifact kinds (examples/sellers/tck: a text artifact, a data artifact, the output.txt file as raw
+// sendMessageService is an a2a-go v2.7.0 agent for /mcp's send_message (spec §12): "hi" completes with Hello World; "kinds" answers
+// the TCK service's artifact kinds (examples/agents/tck: a text artifact, a data artifact, the output.txt file as raw
 // bytes and as a URL) with a data part in its final message too; "ask" asks a text-only question and completes with
 // the answer; "slow" works until the gate cancels it. It records each method, each turn's text and each A2A-Extensions
 // header it receives.
-type hireSeller struct {
+type sendMessageService struct {
 	mu      sync.Mutex
 	methods []string
 	turns   []string
@@ -35,16 +35,16 @@ type hireSeller struct {
 	srv     *httptest.Server
 }
 
-func newHireSeller(t *testing.T) *hireSeller {
+func newSendMessageService(t *testing.T) *sendMessageService {
 	t.Helper()
-	return newHireSellerCaps(t, `{"streaming":true}`)
+	return newSendMessageServiceCaps(t, `{"streaming":true}`)
 }
 
-// newHireSellerCaps is a hireSeller whose card's capabilities are caps (a JSON object), e.g. one that requires an
+// newSendMessageServiceCaps is a sendMessageService whose card's capabilities are caps (a JSON object), e.g. one that requires an
 // extension of its own.
-func newHireSellerCaps(t *testing.T, caps string) *hireSeller {
+func newSendMessageServiceCaps(t *testing.T, caps string) *sendMessageService {
 	t.Helper()
-	s := &hireSeller{}
+	s := &sendMessageService{}
 	rpc := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(s))
 	mux := http.NewServeMux()
 	var card string
@@ -79,14 +79,14 @@ func newHireSellerCaps(t *testing.T, caps string) *hireSeller {
 	return s
 }
 
-// activations are the A2A-Extensions header values the seller received.
-func (s *hireSeller) activations() []string {
+// activations are the A2A-Extensions header values the service received.
+func (s *sendMessageService) activations() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.exts...)
 }
 
-func (s *hireSeller) count(method string) int {
+func (s *sendMessageService) count(method string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
@@ -98,13 +98,13 @@ func (s *hireSeller) count(method string) int {
 	return n
 }
 
-func (s *hireSeller) turnTexts() []string {
+func (s *sendMessageService) turnTexts() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.turns...)
 }
 
-func (s *hireSeller) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *sendMessageService) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		text := ec.Message.Parts[0].Text()
 		s.mu.Lock()
@@ -143,7 +143,7 @@ func (s *hireSeller) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) it
 	}
 }
 
-func (s *hireSeller) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *sendMessageService) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCanceled, nil), nil)
 	}
@@ -316,11 +316,11 @@ func (r toolResult) text() string {
 	return b.String()
 }
 
-func (e *gateEnv) hireServices(kinds *hireSeller, extra string) string {
+func (e *gateEnv) sendMessageServices(kinds *sendMessageService, extra string) string {
 	return `services:
   hello:
     kind: a2a
-    backend: { a2a: { url: "` + e.seller.srv.URL + `/base", allow_private: true } }
+    backend: { a2a: { url: "` + e.service.srv.URL + `/base", allow_private: true } }
     allow: ["org:default"]
     task: { timeout: 10m, retries: 1 }
   kinds:
@@ -332,23 +332,23 @@ func (e *gateEnv) hireServices(kinds *hireSeller, extra string) string {
 }
 
 // The gate's own /mcp, legacy era, through two whole replicas on one database (spec §12, M4 WP-04): no credential is
-// 401 (D270); a session opened on A is served by B; tools/list; a plain hire completes inline, a slow one answers the
-// hire result of a working task after the plain wait; a task-augmented hire answers CreateTaskResult and tasks/result
-// renders the TCK seller's artifact kinds with their data parts in structuredContent.data; a question is the reply-tool
+// 401 (D270); a session opened on A is served by B; tools/list; a plain send_message completes inline, a slow one answers the
+// send_message result of a working task after the plain wait; a task-augmented send_message answers CreateTaskResult and tasks/result
+// renders the TCK service's artifact kinds with their data parts in structuredContent.data; a question is the reply-tool
 // text, reply answers it, and a form-declaring session gets the question as an elicitation/create on tasks/result whose
-// accept is the follow-up once; tasks/list is the buyer's hire tasks across services, newest first, and another buyer's
-// tasks/get is -32602; tasks/cancel is cancelled within 10 s and the seller saw CancelTask; an MCP service and a ref
-// the principal may not hire are tool errors; /mcp writes no calls rows (D289); hire tasks are marked hired with the
-// hire's resend key.
-func TestGateMCPHire(t *testing.T) {
+// accept is the follow-up once; tasks/list is the caller's send_message tasks across services, newest first, and another caller's
+// tasks/get is -32602; tasks/cancel is cancelled within 10 s and the service saw CancelTask; an MCP service and a ref
+// the principal may not send_message are tool errors; /mcp writes no calls rows (D289); send_message tasks are marked sent_by_mcp with the
+// send_message's resend key.
+func TestGateMCPSendMessage(t *testing.T) {
 	e := newGateEnv(t)
 	ctx := context.Background()
-	kinds := newHireSeller(t)
+	kinds := newSendMessageService(t)
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	direct := httptest.NewServer(up)
 	t.Cleanup(direct.Close)
-	services := e.hireServices(kinds, `  web:
+	services := e.sendMessageServices(kinds, `  web:
     kind: mcp
     backend: { mcp: { url: "`+direct.URL+`/mcp", allow_private: true } }
     allow: ["org:default"]
@@ -361,7 +361,7 @@ func TestGateMCPHire(t *testing.T) {
 	timing.PlainWait = 4 * time.Second
 	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), timing)
 	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, services), timing)
-	key, other := e.mintKey("buyer"), e.mintKey("other")
+	key, other := e.mintKey("caller"), e.mintKey("other")
 
 	// D270: no anonymous principal.
 	anonymous := newMCPClient(t, a.url, "")
@@ -377,50 +377,50 @@ func TestGateMCPHire(t *testing.T) {
 		t.Fatalf("mcp_sessions rows of /mcp: %d", n)
 	}
 	_, tl := cb.rpc("tools/list", `{}`)
-	if tl.Error != nil || !strings.Contains(string(tl.Result), `"name":"hire"`) || !strings.Contains(string(tl.Result), `"taskSupport":"optional"`) {
+	if tl.Error != nil || !strings.Contains(string(tl.Result), `"name":"send_message"`) || !strings.Contains(string(tl.Result), `"taskSupport":"optional"`) {
 		t.Fatalf("tools/list on replica b: %s", tl.raw)
 	}
 
-	// A plain hire that completes inline, on b; the task is an ordinary A2A task, marked hired, keyed by §12.3's hash.
+	// A plain send_message that completes inline, on b; the task is an ordinary A2A task, marked sent_by_mcp, keyed by §12.3's hash.
 	args := `{"service":"hello","message":"hi"}`
-	_, ans := cb.call("hire", args)
+	_, ans := cb.call("send_message", args)
 	r := ans.tool(t)
 	if r.IsError || r.text() != "Hello World" || r.Structured.State != "TASK_STATE_COMPLETED" || r.Structured.TaskID == "" || len(ans.all) != 1 {
-		t.Fatalf("a plain hire: %s", ans.raw)
+		t.Fatalf("a plain send_message: %s", ans.raw)
 	}
 	firstReq, _ := gatemcp.FirstRequest(gatemcp.Ref{Name: "hello"}, json.RawMessage(args))
-	if !scalar[bool](t, e.pool, `select hired and protocol = 'a2a' and first_request = $2 and first_message_id is not null
+	if !scalar[bool](t, e.pool, `select sent_by_mcp and protocol = 'a2a' and first_request = $2 and first_message_id is not null
 		from kontra.tasks where id = $1`, r.Structured.TaskID, firstReq[:]) {
-		t.Error("the hire task is not an A2A task marked hired with the hire's resend key")
+		t.Error("the send_message task is not an A2A task marked sent_by_mcp with the send_message's resend key")
 	}
-	// The same hire again is a new task: only an idempotencyKey answers an earlier one (§12.3, D338, D351).
-	if _, again := c.call("hire", args); again.tool(t).Structured.TaskID == r.Structured.TaskID {
-		t.Error("a second unkeyed hire answered the first task")
+	// The same send_message again is a new task: only an idempotencyKey answers an earlier one (§12.3, D338, D351).
+	if _, again := c.call("send_message", args); again.tool(t).Structured.TaskID == r.Structured.TaskID {
+		t.Error("a second unkeyed send_message answered the first task")
 	}
 
-	// A slow seller: the hire result of a working task after the plain wait, its text naming the A2A URL that follows it;
+	// A slow service: the send_message result of a working task after the plain wait, its text naming the A2A URL that follows it;
 	// on JSON.
 	c.accept = "application/json"
 	began := time.Now()
-	_, ans = c.call("hire", `{"service":"kinds","message":"slow"}`)
+	_, ans = c.call("send_message", `{"service":"kinds","message":"slow"}`)
 	c.accept = "application/json, text/event-stream"
 	slow := ans.tool(t)
 	if took := time.Since(began); took < 3*time.Second || took > 15*time.Second || slow.IsError ||
 		slow.Structured.State != "TASK_STATE_WORKING" || !strings.Contains(slow.text(), a.url+"/agents/kinds") {
-		t.Fatalf("a slow hire after %v: %s", took, ans.raw)
+		t.Fatalf("a slow send_message after %v: %s", took, ans.raw)
 	}
 	if slow.Structured.Text != slow.text() || !strings.Contains(slow.Structured.Text, "with GetTask at "+a.url+"/agents/kinds") ||
 		slow.Structured.URL != "" {
-		t.Errorf("a slow hire's structuredContent is not the hire result of a task still running (D324): %s", ans.raw)
+		t.Errorf("a slow send_message's structuredContent is not the send_message result of a task still running (D324): %s", ans.raw)
 	}
 
-	// tasks/cancel (§11.6, D57) on b: cancelled within 10 s, and the seller received CancelTask.
+	// tasks/cancel (§11.6, D57) on b: cancelled within 10 s, and the service received CancelTask.
 	began = time.Now()
 	_, ans = cb.rpc("tasks/cancel", `{"taskId":"`+slow.Structured.TaskID+`"}`)
 	if ans.Error != nil || !strings.Contains(string(ans.Result), `"status":"cancelled"`) || time.Since(began) > 10*time.Second {
 		t.Fatalf("tasks/cancel after %v: %s", time.Since(began), ans.raw)
 	}
-	eventually(t, 10*time.Second, "the seller received CancelTask", func() bool { return kinds.count("CancelTask") >= 1 })
+	eventually(t, 10*time.Second, "the service received CancelTask", func() bool { return kinds.count("CancelTask") >= 1 })
 	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, slow.Structured.TaskID); st != "canceled" {
 		t.Fatalf("after tasks/cancel the task is %s", st)
 	}
@@ -429,11 +429,11 @@ func TestGateMCPHire(t *testing.T) {
 		t.Errorf("tasks/cancel of a cancelled task: %s", ans.raw)
 	}
 
-	// A task-augmented hire: CreateTaskResult; tasks/result on b renders the TCK seller's artifact kinds.
-	_, ans = c.rpc("tools/call", `{"name":"hire","arguments":{"service":"kinds","message":"kinds"},"task":{"ttl":60000}}`)
+	// A task-augmented send_message: CreateTaskResult; tasks/result on b renders the TCK service's artifact kinds.
+	_, ans = c.rpc("tools/call", `{"name":"send_message","arguments":{"service":"kinds","message":"kinds"},"task":{"ttl":60000}}`)
 	ct := ans.tool(t)
 	if ct.Task == nil || ct.Task.TaskID == "" || ct.Task.Status != "working" || ct.Task.PollInterval != 1000 {
-		t.Fatalf("a task-augmented hire: %s", ans.raw)
+		t.Fatalf("a task-augmented send_message: %s", ans.raw)
 	}
 	_, ans = cb.rpc("tasks/result", `{"taskId":"`+ct.Task.TaskID+`"}`)
 	res := ans.tool(t)
@@ -458,13 +458,13 @@ func TestGateMCPHire(t *testing.T) {
 		t.Errorf("tasks/get: %s", ans.raw)
 	}
 
-	// A question (§12.4): this session declared no form elicitation, so a plain hire answers the reply-tool text;
+	// A question (§12.4): this session declared no form elicitation, so a plain send_message answers the reply-tool text;
 	// reply answers it and the task completes with the answer.
-	_, ans = c.call("hire", `{"service":"kinds","message":"ask"}`)
+	_, ans = c.call("send_message", `{"service":"kinds","message":"ask"}`)
 	q := ans.tool(t)
 	if q.IsError || q.Structured.State != "TASK_STATE_INPUT_REQUIRED" || q.Meta["sh.kontra/input-required"] != true ||
 		q.text() != "Which date? (answer with the reply tool, taskId "+q.Structured.TaskID+")" {
-		t.Fatalf("a hire that asks: %s", ans.raw)
+		t.Fatalf("a send_message that asks: %s", ans.raw)
 	}
 	_, ans = cb.rpc("tasks/get", `{"taskId":"`+q.Structured.TaskID+`"}`)
 	if !strings.Contains(string(ans.Result), `"status":"working"`) || !strings.Contains(string(ans.Result), `"sh.kontra/input-required":true`) {
@@ -483,7 +483,7 @@ func TestGateMCPHire(t *testing.T) {
 	// its accept is the follow-up, once; the task completes.
 	f := newMCPClient(t, b.url, key)
 	f.initialize(`{"elicitation":{"form":{}}}`)
-	_, ans = f.rpc("tools/call", `{"name":"hire","arguments":{"service":"kinds","message":"ask"},"task":{}}`)
+	_, ans = f.rpc("tools/call", `{"name":"send_message","arguments":{"service":"kinds","message":"ask"},"task":{}}`)
 	fq := ans.tool(t)
 	eventually(t, 20*time.Second, "the question is asked", func() bool {
 		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, fq.Task.TaskID) == "input-required"
@@ -541,10 +541,10 @@ func TestGateMCPHire(t *testing.T) {
 	}
 	time.Sleep(time.Second)
 	if turns := kinds.turnTexts(); strings.Count(strings.Join(turns, ","), "friday") != 1 || strings.Contains(strings.Join(turns, ","), "saturday") {
-		t.Errorf("the seller's turns %v: the accepted answer once, the second never", turns)
+		t.Errorf("the service's turns %v: the accepted answer once, the second never", turns)
 	}
 
-	// tasks/list: this buyer's hire tasks across services, newest first; another buyer sees none of them.
+	// tasks/list: this caller's send_message tasks across services, newest first; another caller sees none of them.
 	_, ans = c.rpc("tasks/list", `{}`)
 	var list struct {
 		Tasks []struct {
@@ -562,34 +562,39 @@ func TestGateMCPHire(t *testing.T) {
 	o := newMCPClient(t, a.url, other)
 	o.initialize(`{}`)
 	if _, ans = o.rpc("tasks/get", `{"taskId":"`+ct.Task.TaskID+`"}`); ans.Error == nil || ans.Error.Code != -32602 {
-		t.Errorf("another buyer's tasks/get: %s", ans.raw)
+		t.Errorf("another caller's tasks/get: %s", ans.raw)
 	}
 	if _, ans = o.rpc("tasks/list", `{}`); string(ans.Result) != `{"tasks":[]}` {
-		t.Errorf("another buyer's tasks/list: %s", ans.raw)
+		t.Errorf("another caller's tasks/list: %s", ans.raw)
 	}
 	if _, ans = o.call("reply", `{"taskId":"`+q.Structured.TaskID+`","message":"x"}`); !ans.tool(t).IsError || ans.tool(t).text() != "unknown task" {
-		t.Errorf("another buyer's reply: %s", ans.raw)
+		t.Errorf("another caller's reply: %s", ans.raw)
 	}
 
-	// An MCP service, a ref nobody here may hire, a malformed one: tool errors, no task.
+	// An MCP service, a ref nobody here may send_message, a malformed one: tool errors, no task.
 	before := scalar[int64](t, e.pool, `select count(*) from kontra.tasks`)
-	_, ans = c.call("hire", `{"service":"web","message":"hi"}`)
+	_, ans = c.call("send_message", `{"service":"web","message":"hi"}`)
 	if mr := ans.tool(t); !mr.IsError || !strings.Contains(mr.text(), a.url+"/mcp/web") {
-		t.Errorf("hire of an MCP service: %s", ans.raw)
+		t.Errorf("send_message of an MCP service: %s", ans.raw)
 	}
 	for _, ref := range []string{"closed", "nope"} {
-		if _, ans = c.call("hire", `{"service":"`+ref+`","message":"hi"}`); ans.tool(t).text() != "unknown service" || !ans.tool(t).IsError {
-			t.Errorf("hire of %s: %s", ref, ans.raw)
+		if _, ans = c.call("send_message", `{"service":"`+ref+`","message":"hi"}`); ans.tool(t).text() != "unknown service" || !ans.tool(t).IsError {
+			t.Errorf("send_message of %s: %s", ref, ans.raw)
 		}
 	}
-	if _, ans = c.call("hire", `{"service":"hello","message":"hi","extra":1}`); !ans.tool(t).IsError {
-		t.Errorf("hire with an unknown argument: %s", ans.raw)
+	if _, ans = c.call("send_message", `{"service":"hello","message":"hi","extra":1}`); !ans.tool(t).IsError {
+		t.Errorf("send_message with an unknown argument: %s", ans.raw)
 	}
 	if _, ans = c.call("nope", `{}`); ans.Error == nil || ans.Error.Code != -32602 {
 		t.Errorf("an unknown tool: %s", ans.raw)
 	}
+	// The tool's name before D363 is an unknown tool like any other: no alias.
+	if _, ans = c.call("hire", `{"service":"hello","message":"hi"}`); ans.Error == nil || ans.Error.Code != -32602 ||
+		!strings.Contains(ans.Error.Message, "Unknown tool: hire") {
+		t.Errorf("tools/call hire: %s", ans.raw)
+	}
 	if after := scalar[int64](t, e.pool, `select count(*) from kontra.tasks`); after != before {
-		t.Errorf("refused hires created %d tasks", after-before)
+		t.Errorf("refused send_message calls created %d tasks", after-before)
 	}
 
 	// search and describe through the replica; D289: /mcp's tools write no calls rows.
@@ -610,8 +615,8 @@ func TestGateMCPHire(t *testing.T) {
 	if n := scalar[int64](t, e.pool, `select count(*) from kontra.calls`); n != 0 {
 		t.Errorf("/mcp wrote %d calls rows", n)
 	}
-	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where not hired`); n != 0 {
-		t.Errorf("%d tasks hire created are not marked hired", n)
+	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where not sent_by_mcp`); n != 0 {
+		t.Errorf("%d tasks send_message created are not marked sent_by_mcp", n)
 	}
 
 	// DELETE closes the session; a request on it is then 404.

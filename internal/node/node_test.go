@@ -27,9 +27,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/hashicorp/yamux"
 
+	"kontra.sh/kontra/internal/calling"
 	"kontra.sh/kontra/internal/config"
 	"kontra.sh/kontra/internal/enroll"
-	"kontra.sh/kontra/internal/hiring"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/tunnel"
 	"kontra.sh/kontra/internal/tunnel/tunneltest"
@@ -99,9 +99,9 @@ func admitAll(req enroll.Request) *enroll.Decision {
 		served = append(served, tunnel.WelcomeService{Kind: s.Kind, Name: s.Name, URL: "https://gate.example/agents/" + s.Name})
 	}
 	return &enroll.Decision{
-		Key:           enroll.Key{KeyID: req.Hello.KID, TenantID: testTenantID, Tenant: "team", PubKey: req.PubKey},
-		Served:        served,
-		HirePrincipal: "node:" + req.Hello.KID,
+		Key:             enroll.Key{KeyID: req.Hello.KID, TenantID: testTenantID, Tenant: "team", PubKey: req.PubKey},
+		Served:          served,
+		CallerPrincipal: "node:" + req.Hello.KID,
 	}
 }
 
@@ -509,20 +509,20 @@ func TestRunServesAnAgent(t *testing.T) {
 	}
 }
 
-// --listen off (D208): a node that only hosts serves its services and binds no hiring endpoint, so that a second
-// node on the host needs no port of its own, and no local process hires as this node.
+// --listen off (D208): a node that only hosts serves its services and binds no calling endpoint, so that a second
+// node on the host needs no port of its own, and no local process calls as this node.
 func TestRunListenOff(t *testing.T) {
 	g := newTestGate(t, nil)
 	agent := startAgent(t, slowagent.Config{Chunks: 1, Interval: time.Millisecond})
 	cfg := testConfig(t, g.url, "", agentServe(t, "hello", agent))
-	cfg.Listen = hiring.ListenOff
+	cfg.Listen = calling.ListenOff
 	tn := mustNode(t, g, cfg).run(t)
 	g.session(t)
-	eventually(t, 5*time.Second, "hiring is off", func() bool {
-		return strings.Contains(tn.out.String(), "hiring is off (--listen off)")
+	eventually(t, 5*time.Second, "calling is off", func() bool {
+		return strings.Contains(tn.out.String(), "calling is off (--listen off)")
 	})
-	if strings.Contains(tn.out.String(), "hiring at") || strings.Contains(tn.logs.String(), "serving local clients") {
-		t.Fatalf("a node with --listen off serves hiring: %s", tn.out.String())
+	if strings.Contains(tn.out.String(), "calling at") || strings.Contains(tn.logs.String(), "serving local clients") {
+		t.Fatalf("a node with --listen off serves calling: %s", tn.out.String())
 	}
 	eventually(t, 5*time.Second, "the welcome's service URLs printed", func() bool {
 		return strings.Contains(tn.out.String(), "a2a hello  https://gate.example/agents/hello")
@@ -1387,24 +1387,24 @@ func TestParseArgs(t *testing.T) {
 	}
 
 	if cfg.Listen != "127.0.0.1:7777" || cfg.LocalToken != "" || len(cfg.AllowOrigins) != 0 {
-		t.Fatalf("hiring defaults: %q %q %v", cfg.Listen, cfg.LocalToken, cfg.AllowOrigins)
+		t.Fatalf("calling defaults: %q %q %v", cfg.Listen, cfg.LocalToken, cfg.AllowOrigins)
 	}
 
-	// A node that only hires: no --serve (spec/tunnel.md §4, §9); the hiring flags.
+	// A node that only calls: no --serve (spec/tunnel.md §4, §9); the calling flags.
 	tokenFile := filepath.Join(t.TempDir(), "local-token")
 	os.WriteFile(tokenFile, []byte("0123456789abcdef-local\n"), 0o600)
 	cfg, err = parseArgs([]string{"--listen", "0.0.0.0:7700", "--local-token", tokenFile, "--allow-origin", "http://app.local:3000",
 		"--allow-origin", "https://other.example"}, defaultEnv, nil)
 	if err != nil || len(cfg.Serves) != 0 || cfg.Listen != "0.0.0.0:7700" || cfg.LocalToken != "0123456789abcdef-local" ||
 		!slices.Equal(cfg.AllowOrigins, []string{"http://app.local:3000", "https://other.example"}) {
-		t.Fatalf("hire-only with the hiring flags: %+v %v", cfg, err)
+		t.Fatalf("call-only with the calling flags: %+v %v", cfg, err)
 	}
 	if cfg, err := parseArgs(nil, defaultEnv, nil); err != nil || len(cfg.Serves) != 0 {
-		t.Fatalf("no flags at all (hire only): %v", err)
+		t.Fatalf("no flags at all (call only): %v", err)
 	}
-	// --listen off: a node that only hosts binds no hiring endpoint (D208).
+	// --listen off: a node that only hosts binds no calling endpoint (D208).
 	if cfg, err := parseArgs([]string{"--serve", "a2a:hello=http://127.0.0.1:9999", "--listen", "off"}, defaultEnv, nil); err != nil ||
-		cfg.Listen != hiring.ListenOff {
+		cfg.Listen != calling.ListenOff {
 		t.Fatalf("--listen off: %+v %v", cfg, err)
 	}
 
@@ -1456,7 +1456,7 @@ func TestParseArgs(t *testing.T) {
 		{[]string{"--listen", "0.0.0.0:7777"}, "", "--local-token"},
 		{[]string{"--listen", "10.1.2.3:7777"}, "", "--local-token"},
 		{[]string{"--listen", "7777"}, "", "host:port"},
-		{[]string{"--listen", "off"}, "", "neither host nor hire"},
+		{[]string{"--listen", "off"}, "", "neither host nor call"},
 		{[]string{"--serve", serve, "--listen", "off", "--local-token", tokenFile}, "", "--local-token guards --listen"},
 		{[]string{"--serve", serve, "--listen", "off", "--allow-origin", "http://app.local:3000"}, "", "--allow-origin"},
 		{[]string{"--serve", serve, "--listen", "OFF"}, "", "host:port"},
@@ -1742,7 +1742,7 @@ func TestControlIgnoresUnknown(t *testing.T) {
 	if resp, _ := exchange(t, s, "hello", "/x"); resp.StatusCode != 200 || !tn.running() {
 		t.Fatalf("after the control lines: %d, running %v", resp.StatusCode, tn.running())
 	}
-	if !strings.Contains(tn.logs.String(), "hiring API key") || !strings.Contains(tn.logs.String(), "another key was enrolled") {
+	if !strings.Contains(tn.logs.String(), "calling API key") || !strings.Contains(tn.logs.String(), "another key was enrolled") {
 		t.Errorf("auth_revoked and enrolled are not logged:\n%s", tn.logs.String())
 	}
 }

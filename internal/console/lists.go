@@ -18,7 +18,7 @@ import (
 // caller, spec §4), newest activity first.
 type conversationView struct {
 	Service   string    `json:"service"`
-	Caller    string    `json:"caller"`    // the buyer id: the conversation's address
+	Caller    string    `json:"caller"`    // the caller id: the conversation's address
 	Principal string    `json:"principal"` // its latest task's principal, for display
 	Via       string    `json:"via"`
 	ContextID string    `json:"context_id"`
@@ -68,43 +68,43 @@ func (c *Console) conversations(w http.ResponseWriter, r *http.Request) {
 	var (
 		at              *time.Time
 		svc, ctxID      string
-		buyer           *uuid.UUID
+		caller          *uuid.UUID
 		serviceFilterOn = r.URL.Query().Get("service")
 	)
 	if cur != nil {
-		at, svc, buyer, ctxID = &cur.At, cur.Service, &cur.Caller, cur.Context
+		at, svc, caller, ctxID = &cur.At, cur.Service, &cur.Caller, cur.Context
 	}
 	rows, err := c.d.DB.Query(ctx, `
-		select service, buyer_id, principal, via, context_id, n, state, last_at, first_at from (
-			select t.service, t.buyer_id, t.context_id, count(*) filter (where t.exposed_at is not null) as n,
+		select service, caller_id, principal, via, context_id, n, state, last_at, first_at from (
+			select t.service, t.caller_id, t.context_id, count(*) filter (where t.exposed_at is not null) as n,
 			       max(t.status_at) as last_at, min(t.created_at) as first_at,
 			       (array_agg(t.state order by t.id desc))[1] as state, (array_agg(t.principal order by t.id desc))[1] as principal,
 			       (array_agg(t.via order by t.id desc))[1] as via
 			  from kontra.tasks t
 			 where ($1::text = '' or t.service = $1)
-			 group by t.tenant_id, t.service, t.buyer_id, t.context_id) g
-		 where $2::timestamptz is null or (last_at, service, buyer_id, context_id) < ($2, $3::text, $4::uuid, $5::text)
-		 order by last_at desc, service desc, buyer_id desc, context_id desc
-		 limit $6`, serviceFilterOn, at, svc, buyer, ctxID, limit+1)
+			 group by t.tenant_id, t.service, t.caller_id, t.context_id) g
+		 where $2::timestamptz is null or (last_at, service, caller_id, context_id) < ($2, $3::text, $4::uuid, $5::text)
+		 order by last_at desc, service desc, caller_id desc, context_id desc
+		 limit $6`, serviceFilterOn, at, svc, caller, ctxID, limit+1)
 	if err != nil {
 		c.answer(w, r, nil, err)
 		return
 	}
 	defer rows.Close()
 	items := []*conversationView{}
-	var lastBuyer uuid.UUID
+	var lastCaller uuid.UUID
 	for rows.Next() {
 		var (
-			v     conversationView
-			buyer uuid.UUID
+			v      conversationView
+			caller uuid.UUID
 		)
-		if err := rows.Scan(&v.Service, &buyer, &v.Principal, &v.Via, &v.ContextID, &v.Tasks, &v.State, &v.LastAt, &v.FirstAt); err != nil {
+		if err := rows.Scan(&v.Service, &caller, &v.Principal, &v.Via, &v.ContextID, &v.Tasks, &v.State, &v.LastAt, &v.FirstAt); err != nil {
 			c.answer(w, r, nil, err)
 			return
 		}
-		v.Caller = buyer.String()
+		v.Caller = caller.String()
 		if len(items) < limit {
-			lastBuyer = buyer
+			lastCaller = caller
 		}
 		items = append(items, &v)
 	}
@@ -116,7 +116,7 @@ func (c *Console) conversations(w http.ResponseWriter, r *http.Request) {
 	if len(items) > limit {
 		items = items[:limit]
 		l := items[limit-1]
-		n := encodeCursor(convCursor{At: l.LastAt, Service: l.Service, Caller: lastBuyer, Context: l.ContextID})
+		n := encodeCursor(convCursor{At: l.LastAt, Service: l.Service, Caller: lastCaller, Context: l.ContextID})
 		next = &n
 	}
 	c.answer(w, r, map[string]any{"items": items, "next": next}, nil)
@@ -126,15 +126,15 @@ func (c *Console) conversations(w http.ResponseWriter, r *http.Request) {
 func (c *Console) conversation(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := readCtx(r)
 	defer cancel()
-	buyer, err := uuid.Parse(r.PathValue("caller"))
+	caller, err := uuid.Parse(r.PathValue("caller"))
 	if err != nil {
 		c.answer(w, r, nil, fail(http.StatusNotFound, "conversation_not_found", "no such conversation"))
 		return
 	}
 	rows, err := c.d.DB.Query(ctx, `select `+taskColumns+taskFrom+`
 		where t.tenant_id = (select id from kontra.tenants where slug = 'default') -- tasks_by_context
-		  and t.service = $1 and t.buyer_id = $2 and t.context_id = $3
-		order by t.status_at desc, t.id desc limit 1000`, r.PathValue("service"), buyer, r.PathValue("context"))
+		  and t.service = $1 and t.caller_id = $2 and t.context_id = $3
+		order by t.status_at desc, t.id desc limit 1000`, r.PathValue("service"), caller, r.PathValue("context"))
 	if err != nil {
 		c.answer(w, r, nil, err)
 		return
@@ -156,7 +156,7 @@ func (c *Console) conversation(w http.ResponseWriter, r *http.Request) {
 			exposed = append(exposed, t)
 		}
 	}
-	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": buyer.String(), "context_id": r.PathValue("context"),
+	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": caller.String(), "context_id": r.PathValue("context"),
 		"principal": principal, "tasks": exposed}, nil)
 }
 

@@ -83,7 +83,7 @@ type Assertion struct {
 	Service       string    `json:"service"`
 	TunnelSession uuid.UUID `json:"tunnel_session"`
 	Principal     string    `json:"principal"`
-	BuyerID       uuid.UUID `json:"buyer"`
+	CallerID      uuid.UUID `json:"caller"`
 	Via           string    `json:"via"`
 	MCPSession    string    `json:"mcp_session,omitempty"`    // tunnel.md §8.1
 	MCPRequestID  string    `json:"mcp_request_id,omitempty"` // tunnel.md §8.1

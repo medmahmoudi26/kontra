@@ -5,7 +5,7 @@
 # one gate (Recreate, migrate init container, ports 8443 and 9090, tcpSocket probes, the ACME cache volume,
 # a read-only root), a bundled Postgres 17 (uid 70) and Temporal development server (uid 1000) with 10Gi
 # each, Traefik's TCP passthrough for gateway.kontra.sh with PROXY protocol v2, and NetworkPolicies. The
-# Secret names and the sellers rule are placeholders: set them to the live ones.
+# Secret names and the services rule are placeholders: set them to the live ones.
 
 config:
   existingSecret: kontra-gate-config # holds kontra.yaml (placeholder name)
@@ -39,11 +39,11 @@ networkPolicy:
           matchLabels: {kubernetes.io/metadata.name: traefik}
         podSelector:
           matchLabels: {app.kubernetes.io/name: traefik}
-    # The sellers the gate dials inside the cluster (placeholder: the live sellers' namespace and port).
-    sellers:
+    # The services the gate dials inside the cluster (placeholder: the live services' namespace and port).
+    services:
       - to:
           - namespaceSelector:
-              matchLabels: {kubernetes.io/metadata.name: kontra-sellers}
+              matchLabels: {kubernetes.io/metadata.name: kontra-services}
         ports:
           - {protocol: TCP, port: 8000}
     publicEgress:

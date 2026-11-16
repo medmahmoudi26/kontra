@@ -54,8 +54,8 @@ func TestPushWaitsForExposure(t *testing.T) {
 	r := newReceiver(t, nil)
 	d := NewDeliverer(e.log, private, fast())
 
-	id := e.provisionalTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.provisionalTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	out := runPush(context.Background(), d, id, cid)
 	e.writeFrom(id, store.StateWorking, nil, store.GateOrigin()) // the gate's own: the record stays provisional
 	time.Sleep(200 * time.Millisecond)
@@ -76,8 +76,8 @@ func TestPushWaitsForExposure(t *testing.T) {
 		t.Errorf("%d push configs left on the message-only record (%v), want none", left, err)
 	}
 
-	id = e.provisionalTask(buyerA)
-	cid, _ = e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook2")))
+	id = e.provisionalTask(callerA)
+	cid, _ = e.saveInline(cs, id, callerA, pushConfig(r.url("/hook2")))
 	out = runPush(context.Background(), d, id, cid)
 	e.writeFrom(id, store.StateWorking, nil, &store.Origin{Actor: store.ActorCallee, Type: store.TypeTask})
 	term := e.status(id, store.StateCompleted)

@@ -9,7 +9,7 @@ win.*
 
 ## 1. What Kontra is
 
-Kontra is a durable A2A front door for agents. An operator runs the `kontra` gate in front of any A2A 1.0 agent; the world sees a conformant agent with identity, policy, resumable streams, push notifications and, when enabled, escrow and end-to-end sealing. The agent itself runs unmodified on the seller's own machine behind an outbound-only tunnel, or at a public URL the seller already hardens.
+Kontra is a durable A2A front door for agents. An operator runs the `kontra` gate in front of any A2A 1.0 agent; the world sees a conformant agent with identity, policy, resumable streams, push notifications and, when enabled, escrow and end-to-end sealing. The agent itself runs unmodified on the service's own machine behind an outbound-only tunnel, or at a public URL the service already hardens.
 
 Kontra Cloud (`agents.kontra.run`) is the same binary run multi-tenant, plus a catalog and settlement. The marketplace is where gated agents are sold; the gate is the product. In one line: agentgateway with durability and a marketplace. The open-source gate must be safe to expose directly on a VPS, with no second proxy in front; it works like ngrok for agents, without settlement. Settlement and escrow exist only in Cloud.
 
@@ -18,18 +18,18 @@ Four things no stateless A2A proxy (agentgateway, Kong, Agent Router) offers, an
 | Differentiator | What it means concretely |
 | --- | --- |
 | Durable tasks | Every task has a Postgres event log and a Temporal lifecycle: timeouts, retries, resumable SSE, webhook redelivery survive restarts |
-| Tunnel backends | Sellers expose nothing: no inbound port, no TLS, no auth code. `kontra tunnel` dials out and the gate speaks A2A through it |
+| Tunnel backends | Services expose nothing: no inbound port, no TLS, no auth code. `kontra tunnel` dials out and the gate speaks A2A through it |
 | Escrow as policy (Cloud) | Fixed quote held at send, released after a review window, refunded on dispute; Kontra triages |
 | Ciphertext-only relay | Sealed parts cross the gate without a key that opens them; the sidecars seal and unseal |
 
-**What changed from v3.** The seller SDK, the engine Protocol, Nexus offerings, the publish gate, per-seller Temporal namespaces and the Go Authorizer plugin are all removed. Sellers write zero Kontra code. The gate moves from Python/FastAPI to one Go binary on a2a-go v2. The pull/lease protocol sketched on 21 Oct is also dropped: pull is a transport (the tunnel), not a protocol. Section 16 lists what to close.
+**What changed from v3.** The service SDK, the engine Protocol, Nexus offerings, the publish gate, per-service Temporal namespaces and the Go Authorizer plugin are all removed. Services write zero Kontra code. The gate moves from Python/FastAPI to one Go binary on a2a-go v2. The pull/lease protocol sketched on 21 Oct is also dropped: pull is a transport (the tunnel), not a protocol. Section 16 lists what to close.
 
 ## 2. Goals and non-goals
 
 **Goals for v4**
 
-1. A seller runs an unmodified A2A agent on localhost and one `kontra tunnel` command, and a buyer anywhere can hire it with a stock A2A client.
-2. A buyer stream can drop at any point and resume from `Last-Event-ID`; a gate replica can die mid-task and the task finishes.
+1. A service runs an unmodified A2A agent on localhost and one `kontra tunnel` command, and a caller anywhere can call it with a stock A2A client.
+2. A caller stream can drop at any point and resume from `Last-Event-ID`; a gate replica can die mid-task and the task finishes.
 3. The gate never sees plaintext when `sealed: true`, never holds a decrypting key, never opens a connection to a tunnel worker.
 4. One Go binary serves gate, tunnel, proxy and dev tooling. `kontra dev` runs the whole stack on a laptop with no account.
 5. Kontra Cloud is the same gate with an Admission and a Lifecycle hook filled in; nothing escrow-specific lives in the open-source repo except the extension spec.
@@ -37,8 +37,8 @@ Four things no stateless A2A proxy (agentgateway, Kong, Agent Router) offers, an
 
 **Non-goals for v4**
 
-- A seller or buyer SDK in any language. The sidecars replace both.
-- gRPC binding, mTLS to workers, Cedar policy, OIDC for workers, HPKE envelope. All additive later; none changes a seller's setup.
+- A service or caller SDK in any language. The sidecars replace both.
+- gRPC binding, mTLS to workers, Cedar policy, OIDC for workers, HPKE envelope. All additive later; none changes a service's setup.
 - Per-skill pricing, metered pricing, stablecoin or AP2-native settlement rails. The card's `rails` field reserves the slot.
 - Migrating the first user's v3 data. Tables are wiped.
 - Replacing the console frontend. Its backend API changes (section 13); its login, API keys and catalog browse stay.
@@ -48,17 +48,17 @@ Four things no stateless A2A proxy (agentgateway, Kong, Agent Router) offers, an
 
 | Term | Meaning | Credential |
 | --- | --- | --- |
-| Buyer | Anyone who sends an A2A message to a gated agent: a person's CLI, another agent, a console | API key `kk_…` (hash stored) or OIDC JWT from the operator's IdP |
-| Seller | Whoever runs an agent behind the gate | Tunnel key (X25519, generated by `kontra tunnel` on first run, bound to an agent by enrollment) |
+| Caller | Anyone who sends an A2A message to a gated agent: a person's CLI, another agent, a console | API key `kk_…` (hash stored) or OIDC JWT from the operator's IdP |
+| Service | Whoever runs an agent behind the gate | Tunnel key (X25519, generated by `kontra tunnel` on first run, bound to an agent by enrollment) |
 | Operator | Whoever runs a gate: an org for internal use, or Kontra for the Cloud | Passkey or magic link to the console; owns `kontra.yaml` |
-| Gate | The `kontra` server process: A2A server to buyers, A2A client to agents, owner of task records and policy | ES256 signing key (file in self-host, Scaleway Key Manager in Cloud) |
+| Gate | The `kontra` server process: A2A server to callers, A2A client to agents, owner of task records and policy | ES256 signing key (file in self-host, Scaleway Key Manager in Cloud) |
 | Agent | Any A2A 1.0 server. The gate has no opinion about what is inside | None toward Kontra; it sees a normal A2A client |
-| Tunnel | `kontra tunnel`: seller-side sidecar. Dials the gate, multiplexes HTTP, forwards to `localhost:<port>`, unseals inbound parts, reseals outbound ones | The tunnel key |
-| Proxy | `kontra proxy`: buyer-side sidecar. Serves the gate's agents on localhost, verifies cards, generates per-job keys, seals outbound parts, unseals replies | The buyer's API key; per-job keys it generates |
+| Tunnel | `kontra tunnel`: service-side sidecar. Dials the gate, multiplexes HTTP, forwards to `localhost:<port>`, unseals inbound parts, reseals outbound ones | The tunnel key |
+| Proxy | `kontra proxy`: caller-side sidecar. Serves the gate's agents on localhost, verifies cards, generates per-job keys, seals outbound parts, unseals replies | The caller's API key; per-job keys it generates |
 | Backend | How the gate reaches an agent: `tunnel: {}` or `a2a: {url}` | — |
-| Task | One A2A task as the buyer sees it. Has a gate-side id, an event log, a lifecycle workflow, and 1..n upstream attempts | — |
+| Task | One A2A task as the caller sees it. Has a gate-side id, an event log, a lifecycle workflow, and 1..n upstream attempts | — |
 | Listing (Cloud) | Commercial terms for one agent: quote, review window, timeout, visibility. Separate from the card; merged into it at publish | — |
-| Hold, release, refund (Cloud) | The three settlement moves. Kontra holds at send, releases to the seller after the review window, refunds on dispute or failure | — |
+| Hold, release, refund (Cloud) | The three settlement moves. Kontra holds at send, releases to the service after the review window, refunds on dispute or failure | — |
 
 Two words retired on purpose: **worker** (now: the agent, or the tunnel) and **offering** (now: the card plus, in Cloud, a listing).
 
@@ -66,9 +66,9 @@ Two words retired on purpose: **worker** (now: the agent, or the tunnel) and **o
 
 &#91;embedded content: Kontra topology · one gate, two backend kinds, two optional sidecars\]
 
-One Go binary, two stateful dependencies, one optional bucket. Everything right of the gate belongs to the seller, everything left of it to the buyer; the gate holds metadata, state and ciphertext.
+One Go binary, two stateful dependencies, one optional bucket. Everything right of the gate belongs to the service, everything left of it to the caller; the gate holds metadata, state and ciphertext.
 
-The gate is an A2A server toward buyers and an A2A client toward agents. The tunnel changes who opens the TCP connection, not who is the HTTP client: requests still flow gate to agent.
+The gate is an A2A server toward callers and an A2A client toward agents. The tunnel changes who opens the TCP connection, not who is the HTTP client: requests still flow gate to agent.
 
 **Components and repos**
 
@@ -76,50 +76,50 @@ The gate is an A2A server toward buyers and an A2A client toward agents. The tun
 | --- | --- | --- | --- |
 | `kontra` binary: gate, `tunnel`, `proxy`, `dev`, `enroll`, `seal`, `publish` | `medmahmoudi26/kontra` (public, Apache-2.0) | Go 1.26+ | a2a-go v2, pgx, Temporal Go SDK, hashicorp/yamux, filippo.io/age |
 | Extension specs: escrow, sealed, input-schema | `kontra` under `spec/` | Markdown + JSON Schema | Public even though escrow is implemented only in Cloud |
-| Seller examples | `kontra` under `examples/sellers/` | Python, Go, shell | `a2a serve --exec`, helloworld, Temporal agent harness, ADK, `claude` CLI subprocess |
+| Service examples | `kontra` under `examples/agents/` | Python, Go, shell | `a2a serve --exec`, helloworld, Temporal agent harness, ADK, `claude` CLI subprocess |
 | Front-proxy examples | `kontra` under `examples/front/` | YAML | Caddy, agentgateway, k8s ingress |
 | Cloud control plane: console, catalog, listings, Stripe Connect, ledger, Metabase, Helm | `medmahmoudi26/kontra-cloud` (private) | Python workers + console | Fills the gate's hooks; owns `TaskLifecycle` money steps on its own task queue |
 | `kontra-sdk` | archived | — | PyPI 0.2.0 yanked with a pointer |
 
 One-way dependency: `kontra-cloud` deploys and configures `kontra`; `kontra` never imports from `kontra-cloud`.
 
-## 5. Buyer-facing protocol: A2A 1.0
+## 5. Caller-facing protocol: A2A 1.0
 
-The gate is a standard A2A 1.0 agent at `{public_url}/agents/{agent}`. Nothing a buyer does is Kontra-specific except activating extensions.
+The gate is a standard A2A 1.0 agent at `{public_url}/agents/{agent}`. Nothing a caller does is Kontra-specific except activating extensions.
 
 **Bindings and operations.** JSON-RPC 2.0 and HTTP+JSON in v4; gRPC later. All 12 v1.0 operations, implemented by a2a-go's server with Kontra's `TaskStore` and relay executor behind it. `SubscribeToTask` replays from `Last-Event-ID` (the event `seq`) then tails; the task snapshot is the first event on resubscribe. Push notification configs are stored per task; delivery is a Temporal activity (section 10).
 
-**Card.** Served at `{public_url}/agents/{agent}/.well-known/agent-card.json`. The gate fetches the seller's card through the backend, verifies any seller signature, keeps every seller-authored field untouched (`name`, `description`, `skills`, `provider`, modes), and rewrites exactly these:
+**Card.** Served at `{public_url}/agents/{agent}/.well-known/agent-card.json`. The gate fetches the service's card through the backend, verifies any service signature, keeps every service-authored field untouched (`name`, `description`, `skills`, `provider`, modes), and rewrites exactly these:
 
 | Field | Gate sets it to |
 | --- | --- |
 | `supportedInterfaces` | The gate's URL, one entry per binding it terminates (`JSONRPC`, `HTTP+JSON`), `protocolVersion: "1.0"` |
 | `securitySchemes` / `security` | `bearer` (`httpAuthSecurityScheme`, scheme `bearer`); plus `openIdConnect` when the operator configures an IdP |
 | `capabilities.pushNotifications` | `true` (the gate implements push even when the agent does not) |
-| `capabilities.extensions` | Seller's list plus Kontra's (section 9) |
-| `signatures` | Seller's original signature preserved, then the gate's JWS (ES256 over RFC 8785 JCS, `kid`, `jku` = `{public_url}/.well-known/jwks.json`) |
+| `capabilities.extensions` | Service's list plus Kontra's (section 9) |
+| `signatures` | Service's original signature preserved, then the gate's JWS (ES256 over RFC 8785 JCS, `kid`, `jku` = `{public_url}/.well-known/jwks.json`) |
 
-A card whose seller signature fails verification is not served; the agent shows as unavailable. Pre-1.0 upstream cards (`protocolVersion` 0.2/0.3) are normalized through a2a-go's compat layer and served as 1.0.
+A card whose service signature fails verification is not served; the agent shows as unavailable. Pre-1.0 upstream cards (`protocolVersion` 0.2/0.3) are normalized through a2a-go's compat layer and served as 1.0.
 
-**Extension activation.** Clients send `A2A-Extensions: <uri>[, <uri>]` on each request. The gate accepts `X-A2A-Extensions` inbound for older SDKs and sends `A2A-Extensions` upstream. A request to an agent whose card marks an extension `required: true` without that URI is rejected with `ExtensionSupportRequiredError`. In Cloud, activating the escrow extension on `SendMessage` is the buyer's consent to the quote.
+**Extension activation.** Clients send `A2A-Extensions: <uri>[, <uri>]` on each request. The gate accepts `X-A2A-Extensions` inbound for older SDKs and sends `A2A-Extensions` upstream. A request to an agent whose card marks an extension `required: true` without that URI is rejected with `ExtensionSupportRequiredError`. In Cloud, activating the escrow extension on `SendMessage` is the caller's consent to the quote.
 
 **Errors.** v1.0.1 error mappings. Upstream agent errors are relayed as `TaskStatus.state = failed` with the upstream message; gate-side refusals (policy, quota, unknown agent) are JSON-RPC errors before a task exists.
 
 ## 6. Tunnel protocol
 
-The tunnel is a reverse HTTP proxy over one outbound connection. It carries ordinary A2A requests from the gate to an agent on the seller's localhost, so pull and push are both true: the seller opens the TCP connection, the gate is the HTTP client.
+The tunnel is a reverse HTTP proxy over one outbound connection. It carries ordinary A2A requests from the gate to an agent on the service's localhost, so pull and push are both true: the service opens the TCP connection, the gate is the HTTP client.
 
 &#91;embedded content: tunnel handshake and one request · 8 steps\]
 
 **Transport.** WebSocket upgrade on `{public_url}/v1/tunnel` (passes HTTP load balancers and corporate proxies), then hashicorp/yamux multiplexing over it. Each A2A request from the gate is one yamux stream carrying one HTTP/1.1 exchange; SSE responses stream on that same yamux stream. The sidecar serves each stream with a `net/http` reverse proxy to the single configured target, with `Host` rewritten to the target. No other destination is reachable: the sidecar is a fixed-target proxy, not SOCKS.
 
-**Identity.** On first run `kontra tunnel` generates an X25519 keypair at `~/.kontra/tunnel.key` (0600). The handshake proves possession of it by signing the gate's nonce (X25519 key converted for signing via the age/ed25519 derivation, or a paired Ed25519 key stored beside it; implementer's choice, documented). Enrollment binds a key id to an agent name once, using an enrollment token from `kontra enroll <agent>` (self-host) or the seller's API key (Cloud, where the seller registers `owner/agent`). After enrollment, no token is sent again. Revoking the key in the console or `kontra enroll --revoke` ends the session and refuses the next handshake.
+**Identity.** On first run `kontra tunnel` generates an X25519 keypair at `~/.kontra/tunnel.key` (0600). The handshake proves possession of it by signing the gate's nonce (X25519 key converted for signing via the age/ed25519 derivation, or a paired Ed25519 key stored beside it; implementer's choice, documented). Enrollment binds a key id to an agent name once, using an enrollment token from `kontra enroll <agent>` (self-host) or the service's API key (Cloud, where the service registers `owner/agent`). After enrollment, no token is sent again. Revoking the key in the console or `kontra enroll --revoke` ends the session and refuses the next handshake.
 
-**Registry and routing.** On accept the gate writes `tunnels(agent, key_id, session_id, replica_id, connected_at, last_ping)`. Several tunnels may register for one agent (seller replicas). A new task picks a tunnel for that agent round-robin and stays sticky to it for its whole life (section 7). Under several gate replicas, the replica holding the socket is the only one that can use it; dispatch runs on that replica via Temporal per-replica task queues (section 10).
+**Registry and routing.** On accept the gate writes `tunnels(agent, key_id, session_id, replica_id, connected_at, last_ping)`. Several tunnels may register for one agent (service replicas). A new task picks a tunnel for that agent round-robin and stays sticky to it for its whole life (section 7). Under several gate replicas, the replica holding the socket is the only one that can use it; dispatch runs on that replica via Temporal per-replica task queues (section 10).
 
 **Liveness and reconnect.** Ping every 20 s from the sidecar, pong from the gate. Three misses either side: the socket is closed, the `tunnels` row is deleted, and in-flight dispatch activities on that session fail with `tunnel_lost`, which the lifecycle workflow turns into a retry (new attempt) or a failed task per the agent's retry policy. The sidecar reconnects with exponential backoff (1 s to 60 s, jittered) and the same key; it never learns about tasks it was serving.
 
-**Sealing on the sidecar.** With `sealed: true` on the agent, the sidecar unseals every inbound Part to plaintext before forwarding and seals every outbound Part to the buyer's per-job key before writing it to the stream (section 8). The agent on localhost never sees ciphertext.
+**Sealing on the sidecar.** With `sealed: true` on the agent, the sidecar unseals every inbound Part to plaintext before forwarding and seals every outbound Part to the caller's per-job key before writing it to the stream (section 8). The agent on localhost never sees ciphertext.
 
 **Config and flags.**
 
@@ -132,31 +132,31 @@ In Cloud `--gate` defaults to `https://agents.kontra.run` and `--agent` takes `o
 
 ## 7. Relay semantics
 
-The gate owns the buyer-facing task; the agent owns its own task. The relay maps one to the other and is the hardest part of v4. Get this right before the tunnel.
+The gate owns the caller-facing task; the agent owns its own task. The relay maps one to the other and is the hardest part of v4. Get this right before the tunnel.
 
 &#91;embedded content: task and escrow states · A2A states in black, escrow in green\]
 
-**Ids and attempts.** The gate mints `task_id` and `context_id` (UUIDv7) for the buyer. Each dispatch to an agent is an `attempt` with its own upstream `task_id`/`context_id` as the agent assigned them: `attempts(task_id, n, upstream_task_id, upstream_context_id, tunnel_session, started_at, ended_at, outcome)`. Every relayed event has its ids rewritten to the gate's before it is logged or streamed. Buyer-visible metadata never carries upstream ids.
+**Ids and attempts.** The gate mints `task_id` and `context_id` (UUIDv7) for the caller. Each dispatch to an agent is an `attempt` with its own upstream `task_id`/`context_id` as the agent assigned them: `attempts(task_id, n, upstream_task_id, upstream_context_id, tunnel_session, started_at, ended_at, outcome)`. Every relayed event has its ids rewritten to the gate's before it is logged or streamed. Caller-visible metadata never carries upstream ids.
 
-**Streaming.** The dispatch activity calls upstream `SendStreamingMessage` when the agent's card says `streaming: true`, else `SendMessage` then polls `GetTask` at the agent's suggested interval. Each upstream event becomes one row in `task_events` with the next `seq`, in the same transaction that updates the task projection, followed by `NOTIFY`. Buyer SSE and push are fed from the log, never from the upstream connection directly, so a buyer reconnect, a second subscriber and a push webhook all see the same ordered stream.
+**Streaming.** The dispatch activity calls upstream `SendStreamingMessage` when the agent's card says `streaming: true`, else `SendMessage` then polls `GetTask` at the agent's suggested interval. Each upstream event becomes one row in `task_events` with the next `seq`, in the same transaction that updates the task projection, followed by `NOTIFY`. Caller SSE and push are fed from the log, never from the upstream connection directly, so a caller reconnect, a second subscriber and a push webhook all see the same ordered stream.
 
-**Stickiness.** A task stays on the attempt's tunnel session (or the direct URL) until terminal. On `input-required`, the buyer's next message with the same `taskId` is forwarded to the same upstream task over the same session. If that session is gone, the task fails with `tunnel_lost` and is not retried: the agent's task state is unrecoverable from outside. Retries apply only before the first upstream event with a `taskId`; after that, the agent's state is the agent's.
+**Stickiness.** A task stays on the attempt's tunnel session (or the direct URL) until terminal. On `input-required`, the caller's next message with the same `taskId` is forwarded to the same upstream task over the same session. If that session is gone, the task fails with `tunnel_lost` and is not retried: the agent's task state is unrecoverable from outside. Retries apply only before the first upstream event with a `taskId`; after that, the agent's state is the agent's.
 
-**Retries.** `task.retries` (default 2) new attempts on `tunnel_lost` or upstream connection error before any upstream task exists. Each attempt is a fresh upstream `SendMessage` with the same buyer message. Retries exhausted, or upstream `failed`/`rejected`: the gate's task becomes `failed` with the upstream message, one event. `task.timeout` is wall clock from submission regardless of state, including `input-required`.
+**Retries.** `task.retries` (default 2) new attempts on `tunnel_lost` or upstream connection error before any upstream task exists. Each attempt is a fresh upstream `SendMessage` with the same caller message. Retries exhausted, or upstream `failed`/`rejected`: the gate's task becomes `failed` with the upstream message, one event. `task.timeout` is wall clock from submission regardless of state, including `input-required`.
 
-**Cancel.** `CancelTask` from the buyer: if no upstream task yet, the attempt is aborted and the task is `canceled`. Otherwise the gate forwards `CancelTask` upstream and relays whatever the agent answers; if the agent does not support cancel (`UnsupportedOperationError`) the gate returns that error and the task continues. Cancel never races money: in Cloud a hold is refunded only on a terminal `canceled` event.
+**Cancel.** `CancelTask` from the caller: if no upstream task yet, the attempt is aborted and the task is `canceled`. Otherwise the gate forwards `CancelTask` upstream and relays whatever the agent answers; if the agent does not support cancel (`UnsupportedOperationError`) the gate returns that error and the task continues. Cancel never races money: in Cloud a hold is refunded only on a terminal `canceled` event.
 
 **Push.** `SetTaskPushNotificationConfig` is stored on the gate's task. On each event the lifecycle workflow (not the relay) schedules `push_webhook(task_id, seq)` activities with Temporal retries and a 10 s timeout, sending the task snapshot at that `seq`. The agent's own push configs are never used; the gate is the agent's only client.
 
-**Parts and size.** Parts up to 256 KiB are stored inline in `task_events.payload`; larger ones go to the bucket as `payload_ref` and are served to buyers as a `FilePart` with a presigned GET valid 15 minutes. Both directions. Sealed or not, the gate stores bytes it does not interpret.
+**Parts and size.** Parts up to 256 KiB are stored inline in `task_events.payload`; larger ones go to the bucket as `payload_ref` and are served to callers as a `FilePart` with a presigned GET valid 15 minutes. Both directions. Sealed or not, the gate stores bytes it does not interpret.
 
-**Multi-turn contexts.** A buyer message with a known `contextId` and no `taskId` starts a new gate task in that context and is dispatched to the same tunnel session as the previous task in the context when it is still connected, otherwise any session for that agent. Context affinity is best effort; task affinity is a guarantee.
+**Multi-turn contexts.** A caller message with a known `contextId` and no `taskId` starts a new gate task in that context and is dispatched to the same tunnel session as the previous task in the context when it is still connected, otherwise any session for that agent. Context affinity is best effort; task affinity is a guarantee.
 
 ## 8. Sealing
 
-Sealing is end-to-end between the two sidecars. The gate stores and relays ciphertext it cannot open; neither the buyer's agent nor the seller's agent ever handles a key.
+Sealing is end-to-end between the two sidecars. The gate stores and relays ciphertext it cannot open; neither the caller's agent nor the service's agent ever handles a key.
 
-**What is sealed.** With `sealed: true` on an agent, the content of every `Part` (text, file bytes, data) in messages and artifacts, both directions. Not sealed: `TaskStatus.state`, task and context ids, `metadata` (the lifecycle and escrow read it), part `mediaType` and `name`. A buyer who sends an unsealed part to a sealed agent gets `InvalidRequest` from the gate when the extension's `params.required` is true; otherwise the part passes and is marked `kontra.sealed: false` in metadata so the seller sidecar forwards it as is.
+**What is sealed.** With `sealed: true` on an agent, the content of every `Part` (text, file bytes, data) in messages and artifacts, both directions. Not sealed: `TaskStatus.state`, task and context ids, `metadata` (the lifecycle and escrow read it), part `mediaType` and `name`. A caller who sends an unsealed part to a sealed agent gets `InvalidRequest` from the gate when the extension's `params.required` is true; otherwise the part passes and is marked `kontra.sealed: false` in metadata so the service sidecar forwards it as is.
 
 **Envelope v1.** Media type `application/vnd.kontra.sealed+age;v=1`. Plaintext is `header || 0x00 || body` where `header` is canonical JSON `{"v":1,"taskId","contextId","kids":[recipient key ids],"mediaType":<original>}`. Ciphertext is `age` (X25519, ChaCha20-Poly1305) to the recipients. age has no AAD, so the ids in the header are what binds a ciphertext to its task; the receiving sidecar rejects a part whose header ids do not match the task it arrived on. A sealed part replaces the original `Part` with a `FilePart` (`bytes` inline up to 256 KiB, else `uri`) whose `mediaType` is the envelope type and whose `metadata.kontra.sealed.original` is the original `mediaType`.
 
@@ -164,13 +164,13 @@ Sealing is end-to-end between the two sidecars. The gate stores and relays ciphe
 
 | Key | Lives | Made by | Published as | Rotated by |
 | --- | --- | --- | --- | --- |
-| Seller tunnel key (X25519) | `~/.kontra/tunnel.key` on the seller machine, or a mounted secret | `kontra tunnel` first run | `recipients[]` in the agent's sealed extension, one per connected tunnel key | `kontra tunnel --rotate`: new key, re-enroll, old key valid for tasks in flight for 24 h |
-| Buyer per-job key (X25519) | `kontra proxy` memory and `~/.kontra/jobs/<taskId>.key` | `kontra proxy` at `SendMessage` | Public half in message `metadata.kontra.sealed.replyTo` | One per task; deleted when the task is terminal plus the review window |
+| Service tunnel key (X25519) | `~/.kontra/tunnel.key` on the service machine, or a mounted secret | `kontra tunnel` first run | `recipients[]` in the agent's sealed extension, one per connected tunnel key | `kontra tunnel --rotate`: new key, re-enroll, old key valid for tasks in flight for 24 h |
+| Caller per-job key (X25519) | `kontra proxy` memory and `~/.kontra/jobs/<taskId>.key` | `kontra proxy` at `SendMessage` | Public half in message `metadata.kontra.sealed.replyTo` | One per task; deleted when the task is terminal plus the review window |
 | Gate signing key (ES256) | File, or Scaleway Key Manager in Cloud | Operator | JWKS at `/.well-known/jwks.json` | Operator; `kid` rotation with overlap |
 
-The gate holds no private key that opens a part. With several tunnel keys for one agent (seller replicas), the proxy seals to all `recipients`; age supports multiple recipients natively.
+The gate holds no private key that opens a part. With several tunnel keys for one agent (service replicas), the proxy seals to all `recipients`; age supports multiple recipients natively.
 
-**Buyer without the proxy.** `kontra seal --agent <url> file` emits a sealed part for scripting, and documents the pyrage/age-go calls for anyone who must seal in-process. This is the escape hatch, not the path.
+**Caller without the proxy.** `kontra seal --agent <url> file` emits a sealed part for scripting, and documents the pyrage/age-go calls for anyone who must seal in-process. This is the escape hatch, not the path.
 
 **v2 plan, not v4 work.** `hpke;v=2` with ML-KEM768+X25519 and real AAD once pyca/cryptography exposes AAD. The envelope's `v` field and media type parameter exist so v2 is additive.
 
@@ -178,7 +178,7 @@ The gate holds no private key that opens a part. With several tunnel keys for on
 
 Three extensions, declared in `capabilities.extensions`, specified in `kontra/spec/`. Conventions borrowed from AP2 and a2a-x402: static facts in `params`, per-task state in namespaced `metadata` keys, an append-only receipts array, `required: true` where ignoring the extension would cost someone money.
 
-**Escrow** `https://kontra.sh/ext/escrow/v1` (implemented in Cloud; spec public). *Withdrawn on 9 Nov (D351): Kontra runs no payment; a seller that wants to be paid configures AP2 v0.2.0 itself, and the gate relays it untouched.*
+**Escrow** `https://kontra.sh/ext/escrow/v1` (implemented in Cloud; spec public). *Withdrawn on 9 Nov (D351): Kontra runs no payment; a service that wants to be paid configures AP2 v0.2.0 itself, and the gate relays it untouched.*
 
 ```json
 {
@@ -205,22 +205,22 @@ Task metadata written by the gate only:
 | `kontra.escrow.reviewEndsAt` | RFC 3339 |
 | `kontra.escrow.receipts` | Append-only `[{event, rail, ref, at}]`, included in the final status message |
 
-Buyer-written: `kontra.escrow.dispute: {reason}` on a message to the task inside the review window, which moves status to `disputed` and stops the release timer. Activation of the URI on `SendMessage` is consent to the quote. Amounts are decimal strings; durations are integer seconds.
+Caller-written: `kontra.escrow.dispute: {reason}` on a message to the task inside the review window, which moves status to `disputed` and stops the release timer. Activation of the URI on `SendMessage` is consent to the quote. Amounts are decimal strings; durations are integer seconds.
 
 **Sealed** `https://kontra.sh/ext/sealed/v1` (open source)
 
 ```json
 {
   "uri": "https://kontra.sh/ext/sealed/v1",
-  "description": "Parts are end-to-end sealed to the seller's recipients; the gate relays ciphertext.",
+  "description": "Parts are end-to-end sealed to the service's recipients; the gate relays ciphertext.",
   "required": false,
   "params": { "recipients": ["age1..."], "envelope": "application/vnd.kontra.sealed+age;v=1", "required": true }
 }
 ```
 
-`params.required` says whether unsealed parts are rejected. Buyer-written metadata: `kontra.sealed.replyTo` (per-job public key). Sealed parts are recognized by `mediaType`, so no status key is needed.
+`params.required` says whether unsealed parts are rejected. Caller-written metadata: `kontra.sealed.replyTo` (per-job public key). Sealed parts are recognized by `mediaType`, so no status key is needed.
 
-**Input schema** `https://kontra.sh/ext/input-schema/v1` (open source, optional). *Withdrawn on 7 Nov (D350): a first message is plain A2A; sellers suggest one with `skills[].examples`.*
+**Input schema** `https://kontra.sh/ext/input-schema/v1` (open source, optional). *Withdrawn on 7 Nov (D350): a first message is plain A2A; services suggest one with `skills[].examples`.*
 
 ```json
 {
@@ -231,9 +231,9 @@ Buyer-written: `kontra.escrow.dispute: {reason}` on a message to the task inside
 }
 ```
 
-A2A 1.0 has no input schema. This lets the Cloud console and `kontra proxy` render a typed form and validate before sending; agents and clients that ignore it still work with free-form text. Seller-authored, passed through by the gate unchanged. It reuses the JSON Schema 2020-12 work from v3.
+A2A 1.0 has no input schema. This lets the Cloud console and `kontra proxy` render a typed form and validate before sending; agents and clients that ignore it still work with free-form text. Service-authored, passed through by the gate unchanged. It reuses the JSON Schema 2020-12 work from v3.
 
-**AP2 compatibility.** The quote object is shaped so it can be embedded in an AP2 `CartMandate` later, and a buyer's `PaymentMandate`, when a client provides one, is stored as evidence on the task. Neither is required in v4.
+**AP2 compatibility.** The quote object is shaped so it can be embedded in an AP2 `CartMandate` later, and a caller's `PaymentMandate`, when a client provides one, is stored as evidence on the task. Neither is required in v4.
 
 ## 10. Data model and durability
 
@@ -251,7 +251,7 @@ create table tunnel_keys (key_id text primary key, tenant_id uuid, agent text, p
                        enrolled_at timestamptz, revoked_at timestamptz);
 create table tunnels  (session_id uuid primary key, key_id text references tunnel_keys,
                        replica_id text, connected_at timestamptz, last_ping timestamptz);
-create table tasks    (id uuid primary key, tenant_id uuid, agent text, buyer_id uuid, context_id uuid,
+create table tasks    (id uuid primary key, tenant_id uuid, agent text, caller_id uuid, context_id uuid,
                        state text, version bigint default 0, snapshot jsonb, push_config jsonb,
                        deadline timestamptz, created_at timestamptz default now());
 create table attempts (task_id uuid references tasks, n int, upstream_task_id text, upstream_context_id text,
@@ -259,12 +259,12 @@ create table attempts (task_id uuid references tasks, n int, upstream_task_id te
                        primary key (task_id, n));
 create table task_events (task_id uuid references tasks, seq bigint, kind text, payload jsonb,
                        payload_ref text, created_at timestamptz default now(), primary key (task_id, seq));
-create table api_keys (id uuid primary key, tenant_id uuid, buyer_id uuid, prefix text, hash bytea,
+create table api_keys (id uuid primary key, tenant_id uuid, caller_id uuid, prefix text, hash bytea,
                        scopes text[], created_at timestamptz, revoked_at timestamptz);
 create table audit    (n bigserial primary key, prev_hash bytea, row jsonb, hash bytea);
 ```
 
-Every query on `tasks`, `attempts` and `task_events` is keyed by `(tenant_id, agent, buyer_id)` through the task; there is no cross-buyer list.
+Every query on `tasks`, `attempts` and `task_events` is keyed by `(tenant_id, agent, caller_id)` through the task; there is no cross-caller list.
 
 **a2a-go `TaskStore`.** `Save(task, prevVersion)` is `update tasks set snapshot=$2, state=$3, version=version+1 where id=$1 and version=$4`; zero rows is `ErrVersionConflict`. The relay appends `task_events(seq = new version)` in the same transaction and then `notify task_events, '<task_id>:<seq>'`. One `LISTEN` connection per replica wakes in-memory subscribers, who re-read from their last `seq`; the notify payload is a hint, the table is the truth.
 
@@ -291,17 +291,17 @@ One binary, seven subcommands. Nothing here is a framework: `kontra` without a s
 | --- | --- | --- |
 | `kontra -f kontra.yaml` | operator | The gate`, exposed directly. Terminates TLS itself (ACME or provided cert); refuses plaintext and the embedded Temporal when public_url is not localhost. External Temporal and Postgres` |
 | `kontra dev [--agent name=url]...` | developer | Gate at `http://localhost:8080` with embedded Temporal, no accounts, one API key printed at start, agents from flags or `./kontra.yaml`. Tunnels may connect to it |
-| `kontra tunnel --agent A --to URL` | seller | Section 6 |
-| `kontra proxy --gate URL` | buyer | Local A2A endpoint at `http://localhost:7777/agents/<owner>/<name>` for every agent the key may see. Verifies gate signatures, rewrites card URLs to localhost, seals and unseals, validates against `input-schema` when present |
-| `kontra enroll <agent> [--revoke <key_id>]` | operator | Prints a one-time enrollment token (self-host). In Cloud the seller's API key enrolls, so this is console-only |
-| `kontra seal --agent URL [file]` | buyer, scripting | Emits one sealed `FilePart` JSON for the agent's recipients. Escape hatch |
-| `kontra publish listing.yaml` | seller, Cloud | Creates or versions a listing (section 13). Not in the open-source build's help; the subcommand exists and says "needs a Cloud gate" |
+| `kontra tunnel --agent A --to URL` | service | Section 6 |
+| `kontra proxy --gate URL` | caller | Local A2A endpoint at `http://localhost:7777/agents/<owner>/<name>` for every agent the key may see. Verifies gate signatures, rewrites card URLs to localhost, seals and unseals, validates against `input-schema` when present |
+| `kontra enroll <agent> [--revoke <key_id>]` | operator | Prints a one-time enrollment token (self-host). In Cloud the service's API key enrolls, so this is console-only |
+| `kontra seal --agent URL [file]` | caller, scripting | Emits one sealed `FilePart` JSON for the agent's recipients. Escape hatch |
+| `kontra publish listing.yaml` | service, Cloud | Creates or versions a listing (section 13). Not in the open-source build's help; the subcommand exists and says "needs a Cloud gate" |
 
 **`kontra.yaml`** (JSON Schema published at `kontra.sh/schema/config/v1`)
 
 ```yaml
 listen: :8080
-public_url: https://agents.acme.io       # the URL buyers use; must match any front proxy
+public_url: https://agents.acme.io       # the URL callers use; must match any front proxy
 signing_key: file:./kontra.key           # or scaleway:<key-id>
 tls: { acme: { email: ops@acme.io } }    # or { cert: ./fullchain.pem, key: ./privkey.pem }; required off localhost
 limits: { body: 4MiB, inflight_per_key: 32, rps_per_ip: 50, header_timeout: 10s, idle: 60s }  # defaults shown
@@ -310,7 +310,7 @@ postgres:  postgres://kontra@db/kontra
 blobs:     s3://kontra-parts             # optional
 auth:
   api_keys: true
-  oidc: { issuer: https://login.acme.io, audience: kontra }   # optional, buyers only
+  oidc: { issuer: https://login.acme.io, audience: kontra }   # optional, callers only
 agents:
   recon:
     backend: { tunnel: {} }
@@ -328,19 +328,19 @@ In Cloud the `agents:` block is empty and agents come from the database; everyth
 
 ## 12. Security model
 
-The gate's privilege is deliberately small: it sees who talks to whom, when, and for how much, and in Cloud it holds the money. It cannot read a sealed part, cannot reach a seller's network, and cannot forge a seller's card. The residual trust a hosted gate asks for is the trust Stripe already asks for.
+The gate's privilege is deliberately small: it sees who talks to whom, when, and for how much, and in Cloud it holds the money. It cannot read a sealed part, cannot reach a service's network, and cannot forge a service's card. The residual trust a hosted gate asks for is the trust Stripe already asks for.
 
 **Invariants, each enforced by one mechanism**
 
 | Threat | Control | Ships |
 | --- | --- | --- |
-| Cross-tenant or cross-buyer task reads | Every task query scoped by `(tenant_id, agent, buyer_id)`; UUIDv7 ids; no cross-buyer list operation | v4 |
-| Seller reaches other sellers' tasks | A tunnel session only receives requests for the agent its key is enrolled for; agent name comes from the key, never from the request | v4 |
-| Gate reaches the seller's network | The sidecar forwards to one configured target only; no CONNECT, no arbitrary Host | v4 |
-| Buyer reaches or floods the seller | Nothing on the seller is addressable; the gate enforces per-key in-flight caps (default 32), 4 MiB body cap, per-replica token buckets | v4 |
+| Cross-tenant or cross-caller task reads | Every task query scoped by `(tenant_id, agent, caller_id)`; UUIDv7 ids; no cross-caller list operation | v4 |
+| Service reaches other services' tasks | A tunnel session only receives requests for the agent its key is enrolled for; agent name comes from the key, never from the request | v4 |
+| Gate reaches the service's network | The sidecar forwards to one configured target only; no CONNECT, no arbitrary Host | v4 |
+| Caller reaches or floods the service | Nothing on the service is addressable; the gate enforces per-key in-flight caps (default 32), 4 MiB body cap, per-replica token buckets | v4 |
 | Stale or duplicate writes across replicas | Versioned `TaskStore`; append and projection in one transaction; `409` on conflict, never a merge | v4 |
 | Sealed part replayed into another task | `taskId`/`contextId`/`kids` inside the sealed header; sidecars reject mismatches (age has no AAD) | v4 |
-| Dishonest or compromised gate | Ciphertext end to end; gate holds no decrypting key; seller signature preserved beside the gate's | v4 |
+| Dishonest or compromised gate | Ciphertext end to end; gate holds no decrypting key; service signature preserved beside the gate's | v4 |
 | Card spoofing or downgrade | Gate re-signs the card (JWS, ES256, JCS); `supportedInterfaces` lists only what the gate terminates; `kontra proxy` verifies before use | v4 |
 | SSRF via `a2a` backends and push webhooks | Resolve once, pin IP, reject RFC 1918, link-local, loopback, ULA, metadata ranges; `allow_private` is per-backend opt-in; redirects not followed; dedicated egress identity in Cloud | v4 |
 | Stolen tunnel key | Revoke in console or `kontra enroll --revoke`; session dropped; attacker gets ciphertext for tasks already sealed to that key, so rotation also re-publishes `recipients` | v4 |
@@ -353,13 +353,13 @@ The gate's privilege is deliberately small: it sees who talks to whom, when, and
 
 - It never executes code. Agents run where their owners run them.
 - It never stores a private key that decrypts a part. It stores public recipients.
-- It never initiates a connection to a tunnel. Cancel travels as a request inside the tunnel the seller opened.
-- It never sees a seller secret. The protocol has no slot for one.
+- It never initiates a connection to a tunnel. Cancel travels as a request inside the tunnel the service opened.
+- It never sees a service secret. The protocol has no slot for one.
 - It never merges concurrent writes. A stale version is an error.
 
 **Policy.** `allow:` lists per agent, deny by default, answering who may `send` to an agent. Principals: `key:<prefix glob>`, `org:<tenant>`, `oidc:sub:<subject>`. Cedar replaces the lists when someone needs attribute conditions; the config key does not change.
 
-**Front proxies.** The gate is a complete edge on its own and is meant to be exposed directly: TLS with ACME, body and header limits, slow-loris and idle timeouts, per-IP and per-key token buckets, connection caps, HSTS, and a closed default route (only /agents/\*, /.well-known/\*, /v1/tunnel, /healthz). A front proxy (Caddy, agentgateway, an ingress) is optional, for orgs that already centralize OIDC browser login, WAF or IP allowlists there. The gate always keeps the auth nobody in front can do: API keys and tunnel keys. `public_url` must be the URL buyers use so the card the gate signs already carries it and a proxy's own rewrite is a no-op. Tunnels terminate at the gate, not the proxy; a second listener or a path rule bypasses the proxy's buyer auth for `/v1/tunnel`.
+**Front proxies.** The gate is a complete edge on its own and is meant to be exposed directly: TLS with ACME, body and header limits, slow-loris and idle timeouts, per-IP and per-key token buckets, connection caps, HSTS, and a closed default route (only /agents/\*, /.well-known/\*, /v1/tunnel, /healthz). A front proxy (Caddy, agentgateway, an ingress) is optional, for orgs that already centralize OIDC browser login, WAF or IP allowlists there. The gate always keeps the auth nobody in front can do: API keys and tunnel keys. `public_url` must be the URL callers use so the card the gate signs already carries it and a proxy's own rewrite is a no-op. Tunnels terminate at the gate, not the proxy; a second listener or a path rule bypasses the proxy's caller auth for `/v1/tunnel`.
 
 **Pentest targets, in the order a tester would go.** Push webhook SSRF; tunnel sidecar as an open proxy; id confusion between upstream and gate tasks; `Last-Event-ID` reading another task's log; card signature stripping; sealed header mismatch acceptance; escrow dispute after release. Each is a named test in section 15.
 
@@ -375,7 +375,7 @@ The open-source gate is complete for running your own agents and contains no mon
 | Extension specs: escrow, sealed, input-schema | published | implemented |
 | `Admission` and `Lifecycle` hook interfaces | yes, with `allow:` lists and a no-op lifecycle | filled: quote lookup, hold, review window, release, refund |
 | Quotes, holds, ledger, receipts, disputes, Stripe Connect, payouts, fees | no | yes |
-| Listings, catalog, discovery, buyer and seller consoles, accounts, magic link | no | yes |
+| Listings, catalog, discovery, caller and service consoles, accounts, magic link | no | yes |
 | Multi-tenancy | one tenant | many |
 
 **Hooks (in `kontra`)**
@@ -395,7 +395,7 @@ type Lifecycle interface {
 
 Open source wires `allow:` lists into `Admit` and a no-op `Lifecycle`. Cloud's `Admit` looks up the listing, requires the escrow extension to be activated, places the hold, and attaches `kontra.escrow.*` metadata. Its `Lifecycle` runs the review timer and the settlement activities on the Python workers.
 
-**Settlement in Cloud.** Stripe Connect Express accounts, separate charges and transfers: charge the buyer at admission into the platform balance (idempotency key = task id), transfer `quote × (1 − 0.09)` to the seller's connected account on release, refund in full on dispute or failure. Not manual capture: an uncaptured authorization expires in about 7 days, which would silently cap `timeout + reviewWindow`. Stripe webhooks (`charge.refunded`, `transfer.created`, `charge.dispute.created`) are signals into `TaskLifecycle`; the ledger projection and Metabase read Postgres. A card chargeback after release is a Stripe dispute answered with the task's event log and sealed-part hashes; the in-protocol dispute inside the review window is Kontra's own.
+**Settlement in Cloud.** Stripe Connect Express accounts, separate charges and transfers: charge the caller at admission into the platform balance (idempotency key = task id), transfer `quote × (1 − 0.09)` to the service's connected account on release, refund in full on dispute or failure. Not manual capture: an uncaptured authorization expires in about 7 days, which would silently cap `timeout + reviewWindow`. Stripe webhooks (`charge.refunded`, `transfer.created`, `charge.dispute.created`) are signals into `TaskLifecycle`; the ledger projection and Metabase read Postgres. A card chargeback after release is a Stripe dispute answered with the task's event log and sealed-part hashes; the in-protocol dispute inside the review window is Kontra's own.
 
 **Listings.** `kontra publish listing.yaml` creates a listing row bound to a card hash:
 
@@ -409,9 +409,9 @@ sealed: true
 visibility: public             # public | unlisted
 ```
 
-A listing goes live when the seller's Connect account has payouts enabled. Cloud re-fetches the card periodically; a hash mismatch flags the listing stale and asks the seller to re-publish, without taking it down. Price changes version the listing; tasks keep the quote they were admitted with. One quote per agent in v4; a seller who wants two prices publishes two agents.
+A listing goes live when the service's Connect account has payouts enabled. Cloud re-fetches the card periodically; a hash mismatch flags the listing stale and asks the service to re-publish, without taking it down. Price changes version the listing; tasks keep the quote they were admitted with. One quote per agent in v4; a service who wants two prices publishes two agents.
 
-**What Cloud keeps from today.** Hetzner k3s, Scaleway managed Postgres, Grafana Cloud and Sentry, helmfile with two charts, console on its own origin, magic-link login, API keys, Stripe Connect Express, the Python ledger projection and Metabase (kontra-cloud #48, #49, #50), temporal-worker-controller for Kontra's own workers. The FastAPI gate is replaced by the Go binary; the console's hire form becomes a message box with file parts, plus a typed form when the agent publishes `input-schema`.
+**What Cloud keeps from today.** Hetzner k3s, Scaleway managed Postgres, Grafana Cloud and Sentry, helmfile with two charts, console on its own origin, magic-link login, API keys, Stripe Connect Express, the Python ledger projection and Metabase (kontra-cloud #48, #49, #50), temporal-worker-controller for Kontra's own workers. The FastAPI gate is replaced by the Go binary; the console's call form becomes a message box with file parts, plus a typed form when the agent publishes `input-schema`.
 
 ## 14. Milestones
 
@@ -422,11 +422,11 @@ Six milestones, each gated. The relay is built against the direct backend first 
 | Milestone | Deliverables | Gate to pass |
 | --- | --- | --- |
 | M0 Specs | `spec/tunnel.md`, `spec/relay.md` (id/attempt mapping, input-required, cancel, retry tables), `spec/ext-escrow.md`, `spec/ext-sealed.md`, `spec/ext-input-schema.md`, `migrations/0001_init.sql`, `examples/` skeleton; kill list executed (section 16) | Owner reads and signs both protocol specs |
-| M1 Relay | Go module; a2a-go server with Postgres `TaskStore`; built-in TLS (ACME) and edge limits from section 12; `a2a: {url}` backend; `TaskLifecycle` + `dispatch` + `push_webhook` + `forward_cancel`; SSE resume; API keys; `allow:` lists; card rewrite without signing; `a2a serve --exec` seller example | Kill a gate replica mid-task with two replicas running: task completes; buyer SSE resumes with no gap or duplicate |
+| M1 Relay | Go module; a2a-go server with Postgres `TaskStore`; built-in TLS (ACME) and edge limits from section 12; `a2a: {url}` backend; `TaskLifecycle` + `dispatch` + `push_webhook` + `forward_cancel`; SSE resume; API keys; `allow:` lists; card rewrite without signing; `a2a serve --exec` service example | Kill a gate replica mid-task with two replicas running: task completes; caller SSE resumes with no gap or duplicate |
 | M2 Tunnel | `kontra tunnel`; handshake and enrollment; yamux over WebSocket; `tunnels` registry; per-replica task queues; stickiness; reconnect; helloworld example through the tunnel | Kill the tunnel process mid-task: task fails or retries exactly as section 7 says; reconnect re-registers within backoff |
 | M3 Sealing | Envelope v1 in both sidecars; `kontra proxy`; `kontra seal`; card re-signing with JWKS; claim-check bucket | Pentest list from section 12 run against a VPS deployment with no proxy in front, findings recorded and fixed; the gate's Postgres and logs contain no plaintext for a sealed task |
-| M4 Dev and conformance | `kontra dev` with embedded Temporal; TCK pinned and in CI with an expected-failures file; `examples/sellers/{temporal-harness,adk,claude-cli}`; `examples/front/{caddy,agentgateway,ingress}`; README demo | TCK green on JSON-RPC and HTTP+JSON, bare and behind Caddy; README demo runs from a clean machine |
-| M5 Cloud | Hooks filled in `kontra-cloud`; listings and `kontra publish`; Stripe Connect via #50 against the hooks; console hire form (message + input-schema form); Go gate in the Helm chart replacing the FastAPI gate; first user migrated | One paid task end to end on Stripe test mode: hold, review window, release, payout visible in the Connect dashboard |
+| M4 Dev and conformance | `kontra dev` with embedded Temporal; TCK pinned and in CI with an expected-failures file; `examples/agents/{temporal-harness,adk,claude-cli}`; `examples/front/{caddy,agentgateway,ingress}`; README demo | TCK green on JSON-RPC and HTTP+JSON, bare and behind Caddy; README demo runs from a clean machine |
+| M5 Cloud | Hooks filled in `kontra-cloud`; listings and `kontra publish`; Stripe Connect via #50 against the hooks; console call form (message + input-schema form); Go gate in the Helm chart replacing the FastAPI gate; first user migrated | One paid task end to end on Stripe test mode: hold, review window, release, payout visible in the Connect dashboard |
 
 No estimates in this document; the owner sets dates. Ordering is the commitment.
 
@@ -438,11 +438,11 @@ No estimates in this document; the owner sets dates. Ordering is the commitment.
 # terminal 1: gate
 kontra dev                                   # prints KONTRA_API_KEY=kk_dev_...
 
-# terminal 2: seller, two agents
+# terminal 2: service, two agents
 a2a serve --exec 'echo Hello World' --port 9999
 kontra tunnel --gate http://localhost:8080 --agent hello --to http://localhost:9999 --enroll $(kontra enroll hello)
 
-# terminal 3: buyer
+# terminal 3: caller
 curl -s localhost:8080/agents/hello/.well-known/agent-card.json | jq '.supportedInterfaces[0].url, .signatures | length'
 a2a send http://localhost:8080/agents/hello "hi" -H "Authorization: Bearer $KONTRA_API_KEY"
 #  -> Hello World
@@ -456,20 +456,20 @@ a2a send http://localhost:7777/agents/hello "hi"     # proxy seals; gate logs sh
 
 | Test | Expected |
 | --- | --- |
-| `relay_resume`: kill buyer SSE at a random `seq`, resubscribe with `Last-Event-ID` | Snapshot then events from `seq+1`; no gap, no duplicate |
+| `relay_resume`: kill caller SSE at a random `seq`, resubscribe with `Last-Event-ID` | Snapshot then events from `seq+1`; no gap, no duplicate |
 | `replica_kill`: two gate replicas, kill the one holding the tunnel mid-task | Dispatch activity times out within 60 s; task retried or failed per retry policy; `tunnels` row gone |
 | `tunnel_kill`: SIGKILL the sidecar mid-task, restart it | Task on that session fails `tunnel_lost` (no retry once upstream task exists); sidecar re-registers within 60 s; next task succeeds |
-| `input_required_sticky`: agent returns `input-required`, buyer replies | Reply reaches the same upstream task on the same session |
+| `input_required_sticky`: agent returns `input-required`, caller replies | Reply reaches the same upstream task on the same session |
 | `cancel_forwarded`: `a2a serve --exec 'sleep 30; echo done'`, cancel at 5 s | Upstream receives `CancelTask`; task `canceled`; no `completed` event after |
 | `push_delivery`: register a webhook, take it down for 2 min, bring it back | All snapshots delivered in order within retry budget |
-| `card_passthrough`: seller card with a signature | Served card has two signatures; seller fields byte-identical under JCS |
+| `card_passthrough`: service card with a signature | Served card has two signatures; service fields byte-identical under JCS |
 | `card_compat`: helloworld 0.2.5 card upstream | Served as 1.0 with `supportedInterfaces` |
 | `sealed_no_plaintext`: sealed task with a known marker string | Marker absent from Postgres, logs, bucket objects |
 | `sealed_replay`: resend a sealed part under another task id | Receiving sidecar rejects; gate records the rejection |
 | `sealed_unsealed_part`: unsealed part to a `required: true` agent | `InvalidRequest` before dispatch |
 | `ssrf_webhook`: push config pointing at `169.254.169.254`, `10.0.0.1`, `localhost`, a redirecting URL | All refused at config time; no outbound connection |
 | `sidecar_not_a_proxy`: request through the tunnel with a foreign `Host` or absolute URL | Forwarded to the configured target only, `Host` rewritten |
-| `cross_buyer`: buyer B calls `GetTask` with buyer A's task id | `TaskNotFound` |
+| `cross_caller`: caller B calls `GetTask` with caller A's task id | `TaskNotFound` |
 | `key_scope`: tunnel enrolled for `hello` receives a task for `recon` | Impossible by construction; test asserts the dispatcher never selects it |
 | `version_conflict`: two replicas save the same task version | One `409`, event log has no gap |
 | `tck_jsonrpc`, `tck_rest`: official TCK, pinned commit | Green except the expected-failures file, each entry with a reason |
@@ -483,25 +483,25 @@ Execute this at M0 so no agent keeps implementing the old plan. Close with a com
 
 | Item | Action | Why it dies |
 | --- | --- | --- |
-| kontra-sdk epic #50 and #51–#60 (v3 seller SDK) | Close | Sellers write no Kontra code |
+| kontra-sdk epic #50 and #51–#60 (v3 service SDK) | Close | Services write no Kontra code |
 | kontra-cloud #44–#47 (v3 tracking) | Close | Same |
-| kontra-sdk #7 (parallel activities primitive) | Close | Seller's framework's business |
+| kontra-sdk #7 (parallel activities primitive) | Close | Service's framework's business |
 | kontra-sdk #8, kontra-cloud #3 (key UX redesign) | Close; superseded by tunnel and proxy keys (section 8) | One key per sidecar, no key UX |
-| kontra-sdk #9, #10, kontra-cloud #6 (DescribeTaskQueue, `serve --metrics`, Workers page) | Close | Sellers never connect to Kontra's Temporal |
-| Linear KON-5–KON-8 (graph dev console) | Close or re-scope to a task timeline | The gate never sees seller Temporal history |
+| kontra-sdk #9, #10, kontra-cloud #6 (DescribeTaskQueue, `serve --metrics`, Workers page) | Close | Services never connect to Kontra's Temporal |
+| Linear KON-5–KON-8 (graph dev console) | Close or re-scope to a task timeline | The gate never sees service Temporal history |
 | Temporal Authorizer plugin (Go) | Delete | No external Temporal clients |
-| Per-seller Temporal namespaces, Nexus endpoints, `nexgen` contract derivation | Delete | One internal namespace; cards replace contracts |
-| Engine Protocol (11 members), publish-gate import scan | Delete | No seller SDK |
+| Per-service Temporal namespaces, Nexus endpoints, `nexgen` contract derivation | Delete | One internal namespace; cards replace contracts |
+| Engine Protocol (11 members), publish-gate import scan | Delete | No service SDK |
 | FastAPI `kontra-gate` (prod and dev images) | Delete at M5 | Replaced by the Go binary |
 | `kontra-sdk` on PyPI (0.2.0) | Yank with a README pointer; archive the repo | Replaced by the binary |
-| `kontra.harness` idea | Leave open as an example under `examples/sellers/`, not core | Owner asked it not be rejected |
+| `kontra.harness` idea | Leave open as an example under `examples/agents/`, not core | Owner asked it not be rejected |
 | v2/v3 tables: offerings, contracts, holds by contract hash | Drop; fresh `0001_init.sql` | Owner accepts data loss for the first user |
 
 **Survives, relocated**
 
 | Item | Goes to |
 | --- | --- |
-| Agent examples: OpenAI Agents SDK in a Temporal workflow, `claude` CLI subprocess | `examples/sellers/temporal-harness`, `examples/sellers/claude-cli`, each an A2A server |
+| Agent examples: OpenAI Agents SDK in a Temporal workflow, `claude` CLI subprocess | `examples/agents/temporal-harness`, `examples/agents/claude-cli`, each an A2A server |
 | JSON Schema 2020-12 input contracts | `input-schema` extension (section 9) |
 | Claim-check bucket rule (payloads never in history) | Section 7, both directions |
 | 900 bps fee, no minimum job amount | Cloud `Admit` and settlement |
@@ -518,7 +518,7 @@ Execute this at M0 so no agent keeps implementing the old plan. Close with a com
 - Kontra is a durable A2A gateway; the marketplace is secondary and is the hosted gate plus a catalog.
 - Go, one binary, a2a-go v2. Temporal in both open source and Cloud.
 - Tunnel and direct `a2a` are the only two backends. The pull/lease protocol is dropped.
-- No seller or buyer SDK; sidecars instead. kontra-sdk and the v3 concepts are retired.
+- No service or caller SDK; sidecars instead. kontra-sdk and the v3 concepts are retired.
 - agentgateway is not a base or a layer; it is an optional front proxy, and an example config ships.
 - Stripe Connect for settlement now; AP2 shapes the quote and consent objects; stablecoin and AP2-native rails are reserved by the `rails` field and not built.
 - Open source contains no money code. Escrow is a public extension spec implemented only in Cloud.
@@ -532,17 +532,17 @@ Execute this at M0 so no agent keeps implementing the old plan. Close with a com
 | Tunnel transport is WebSocket + yamux | Raw TLS + yamux (fails behind HTTP-only load balancers), HTTP/2 reverse (less library support) |
 | Tunnel identity is one X25519 key used for both handshake and sealing | Separate signing and sealing keys per tunnel (cleaner cryptographically, two files to manage) |
 | Retries only before the first upstream `taskId`; afterwards `tunnel_lost` fails the task | Retry always with a fresh upstream task (risks double work and double side effects) |
-| `task.timeout` is wall clock including `input-required` | Pause the clock while waiting on the buyer |
+| `task.timeout` is wall clock including `input-required` | Pause the clock while waiting on the caller |
 | Parts over 256 KiB go to the bucket | Everything inline (bloats Postgres), everything in the bucket (slower small tasks) |
 | One quote per agent | Per-skill pricing via a metadata key every client would have to send |
 | Stripe separate charges and transfers, charge at admission | Manual capture (7-day authorization limit caps the review window) |
-| `kontra proxy` ships in M3 | Buyer-side library per language |
+| `kontra proxy` ships in M3 | Caller-side library per language |
 | Postgres migrations with golang-migrate in `kontra`; Cloud tables in `kontra-cloud` | Alembic stays owner of everything |
 | Config reload on SIGHUP | Restart only |
 
 **Open for the owner**
 
-- [ ] Does Cloud require the escrow extension on every public listing, or may a seller list an agent for free (`quote` absent, no hold)?
+- [ ] Does Cloud require the escrow extension on every public listing, or may a service list an agent for free (`quote` absent, no hold)?
 - [ ] Who decides a dispute in v4: owner by hand in the console (default), or an automatic refund on any dispute until volume justifies triage?
 - [ ] Should the gate serve the authenticated extended card (`extendedAgentCard`) at all in v4? Default: no.
 - [ ] Company jurisdiction for the Connect platform account (France vs. Estonia was floated). Affects Stripe onboarding, not the code.
@@ -562,6 +562,6 @@ Execute this at M0 so no agent keeps implementing the old plan. Close with a com
 | Card signature stripping by a front proxy that rewrites JSON | low | `kontra proxy` verifies; docs say proxies must not touch the card body; `tck_behind_caddy` |
 | Stripe Connect platform liability: funds on the platform balance during the review window | certain | This is what Connect is for; keep review windows bounded (max 7 days in v4); legal review of jurisdiction is an owner task |
 | agentgateway or AAIF adds task persistence | medium | Ship tunnel + escrow + sealing early; they cannot ship escrow for non-member agents or outbound-only backends without becoming a server |
-| Scope creep back toward an SDK | high, historically | Every seller-facing change must pass: can the helloworld sample still run unmodified? If not, it is rejected |
+| Scope creep back toward an SDK | high, historically | Every service-facing change must pass: can the helloworld sample still run unmodified? If not, it is rejected |
 
 **Sources.** [A2A specification v1.0](https://a2a-protocol.org/dev/specification/) · [a2a-go](https://github.com/a2aproject/a2a-go) · [a2a-samples helloworld](https://github.com/a2aproject/a2a-samples) · [agentgateway A2A docs](https://agentgateway.dev/docs/standalone/latest/documentation/agent/a2a/) · [AP2 A2A extension](https://ap2-protocol.org/a2a-extension) · [a2a-x402 spec](https://github.com/google-agentic-commerce/a2a-x402) · Research note "Kontra A2A Gateway: Recommended Stack Beyond Temporal" (21 Oct 2026, attached in the originating chat).

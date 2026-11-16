@@ -18,15 +18,15 @@ import (
 var (
 	acmeTenant  = uuid.MustParse("0192f0b4-0000-7000-8000-0000000000a1")
 	otherTenant = uuid.MustParse("0192f0b4-0000-7000-8000-0000000000b2")
-	buyer1      = uuid.MustParse("0192f0b4-0000-7000-8000-000000000001")
+	caller1     = uuid.MustParse("0192f0b4-0000-7000-8000-000000000001")
 	keyID1      = uuid.MustParse("0192f0b4-0000-7000-8000-0000000000c1")
 )
 
 func keyPrincipal(prefix, slug string, tenant uuid.UUID, scopes ...Scope) Principal {
 	if scopes == nil {
-		scopes = []Scope{ScopeHire}
+		scopes = []Scope{ScopeCall}
 	}
-	return Principal{Kind: KindKey, ID: "key:" + prefix, TenantID: &tenant, TenantSlug: slug, BuyerID: buyer1, Via: ViaAPIKey, Scopes: scopes, KeyID: &keyID1}
+	return Principal{Kind: KindKey, ID: "key:" + prefix, TenantID: &tenant, TenantSlug: slug, CallerID: caller1, Via: ViaAPIKey, Scopes: scopes, KeyID: &keyID1}
 }
 
 func mustList(t *testing.T, entries ...string) AllowList {
@@ -40,21 +40,21 @@ func mustList(t *testing.T, entries ...string) AllowList {
 
 // allow: lists (spec §2.3, D20, D68, D301): key: globs, org:<tenant> (its keys), oidc:sub:, oidc:* (every OIDC
 // principal, over oidc or mcp, and no API key, node or anonymous caller), node:, anonymous (everyone, the caller
-// keeping its own principal), deny by default, and no service for a key without the hire scope.
+// keeping its own principal), deny by default, and no service for a key without the call scope.
 func TestAllowList(t *testing.T) {
 	acmeKey := keyPrincipal("kk_acme_ab12cd34", "acme", acmeTenant)
 	acmeKey2 := keyPrincipal("kk_acme_Zz99Yy88", "acme", acmeTenant)
 	otherKey := keyPrincipal("kk_acmex_ab12cd34", "other", otherTenant)
 	shortKey := keyPrincipal("kk_a_00000001", "other", otherTenant)
 	enrollOnly := keyPrincipal("kk_acme_ab12cd35", "acme", acmeTenant, ScopeEnrollAll)
-	oidc := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|42", BuyerID: buyer1, Via: ViaOIDC}
-	oidcMCP := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|42", BuyerID: buyer1, Via: ViaMCP}
-	oidcOther := Principal{Kind: KindOIDC, ID: "oidc:sub:google-oauth2|7", BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-000000000002"), Via: ViaMCP}
-	node := Principal{Kind: KindNode, ID: "node:k1_abcdefghijklmnopqrstuvwxyz", TenantID: &acmeTenant, TenantSlug: "acme", BuyerID: buyer1, Via: ViaNode}
+	oidc := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|42", CallerID: caller1, Via: ViaOIDC}
+	oidcMCP := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|42", CallerID: caller1, Via: ViaMCP}
+	oidcOther := Principal{Kind: KindOIDC, ID: "oidc:sub:google-oauth2|7", CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-000000000002"), Via: ViaMCP}
+	node := Principal{Kind: KindNode, ID: "node:k1_abcdefghijklmnopqrstuvwxyz", TenantID: &acmeTenant, TenantSlug: "acme", CallerID: caller1, Via: ViaNode}
 	// D315: an OIDC principal whose issuer's tenant claim names acme is an org:acme member, and stays an OIDC principal.
 	oidcAcme := Principal{Kind: KindOIDC, ID: "oidc:sub:auth0|99", TenantID: &acmeTenant, TenantSlug: "acme",
-		BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-000000000003"), Via: ViaOIDC}
-	anon := Anonymous(buyer1)
+		CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-000000000003"), Via: ViaOIDC}
+	anon := Anonymous(caller1)
 	all := []Principal{acmeKey, acmeKey2, otherKey, shortKey, enrollOnly, oidc, oidcMCP, oidcOther, oidcAcme, node, anon}
 	name := func(p Principal) string {
 		return p.ID + "/" + string(p.Via) + "/" + strings.Join(func() []string {
@@ -150,21 +150,21 @@ func TestParseAllowListErrors(t *testing.T) {
 	}
 }
 
-// An authenticated caller keeps its own principal, buyer and via on an anonymous service; no credential is
-// the anonymous principal with the service's buyer; a bad credential is 401 even there.
+// An authenticated caller keeps its own principal, caller and via on an anonymous service; no credential is
+// the anonymous principal with the service's caller; a bad credential is 401 even there.
 func TestAuthenticatorWithoutKeys(t *testing.T) {
 	a := NewAuthenticator(nil)
-	anonBuyer := uuid.MustParse("0192f0b4-0000-7000-8000-0000000000ff")
+	anonCaller := uuid.MustParse("0192f0b4-0000-7000-8000-0000000000ff")
 	r := httptest.NewRequest("POST", "/agents/hello", nil)
-	p, authed, err := a.Authenticate(r, anonBuyer)
-	if err != nil || authed || p.Kind != KindAnonymous || p.ID != "anonymous" || p.BuyerID != anonBuyer || p.Via != ViaAnonymous || p.TenantID != nil {
+	p, authed, err := a.Authenticate(r, anonCaller)
+	if err != nil || authed || p.Kind != KindAnonymous || p.ID != "anonymous" || p.CallerID != anonCaller || p.Via != ViaAnonymous || p.TenantID != nil {
 		t.Errorf("no credential: %+v %v %v", p, authed, err)
 	}
 	if !mustList(t, "anonymous").Admits(p) || mustList(t, "org:acme").Admits(p) {
 		t.Error("the anonymous principal is admitted by the wrong lists")
 	}
 	r.Header.Set("Authorization", "Bearer kk_acme_x")
-	if _, _, err := a.Authenticate(r, anonBuyer); !errors.Is(err, ErrUnauthenticated) {
+	if _, _, err := a.Authenticate(r, anonCaller); !errors.Is(err, ErrUnauthenticated) {
 		t.Errorf("a bearer with API keys off = %v, want ErrUnauthenticated", err)
 	}
 }
@@ -254,15 +254,18 @@ func TestKeyFormat(t *testing.T) {
 }
 
 func TestParseScope(t *testing.T) {
-	for _, s := range []string{"hire", "enroll:*", "enroll:hello", "enroll:a-b"} {
+	for _, s := range []string{"call", "enroll:*", "enroll:hello", "enroll:a-b"} {
 		if got, err := ParseScope(s); err != nil || string(got) != s {
 			t.Errorf("%q: %v", s, err)
 		}
 	}
-	for _, s := range []string{"", "admin", "enroll:", "enroll:Hello", "hire ", "enroll:**"} {
+	for _, s := range []string{"", "admin", "enroll:", "enroll:Hello", "call ", "enroll:**"} {
 		if _, err := ParseScope(s); err == nil {
 			t.Errorf("%q accepted", s)
 		}
+	}
+	if _, err := ParseScope("hire"); err == nil || err.Error() != "scope hire was renamed call (D363)" {
+		t.Errorf("hire = %v, want the rename named", err)
 	}
 	if EnrollScope("hello") != "enroll:hello" {
 		t.Error("EnrollScope")
@@ -301,17 +304,17 @@ func TestRevocationNotifyPayloads(t *testing.T) {
 }
 
 func TestPrincipalScopes(t *testing.T) {
-	if !keyPrincipal("kk_a_00000001", "acme", acmeTenant).MayHire() {
-		t.Error("a hire key may not hire")
+	if !keyPrincipal("kk_a_00000001", "acme", acmeTenant).MayCall() {
+		t.Error("a call key may not call")
 	}
-	if keyPrincipal("kk_a_00000001", "acme", acmeTenant, ScopeEnrollAll).MayHire() {
-		t.Error("an enroll-only key may hire")
+	if keyPrincipal("kk_a_00000001", "acme", acmeTenant, ScopeEnrollAll).MayCall() {
+		t.Error("an enroll-only key may call")
 	}
-	if !Anonymous(buyer1).MayHire() || Anonymous(buyer1).Authenticated() {
+	if !Anonymous(caller1).MayCall() || Anonymous(caller1).Authenticated() {
 		t.Error("anonymous")
 	}
-	if (Principal{}).MayHire() {
-		t.Error("the zero principal may hire")
+	if (Principal{}).MayCall() {
+		t.Error("the zero principal may call")
 	}
 }
 
@@ -366,34 +369,34 @@ func TestRememberAfterAReReadBegan(t *testing.T) {
 	}
 }
 
-// hireSource is a tunnel session's principal source (internal/tunnelgate's), for the Authenticator's tests.
-type hireSource struct {
+// callSource is a tunnel session's principal source (internal/tunnelgate's), for the Authenticator's tests.
+type callSource struct {
 	p   Principal
 	err error
 	n   int
 }
 
-func (h *hireSource) HirePrincipal(context.Context) (Principal, error) {
+func (h *callSource) CallerPrincipal(context.Context) (Principal, error) {
 	h.n++
 	return h.p, h.err
 }
 
 // A request a node opened on its tunnel session takes the session's principal (spec/tunnel.md §9): a credential
 // it carries is never read, not even one that would be refused, nor one that would authenticate as someone
-// else; a session whose hiring key was revoked is 401 (§12).
-func TestAuthenticatorHiringRequest(t *testing.T) {
+// else; a session whose calling key was revoked is 401 (§12).
+func TestAuthenticatorCallingRequest(t *testing.T) {
 	a := NewAuthenticator(nil) // no API keys: every bearer credential of the network is refused
 	node := Principal{Kind: KindNode, ID: "node:k1_abcdefghijklmnopqrstuvwxyz", TenantID: &acmeTenant, TenantSlug: "acme",
-		BuyerID: buyer1, Via: ViaNode}
-	src := &hireSource{p: node}
+		CallerID: caller1, Via: ViaNode}
+	src := &callSource{p: node}
 	for _, authz := range []string{"", "Bearer kk_acme_x", "Basic Zm9vOmJhcg=="} {
 		r := httptest.NewRequest("POST", "/agents/hello", nil)
 		if authz != "" {
 			r.Header.Set("Authorization", authz)
 		}
-		r = r.WithContext(WithHireSource(r.Context(), src))
+		r = r.WithContext(WithCallSource(r.Context(), src))
 		p, authed, err := a.Authenticate(r, uuid.Nil)
-		if err != nil || !authed || p.ID != node.ID || p.Via != ViaNode || p.BuyerID != buyer1 {
+		if err != nil || !authed || p.ID != node.ID || p.Via != ViaNode || p.CallerID != caller1 {
 			t.Errorf("Authorization %q: %+v %v %v, want the session's principal", authz, p, authed, err)
 		}
 	}
@@ -403,12 +406,12 @@ func TestAuthenticatorHiringRequest(t *testing.T) {
 	}
 	src.err = ErrUnauthenticated
 	r := httptest.NewRequest("GET", "/agents/hello", nil)
-	r = r.WithContext(WithHireSource(r.Context(), src))
+	r = r.WithContext(WithCallSource(r.Context(), src))
 	if _, _, err := a.Authenticate(r, uuid.Nil); !errors.Is(err, ErrUnauthenticated) {
-		t.Errorf("a revoked hiring key: %v, want ErrUnauthenticated", err)
+		t.Errorf("a revoked calling key: %v, want ErrUnauthenticated", err)
 	}
-	if _, ok := HireSourceFrom(httptest.NewRequest("GET", "/", nil).Context()); ok {
-		t.Error("a network request carries a hire source")
+	if _, ok := CallSourceFrom(httptest.NewRequest("GET", "/", nil).Context()); ok {
+		t.Error("a network request carries a call source")
 	}
 }
 

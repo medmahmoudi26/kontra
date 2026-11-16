@@ -426,7 +426,7 @@ func (w *Writer) serve(rw http.ResponseWriter, r *http.Request, s Stream, p plan
 			// when it already ends a turn, since nothing more of that turn will come.
 			p.lead, p.after, p.leadCloses = row.Snapshot, row.Version, endsTurn(row.Snapshot.Status.State)
 		}
-		// A new task exposed already (returnImmediately, a hire, or a callee faster than the stream): its rows from
+		// A new task exposed already (returnImmediately, a call, or a callee faster than the stream): its rows from
 		// the creation row on, each with its seq.
 	}
 	if p.lead == nil && p.leadAt > 0 {

@@ -25,14 +25,14 @@ import (
 )
 
 // The M3 gate (D171, D172; spec/relay.md §16, spec/tunnel.md §16, spec/ext-sealed.md §9): sealing and MCP hosting
-// through two gate replicas, Temporal, Postgres, a bucket, hosting and hiring nodes, the stock MCP servers and the
+// through two gate replicas, Temporal, Postgres, a bucket, hosting and calling nodes, the stock MCP servers and the
 // dual-era double. The six gate tests the owner named: sealed_no_plaintext_test.go (TestSealedNoPlaintext),
 // sealed_replay_test.go (TestSealedReplay), sealed_unsealed_part_test.go (TestSealedUnsealedPart),
 // mcp_session_cross_node_test.go (TestMCPSessionCrossNode), mcp_tool_denied_test.go (TestMCPToolDenied) and
 // mcp_task_resume_test.go (TestMCPTaskResume). With them: card_passthrough_test.go (TestCardPassthrough),
 // mcp_misc_test.go (TestMCPBatchRefused, TestMCPMetaSpoof, TestMCPSessionRevoked, TestMCPCaseSmuggling,
 // TestA2ACaseSmuggling), stdio_roots_test.go (TestStdioRoots), local_rebinding_test.go (TestLocalRebinding,
-// TestHiring), mcp_modern_test.go (TestMCPModernTask, TestMCPEraFallback, TestMCPModernEverything2),
+// TestCalling), mcp_modern_test.go (TestMCPModernTask, TestMCPEraFallback, TestMCPModernEverything2),
 // mcp_peer_hop_test.go (TestMCPPeerHop) and sealed_blob_test.go (TestSealedBlob). This file holds what they share.
 
 // startFakeNode dials a FakeNode (fakenode.go: it ignores the control stream and records every preamble the gate
@@ -71,8 +71,8 @@ func preamblesFor(f *FakeNode, service string) int {
 	return n
 }
 
-// localA2A is a stock a2a-go client resolved from a hiring node's local card ({local}/agents/{svc}), with no
-// credential: the node hires as its API key's principal.
+// localA2A is a stock a2a-go client resolved from a calling node's local card ({local}/agents/{svc}), with no
+// credential: the node calls as its API key's principal.
 func localA2A(t *testing.T, ctx context.Context, local, svc string) *a2aclient.Client {
 	t.Helper()
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)

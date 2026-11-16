@@ -26,7 +26,7 @@ const ResendWindow = 24 * time.Hour
 
 // InlinePushSaver saves a request's inline push config (configuration.taskPushNotificationConfig) for the
 // task inside the work queue's transaction, before the work item is written (spec §10.1), with Save's
-// rules (idempotent per task, URL and token; the per-task and per-buyer limits). configID is the config to
+// rules (idempotent per task, URL and token; the per-task and per-caller limits). configID is the config to
 // announce, empty when the save needs no push_webhook started (an update of a config that is delivering):
 // Write sends kontra.push for it once a follow-up's kontra.message is accepted (a new row, or a failed
 // config set again); a new task's workflow lists its configs at start. inserted reports a new row:
@@ -47,7 +47,7 @@ type QueueOptions struct {
 	Push InlinePushSaver
 	// Hooks is the hook configuration a new task's workflow starts with (spec §13.3, D46).
 	Hooks HooksSnapshot
-	// Caps checks an anonymous tenant's concurrent tasks, as host and as hirer, in the transaction that creates a task
+	// Caps checks an anonymous tenant's concurrent tasks, as host and as caller, in the transaction that creates a task
 	// (spec/tunnel.md §6.2; *anon.Caps); nil checks nothing (a gate without tunnel.anonymous).
 	Caps TaskCaps
 	// ReattachGrace is task.reattach_grace (spec §6.4, §17; D345), which a new task's workflow starts with: how long a
@@ -60,7 +60,7 @@ type QueueOptions struct {
 
 // TaskCaps checks the anonymous tenants' task caps (spec/tunnel.md §6.2, D277) in tx, the transaction that creates a
 // task, before its row: an error wrapping anon.ErrRateLimited when the service's tenant (as host) or the principal's
-// (as hirer) has its cap of non-terminal tasks. *anon.Caps implements it.
+// (as caller) has its cap of non-terminal tasks. *anon.Caps implements it.
 type TaskCaps interface {
 	Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug, principal string) error
 }
@@ -115,8 +115,8 @@ func (q *Queue) now() time.Time {
 // identical requests arriving together make one task), the gate task is pre-created (the id Admission was
 // shown, gate ids, submitted, the caller's message in history), the inline
 // push config is saved, and the sanitized payload is stored as a work item; after the commit,
-// StartWithMessage. payload.TaskID is set to the task's id, which Write returns. A hire's new task (WithHire,
-// relay.md §12.3) is marked hired, keyed by the hire's resend key, and answered by a keyed retry as Hire says.
+// StartWithMessage. payload.TaskID is set to the task's id, which Write returns. A send_message's new task (WithSendMessage,
+// relay.md §12.3) is marked sent_by_mcp, keyed by the send_message's resend key, and answered by a keyed retry as SendMessage says.
 //
 // A follow-up: the work item is stored (and the task's version V, and the turn end it answers, read in the
 // same transaction) and kontra.message sent, then kontra.push for an inline config it inserted. A refusal
@@ -178,17 +178,17 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		return "", a2a.NewError(a2a.ErrInternalError, "admission unavailable")
 	}
 	// The hash of the request as the caller sent it, before the relay stored its large parts (spec §10.4, §15); a
-	// hire's resend key instead (relay.md §12.3), which a retry of the same hire matches.
-	hire, hired := HireFrom(ctx)
+	// send_message's resend key instead (relay.md §12.3), which a retry of the same send_message matches.
+	send, sentByMCP := SendMessageFrom(ctx)
 	hash, err := store.RequestHashOf(ctx, req)
 	if err != nil {
 		return "", err
 	}
-	if hired {
-		hash = hire.Key
+	if sentByMCP {
+		hash = send.Key
 	}
 	since := q.now().Add(-ResendWindow)
-	prev, err := q.findResend(ctx, nil, hire, hired, owner, req.Message.ID, hash, since)
+	prev, err := q.findResend(ctx, nil, send, sentByMCP, owner, req.Message.ID, hash, since)
 	if err != nil {
 		return "", err
 	}
@@ -225,7 +225,7 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 	err = pgx.BeginFunc(ctx, q.log.DB(), func(tx pgx.Tx) error {
 		// The lookup above takes no lock: an identical request arriving at the same moment missed it too.
 		// Under the resend key's lock the later one finds the earlier one's task once it committed.
-		found, err := q.findResend(ctx, tx, hire, hired, owner, req.Message.ID, hash, since)
+		found, err := q.findResend(ctx, tx, send, sentByMCP, owner, req.Message.ID, hash, since)
 		if err != nil {
 			return err
 		}
@@ -242,12 +242,12 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 		if _, err := q.log.CreateTask(ctx, tx, store.NewTask{
 			ID: taskID, Service: q.svc, Protocol: store.ProtocolA2A, Owner: owner, ContextID: contextID, State: state,
 			Snapshot: snap, FirstMessageID: req.Message.ID, FirstRequest: hash, Origin: origin,
-			Provisional: provisional(req, hired),
+			Provisional: provisional(req, sentByMCP),
 		}); err != nil {
 			return err
 		}
-		if hired {
-			if err := q.log.MarkHired(ctx, tx, taskID); err != nil {
+		if sentByMCP {
+			if err := q.log.MarkSentByMCP(ctx, tx, taskID); err != nil {
 				return err
 			}
 		}
@@ -285,57 +285,57 @@ func (q *Queue) writeNew(ctx context.Context, p *workqueue.Payload, owner store.
 
 // provisional reports whether a new task starts unexposed (D362): a caller awaiting the answer to its message (a
 // blocking SendMessage, a stream) sees a task only once the callee's first answer is one, and a Message otherwise. A
-// caller that asked returnImmediately is answered the task now, and a /mcp hire's task is the gate's own: both are
+// caller that asked returnImmediately is answered the task now, and a /mcp send_message's task is the gate's own: both are
 // exposed at creation.
-func provisional(req *a2a.SendMessageRequest, hired bool) bool {
-	return !hired && (req.Config == nil || !req.Config.ReturnImmediately)
+func provisional(req *a2a.SendMessageRequest, sentByMCP bool) bool {
+	return !sentByMCP && (req.Config == nil || !req.Config.ReturnImmediately)
 }
 
 // errResent rolls back a new task's transaction that found, under the resend key's lock, the task an
 // identical request created meanwhile.
 var errResent = errors.New("lifecycle: an identical request created the task meanwhile")
 
-// Hire is what Write needs of a task the gate's own /mcp creates with hire (spec/relay.md §12.2, §12.3): the task is
-// marked hired (tasks.hired, D272), its first_request is Key, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)), instead of the
-// request's hash. A hire without an idempotencyKey is never a resend of an earlier task (D351 removed the retry of a
-// quoted hire): each one is a new task.
+// SendMessage is what Write needs of a task the gate's own /mcp creates with send_message (spec/relay.md §12.2, §12.3): the task is
+// marked sent_by_mcp (tasks.sent_by_mcp, D272), its first_request is Key, SHA-256(ref ‖ 0x00 ‖ JCS(arguments)), instead of the
+// request's hash. A send_message without an idempotencyKey is never a resend of an earlier task (D351 removed the retry of a
+// quoted send_message): each one is a new task.
 //
-// A hire with an idempotencyKey (Keyed, relay.md §12.3 Idempotency, D338) has its messageId minted from the key: the
-// earlier task Write answers it with is the hire task of the same buyer, principal and first_message_id created less
-// than store.HireKeyWindow ago, whatever its state, looked for across services; one of another service or another
-// resend key is ErrHireKeyReused, and nothing is created.
-type Hire struct {
+// A send_message with an idempotencyKey (Keyed, relay.md §12.3 Idempotency, D338) has its messageId minted from the key: the
+// earlier task Write answers it with is the send_message task of the same caller, principal and first_message_id created less
+// than store.SendMessageKeyWindow ago, whatever its state, looked for across services; one of another service or another
+// resend key is ErrSendMessageKeyReused, and nothing is created.
+type SendMessage struct {
 	Key [32]byte
-	// Keyed, for a hire with an idempotencyKey, is how the key finds its task: the hire's messageId is Keyed.MessageIDs[0].
-	Keyed *store.HireKey
+	// Keyed, for a send_message with an idempotencyKey, is how the key finds its task: the send_message's messageId is Keyed.MessageIDs[0].
+	Keyed *store.SendMessageKey
 }
 
-// ErrHireKeyReused refuses a hire whose idempotencyKey an earlier hire of the same buyer and principal used, within
-// store.HireKeyWindow, with other arguments (another service, message or contextId): nothing is created (D338).
-var ErrHireKeyReused = fmt.Errorf("%w: idempotencyKey already used for a different hire", a2a.ErrInvalidParams)
+// ErrSendMessageKeyReused refuses a send_message whose idempotencyKey an earlier send_message of the same caller and principal used, within
+// store.SendMessageKeyWindow, with other arguments (another service, message or contextId): nothing is created (D338).
+var ErrSendMessageKeyReused = fmt.Errorf("%w: idempotencyKey already used for a different send_message", a2a.ErrInvalidParams)
 
-type hireKey struct{}
+type sendMessageKey struct{}
 
-// WithHire marks ctx as a hire's: the work queue's Write creates the task as Hire says.
-func WithHire(ctx context.Context, h Hire) context.Context {
-	return context.WithValue(ctx, hireKey{}, h)
+// WithSendMessage marks ctx as a send_message's: the work queue's Write creates the task as SendMessage says.
+func WithSendMessage(ctx context.Context, h SendMessage) context.Context {
+	return context.WithValue(ctx, sendMessageKey{}, h)
 }
 
-// HireFrom returns the hire ctx carries, ok false for any other request.
-func HireFrom(ctx context.Context) (Hire, bool) {
-	h, ok := ctx.Value(hireKey{}).(Hire)
+// SendMessageFrom returns the send_message ctx carries, ok false for any other request.
+func SendMessageFrom(ctx context.Context) (SendMessage, bool) {
+	h, ok := ctx.Value(sendMessageKey{}).(SendMessage)
 	return h, ok
 }
 
 // findResend is the earlier task a new task's request repeats: a resend of the same messageId and request hash
-// (spec §15), or for a keyed hire the task of its idempotencyKey (relay.md §12.3, D338); an unkeyed hire repeats
+// (spec §15), or for a keyed send_message the task of its idempotencyKey (relay.md §12.3, D338); an unkeyed send_message repeats
 // none. With tx it looks under the key's lock.
-func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, hire Hire, hired bool, owner store.Owner, messageID string,
+func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, send SendMessage, sentByMCP bool, owner store.Owner, messageID string,
 	hash [32]byte, since time.Time) (*store.TaskRow, error) {
 	switch {
-	case hired && hire.Keyed != nil:
-		return q.findKeyed(ctx, tx, hire, owner)
-	case hired:
+	case sentByMCP && send.Keyed != nil:
+		return q.findKeyed(ctx, tx, send, owner)
+	case sentByMCP:
 		return nil, nil
 	case tx == nil:
 		return q.log.FindResend(ctx, q.svc, owner, messageID, hash, since)
@@ -343,27 +343,27 @@ func (q *Queue) findResend(ctx context.Context, tx pgx.Tx, hire Hire, hired bool
 	return q.log.FindResendLocked(ctx, tx, q.svc, owner, messageID, hash, since)
 }
 
-// findKeyed is the earlier task a keyed hire repeats (Hire.Keyed): the hire task of the owner's buyer and principal
-// whose first_message_id is one of the key's messageIds, created less than store.HireKeyWindow ago (with tx, under the
-// key's lock); one of another service, or of another resend key (other arguments), is ErrHireKeyReused.
-func (q *Queue) findKeyed(ctx context.Context, tx pgx.Tx, hire Hire, owner store.Owner) (*store.TaskRow, error) {
-	since := q.now().Add(-store.HireKeyWindow)
+// findKeyed is the earlier task a keyed send_message repeats (SendMessage.Keyed): the send_message task of the owner's caller and principal
+// whose first_message_id is one of the key's messageIds, created less than store.SendMessageKeyWindow ago (with tx, under the
+// key's lock); one of another service, or of another resend key (other arguments), is ErrSendMessageKeyReused.
+func (q *Queue) findKeyed(ctx context.Context, tx pgx.Tx, send SendMessage, owner store.Owner) (*store.TaskRow, error) {
+	since := q.now().Add(-store.SendMessageKeyWindow)
 	var (
-		k   *store.KeyedHire
+		k   *store.KeyedSendMessage
 		err error
 	)
 	if tx == nil {
-		k, err = q.log.FindHireKeyed(ctx, owner.BuyerID, owner.Principal, *hire.Keyed, since)
+		k, err = q.log.FindSendMessageKeyed(ctx, owner.CallerID, owner.Principal, *send.Keyed, since)
 	} else {
-		k, err = q.log.FindHireKeyedLocked(ctx, tx, owner.BuyerID, owner.Principal, *hire.Keyed, since)
+		k, err = q.log.FindSendMessageKeyedLocked(ctx, tx, owner.CallerID, owner.Principal, *send.Keyed, since)
 	}
 	switch {
 	case err != nil:
 		return nil, err
 	case k == nil:
 		return nil, nil
-	case k.Task.TenantID != q.svc.TenantID || k.Task.Service != q.svc.Name || k.FirstRequest != hire.Key:
-		return nil, ErrHireKeyReused
+	case k.Task.TenantID != q.svc.TenantID || k.Task.Service != q.svc.Name || k.FirstRequest != send.Key:
+		return nil, ErrSendMessageKeyReused
 	}
 	return k.Task, nil
 }
@@ -389,7 +389,7 @@ func (q *Queue) resend(ctx context.Context, p *workqueue.Payload, prev *store.Ta
 }
 
 // ReissueStart re-issues the start of prev's workflow with its first work item id, as a resend does: a task whose
-// start was lost gets its workflow (spec §14.5; a keyed hire's retry, D338). A refusal (the work item was accepted
+// start was lost gets its workflow (spec §14.5; a keyed send_message's retry, D338). A refusal (the work item was accepted
 // already) and a closed workflow are what an idempotent re-issue meets, and are not errors; a task without a work
 // item has no start to re-issue.
 func (q *Queue) ReissueStart(ctx context.Context, prev *store.TaskRow) error {

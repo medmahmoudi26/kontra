@@ -26,9 +26,9 @@ import (
 
 // M3 review round 4: regression tests of the hosting node's MCP sealing through the proxy.
 
-// r4-hosting-1 (D252): the buyer's sealed task-augmented call reaches a URL server, and the gate ends the exchange
+// r4-hosting-1 (D252): the caller's sealed task-augmented call reaches a URL server, and the gate ends the exchange
 // before the server's CreateTaskResult comes: End records the call (D233), and the task is never bound to the job. On
-// the buyer's own session (its preamble and Mcp-Session-Id, both the gate's to choose) tasks/result of that task is
+// the caller's own session (its preamble and Mcp-Session-Id, both the gate's to choose) tasks/result of that task is
 // wrong_task, and tasks/list lists none of it: the task's result and statusMessage never reach the gate in plaintext.
 func TestReview4UnboundTaskURL(t *testing.T) {
 	up := mcptest.New()
@@ -59,7 +59,7 @@ func TestReview4UnboundTaskURL(t *testing.T) {
 	hosting, node := hostingFor(t)
 	pp.p.seal = hosting
 	sid := r3Init(t, pp, "web")
-	h := r3Hash("the buyer's gate session")
+	h := r3Hash("the caller's gate session")
 	call, _, _ := sealedCall(t, node, "web", h, "longRun", "1", `{"text":"SECRET-SEALED-ARG"}`)
 	call = strings.Replace(call, `"arguments":{}`, `"arguments":{},"task":{"ttl":60000}`, 1)
 	st := pp.open(t, mcpSealedPreamble("web", h, "1"))
@@ -85,19 +85,19 @@ func TestReview4UnboundTaskURL(t *testing.T) {
 	resp, body, _ := pp.raw(t, mcpSealedPreamble("web", h, ""), mcpPost(tr, sid, mcpwire.V20251125))
 	if strings.Contains(body, "SECRET-SEALED-ARG") || resp.StatusCode != http.StatusBadRequest ||
 		resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectWrongTask) {
-		t.Fatalf("tasks/result of the buyer's unbound task on its session: %d %q %s", resp.StatusCode,
+		t.Fatalf("tasks/result of the caller's unbound task on its session: %d %q %s", resp.StatusCode,
 			resp.Header.Get(tunnel.HeaderSealedReject), body)
 	}
 	tl := `{"jsonrpc":"2.0","id":52,"method":"tasks/list","params":{}}`
 	resp, body, _ = pp.raw(t, mcpSealedPreamble("web", h, ""), mcpPost(tl, sid, mcpwire.V20251125))
 	if strings.Contains(body, id) || strings.Contains(body, "SECRET") {
-		t.Fatalf("tasks/list on the buyer's session lists the unbound task: %d %s", resp.StatusCode, body)
+		t.Fatalf("tasks/list on the caller's session lists the unbound task: %d %s", resp.StatusCode, body)
 	}
 }
 
 // r4-hosting-1 (D252) on the stdio bridge: the gate closes the call's POST before the child's CreateTaskResult, which
 // the bridge then drops (no POST stream is open for it). The task the child created stays out of the gate's reach on
-// the buyer's own session: tasks/result is wrong_task, and tasks/list lists none of it.
+// the caller's own session: tasks/result is wrong_task, and tasks/list lists none of it.
 func TestReview4UnboundTaskStdio(t *testing.T) {
 	bin := stdioServer(t)
 	rec := t.TempDir()
@@ -105,7 +105,7 @@ func TestReview4UnboundTaskStdio(t *testing.T) {
 	hosting, node := hostingFor(t)
 	pp.p.seal = hosting
 	sid := r3Init(t, pp, "fs")
-	h := r3Hash("the buyer's gate session")
+	h := r3Hash("the caller's gate session")
 	call, _, _ := sealedCall(t, node, "fs", h, "longrun", "1", `{"text":"SECRET-SEALED-ARG","delayMs":600}`)
 	call = strings.Replace(call, `"arguments":{}`, `"arguments":{},"task":{"ttl":60000}`, 1)
 	st := pp.open(t, mcpSealedPreamble("fs", h, "1"))
@@ -127,13 +127,13 @@ func TestReview4UnboundTaskStdio(t *testing.T) {
 	resp, body, _ := pp.raw(t, mcpSealedPreamble("fs", h, ""), mcpPost(tr, sid, mcpwire.V20251125))
 	if strings.Contains(body, "SECRET-SEALED-ARG") || resp.StatusCode != http.StatusBadRequest ||
 		resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectWrongTask) {
-		t.Fatalf("tasks/result of the buyer's unbound task on its session: %d %q %s", resp.StatusCode,
+		t.Fatalf("tasks/result of the caller's unbound task on its session: %d %q %s", resp.StatusCode,
 			resp.Header.Get(tunnel.HeaderSealedReject), body)
 	}
 	tl := `{"jsonrpc":"2.0","id":52,"method":"tasks/list","params":{}}`
 	resp, body, _ = pp.raw(t, mcpSealedPreamble("fs", h, ""), mcpPost(tl, sid, mcpwire.V20251125))
 	if strings.Contains(body, "task-1") || strings.Contains(body, "SECRET") {
-		t.Fatalf("tasks/list on the buyer's session lists the unbound task: %d %s", resp.StatusCode, body)
+		t.Fatalf("tasks/list on the caller's session lists the unbound task: %d %s", resp.StatusCode, body)
 	}
 }
 
@@ -200,7 +200,7 @@ func sessionlessUp(t *testing.T) (*url.URL, func() []string) {
 	return u, func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), answers...) }
 }
 
-// r4-hosting-2 (D253): a URL server that mints no Mcp-Session-Id. The buyer's sealed plain call's sampling request
+// r4-hosting-2 (D253): a URL server that mints no Mcp-Session-Id. The caller's sealed plain call's sampling request
 // comes sealed on the call's own stream; the gate's own plaintext answer to it, POSTed with no Mcp-Session-Id under
 // a preamble that names no session, is refused bad_header and never reaches the server.
 func TestReview4SessionlessAnswerURL(t *testing.T) {
@@ -213,7 +213,7 @@ func TestReview4SessionlessAnswerURL(t *testing.T) {
 	if resp.StatusCode != 200 || resp.Header.Get(mcpwire.HeaderSessionID) != "" {
 		t.Fatalf("initialize: %d %q", resp.StatusCode, resp.Header.Get(mcpwire.HeaderSessionID))
 	}
-	session := r3Hash("the buyer's gate session")
+	session := r3Hash("the caller's gate session")
 	call, key, _ := sealedCall(t, node, "web", session, "sample", "1", `{"text":"SECRET-SEALED-ARG"}`)
 	cresp, cbr := pp.streamed(t, mcpSealedPreamble("web", session, "1"), mcpPost(call, "", mcpwire.V20251125))
 	if cresp.StatusCode != 200 {
@@ -232,15 +232,15 @@ func TestReview4SessionlessAnswerURL(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	for _, a := range answers() {
 		if strings.Contains(a, "GATE-WROTE-THIS") {
-			t.Fatalf("the server took the gate's plaintext answer to the buyer's sealed input request: %s", a)
+			t.Fatalf("the server took the gate's plaintext answer to the caller's sealed input request: %s", a)
 		}
 	}
 }
 
-// r4-hosting-3 (D254): the node restarts (a crash, an OOM kill, a reboot) while the buyer's first sealed call on a
+// r4-hosting-3 (D254): the node restarts (a crash, an OOM kill, a reboot) while the caller's first sealed call on a
 // session is with a URL server that answers JSON (its headers come with its result). The call's records were on disk
-// before it was handed, and are applied as the node starts: the buyer's upstream session is its job's, and the gate's
-// unsealed call on it, under a preamble that names no session, is refused; the buyer's call resent is replayed.
+// before it was handed, and are applied as the node starts: the caller's upstream session is its job's, and the gate's
+// unsealed call on it, under a preamble that names no session, is refused; the caller's call resent is replayed.
 func TestReview4RestartWhileFirstCallInFlight(t *testing.T) {
 	got, block := make(chan struct{}), make(chan struct{})
 	up, target := statefulUp(t, got, block)
@@ -261,8 +261,8 @@ func TestReview4RestartWhileFirstCallInFlight(t *testing.T) {
 	}
 	pp.p.seal = open()
 	sid := r3Init(t, pp, "web")
-	h := r3Hash("the buyer's gate session")
-	call, _, _ := sealedCall(t, id, "web", h, "login", "1", `{"secret":"BUYER-SECRET-LOGIN"}`)
+	h := r3Hash("the caller's gate session")
+	call, _, _ := sealedCall(t, id, "web", h, "login", "1", `{"secret":"CALLER-SECRET-LOGIN"}`)
 	st := pp.open(t, mcpSealedPreamble("web", h, "1"))
 	if _, err := io.WriteString(st, mcpPost(call, sid, mcpwire.V20251125)); err != nil {
 		t.Fatal(err)
@@ -288,15 +288,15 @@ func TestReview4RestartWhileFirstCallInFlight(t *testing.T) {
 	})
 	whoami := `{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"whoami","arguments":{}}}`
 	resp, body, _ := pp.raw(t, mcpPreamble("web"), mcpPost(whoami, sid, mcpwire.V20251125))
-	if strings.Contains(body, "BUYER-SECRET-LOGIN") || resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("after a restart, the gate's unsealed call on the buyer's upstream session: %d %s", resp.StatusCode, body)
+	if strings.Contains(body, "CALLER-SECRET-LOGIN") || resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("after a restart, the gate's unsealed call on the caller's upstream session: %d %s", resp.StatusCode, body)
 	}
 	resp, body, _ = pp.raw(t, mcpSealedPreamble("web", h, "1"), mcpPost(call, sid, mcpwire.V20251125))
 	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectReplayed) {
-		t.Fatalf("after a restart, the buyer's call resent: %d %q %s", resp.StatusCode, resp.Header.Get(tunnel.HeaderSealedReject), body)
+		t.Fatalf("after a restart, the caller's call resent: %d %q %s", resp.StatusCode, resp.Header.Get(tunnel.HeaderSealedReject), body)
 	}
 	if n := up.Calls("login"); n != 1 {
-		t.Fatalf("the server ran the buyer's call %d times", n)
+		t.Fatalf("the server ran the caller's call %d times", n)
 	}
 }
 
@@ -309,8 +309,8 @@ func TestReview4DeleteEndsTheHold(t *testing.T) {
 	hosting, node := hostingFor(t)
 	pp.p.seal = hosting
 	sid := r3Init(t, pp, "web")
-	h := r3Hash("the buyer's gate session")
-	call, _, _ := sealedCall(t, node, "web", h, "login", "1", `{"secret":"BUYER-SECRET-LOGIN"}`)
+	h := r3Hash("the caller's gate session")
+	call, _, _ := sealedCall(t, node, "web", h, "login", "1", `{"secret":"CALLER-SECRET-LOGIN"}`)
 	if resp, body, _ := pp.raw(t, mcpSealedPreamble("web", h, "1"), mcpPost(call, sid, mcpwire.V20251125)); resp.StatusCode != 200 {
 		t.Fatalf("the sealed call: %d %s", resp.StatusCode, body)
 	}
@@ -326,7 +326,7 @@ func TestReview4DeleteEndsTheHold(t *testing.T) {
 	// The session is gone on the server: the request now reaches it, and the server answers it as for any unknown
 	// session.
 	resp, body, _ := pp.raw(t, mcpPreamble("web"), mcpPost(whoami, sid, mcpwire.V20251125))
-	if resp.StatusCode != http.StatusNotFound || strings.Contains(body, "BUYER-SECRET-LOGIN") {
+	if resp.StatusCode != http.StatusNotFound || strings.Contains(body, "CALLER-SECRET-LOGIN") {
 		t.Fatalf("a call on the deleted session: %d %s", resp.StatusCode, body)
 	}
 }
@@ -351,17 +351,17 @@ func TestReview4UpstreamGroupAliases(t *testing.T) {
 	}
 }
 
-// r4-hiring-5 (D262): the node sends its local clients to localhost, which a stock Linux resolves to ::1 first. A
+// r4-calling-5 (D262): the node sends its local clients to localhost, which a stock Linux resolves to ::1 first. A
 // loopback --listen binds the port on both loopback families, so no other local user can bind [::1]:<port> and serve
 // the node's clients; a client of [::1] reaches the node; and a port another process holds on ::1 stops the start.
-func TestReview4HiringBindsBothLoopbackFamilies(t *testing.T) {
+func TestReview4CallingBindsBothLoopbackFamilies(t *testing.T) {
 	if ln, err := net.Listen("tcp", "[::1]:0"); err != nil {
 		t.Skip("this host has no IPv6 loopback")
 	} else {
 		_ = ln.Close()
 	}
-	router := &hireRouter{}
-	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Hire: router} })
+	router := &callRouter{}
+	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Call: router} })
 	tn := mustNode(t, g, testConfig(t, g.url, "")).run(t)
 	tn.welcomed(t)
 	port := tn.localPort(t)

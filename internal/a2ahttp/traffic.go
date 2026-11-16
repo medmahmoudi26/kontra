@@ -189,15 +189,15 @@ func versionOf(r *http.Request) string {
 	return traffic.MajorMinor(v)
 }
 
-// methodOf names the call: the JSON-RPC method, the HTTP+JSON route's method, or card, upstream_card and seller_jwks.
+// methodOf names the call: the JSON-RPC method, the HTTP+JSON route's method, or card, upstream_card and service_jwks.
 func methodOf(r *http.Request, rt route, body []byte) string {
 	switch rt.kind {
 	case routeCard:
 		return "card"
 	case routeUpstreamCard:
 		return "upstream_card"
-	case routeSellerJWKS:
-		return "seller_jwks"
+	case routeServiceJWKS:
+		return "service_jwks"
 	case routeJSONRPC:
 		var req struct {
 			Method string `json:"method"`

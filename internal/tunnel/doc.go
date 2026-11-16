@@ -43,8 +43,8 @@ const (
 	// NodeMaxInflight is `--max-inflight`'s default: inbound streams in flight per session on the node;
 	// over it the node answers 503 with Kontra-Node: full (§14).
 	NodeMaxInflight = 64
-	// GateMaxInflight and GateMaxInflightAnonymous bound node-opened (hiring) streams per session on the
-	// gate; over them the gate answers 429 (§14, §6.2). Hiring is M3.
+	// GateMaxInflight and GateMaxInflightAnonymous bound node-opened (calling) streams per session on the
+	// gate; over them the gate answers 429 (§14, §6.2). Calling is M3.
 	GateMaxInflight          = 32
 	GateMaxInflightAnonymous = 8
 	// GateMaxHalfClosed bounds, per session, the gate-opened streams that the gate has closed and the node

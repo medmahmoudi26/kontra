@@ -19,7 +19,7 @@ import (
 // dispatch heartbeat timeout (30 s) with chunks still to come.
 var killUpstream = slowagent.Config{Chunks: 60, Interval: time.Second, Streaming: true, Binding: "JSONRPC"}
 
-// cookieCall sends a caller cookie with every buyer request: it must never reach the upstream.
+// cookieCall sends a caller cookie with every caller request: it must never reach the upstream.
 var cookieCall = Call{Header: http.Header{"Cookie": {"session=e2e-cookie"}}}
 
 // dispatching starts a streaming task on replica A and reads until the dispatch has its first upstream task
@@ -27,7 +27,7 @@ var cookieCall = Call{Header: http.Header{"Cookie": {"session=e2e-cookie"}}}
 // replica X holding the dispatch.
 func dispatching(t *testing.T, ctx context.Context, h *Harness, text string) (*Stream, []Event, a2a.TaskID, *Gate, Attempt) {
 	t.Helper()
-	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[0], newMessage(text), cookieCall)
+	s, err := h.CallerA().SendStreaming(ctx, h.Gates[0], newMessage(text), cookieCall)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func resumeOn(t *testing.T, ctx context.Context, h *Harness, g *Gate, taskID a2a
 	)
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
-		if s, err = h.BuyerA().Subscribe(ctx, g, taskID, &lei, cookieCall); err == nil {
+		if s, err = h.CallerA().Subscribe(ctx, g, taskID, &lei, cookieCall); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -138,14 +138,14 @@ func drainBroken(ctx context.Context, s *Stream) []Event {
 // for part with no part twice, and the log holds exactly one terminal status.
 func checkCompletedOnce(t *testing.T, ctx context.Context, h *Harness, taskID a2a.TaskID, survivor *Gate, before Attempt) {
 	t.Helper()
-	task, err := h.BuyerA().Client(t, survivor, "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+	task, err := h.CallerA().Client(t, survivor, "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
 	if err != nil {
 		t.Fatalf("GetTask on %s: %v", survivor.Name, err)
 	}
 	if task.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("the task ended %s, want completed", task.Status.State)
 	}
-	// The dispatch ends the attempt (ended_at, outcome) after it logged the terminal row the buyer saw.
+	// The dispatch ends the attempt (ended_at, outcome) after it logged the terminal row the caller saw.
 	var as []Attempt
 	eventually(t, 30*time.Second, "the attempt ended", func() bool {
 		var err error
@@ -212,13 +212,13 @@ func checkCompletedOnce(t *testing.T, ctx context.Context, h *Harness, taskID a2
 }
 
 // TestReplicaKillDirect is replica_kill, direct-backend variant (spec/relay.md §6.4, §14.2, §16; D42), the
-// M1 gate: two replicas; a streaming task on the slow upstream; the buyer follows it on the replica that
+// M1 gate: two replicas; a streaming task on the slow upstream; the caller follows it on the replica that
 // holds the dispatch (attempts.replica_id); that replica is SIGKILLed mid-stream after the first upstream
 // task id. The dispatch's heartbeat times out (within 60 s), the workflow reads attempt_state and
 // re-attaches on the surviving replica with a new dispatch of the same attempt, which writes its replica
-// id, GetTasks the upstream, logs only the difference and follows it to completed. The buyer resumes with
+// id, GetTasks the upstream, logs only the difference and follows it to completed. The caller resumes with
 // Last-Event-ID against the surviving replica. Expected: the task completes; attempt n is still 1 and the
-// upstream received exactly one send; the buyer's carried rows across all its streams equal the log's
+// upstream received exactly one send; the caller's carried rows across all its streams equal the log's
 // carried rows, with no gap and no duplicate.
 func TestReplicaKillDirect(t *testing.T) {
 	h := start(t, Options{Upstream: killUpstream})
@@ -228,7 +228,7 @@ func TestReplicaKillDirect(t *testing.T) {
 	y := h.Other(x)
 	t.Logf("task %s: the dispatch runs on %s (%s); %s (%s) survives", taskID, x.Name, x.ReplicaID, y.Name, y.ReplicaID)
 
-	// Resume 1: the buyer drops its first stream and follows the task on X.
+	// Resume 1: the caller drops its first stream and follows the task on X.
 	if err := s1.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ const takeover = 90 * time.Second
 // detected only after two heartbeat rounds, against one for a dead one). Once X runs again, its old
 // dispatch, still alive and reading the upstream, is superseded: it logs "dispatch superseded by a newer
 // dispatch" and appends nothing (D77). The task completes once, on one attempt, with no part logged
-// twice, the buyer's resumed stream has no gap and no duplicate, and X serves again.
+// twice, the caller's resumed stream has no gap and no duplicate, and X serves again.
 func TestReplicaStallDirect(t *testing.T) {
 	h := start(t, Options{Upstream: killUpstream})
 	ctx := ctxFor(t, 10*time.Minute)
@@ -313,7 +313,7 @@ func TestReplicaStallDirect(t *testing.T) {
 			_ = x.Continue()
 		}
 	}()
-	// The buyer's stream on A stalls if A is X: it drops it either way.
+	// The caller's stream on A stalls if A is X: it drops it either way.
 	if err := s1.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestReplicaStallDirect(t *testing.T) {
 	eventually(t, 60*time.Second, x.Name+" healthy again", func() bool {
 		return status(ctx, http.MethodGet, x.URL+"/healthz", "") == http.StatusOK
 	})
-	task, err := h.BuyerA().Client(t, x, "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+	task, err := h.CallerA().Client(t, x, "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
 	if err != nil || task.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("GetTask on the resumed %s: %v %v", x.Name, task, err)
 	}

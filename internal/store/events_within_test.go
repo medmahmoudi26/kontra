@@ -50,7 +50,7 @@ func incompressible(t *testing.T, n int) string {
 func TestEventsWithin(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	task := e.newTask(e.svc, buyerA, "", "hi") // 1
+	task := e.newTask(e.svc, callerA, "", "hi") // 1
 	id := uid(t, task.ID)
 	big := []int64{
 		e.appendArtifact(task, incompressible(t, 1<<20)), // 2

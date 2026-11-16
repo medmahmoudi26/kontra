@@ -10,14 +10,14 @@ TestCancelForwarded 8
 TestCancelForwardedTunnel 13
 TestCardCompat 2
 TestCardPassthrough 2
-TestCrossBuyer 3
+TestCrossCaller 3
 TestFollowUp 6
 TestFollowUpLateRead 5
 TestFollowUpTemporalUnreachable 56
 TestFrontLosesTheWelcome 0
 TestFrontProxyHeaderIsTheClientAddress 0
 TestGateMCPBlobThroughANode 3
-TestGateMCPHire 29
+TestGateMCPCall 29
 TestGateMCPModern 11
 TestGateMCPOAuth 65
 TestGateMCPReply 7
@@ -25,7 +25,7 @@ TestGateMCPSearch 6
 TestGateMCPStockClient 6
 TestGateMCPTools 60
 TestHelloworldTunnel 6
-TestHiring 3
+TestCalling 3
 TestInputRequiredSticky 15
 TestKeyScope 10
 TestLeakCheckFindsAProcessByItsDirectory 1
@@ -46,7 +46,7 @@ TestMCPSessionRevoked 3
 TestMCPTaskResume 80
 TestMCPToolDenied 3
 TestMarkerForms 0
-TestNamesSellerIgnoresTheFrontsPort 0
+TestNamesServiceIgnoresTheFrontsPort 0
 TestNodeRotateAfterLeak 4
 TestNpmInstallCarriesTheMarkers 0
 TestPushDelivery 131

@@ -15,7 +15,7 @@ import (
 func TestCardCapabilities(t *testing.T) {
 	card := json.RawMessage(`{"name":"booking","capabilities":{"streaming":true,"pushNotifications":false,
 		"extensions":[{"uri":"https://kontra.sh/ext/input-schema/v1","required":false,"params":{"schema":{"type":"object",
-		"properties":{"topic":{"type":"string"}},"required":["topic"]}}},{"uri":"https://seller.example/ext/x","required":true}]},
+		"properties":{"topic":{"type":"string"}},"required":["topic"]}}},{"uri":"https://service.example/ext/x","required":true}]},
 		"defaultInputModes":["text/plain","application/json"],"defaultOutputModes":["text/plain"],
 		"skills":[{"id":"book","name":"Book","description":"Books a table","tags":["food"],"examples":["a table for two"],
 		"inputModes":["application/json"],"extra":1}]}`)
@@ -28,7 +28,7 @@ func TestCardCapabilities(t *testing.T) {
 		Examples: []string{"a table for two"}, InputModes: []string{"application/json"}}}) {
 		t.Errorf("skills %+v", c.Skills)
 	}
-	if !reflect.DeepEqual(c.Extensions, []ExtensionInCard{{URI: "https://kontra.sh/ext/input-schema/v1"}, {URI: "https://seller.example/ext/x", Required: true}}) {
+	if !reflect.DeepEqual(c.Extensions, []ExtensionInCard{{URI: "https://kontra.sh/ext/input-schema/v1"}, {URI: "https://service.example/ext/x", Required: true}}) {
 		t.Errorf("extensions %+v", c.Extensions)
 	}
 	if raw, err := json.Marshal(c); err != nil || bytes.Contains(raw, []byte("inputSchema")) || bytes.Contains(raw, []byte(`"topic"`)) {

@@ -72,7 +72,7 @@ func (i *Issuer) Verifier() *Verifier { return i.v }
 func (i *Issuer) Feed() *Feed { return i.feed }
 
 // Principal verifies token for audience (Verifier.Verify), then checks it against the issuer's revocation feed and
-// maps its tenant claim, and returns the principal it stands for: oidc:sub:<sub>, buyer UUIDv5(issuer ‖ sub), the
+// maps its tenant claim, and returns the principal it stands for: oidc:sub:<sub>, caller UUIDv5(issuer ‖ sub), the
 // tenant the claim names (none without the claim), and via. A token the gate refuses is ErrInvalidToken (a 401); a
 // key set, feed or tenant the gate could not read is ErrUnavailable or the database's error (the gate's own failure).
 func (i *Issuer) Principal(ctx context.Context, token, audience string, via auth.Via) (auth.Principal, error) {
@@ -85,7 +85,7 @@ func (i *Issuer) Principal(ctx context.Context, token, audience string, via auth
 			return auth.Principal{}, err
 		}
 	}
-	p := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:" + c.Subject, BuyerID: BuyerID(i.Issuer(), c.Subject), Via: via}
+	p := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:" + c.Subject, CallerID: CallerID(i.Issuer(), c.Subject), Via: via}
 	if i.claim == "" {
 		return p, nil
 	}

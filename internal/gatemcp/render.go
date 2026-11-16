@@ -60,10 +60,10 @@ func textResult(text string, structured any, meta map[string]any) json.RawMessag
 	return b
 }
 
-// Render is an ended hire task's outcome as MCP content (§12.2, D289, D324): text parts as text, data parts as text
+// Render is an ended send_message task's outcome as MCP content (§12.2, D289, D324): text parts as text, data parts as text
 // (the value's JSON) and in structuredContent.data, file parts as resource blocks (raw bytes embedded, a URL as a
 // resource_link) and in structuredContent.files, from the final status message and then each artifact;
-// structuredContent a HireResult with the A2A state, the task's thread URL when it has one, and the text of the
+// structuredContent a SendMessageResult with the A2A state, the task's thread URL when it has one, and the text of the
 // content's text blocks. A CallToolResult whatever the state: isError for failed, rejected and canceled, with the
 // final status message as text (the failure's reason text when it has none) and sh.kontra/failure (§11.8's reason; a
 // rejected task's is "rejected") or sh.kontra/canceled in _meta. Kontra-blob parts must have been rendered as
@@ -168,12 +168,12 @@ func render(task *a2a.Task, state store.State) callToolResult {
 		id, ctxID = string(task.ID), task.ContextID
 	}
 	return callToolResult{Content: blocks, IsError: isError, Meta: meta,
-		StructuredContent: HireResult{TaskID: id, State: string(state.A2A()), ContextID: ctxID,
+		StructuredContent: SendMessageResult{TaskID: id, State: string(state.A2A()), ContextID: ctxID,
 			Text: strings.Join(texts, "\n"), Data: data, Files: files}}
 }
 
-// FailureRejected is sh.kontra/failure of a hire task the agent rejected (A2A rejected, MCP "failed"): §12.2 gives
-// every failed, rejected or canceled hire task sh.kontra/failure or sh.kontra/canceled, and §11.8's reasons are the
+// FailureRejected is sh.kontra/failure of a send_message task the agent rejected (A2A rejected, MCP "failed"): §12.2 gives
+// every failed, rejected or canceled send_message task sh.kontra/failure or sh.kontra/canceled, and §11.8's reasons are the
 // gate's failures, none of which a rejection is (D293).
 const FailureRejected = "rejected"
 
@@ -210,7 +210,7 @@ func partURI(task *a2a.Task, p *a2a.Part, n int) string {
 	return "kontra:task/" + id + "/" + name
 }
 
-// statusText is the text parts of the task's status message (§12.4: a hire task's statusMessage), "" when none.
+// statusText is the text parts of the task's status message (§12.4: a send_message task's statusMessage), "" when none.
 func statusText(task *a2a.Task) string {
 	if task == nil || task.Status.Message == nil {
 		return ""
@@ -243,7 +243,7 @@ func textOnly(task *a2a.Task) bool {
 	return true
 }
 
-// Question is §12.4's reading of an input-required hire task for a reader: whether it is input_required (a
+// Question is §12.4's reading of an input-required send_message task for a reader: whether it is input_required (a
 // text-only question and a reader that declared form elicitation) and the text the reply-tool form shows otherwise:
 // the agent's text and " (answer with the reply tool, taskId <id>)", with _meta["sh.kontra/input-required"].
 func Question(task *a2a.Task, rd Reader) (inputRequired bool, statusMessage string, err error) {
@@ -284,7 +284,7 @@ func ttlOf(row *store.TaskRow, svc store.ServiceRef) *int64 {
 	return &ms
 }
 
-// taskView is a hire task as an MCP reader sees it (§5.1, §12.2, §12.4): its status in MCP's vocabulary, its
+// taskView is a send_message task as an MCP reader sees it (§5.1, §12.2, §12.4): its status in MCP's vocabulary, its
 // statusMessage, and the _meta the gate adds.
 type taskView struct {
 	status        string
@@ -292,7 +292,7 @@ type taskView struct {
 	meta          map[string]any
 }
 
-// view presents a hire task to rd (§5.1, §12.4): input-required is input_required for a text-only question when rd declared form elicitation, else
+// view presents a send_message task to rd (§5.1, §12.4): input-required is input_required for a text-only question when rd declared form elicitation, else
 // working with the reply-tool text and _meta sh.kontra/input-required (D58); failed has sh.kontra/failure (§11.8),
 // rejected sh.kontra/failure "rejected" (FailureRejected), canceled sh.kontra/canceled; the statusMessage is otherwise
 // the text of the status message.
@@ -365,7 +365,7 @@ func taskResult(row *store.TaskRow, svc store.ServiceRef, rd Reader) (json.RawMe
 	return json.Marshal(o)
 }
 
-// createTaskResult is the answer to a task-augmented hire (§11.5 step 2, §12.3): {"task": Task, "_meta"}.
+// createTaskResult is the answer to a task-augmented send_message (§11.5 step 2, §12.3): {"task": Task, "_meta"}.
 func createTaskResult(row *store.TaskRow, svc store.ServiceRef, rd Reader) (json.RawMessage, error) {
 	v := view(row, rd)
 	o := map[string]any{"task": taskObject(row, svc, v)}

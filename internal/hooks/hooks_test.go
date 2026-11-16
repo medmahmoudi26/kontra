@@ -12,7 +12,7 @@ import (
 func TestBuiltinAdmissionAllows(t *testing.T) {
 	d, err := BuiltinAdmission{}.Admit(context.Background(), AdmitRequest{
 		Operation: OpTask, TaskID: "0192f0b4-0000-7000-8000-000000000001", Protocol: "a2a",
-		Principal: Principal{Kind: "key", ID: "key:kk_a_00000001", BuyerID: "b", Via: "api_key"},
+		Principal: Principal{Kind: "key", ID: "key:kk_a_00000001", CallerID: "b", Via: "api_key"},
 	})
 	if err != nil || d.Outcome != Allow || d.Refusal != nil || d.Metadata != nil {
 		t.Errorf("built-in admission: %+v %v", d, err)
@@ -102,11 +102,11 @@ func TestStripCaller(t *testing.T) {
 }
 
 func TestStripService(t *testing.T) {
-	md := map[string]any{"kontra.approve.url": "x", KeySealed: map[string]any{"original": "x"}, "seller": 1}
-	if got := StripService(md, false); !reflect.DeepEqual(got, map[string]any{"seller": 1}) {
+	md := map[string]any{"kontra.approve.url": "x", KeySealed: map[string]any{"original": "x"}, "service": 1}
+	if got := StripService(md, false); !reflect.DeepEqual(got, map[string]any{"service": 1}) {
 		t.Errorf("not a sealed part: %v", got)
 	}
-	if got := StripService(md, true); !reflect.DeepEqual(got, map[string]any{KeySealed: map[string]any{"original": "x"}, "seller": 1}) {
+	if got := StripService(md, true); !reflect.DeepEqual(got, map[string]any{KeySealed: map[string]any{"original": "x"}, "service": 1}) {
 		t.Errorf("a sealed part keeps kontra.sealed: %v", got)
 	}
 	if got := StripService(map[string]any{"a": 1}, false); !reflect.DeepEqual(got, map[string]any{"a": 1}) {

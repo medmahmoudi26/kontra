@@ -41,7 +41,7 @@ func TestModernEraDroppedOnEveryReplica(t *testing.T) {
 	ra := e.replica("a", replicaOpts{peer: true})
 	rb := e.replica("b", replicaOpts{peer: true})
 	n1 := e.node(rb, legacy, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, ra.url+"/mcp/tun", false)
 	if rep := m.req(1, "tools/list", nil); rep.status != http.StatusBadRequest || !strings.Contains(string(rep.body), "No valid session ID") {
 		t.Fatalf("legacy-only through the hop: %d %s", rep.status, rep.body)
@@ -81,7 +81,7 @@ func TestModernTaskPollingKeepsVirtualSession(t *testing.T) {
 	_, url := modernTaskDouble(t)
 	e.service("research", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/research", true)
 	taskID := createdModern(t, m.req(1, "tools/call", map[string]any{"name": "long", "arguments": map[string]any{}}))
 	rows := e.virtualRows("research")
@@ -119,7 +119,7 @@ func TestModernRepeatedVersionHeader(t *testing.T) {
 	up, url := dualEra(t, mcptest.Tool("echo", ""))
 	e.service("svc", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/svc", false)
 	result(t, m.req(1, "server/discover", nil))
 	body := m.body(2, "tools/call", map[string]any{"name": "echo", "arguments": map[string]any{"text": "dup"}})
@@ -185,7 +185,7 @@ func TestModernAdmissionFlightOutlivesItsLeader(t *testing.T) {
 	// The era is known first (another principal's server/discover), so the requests below go straight to Admission.
 	k0, _ := e.apiKey("first")
 	result(t, newModern(t, k0, r.url+"/mcp/svc", false).req(0, "server/discover", nil))
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/svc", false)
 	lctx, leave := context.WithCancel(context.Background())
 	defer leave()
@@ -350,7 +350,7 @@ func TestAnswerCallClientGone(t *testing.T) {
 	}
 	submitted := func() uuid.UUID {
 		id := uuid.Must(uuid.NewV7())
-		nt, err := store.NewMCPTask(id, svc, store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}, nil, nil)
+		nt, err := store.NewMCPTask(id, svc, store.Owner{CallerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

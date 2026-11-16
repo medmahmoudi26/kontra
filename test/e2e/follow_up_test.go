@@ -22,7 +22,7 @@ import (
 // events and the task.
 func askTask(t *testing.T, ctx context.Context, h *Harness, g *Gate, text string) ([]Event, a2a.TaskID) {
 	t.Helper()
-	s, err := h.BuyerA().SendStreaming(ctx, g, newMessage(slowagent.AskPrefix+" "+text), cookieCall)
+	s, err := h.CallerA().SendStreaming(ctx, g, newMessage(slowagent.AskPrefix+" "+text), cookieCall)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestFollowUp(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-go1
-			outs[i].s, outs[i].err = h.BuyerA().SendStreaming(ctx, g, req, cookieCall)
+			outs[i].s, outs[i].err = h.CallerA().SendStreaming(ctx, g, req, cookieCall)
 		}()
 	}
 	close(go1)
@@ -139,7 +139,7 @@ func TestFollowUp(t *testing.T) {
 	if !turns[1].FollowUp || turns[1].TaskID != a2a.TaskID(as[0].UpstreamTaskID) || !strings.Contains(turns[1].Text, accepted.gate.Name) {
 		t.Fatalf("the upstream's second turn: %+v", turns[1])
 	}
-	task, err := h.BuyerA().Client(t, h.Gates[1], "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+	task, err := h.CallerA().Client(t, h.Gates[1], "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestFollowUpTemporalUnreachable(t *testing.T) {
 	// Temporal hangs.
 	h.TemporalProxy.Blackhole()
 	began := time.Now()
-	r, err := h.BuyerA().RPC(ctx, h.Gates[0], "", "SendMessage", follow("while temporal hangs"))
+	r, err := h.CallerA().RPC(ctx, h.Gates[0], "", "SendMessage", follow("while temporal hangs"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestFollowUpTemporalUnreachable(t *testing.T) {
 	within("JSON-RPC", began, lifecycle.AcceptWait)
 	noSecrets("JSON-RPC", r.Body)
 	began = time.Now()
-	rr, err := h.BuyerA().REST(ctx, h.Gates[1], "", http.MethodPost, "/message:send", follow("while temporal hangs, REST"))
+	rr, err := h.CallerA().REST(ctx, h.Gates[1], "", http.MethodPost, "/message:send", follow("while temporal hangs, REST"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestFollowUpTemporalUnreachable(t *testing.T) {
 	within("HTTP+JSON", began, lifecycle.AcceptWait)
 	noSecrets("HTTP+JSON", rr.Body)
 	began = time.Now()
-	_, err = h.BuyerA().SendStreaming(ctx, h.Gates[0], follow("while temporal hangs, streaming"), Call{})
+	_, err = h.CallerA().SendStreaming(ctx, h.Gates[0], follow("while temporal hangs, streaming"), Call{})
 	var se *StreamError
 	if !errors.As(err, &se) || se.RPC == nil || se.RPC.Code != -32603 || strings.HasPrefix(se.ContentType, "text/event-stream") {
 		t.Fatalf("a streaming follow-up while Temporal hangs: %v, want -32603 before any stream", err)
@@ -264,7 +264,7 @@ func TestFollowUpTemporalUnreachable(t *testing.T) {
 	// Temporal unreachable: the dial fails at once, and the gate still answers within its wait.
 	h.TemporalProxy.Cut()
 	began = time.Now()
-	r, err = h.BuyerA().RPC(ctx, h.Gates[1], "", "SendMessage", follow("while temporal is unreachable"))
+	r, err = h.CallerA().RPC(ctx, h.Gates[1], "", "SendMessage", follow("while temporal is unreachable"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestFollowUpTemporalUnreachable(t *testing.T) {
 	var res a2a.SendMessageResult
 	eventually(t, 2*time.Minute, "a follow-up accepted once Temporal is back", func() bool {
 		kept = kept[:0]
-		res, err = h.BuyerA().Client(t, h.Gates[1], "").SendMessage(ctx, follow("now"))
+		res, err = h.CallerA().Client(t, h.Gates[1], "").SendMessage(ctx, follow("now"))
 		return err == nil
 	})
 	if task, ok := res.(*a2a.Task); !ok || task.Status.State != a2a.TaskStateCompleted {
@@ -360,7 +360,7 @@ func TestFollowUpLateRead(t *testing.T) {
 				time.Sleep(2 * time.Millisecond)
 			}
 		}()
-		s, err := h.BuyerA().SendStreaming(ctx, a, req, cookieCall)
+		s, err := h.CallerA().SendStreaming(ctx, a, req, cookieCall)
 		if err != nil {
 			stopCut()
 			t.Fatalf("try %d: the follow-up got no stream (spec §9: an accepted turn is answered with its stream): %v", try, err)
@@ -399,7 +399,7 @@ func TestFollowUpLateRead(t *testing.T) {
 		}
 		checkCarried(t, h, taskID, append(ids(evs1), ids(evs2[1:])...))
 		checkFollowUpItems(t, ctx, h, taskID, req.Message)
-		task, err := h.BuyerA().Client(t, h.Gates[1], "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+		task, err := h.CallerA().Client(t, h.Gates[1], "").GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
 		if err != nil || task.Status.State != a2a.TaskStateCompleted {
 			t.Fatalf("GetTask after the follow-up: %v %v, want completed", task, err)
 		}

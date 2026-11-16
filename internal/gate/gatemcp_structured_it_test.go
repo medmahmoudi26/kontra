@@ -14,8 +14,8 @@ import (
 )
 
 // structuredOnly is what a client that shows its model nothing but structuredContent sees of a tool result (Claude
-// Code 2.1.281, M5's gate G3, C59): the result's structuredContent, read with exact keys into the hire result's shape.
-func structuredOnly(t *testing.T, what string, a rpcAnswer) gatemcp.HireResult {
+// Code 2.1.281, M5's gate G3, C59): the result's structuredContent, read with exact keys into the send_message result's shape.
+func structuredOnly(t *testing.T, what string, a rpcAnswer) gatemcp.SendMessageResult {
 	t.Helper()
 	if a.Error != nil || a.Result == nil {
 		t.Fatalf("%s: not a result: %s", what, a.raw)
@@ -26,7 +26,7 @@ func structuredOnly(t *testing.T, what string, a rpcAnswer) gatemcp.HireResult {
 	if err := json.Unmarshal(a.Result, &r); err != nil || len(r.StructuredContent) == 0 {
 		t.Fatalf("%s: no structuredContent: %s", what, a.raw)
 	}
-	var hr gatemcp.HireResult
+	var hr gatemcp.SendMessageResult
 	dec := json.NewDecoder(bytes.NewReader(r.StructuredContent))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&hr); err != nil {
@@ -36,51 +36,51 @@ func structuredOnly(t *testing.T, what string, a rpcAnswer) gatemcp.HireResult {
 }
 
 // What a person needs, in structuredContent alone (spec §12.2, §12.3; D324, D351), through a whole replica, from a
-// 2026-07-28 client that declares URL and form elicitation and calls hire without the tasks extension, as Claude Code
+// 2026-07-28 client that declares URL and form elicitation and calls send_message without the tasks extension, as Claude Code
 // does, and from 2025-11-25 sessions:
 //
-//   - a hire Admission allows: the answer's text beside data and the file links, and no url or quote; a question is
+//   - a send_message Admission allows: the answer's text beside data and the file links, and no url or quote; a question is
 //     its text with the reply-tool hint, and reply's structuredContent the answer to it;
 //   - a session that declared elicitation.url gets the same result, never -32042;
 //
 // and an operator's refusal code (spec §13.1, D325): Admission's -32060 reaches /mcp as -32060 with its message in
 // both eras, and the A2A bindings as PERMISSION_DENIED (JSON-RPC -31403, HTTP+JSON 403) with {"code": -32060} in the
 // error's data; no task is created.
-func TestGateMCPHireStructured(t *testing.T) {
+func TestGateMCPSendMessageStructured(t *testing.T) {
 	e := newGateEnv(t)
-	kinds, paid := newHireSeller(t), newHireSeller(t)
+	kinds, paid := newSendMessageService(t), newSendMessageService(t)
 	hook := newHookServer(t)
 	t.Setenv("KONTRA_TEST_ADMISSION_SECRET", "Hk4nW8qZ2xV6bM1tR9yL3pD7sF0gJ5cA")
 	services := e.modernServices(kinds, paid, hook.srv.URL)
 	timing := fastTiming
 	timing.PlainWait = 4 * time.Second
 	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), timing)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	claude := newModernClient(t, a.url, key, `{"elicitation":{"form":{},"url":{}}}`)
 	tasks := func() int64 { return scalar[int64](t, e.pool, `select count(*) from kontra.tasks`) }
 
-	// A hire: the answer's text, data and files (structuredOnly refuses a url or quote member: D351).
-	_, ans := claude.call("hire", `{"service":"kinds","message":"kinds"}`)
-	free := structuredOnly(t, "a hire", ans)
+	// A send_message: the answer's text, data and files (structuredOnly refuses a url or quote member: D351).
+	_, ans := claude.call("send_message", `{"service":"kinds","message":"kinds"}`)
+	free := structuredOnly(t, "a send_message", ans)
 	if free.State != "TASK_STATE_COMPLETED" || free.Text != "done\ntck artifact" ||
 		fmt.Sprint(free.Data) != "[map[total:4] map[key:value]]" || len(free.Files) != 2 ||
 		!strings.HasPrefix(free.Files[0].URI, "kontra:task/"+free.TaskID+"/") || free.Files[1].URI != "https://example.com/output.txt" {
-		t.Errorf("a hire's structuredContent: %+v", free)
+		t.Errorf("a send_message's structuredContent: %+v", free)
 	}
 	// A legacy session that declared URL elicitation: the same result, never -32042.
 	s := newMCPClient(t, a.url, key)
 	s.initialize(`{"elicitation":{"url":{}}}`)
-	_, ans = s.call("hire", `{"service":"kinds","message":"hi"}`)
-	if r := structuredOnly(t, "a legacy hire declaring URL elicitation", ans); r.State != "TASK_STATE_COMPLETED" || r.Text != "Hello World" {
-		t.Errorf("a legacy hire declaring URL elicitation: %+v", r)
+	_, ans = s.call("send_message", `{"service":"kinds","message":"hi"}`)
+	if r := structuredOnly(t, "a legacy send_message declaring URL elicitation", ans); r.State != "TASK_STATE_COMPLETED" || r.Text != "Hello World" {
+		t.Errorf("a legacy send_message declaring URL elicitation: %+v", r)
 	}
 	p := newMCPClient(t, a.url, key)
 	p.initialize(`{}`)
 	// A question, and reply's answer.
-	_, ans = claude.call("hire", `{"service":"kinds","message":"ask"}`)
-	ask := structuredOnly(t, "a hire that asks", ans)
+	_, ans = claude.call("send_message", `{"service":"kinds","message":"ask"}`)
+	ask := structuredOnly(t, "a send_message that asks", ans)
 	if ask.State != "TASK_STATE_INPUT_REQUIRED" || ask.Text != "Which date? (answer with the reply tool, taskId "+ask.TaskID+")" {
-		t.Errorf("a hire that asks: %+v", ask)
+		t.Errorf("a send_message that asks: %+v", ask)
 	}
 	_, ans = claude.call("reply", `{"taskId":"`+ask.TaskID+`","message":"friday"}`)
 	if r := structuredOnly(t, "reply", ans); r.TaskID != ask.TaskID || r.State != "TASK_STATE_COMPLETED" || r.Text != "booked for friday" {
@@ -88,15 +88,15 @@ func TestGateMCPHireStructured(t *testing.T) {
 	}
 
 	// An operator's refusal code: as it is on /mcp, in the error's data on A2A; no task.
-	const why = "this service's seller cannot be paid yet"
+	const why = "this service's service cannot be paid yet"
 	hook.set(func(h *hookServer) { h.raw = `{"outcome":"deny","refusal":{"code":-32060,"message":"` + why + `"}}` })
 	n := tasks()
 	for name, c := range map[string]func() rpcAnswer{
-		"modern": func() rpcAnswer { _, a := claude.call("hire", `{"service":"kinds","message":"hi"}`); return a },
-		"legacy": func() rpcAnswer { _, a := p.call("hire", `{"service":"kinds","message":"hi"}`); return a },
+		"modern": func() rpcAnswer { _, a := claude.call("send_message", `{"service":"kinds","message":"hi"}`); return a },
+		"legacy": func() rpcAnswer { _, a := p.call("send_message", `{"service":"kinds","message":"hi"}`); return a },
 	} {
 		if ans := c(); ans.Error == nil || ans.Error.Code != -32060 || ans.Error.Message != why {
-			t.Errorf("%s hire refused by the operator: %s, want -32060 %q", name, ans.raw, why)
+			t.Errorf("%s send_message refused by the operator: %s, want -32060 %q", name, ans.raw, why)
 		}
 	}
 	post := func(path, body string) (int, string) {
@@ -136,7 +136,7 @@ func TestGateMCPHireStructured(t *testing.T) {
 		t.Errorf("A2A HTTP+JSON refused by the operator: %d %s, want 403 with code -32060 in details", status, body)
 	}
 	if m := tasks(); m != n {
-		t.Errorf("refused hires created %d tasks", m-n)
+		t.Errorf("refused send_message calls created %d tasks", m-n)
 	}
 }
 

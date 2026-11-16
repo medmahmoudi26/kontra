@@ -80,14 +80,14 @@ func (d *stuckA2A) ForwardCancel(ctx context.Context, in AttemptRef) (ForwardCan
 	return ForwardCancelResult{Outcome: CancelContinues}, nil
 }
 
-// The /mcp tasks/cancel of a hire task (relay.md §12.2, D57; changeHireMCPCancel, D46): kontra.cancel in MCP mode on
+// The /mcp tasks/cancel of a send_message task (relay.md §12.2, D57; changeSendMessageMCPCancel, D46): kontra.cancel in MCP mode on
 // an A2A task, over a development server with the real lifecycle activities. With an upstream task whose
 // forward_cancel never answers, and before the first upstream task id with a dispatch an abort does not stop, the
 // cancel completes canceled within 10 s whatever the upstream answers, the task is canceled (client), the dispatch
 // is stopped, forward_cancel (which sends the upstream §8's CancelTask) or abort ran, and the history carries the
 // hire-mcp-cancel marker and not mcp-cancel's. With KONTRA_RECORD_HISTORIES=1 both histories are recorded for
 // TestReplayRecordedHistories (never over a file).
-func TestHireCancelInMCPMode(t *testing.T) {
+func TestCallCancelInMCPMode(t *testing.T) {
 	e := newPGEnv(t)
 	e.acts.Push = nil
 	c := temporaltest.Client(t)
@@ -109,14 +109,14 @@ func TestHireCancelInMCPMode(t *testing.T) {
 		first  bool
 		record string
 	}{
-		{"with an upstream task", true, "hire_mcp_cancel_upstream_silent"},
-		{"before the first upstream task id", false, "hire_mcp_cancel_before_first_id"},
+		{"with an upstream task", true, "send_message_mcp_cancel_upstream_silent"},
+		{"before the first upstream task id", false, "send_message_mcp_cancel_before_first_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			d.first = tc.first
 			aborts, forwarded := d.aborts.Load(), d.forwarded.Load()
-			cctx, pre := caller(true)
-			id, err := q.Write(cctx, payloadOf(requestOf("m-"+pre, "hire me")))
+			cctx, pre := callerCtx(true)
+			id, err := q.Write(cctx, payloadOf(requestOf("m-"+pre, "call me")))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -143,7 +143,7 @@ func TestHireCancelInMCPMode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(js), base64.StdEncoding.EncodeToString([]byte(`"`+changeHireMCPCancel+`"`))) {
+			if !strings.Contains(string(js), base64.StdEncoding.EncodeToString([]byte(`"`+changeSendMessageMCPCancel+`"`))) {
 				t.Fatal("the history has no hire-mcp-cancel marker")
 			}
 			if strings.Contains(string(js), base64.StdEncoding.EncodeToString([]byte(`"`+changeMCPCancel+`"`))) {
@@ -174,8 +174,8 @@ func TestRequestCancelMCPReturnsOnAcceptance(t *testing.T) {
 	t.Cleanup(w.Stop)
 	q := NewQueue(e.svc, e.log, lc, QueueOptions{Owner: ownerFrom, Hooks: HooksSnapshot{LifecycleQueue: QueueLifecycle}})
 	ctx := context.Background()
-	cctx, pre := caller(true)
-	id, err := q.Write(cctx, payloadOf(requestOf("m-"+pre, "hire me")))
+	cctx, pre := callerCtx(true)
+	id, err := q.Write(cctx, payloadOf(requestOf("m-"+pre, "call me")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,17 +216,17 @@ func TestRequestCancelMCPReturnsOnAcceptance(t *testing.T) {
 // The histories recorded before the cancel-mode patch replay with it (spec §14.4, D46): none of them carries the
 // hire-mcp-cancel marker (no Update had a mode then), and each replays against the patched TaskLifecycle
 // (TestReplayRecordedHistories replays every file; this one names the pre-patch files, so a patch that changed what
-// they replay through fails here even if the recorded ones are re-recorded). The hire_ files are the patch's own.
+// they replay through fails here even if the recorded ones are re-recorded). The send_message_ files are the patch's own.
 func TestReplayHistoriesBeforeTheCancelMode(t *testing.T) {
 	files, err := filepath.Glob(filepath.Join("testdata", "histories", "*.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	marker := base64.StdEncoding.EncodeToString([]byte(`"` + changeHireMCPCancel + `"`))
+	marker := base64.StdEncoding.EncodeToString([]byte(`"` + changeSendMessageMCPCancel + `"`))
 	logger := tlog.NewStructuredLogger(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	n := 0
 	for _, f := range files {
-		if strings.HasPrefix(filepath.Base(f), "hire_") {
+		if strings.HasPrefix(filepath.Base(f), "send_message_") {
 			continue
 		}
 		b, err := os.ReadFile(f)

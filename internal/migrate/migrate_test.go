@@ -66,7 +66,7 @@ func applied(t *testing.T, m *migrate.Migrator) []int64 {
 	return v
 }
 
-// `migrate up` on an empty database creates schema kontra and kontra.goose_db_version and applies 0001 to 0008, in
+// `migrate up` on an empty database creates schema kontra and kontra.goose_db_version and applies 0001 to 0009, in
 // order; nothing lands in public.
 func TestUpOnEmptyDatabase(t *testing.T) {
 	dsn := pgtest.Database(t)
@@ -81,10 +81,10 @@ func TestUpOnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 8 {
-		t.Fatalf("Up = %v, want 0001 to 0008 applied", res)
+	if len(res) != 9 {
+		t.Fatalf("Up = %v, want 0001 to 0009 applied", res)
 	}
-	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql"} {
+	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql", "0009_caller_callee.sql"} {
 		r := res[i]
 		if r.Source.Version != int64(i+1) || r.Direction != "up" || r.Error != nil || r.Empty || !strings.HasSuffix(r.Source.Path, name) {
 			t.Errorf("Up[%d] = %v, want %s applied", i, r, name)
@@ -101,8 +101,8 @@ func TestUpOnEmptyDatabase(t *testing.T) {
 	if n := relations(t, c, "public"); n != 0 {
 		t.Errorf("%d relations in public, want 0 (D37)", n)
 	}
-	if got := applied(t, m); len(got) != 8 || got[0] != 1 || got[1] != 2 || got[2] != 3 || got[3] != 4 || got[4] != 5 || got[5] != 6 || got[6] != 7 || got[7] != 8 {
-		t.Errorf("applied = %v, want [1 2 3 4 5 6 7 8]", got)
+	if got := applied(t, m); len(got) != 9 || got[0] != 1 || got[1] != 2 || got[2] != 3 || got[3] != 4 || got[4] != 5 || got[5] != 6 || got[6] != 7 || got[7] != 8 || got[8] != 9 {
+		t.Errorf("applied = %v, want [1 2 3 4 5 6 7 8 9]", got)
 	}
 	if err := m.Check(ctx); err != nil {
 		t.Errorf("Check after up: %v", err)
@@ -122,12 +122,12 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st) != 8 {
-		t.Fatalf("Status on an empty database = %+v, want 0001 to 0008 pending", st)
+	if len(st) != 9 {
+		t.Fatalf("Status on an empty database = %+v, want 0001 to 0009 pending", st)
 	}
 	for i, s := range st {
 		if s.State != goose.StatePending || s.Source.Version != int64(i+1) {
-			t.Fatalf("Status on an empty database = %+v, want 0001 to 0008 pending", st)
+			t.Fatalf("Status on an empty database = %+v, want 0001 to 0009 pending", st)
 		}
 	}
 	if _, err := m.Up(ctx); err != nil {
@@ -137,10 +137,69 @@ func TestStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql"} {
-		if len(st) != 8 || st[i].State != goose.StateApplied || st[i].AppliedAt.IsZero() || !strings.HasSuffix(st[i].Source.Path, name) {
+	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql", "0009_caller_callee.sql"} {
+		if len(st) != 9 || st[i].State != goose.StateApplied || st[i].AppliedAt.IsZero() || !strings.HasSuffix(st[i].Source.Path, name) {
 			t.Fatalf("Status after up = %+v, want %s applied with a time", st, name)
 		}
+	}
+}
+
+// 0009 renames columns and rewrites what was stored under the old names (D363): a key's hire scope reads call, a
+// queued work item's owner.buyerId reads callerId, and a traffic row's seller_jwks reads service_jwks; its down gives
+// them back.
+func TestCallerCalleeRewritesStoredNames(t *testing.T) {
+	dsn := pgtest.Database(t)
+	c := connect(t, dsn)
+	m := open(t, dsn)
+	ctx := context.Background()
+	if _, err := m.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := m.Down(ctx); err != nil || res.Source.Version != 9 {
+		t.Fatalf("0009's Down = %v, %v", res, err)
+	}
+	if _, err := c.Exec(ctx, `set search_path to kontra;
+		insert into tenants (id, slug, kind) values ('01900000-0000-7000-8000-000000000001', 'default', 'team');
+		insert into services (tenant_id, name, kind, backend, source) values ('01900000-0000-7000-8000-000000000001', 'hello', 'a2a', '{"tunnel": {}}', 'config');
+		insert into api_keys (id, tenant_id, buyer_id, prefix, hash) values ('01900000-0000-7000-8000-0000000000c1',
+			'01900000-0000-7000-8000-000000000001', '01900000-0000-7000-8000-0000000000bb', 'kk_old', sha256('kk_old'));
+		insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version, snapshot, status_at)
+			values ('01900000-0000-7000-8000-0000000000aa', '01900000-0000-7000-8000-000000000001', 'hello', 'a2a',
+			'01900000-0000-7000-8000-0000000000bb', 'key:kk_old', 'api_key', 'ctx-1', 'submitted', 1, '{"id": "x"}', now());
+		insert into work_items (id, task_id, kind, payload) values ('01900000-0000-7000-8000-0000000000d1',
+			'01900000-0000-7000-8000-0000000000aa', 'execute',
+			'{"request":{},"owner":{"buyerId":"01900000-0000-7000-8000-0000000000bb","principal":"key:kk_old","via":"api_key"}}');
+		insert into a2a_exchanges (id, at, service, method, binding, bytes_in, bytes_out, duration_ms, http_status)
+			values ('01900000-0000-7000-8000-0000000000e1', now(), 'hello', 'seller_jwks', 'rest', 0, 0, 0, 200);
+		set search_path to public`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Up(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar[[]string](t, c, "select scopes from kontra.api_keys where prefix = 'kk_old'"); len(got) != 1 || got[0] != "call" {
+		t.Errorf("the stored key's scopes after 0009 = %v, want [call]", got)
+	}
+	if got := scalar[string](t, c, "select caller_id::text from kontra.api_keys where prefix = 'kk_old'"); got != "01900000-0000-7000-8000-0000000000bb" {
+		t.Errorf("the stored key's caller_id = %s", got)
+	}
+	if got := scalar[string](t, c, "select payload::text from kontra.work_items"); !strings.Contains(got, `"callerId": "01900000-0000-7000-8000-0000000000bb"`) || strings.Contains(got, "buyerId") {
+		t.Errorf("the queued work item after 0009 = %s", got)
+	}
+	if got := scalar[string](t, c, "select method from kontra.a2a_exchanges"); got != "service_jwks" {
+		t.Errorf("the traffic row's method after 0009 = %s", got)
+	}
+	if _, err := m.Down(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar[[]string](t, c, "select scopes from kontra.api_keys where prefix = 'kk_old'"); len(got) != 1 || got[0] != "hire" {
+		t.Errorf("the stored key's scopes after 0009's down = %v, want [hire]", got)
+	}
+	if got := scalar[string](t, c, "select payload::text from kontra.work_items"); !strings.Contains(got, `"buyerId": "01900000-0000-7000-8000-0000000000bb"`) || strings.Contains(got, "callerId") {
+		t.Errorf("the queued work item after 0009's down = %s", got)
+	}
+	if got := scalar[string](t, c, "select method from kontra.a2a_exchanges"); got != "seller_jwks" {
+		t.Errorf("the traffic row's method after 0009's down = %s", got)
 	}
 }
 
@@ -159,8 +218,42 @@ func TestDownThenUp(t *testing.T) {
 	}
 	afterUp := relations(t, c, "kontra")
 
-	// 0008: its down drops tasks.exposed_at and makes tasks_by_caller whole again, and nothing else.
+	// 0009: its down gives back the old names and the stored hire scope, and nothing else.
+	if _, err := c.Exec(ctx, `with t as (insert into kontra.tenants (id, slug, kind) values (gen_random_uuid(), 'm0009', 'team') returning id)
+		insert into kontra.api_keys (id, prefix, hash, name, tenant_id, caller_id)
+		select gen_random_uuid(), 'kk_0009test', sha256('kk_0009test'), 'k', t.id, gen_random_uuid() from t`); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar[[]string](t, c, "select scopes from kontra.api_keys where prefix = 'kk_0009test'"); len(got) != 1 || got[0] != "call" {
+		t.Fatalf("a new key's scopes at version 9 = %v, want [call]", got)
+	}
 	res, err := m.Down(ctx)
+	if err != nil || res.Source.Version != 9 || res.Direction != "down" {
+		t.Fatalf("0009's Down = %v, %v", res, err)
+	}
+	if got := scalar[[]string](t, c, "select scopes from kontra.api_keys where prefix = 'kk_0009test'"); len(got) != 1 || got[0] != "hire" {
+		t.Errorf("the key's scopes after 0009's down = %v, want [hire]", got)
+	}
+	for _, col := range [][2]string{{"api_keys", "buyer_id"}, {"tasks", "buyer_id"}, {"mcp_sessions", "buyer_id"}, {"calls", "buyer_id"},
+		{"tasks", "hired"}, {"tunnels", "hire_principal"}, {"services", "seller_keys"}} {
+		if !scalar[bool](t, c, "select exists (select 1 from information_schema.columns where table_schema = 'kontra' and table_name = $1 and column_name = $2)", col[0], col[1]) {
+			t.Errorf("0009's down did not give back %s.%s", col[0], col[1])
+		}
+	}
+	for _, ix := range []string{"api_keys_by_buyer", "calls_by_buyer", "tasks_by_buyer", "tasks_hired", "tasks_hired_by_message"} {
+		if !scalar[bool](t, c, "select to_regclass($1) is not null", "kontra."+ix) {
+			t.Errorf("0009's down did not give back index %s", ix)
+		}
+	}
+	if _, err := c.Exec(ctx, "delete from kontra.tenants where slug = 'm0009'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Check(ctx); !errors.Is(err, migrate.ErrSchemaNotCurrent) || !strings.Contains(err.Error(), "at version 8") {
+		t.Errorf("Check at version 8 = %v", err)
+	}
+
+	// 0008: its down drops tasks.exposed_at and makes tasks_by_caller whole again, and nothing else.
+	res, err = m.Down(ctx)
 	if err != nil || res.Source.Version != 8 || res.Direction != "down" {
 		t.Fatalf("0008's Down = %v, %v", res, err)
 	}
@@ -333,7 +426,7 @@ func TestDownThenUp(t *testing.T) {
 	}
 
 	res2, err := m.Up(ctx)
-	if err != nil || len(res2) != 8 {
+	if err != nil || len(res2) != 9 {
 		t.Fatalf("Up after down = %v, %v", res2, err)
 	}
 	if n := relations(t, c, "kontra"); n != afterUp {
@@ -360,10 +453,10 @@ func TestConcurrentUpAppliesOnce(t *testing.T) {
 		if errs[0] != nil || errs[1] != nil {
 			t.Fatalf("concurrent Up: %v / %v", errs[0], errs[1])
 		}
-		if n := len(results[0]) + len(results[1]); n != 8 {
-			t.Fatalf("concurrent Up applied %d migrations in total (%v, %v), want 8", n, results[0], results[1])
+		if n := len(results[0]) + len(results[1]); n != 9 {
+			t.Fatalf("concurrent Up applied %d migrations in total (%v, %v), want 9", n, results[0], results[1])
 		}
-		if got := applied(t, a); len(got) != 8 {
+		if got := applied(t, a); len(got) != 9 {
 			t.Fatalf("applied = %v", got)
 		}
 	}
@@ -400,7 +493,7 @@ func TestUpWaitsForTheLock(t *testing.T) {
 	}
 	select {
 	case r := <-done:
-		if r.err != nil || len(r.res) != 8 {
+		if r.err != nil || len(r.res) != 9 {
 			t.Fatalf("Up after the lock was released = %v, %v", r.res, r.err)
 		}
 	case <-time.After(15 * time.Second):
@@ -408,7 +501,7 @@ func TestUpWaitsForTheLock(t *testing.T) {
 	}
 }
 
-// Check fails at version 0 and passes at 8, the latest; it is read-only, and it refuses a database ahead of
+// Check fails at version 0 and passes at 9, the latest; it is read-only, and it refuses a database ahead of
 // the binary.
 func TestCheck(t *testing.T) {
 	dsn := pgtest.Database(t)
@@ -423,16 +516,16 @@ func TestCheck(t *testing.T) {
 	if scalar[bool](t, c, "select exists (select 1 from pg_namespace where nspname = 'kontra')") {
 		t.Error("Check created schema kontra")
 	}
-	if m.Latest() != 8 {
-		t.Errorf("Latest = %d, want 8", m.Latest())
+	if m.Latest() != 9 {
+		t.Errorf("Latest = %d, want 9", m.Latest())
 	}
 	if _, err := m.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Check(ctx); err != nil {
-		t.Errorf("Check at version 8 = %v", err)
+		t.Errorf("Check at version 9 = %v", err)
 	}
-	if _, err := c.Exec(ctx, "insert into kontra.goose_db_version (version_id, is_applied) values (9, true)"); err != nil {
+	if _, err := c.Exec(ctx, "insert into kontra.goose_db_version (version_id, is_applied) values (10, true)"); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Check(ctx); !errors.Is(err, migrate.ErrSchemaNotCurrent) || !strings.Contains(err.Error(), "does not know") {
@@ -471,13 +564,13 @@ func TestM4ScansTasksOnce(t *testing.T) {
 	if _, err := m.Up(ctx); err != nil {
 		t.Fatal(err)
 	}
-	for range 6 { // 0008, 0007, 0006, 0005, 0004, then 0003
+	for range 7 { // 0009, 0008, 0007, 0006, 0005, 0004, then 0003
 		if _, err := m.Down(ctx); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if got := applied(t, m); len(got) != 2 || got[1] != 2 {
-		t.Fatalf("applied after six downs = %v, want [1 2]", got)
+		t.Fatalf("applied after seven downs = %v, want [1 2]", got)
 	}
 	b, err := fs.ReadFile(migrations.FS, "0003_m4.sql")
 	if err != nil {

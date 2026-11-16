@@ -199,7 +199,7 @@ func TestScrubMessage(t *testing.T) {
 }
 
 func TestMergeMeta(t *testing.T) {
-	out, err := MergeMeta([]byte(`{"name":"a","_meta":{"sh.kontra/note":"seller","k":1}}`),
+	out, err := MergeMeta([]byte(`{"name":"a","_meta":{"sh.kontra/note":"service","k":1}}`),
 		map[string]json.RawMessage{"sh.kontra/note": json.RawMessage(`"operator"`), "sh.kontra/z": json.RawMessage(`1`)})
 	if err != nil || string(out) != `{"name":"a","_meta":{"k":1,"sh.kontra/note":"operator","sh.kontra/z":1}}` {
 		t.Fatalf("%s %v", out, err)

@@ -50,8 +50,8 @@ func TestLocalProfileEnrollsWithoutCredentials(t *testing.T) {
 
 	// A node that only calls agents.
 	k4 := newTestKey(t)
-	if d := e.mustAdmit(k4, hello(k4)); len(d.Served) != 0 || d.HirePrincipal != "node:"+k4.kid {
-		t.Fatalf("hire-only: %+v", d)
+	if d := e.mustAdmit(k4, hello(k4)); len(d.Served) != 0 || d.CallerPrincipal != "node:"+k4.kid {
+		t.Fatalf("call-only: %+v", d)
 	}
 	e.verifyAudit()
 }

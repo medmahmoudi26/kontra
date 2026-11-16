@@ -114,17 +114,17 @@ func (le *lifecycleEnv) start(inline *a2a.PushConfig) (uuid.UUID, string) {
 		wid = uuid.Must(uuid.NewV7())
 	)
 	if err := pgx.BeginFunc(ctx, le.pool, func(tx pgx.Tx) error {
-		id = le.newTaskTx(tx, buyerA)
+		id = le.newTaskTx(tx, callerA)
 		if inline != nil {
 			var err error
-			if cid, _, err = le.cs.SaveInline(ctx, tx, id, buyerA, inline); err != nil {
+			if cid, _, err = le.cs.SaveInline(ctx, tx, id, callerA, inline); err != nil {
 				return err
 			}
 		}
 		msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hello"))
 		msg.TaskID = a2a.TaskID(id.String())
 		return le.log.InsertWorkItem(ctx, tx, store.WorkItem{ID: wid, TaskID: id, Kind: store.WorkExecute,
-			Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, Owner: buyerA}})
+			Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, Owner: callerA}})
 	}); err != nil {
 		le.t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestStatusesWithinOneMillisecondAreDistinctSnapshots(t *testing.T) {
 	e := newEnv(t)
 	frozen := time.Now()
 	e.now = func() time.Time { return frozen }
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	for range 15 {
 		e.status(id, store.StateWorking)
 	}

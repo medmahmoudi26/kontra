@@ -16,12 +16,12 @@ import (
 )
 
 // sweepSealingEvery is how often the node drops the job state and the per-job keys whose time has passed (a hosted
-// job 7 days after its last exchange, a hired job's key after its kontra.keyRetainUntil).
+// job 7 days after its last exchange, a called job's key after its kontra.keyRetainUntil).
 const sweepSealingEvery = time.Hour
 
 // setupSealing makes the node's sealing (spec/ext-sealed.md §5, §7; M3 WP-08): the hosting side, whose durable job
 // state is under ~/.kontra/hosted/<gate host>/ and which opens with every key of the identity file (a rotated key
-// still opens during its overlap, §12), and the hiring side, whose per-job keys are under ~/.kontra/jobs/<gate host>/
+// still opens during its overlap, §12), and the calling side, whose per-job keys are under ~/.kontra/jobs/<gate host>/
 // and whose pins are ~/.kontra/pins.
 func (n *Node) setupSealing(gate *url.URL, origin string, log *slog.Logger) error {
 	home := n.cfg.Home
@@ -67,15 +67,15 @@ func (n *Node) setupSealing(gate *url.URL, origin string, log *slog.Logger) erro
 	if err != nil {
 		return err
 	}
-	hs, err := sealing.NewHiring(sealing.HiringConfig{
+	hs, err := sealing.NewCalling(sealing.CallingConfig{
 		Jobs: jobs, Pins: ps, Opts: pins.Options{PinRecipients: n.cfg.PinRecipients, Accept: n.cfg.AcceptChange},
-		Gate: origin, Card: n.hire.Card, Out: n.cfg.Err,
+		Gate: origin, Card: n.call.Card, Out: n.cfg.Err,
 	}, log)
 	if err != nil {
 		return err
 	}
-	n.hiringSeal = hs
-	n.hire.SetSealing(hs)
+	n.callingSeal = hs
+	n.call.SetSealing(hs)
 	return nil
 }
 
@@ -86,7 +86,7 @@ func (n *Node) sweepSealing(now time.Time) {
 			n.logger.Warn("sealing: the hosted job state was not swept", "err", err)
 		}
 	}
-	if n.hiringSeal != nil {
-		n.hiringSeal.Sweep()
+	if n.callingSeal != nil {
+		n.callingSeal.Sweep()
 	}
 }

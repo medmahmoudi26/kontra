@@ -712,8 +712,8 @@ func (r *run) references(ctx context.Context) (map[a2a.TaskID]a2a.TaskID, error)
 		               where a.task_id = t.id and a.upstream_task_id is not null
 		                 and `+store.SameBackend("$6", "$7")+`
 		               order by a.n desc limit 1) a on true
-		where t.id = any($1::uuid[]) and t.tenant_id = $2 and t.service = $3 and t.buyer_id = $4 and t.context_id = $5`,
-		want, r.d.svc.TenantID, r.d.svc.Name, r.d.task.Owner.BuyerID, r.d.task.ContextID, string(r.attempt.Backend), r.attempt.TunnelSession)
+		where t.id = any($1::uuid[]) and t.tenant_id = $2 and t.service = $3 and t.caller_id = $4 and t.context_id = $5`,
+		want, r.d.svc.TenantID, r.d.svc.Name, r.d.task.Owner.CallerID, r.d.task.ContextID, string(r.attempt.Backend), r.attempt.TunnelSession)
 	if err != nil {
 		return nil, fmt.Errorf("relay: referenced tasks: %w", err)
 	}
@@ -1041,7 +1041,7 @@ func (r *run) awaitTask(ctx context.Context) *a2a.Task {
 // SPEC-CONFLICT (D98): §6.4's table fails a task at an upstream protocol error after its first upstream id, while
 // D81 resends an undelivered follow-up and "then continues as a re-attach". An upstream that already took
 // the follow-up refuses the duplicate: a2a-go while the first copy runs, and any upstream once the task it
-// finished is terminal. Failing then would lose the result of a turn the seller is working on or finished,
+// finished is terminal. Failing then would lose the result of a turn the service is working on or finished,
 // which D81 exists to prevent; following an upstream that never took the follow-up would wait on its
 // input-required until the task deadline. The closest faithful behaviour: the refusal fails the task only
 // when, for GetTaskGrace, the upstream task neither moves from the projection's input-required nor shows

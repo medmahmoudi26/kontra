@@ -9,7 +9,7 @@
 // 2.x pinned to 2026-07-28 (server/discover, no session) and declaring URL and form elicitation without the tasks
 // extension, as Claude Code does. The bearer is $KONTRA_E2E_MCP_KEY. input.json is {calls, check}: calls a list of
 // {tool, arguments}, where an argument "$taskId" is the previous result's structuredContent.taskId; check {good, bad},
-// values the client's own validator is asked about against hire's outputSchema (good ones it must accept, bad ones
+// values the client's own validator is asked about against call's outputSchema (good ones it must accept, bad ones
 // refuse: the control that the validator the calls went through is live). Each line of stdout is one JSON object:
 // the tools listed, each call's {result} or {error, code}, then {check: {good: [valid…], bad: [valid…]}}.
 import { readFileSync } from 'node:fs';
@@ -47,7 +47,7 @@ for (const call of input.calls) {
     out({ error: String(e?.message ?? e), code: e?.code ?? null });
   }
 }
-const hire = listed.tools.find((t) => t.name === 'hire');
-const validate = client._jsonSchemaValidator.getValidator(hire.outputSchema);
+const call = listed.tools.find((t) => t.name === 'call');
+const validate = client._jsonSchemaValidator.getValidator(call.outputSchema);
 out({ check: { good: input.check.good.map((v) => validate(v).valid), bad: input.check.bad.map((v) => validate(v).valid) } });
 await client.close();

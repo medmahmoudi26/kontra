@@ -180,7 +180,7 @@ func (s *Store) synthesizedFailure(taskID a2a.TaskID, ev a2a.Event, st a2a.TaskS
 }
 
 // Get returns the projection and its version, scoped to the caller. A malformed id (checked before any
-// query), an unknown id and a task of another buyer are all a2a.ErrTaskNotFound (spec §4).
+// query), an unknown id and a task of another caller are all a2a.ErrTaskNotFound (spec §4).
 func (s *Store) Get(ctx context.Context, taskID a2a.TaskID) (*taskstore.StoredTask, error) {
 	id, err := ids.ParseTaskID(string(taskID))
 	if err != nil {
@@ -196,8 +196,8 @@ func (s *Store) Get(ctx context.Context, taskID a2a.TaskID) (*taskstore.StoredTa
 		principal string
 	)
 	err = s.db.QueryRow(ctx, `select snapshot, version, principal from kontra.tasks
-		where id = $1 and tenant_id = $2 and service = $3 and buyer_id = $4`,
-		id, s.svc.TenantID, s.svc.Name, o.BuyerID).Scan(&snap, &version, &principal)
+		where id = $1 and tenant_id = $2 and service = $3 and caller_id = $4`,
+		id, s.svc.TenantID, s.svc.Name, o.CallerID).Scan(&snap, &version, &principal)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound()
 	}

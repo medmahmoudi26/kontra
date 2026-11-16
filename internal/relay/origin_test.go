@@ -53,7 +53,7 @@ func TestOriginStreamed(t *testing.T) {
 	_, b, info := newAgent(t, spoofer(2), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "go"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "go"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
 		t.Fatalf("result %+v", res)
 	}
@@ -92,7 +92,7 @@ func TestOriginMessageConverted(t *testing.T) {
 	})
 	_, b, info := newAgent(t, exec, agentConfig{})
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.dispatch(context.Background(), id, 1, wid, false)
 	if got := e.origins(id); fmt.Sprint(got) != "[status callee·Message→TaskStatusUpdateEvent@SendMessage]" {
 		t.Errorf("origins %v", got)
@@ -113,7 +113,7 @@ func TestOriginPolled(t *testing.T) {
 	})
 	_, b, info := newAgent(t, exec, agentConfig{})
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.dispatch(context.Background(), id, 1, wid, false)
 	got := e.origins(id)
 	if len(got) < 2 || got[0] != "status callee·Task→TaskStatusUpdateEvent@SendMessage" ||
@@ -127,7 +127,7 @@ func TestOriginPolled(t *testing.T) {
 func TestOriginGateWrites(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	ctx := context.Background()
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	since := time.Now()
 	if _, err := e.log.LogReconnectWait(ctx, uid(t, id), since, since.Add(15*time.Minute), "waiting"); err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestOriginGateWrites(t *testing.T) {
 	if got := e.origins(id); fmt.Sprint(got) != "[status gate·TaskStatusUpdateEvent status gate·TaskStatusUpdateEvent]" {
 		t.Errorf("origins %v", got)
 	}
-	id2, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id2, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	if _, err := e.log.WriteTerminal(ctx, store.TerminalWrite{TaskID: uid(t, id2), State: store.StateCompleted, Text: "the agent ended it"}); err != nil {
 		t.Fatal(err)
 	}
@@ -155,11 +155,11 @@ func TestOriginFollowUp(t *testing.T) {
 	_, b, info := newAgent(t, askingAgent(), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 		t.Fatalf("turn 1: %+v", res)
 	}
-	wid2 := e.followUp(id, buyerA, "the blue one")
+	wid2 := e.followUp(id, callerA, "the blue one")
 	ex := uuid.Must(uuid.NewV7()).String()
 	e.exec(`update kontra.work_items set payload = jsonb_set(payload::jsonb, '{origin}', $2::jsonb)::json where id = $1`, wid2,
 		`{"actor":"caller","type":"SendStreamingMessage","method":"SendStreamingMessage","exchange_id":"`+ex+`"}`)

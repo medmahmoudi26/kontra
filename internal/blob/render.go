@@ -92,15 +92,15 @@ func Externalize(ctx context.Context, s Store, tenant, task uuid.UUID, p *a2a.Pa
 type keepKey struct{}
 
 // WithKeepRefs marks ctx as a request whose answers keep kontra-blob:<ref> (spec/relay.md §10.4: "to nodes"):
-// one that arrived on a hiring node's stream (spec/tunnel.md §9; M3 WP-03). Every Renderer method passes what it
+// one that arrived on a calling node's stream (spec/tunnel.md §9; M3 WP-03). Every Renderer method passes what it
 // is given unchanged under such a context.
 func WithKeepRefs(ctx context.Context) context.Context {
 	return context.WithValue(ctx, keepKey{}, true)
 }
 
 // ForCaller undoes WithKeepRefs: what is rendered on the returned context is a caller's, presigned GETs. The gate's
-// own /mcp renders a hire task's parts so for every reader, a request that arrived on a hiring stream included: its
-// answer is an MCP result, which a hiring node relays as it is (it inlines the parts of A2A answers only), so its
+// own /mcp renders a send_message task's parts so for every reader, a request that arrived on a calling stream included: its
+// answer is an MCP result, which a calling node relays as it is (it inlines the parts of A2A answers only), so its
 // client is a caller and the node fetches nothing from it (spec/relay.md §10.4, §12.2; D56 holds; D303).
 func ForCaller(ctx context.Context) context.Context {
 	return context.WithValue(ctx, keepKey{}, false)
@@ -113,7 +113,7 @@ func KeepRefs(ctx context.Context) bool { v, _ := ctx.Value(keepKey{}).(bool); r
 // out of the gate uses (a2a-go's answers through the relay's interceptors, the gate's SSE writer, push
 // deliveries, the dispatch to a direct backend). A url part kontra-blob:<ref> becomes a presigned GET valid
 // PresignTTL, for callers, push receivers and direct backends; it stays kontra-blob:<ref> for a node (a tunnel
-// dispatch, which does not render, and a request that arrived on a hiring stream: WithKeepRefs).
+// dispatch, which does not render, and a request that arrived on a calling stream: WithKeepRefs).
 //
 // A ref is resolved only through the blobs table, and rendered only when its row names the task being
 // rendered (D181). A ref without a row, or whose row names another task, is passed as kontra-blob:<ref> (a

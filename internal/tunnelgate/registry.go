@@ -144,7 +144,7 @@ var errClosing = errors.New("tunnelgate: the replica is shutting down its tunnel
 //     superseded one: it inserts nothing); bindings revoked since the admission leave the served set; the
 //     rows of the key's older sessions whose replica is not draining are deleted (superseded), with NOTIFY
 //     kontra_tunnel 'session:<id>' for those of other replicas; and the tunnels row (session_id, key_id,
-//     tenant_id, replica_id, services, hire_principal, cli_version) is inserted.
+//     tenant_id, replica_id, services, caller_principal, cli_version) is inserted.
 //  5. After the commit: s is registered (Get finds it) at once, since its row is a candidate on every replica from
 //     the commit on; then the superseded sessions of this replica are closed, whatever became of s meanwhile
 //     (their rows are gone; closing one closes its pinned MCP sessions in Postgres, relay.md §11.2, which s's
@@ -424,12 +424,12 @@ func (r *Registry) insert(ctx context.Context, s *Session) ([]uuid.UUID, error) 
 		if cli == "" {
 			cli = "unknown"
 		}
-		var hire *string
-		if s.HirePrincipal != "" {
-			hire = &s.HirePrincipal
+		var call *string
+		if s.CallerPrincipal != "" {
+			call = &s.CallerPrincipal
 		}
-		if _, err := tx.Exec(ctx, `insert into kontra.tunnels (session_id, key_id, tenant_id, replica_id, services, hire_principal, cli_version)
-			values ($1, $2, $3, $4, $5::text[], $6, $7)`, s.ID, s.KeyID, s.TenantID, r.cfg.ReplicaID, s.Served(), hire, cli); err != nil {
+		if _, err := tx.Exec(ctx, `insert into kontra.tunnels (session_id, key_id, tenant_id, replica_id, services, caller_principal, cli_version)
+			values ($1, $2, $3, $4, $5::text[], $6, $7)`, s.ID, s.KeyID, s.TenantID, r.cfg.ReplicaID, s.Served(), call, cli); err != nil {
 			return err
 		}
 		return nil

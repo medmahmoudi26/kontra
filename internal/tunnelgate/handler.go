@@ -71,13 +71,13 @@ type HandlerConfig struct {
 	// keepalive must stay off (D33). Either way each session gets its own copy, whose Logger is the
 	// session's (its LogOutput and Logger are replaced), so yamux's lines say which session they are about.
 	Yamux *yamux.Config
-	// NodeStreams serves the streams nodes open (hiring §9, blobs §8.3). Nil serves them with a NodeStreams
-	// that has no router and no bucket: every hiring request is 404 and every ref not_found (the e2e FakeGate's
+	// NodeStreams serves the streams nodes open (calling §9, blobs §8.3). Nil serves them with a NodeStreams
+	// that has no router and no bucket: every calling request is 404 and every ref not_found (the e2e FakeGate's
 	// default); the in-flight cap is the same.
 	NodeStreams *NodeStreams
-	// AnonymousHiringStreams is an anonymous session's cap of node-opened streams in flight (tunnel.anonymous's
-	// hiring_streams, spec/tunnel.md §6.2, §14, D182); tunnel.GateMaxInflightAnonymous when zero.
-	AnonymousHiringStreams int
+	// AnonymousCallingStreams is an anonymous session's cap of node-opened streams in flight (tunnel.anonymous's
+	// calling_streams, spec/tunnel.md §6.2, §14, D182); tunnel.GateMaxInflightAnonymous when zero.
+	AnonymousCallingStreams int
 	// OnAnonymousExpiry runs when an anonymous session this replica holds reaches its end, after the session was
 	// told {"t": "revoked"} and closed (the gate's sweeper ends its tenant at once rather than at its next pass).
 	// Nil does nothing.
@@ -415,18 +415,18 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 	}
 	ns := h.cfg.NodeStreams
 	s := &Session{
-		ID:            a.session,
-		KeyID:         dec.Key.KeyID,
-		TenantID:      dec.Key.TenantID,
-		Tenant:        dec.Key.Tenant,
-		HirePrincipal: dec.HirePrincipal,
-		CLIVersion:    a.hello.Agent,
-		NodeName:      a.hello.Name,
-		mux:           mux,
-		served:        make(map[string]string, len(dec.Served)),
-		control:       control,
-		hire:          dec.Hire,
-		hiring:        ns,
+		ID:              a.session,
+		KeyID:           dec.Key.KeyID,
+		TenantID:        dec.Key.TenantID,
+		Tenant:          dec.Key.Tenant,
+		CallerPrincipal: dec.CallerPrincipal,
+		CLIVersion:      a.hello.Agent,
+		NodeName:        a.hello.Name,
+		mux:             mux,
+		served:          make(map[string]string, len(dec.Served)),
+		control:         control,
+		call:            dec.Call,
+		calling:         ns,
 	}
 	for _, sv := range dec.Served {
 		s.served[sv.Name] = sv.Kind
@@ -434,15 +434,15 @@ func (h *Handler) serve(c *websocket.Conn, a *admitted, remote string, log *slog
 	limit := ns.limit()
 	if dec.Anonymous != nil {
 		s.expiresAt = dec.Anonymous.ExpiresAt
-		// An anonymous session's hiring streams take tunnel.anonymous's hiring_streams (§6.2, §14, D182).
+		// An anonymous session's calling streams take tunnel.anonymous's calling_streams (§6.2, §14, D182).
 		limit = tunnel.GateMaxInflightAnonymous
-		if h.cfg.AnonymousHiringStreams > 0 {
-			limit = h.cfg.AnonymousHiringStreams
+		if h.cfg.AnonymousCallingStreams > 0 {
+			limit = h.cfg.AnonymousCallingStreams
 		}
 	}
-	// The hiring API key is watched by every re-read of the revocation cache while the session lives (§12).
-	if s.hire != nil && ns.Keys != nil {
-		defer ns.Keys.Hold(*s.hire)()
+	// The calling API key is watched by every re-read of the revocation cache while the session lives (§12).
+	if s.call != nil && ns.Keys != nil {
+		defer ns.Keys.Hold(*s.call)()
 	}
 
 	go acceptNodeStreams(ctx, s, mux, ns, limit, log)

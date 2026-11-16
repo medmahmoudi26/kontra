@@ -18,12 +18,12 @@ import (
 func TestSnapshotAtEqualsProjection(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
+	ctx := asOwner(context.Background(), callerA)
 	seen := map[string]int{} // kinds folded, and kinds after the terminal row, across every sequence
 	for seed := uint64(1); seed <= 8; seed++ {
 		t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(seed, 0x6b6f6e747261))
-			task := e.newTask(e.svc, buyerA, "", "start")
+			task := e.newTask(e.svc, callerA, "", "start")
 			id := uid(t, task.ID)
 			projections := map[int64]string{}
 			record := func() {
@@ -49,7 +49,7 @@ func TestSnapshotAtEqualsProjection(t *testing.T) {
 						// A message row after the terminal row, as an earlier release's review window wrote
 						// one (D351): the store no longer appends it, so it is written as that release left it;
 						// logs that hold one still fold.
-						msg := workPayload(task, fmt.Sprintf("review %d", step), buyerA).Request.Message
+						msg := workPayload(task, fmt.Sprintf("review %d", step), callerA).Request.Message
 						row, err := e.log.Load(ctx, id)
 						if err != nil {
 							t.Fatal(err)

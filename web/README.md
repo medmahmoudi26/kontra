@@ -34,7 +34,7 @@ that draws and answers an agent's own form on the thread (the A2A samples' form 
 `input_schema`); a first message is text, or the card's AgentStack initial form. `api.js`, `app.js`, `main.js`,
 `nav.js` and `routes.js` were rewritten for the gate's console API, and `views/{tasks,contexts,traffic,calls,
 services}.js` are this repository's own list views. `js/ap2.js` (AP2 v0.2.0 data parts, classified by the keys
-`examples/sellers/ap2-merchant` emits and decoded for display, never verified) and `views/ap2.js` (their cards) are
+`examples/agents/ap2-merchant` emits and decoded for display, never verified) and `views/ap2.js` (their cards) are
 new here too, and so are, for the A2A wire, `views/{contexts,exchange,playground,wire}.js` (`contexts.js` replaces
 `conversations.js`; the Cards page, `views/agents.js`, compares the two cards at `#/cards/<service>`) and the wire model
 in `js/taskevents.js` (`wireOf`, `wireOfExchange`, `routingOf`). The playground's A2A calls go through `api.js` (`a2a`)

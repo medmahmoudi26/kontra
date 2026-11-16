@@ -20,7 +20,7 @@ import (
 
 // resendRig is the relay over the real lifecycle (Temporal, Postgres) for one service, as the gate wires it: the
 // interceptors (with Admission admit, and the service's work queue as their StartReissuer), the Temporal-backed work
-// queue, the workers, and a seller that asks for input once.
+// queue, the workers, and a service that asks for input once.
 type resendRig struct {
 	t      *testing.T
 	log    *store.Log
@@ -32,7 +32,7 @@ type resendRig struct {
 	deps   HandlerDeps
 	admit  hooks.Admission
 	queues lifecycle.QueueOptions
-	// backends serves the seller's backend and card Info to dispatch (a test may change what the card declares).
+	// backends serves the service's backend and card Info to dispatch (a test may change what the card declares).
 	backends *staticBackends
 }
 
@@ -116,7 +116,7 @@ func resendRequest(id, text string) *a2a.SendMessageRequest {
 // send is a blocking SendMessage on h bounded by 10 s, returning the task and how long it took.
 func (r *resendRig) send(h a2asrv.RequestHandler, what string, req *a2a.SendMessageRequest) (*a2a.Task, time.Duration) {
 	r.t.Helper()
-	cctx, cancel := context.WithTimeout(asCaller(buyerA), 10*time.Second)
+	cctx, cancel := context.WithTimeout(asCaller(callerA), 10*time.Second)
 	defer cancel()
 	start := time.Now()
 	res, err := h.SendMessage(cctx, req)
@@ -134,7 +134,7 @@ func (r *resendRig) send(h a2asrv.RequestHandler, what string, req *a2a.SendMess
 // TestBlockingResendAtTurnEnd (D290; found by the pinned A2A TCK in M4 WP-02, whose message ids are per session,
 // so its prerequisite input-required tasks after the first are resends): a blocking SendMessage that repeats a
 // request whose task already stands at input-required is answered at once with that task, as it stands (spec §9,
-// §15), instead of waiting at the log's tail for a turn that ended before it. The seller sees the message once; the
+// §15), instead of waiting at the log's tail for a turn that ended before it. The service sees the message once; the
 // same messageId with another request is a new task; a resend of the task once it completed is answered completed.
 // Before the fix the second SendMessage ran into its 10 s deadline.
 func TestBlockingResendAtTurnEnd(t *testing.T) {
@@ -158,7 +158,7 @@ func TestBlockingResendAtTurnEnd(t *testing.T) {
 		}
 	}
 	if sent := r.agent.sentMessages(t); len(sent) != 1 {
-		t.Fatalf("the seller received %d messages, want 1: a resend is never dispatched again", len(sent))
+		t.Fatalf("the service received %d messages, want 1: a resend is never dispatched again", len(sent))
 	}
 
 	// The same messageId with another request is a new task (spec §15: the request hash is the key too).
@@ -178,7 +178,7 @@ func TestBlockingResendAtTurnEnd(t *testing.T) {
 		t.Fatalf("a resend of the completed task: %s %s after %v", again.ID, again.Status.State, took.Round(time.Millisecond))
 	}
 	if sent := r.agent.sentMessages(t); len(sent) != 3 {
-		t.Errorf("the seller received %d messages, want 3 (two first turns and one follow-up)", len(sent))
+		t.Errorf("the service received %d messages, want 3 (two first turns and one follow-up)", len(sent))
 	}
 }
 

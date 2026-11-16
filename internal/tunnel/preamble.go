@@ -13,7 +13,7 @@ type Op string
 
 // Operations.
 const (
-	OpHTTP    Op = "http"    // one HTTP/1.1 exchange for one service (gate-opened: hosting; node-opened: hiring, M3)
+	OpHTTP    Op = "http"    // one HTTP/1.1 exchange for one service (gate-opened: hosting; node-opened: calling, M3)
 	OpControl Op = "control" // the control stream, once per session, the first stream the gate opens (§13)
 	OpBlob    Op = "blob"    // a node-opened blob fetch (§8.3, M3)
 )

@@ -90,7 +90,7 @@ func (e *pgEnv) mcpTask(t *testing.T, lc *Client) uuid.UUID {
 	svc := store.ServiceRef{TenantID: e.svc.TenantID, Tenant: e.svc.Tenant, Name: "research", Kind: "mcp",
 		Timeout: time.Hour, Retries: 2, Retention: 7 * 24 * time.Hour}
 	id := uuid.Must(uuid.NewV7())
-	nt, err := store.NewMCPTask(id, svc, buyer, nil, nil)
+	nt, err := store.NewMCPTask(id, svc, caller, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func (e *pgEnv) mcpTask(t *testing.T, lc *Client) uuid.UUID {
 	work := &store.MCPWork{Request: []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"research","task":{}}}`),
 		Tool: "research", RequestID: json.RawMessage(`7`), Version: "2025-11-25", Session: strings.Repeat("ab", 32)}
 	if err := e.log.InsertWorkItem(ctx, nil, store.WorkItem{ID: wid, TaskID: id, Kind: store.WorkExecute,
-		Payload: store.WorkPayload{Owner: buyer, MCP: work}}); err != nil {
+		Payload: store.WorkPayload{Owner: caller, MCP: work}}); err != nil {
 		t.Fatal(err)
 	}
 	in := Input{TaskID: id.String(), TimeoutSeconds: 3600, Retries: 2, Hooks: HooksSnapshot{LifecycleQueue: QueueLifecycle}, Protocol: ProtocolMCP}
@@ -190,7 +190,7 @@ func TestMCPTaskActivities(t *testing.T) {
 		values ($1, 'research', 'mcp', '{"mcp": {"url": "http://127.0.0.1:1"}}', 'config', 3600, 2, 'durable')`, e.svc.TenantID)
 	svc := store.ServiceRef{TenantID: e.svc.TenantID, Tenant: e.svc.Tenant, Name: "research", Kind: "mcp"}
 	id := uuid.Must(uuid.NewV7())
-	nt, err := store.NewMCPTask(id, svc, buyer,
+	nt, err := store.NewMCPTask(id, svc, caller,
 		map[string]any{"kontra.op.hold": "h-1", "caller.key": "x"}, map[string]any{"sh.kontra/note": "1 USD"})
 	if err != nil {
 		t.Fatal(err)

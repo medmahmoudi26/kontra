@@ -21,7 +21,7 @@ func TestReview4CallStreamIsNotResumable(t *testing.T) {
 	e := newEnv(t)
 	r := e.replica("a", replicaOpts{})
 	e.service("ev", u, nil)
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	endpoint := r.url + "/mcp/ev"
 	c.initialize(endpoint)
@@ -45,7 +45,7 @@ func TestReview4CallStreamIsNotResumable(t *testing.T) {
 }
 
 // r4-relay-1 (D265), the GET half: an upstream that answers a resumed GET with a response (a replayed call's, or a
-// response a seller puts there so that the client takes it while the POST's stream is metered another): the GET
+// response a service puts there so that the client takes it while the POST's stream is metered another): the GET
 // stream reaches the client up to that response, never the response.
 func TestReview4GETCarriesNoResponse(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +78,7 @@ func TestReview4GETCarriesNoResponse(t *testing.T) {
 	e := newEnv(t)
 	r := e.replica("a", replicaOpts{})
 	e.service("up", up.URL+"/mcp", nil)
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	endpoint := r.url + "/mcp/up"
 	c.initialize(endpoint)

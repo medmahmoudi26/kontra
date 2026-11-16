@@ -26,16 +26,16 @@ func (a *Authenticator) SetA2AVerifier(v A2AVerifier) { a.a2a = v }
 // (LooksLikeJWT) is verified as a token of the configured issuer and never looked up as an API key; any other bearer
 // is an API key, as on every route. Without one, a JWT is looked up as an API key and refused, as before M5. A request
 // a node opened takes its session's principal, as Authenticate gives it.
-func (a *Authenticator) AuthenticateA2A(r *http.Request, anonymousBuyer uuid.UUID) (p Principal, authenticated bool, err error) {
+func (a *Authenticator) AuthenticateA2A(r *http.Request, anonymousCaller uuid.UUID) (p Principal, authenticated bool, err error) {
 	if a.a2a == nil || a.local {
-		return a.Authenticate(r, anonymousBuyer)
+		return a.Authenticate(r, anonymousCaller)
 	}
-	if _, ok := HireSourceFrom(r.Context()); ok {
-		return a.Authenticate(r, anonymousBuyer)
+	if _, ok := CallSourceFrom(r.Context()); ok {
+		return a.Authenticate(r, anonymousCaller)
 	}
 	token, present, err := BearerToken(r.Header)
 	if !present || err != nil || !LooksLikeJWT(token) {
-		return a.Authenticate(r, anonymousBuyer)
+		return a.Authenticate(r, anonymousCaller)
 	}
 	if p, err = a.a2a.VerifyA2A(r.Context(), token); err != nil {
 		return Principal{}, false, err

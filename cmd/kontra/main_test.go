@@ -61,7 +61,7 @@ func TestSubcommands(t *testing.T) {
 		{[]string{"seal", "--help"}, 0, "usage:\n  kontra seal --service <service URL>", ""},
 		{[]string{"seal", "-h"}, 0, "\n  kontra seal --open <part.json>\n", ""},
 		{[]string{"seal", "--bogus"}, 2, "", "usage:\n  kontra seal --service"},
-		{[]string{"--help"}, 0, "kid:<kid> for a seller signature", ""},
+		{[]string{"--help"}, 0, "kid:<kid> for a service signature", ""},
 	} {
 		var stdout, stderr bytes.Buffer
 		if code := run(ctx, c.args, &stdout, &stderr); code != c.code ||
@@ -310,9 +310,9 @@ type admitAnonymous struct {
 func (a admitAnonymous) Admit(_ context.Context, req enroll.Request) (*enroll.Decision, error) {
 	a.asked <- req.Hello.Anonymous
 	d := &enroll.Decision{
-		Key:           enroll.Key{KeyID: req.Hello.KID, TenantID: uuid.Must(uuid.NewV7()), Tenant: "anon-0123456789abcdef", PubKey: req.PubKey},
-		HirePrincipal: "node:" + req.Hello.KID,
-		Anonymous:     &enroll.Anonymous{ExpiresAt: a.end},
+		Key:             enroll.Key{KeyID: req.Hello.KID, TenantID: uuid.Must(uuid.NewV7()), Tenant: "anon-0123456789abcdef", PubKey: req.PubKey},
+		CallerPrincipal: "node:" + req.Hello.KID,
+		Anonymous:       &enroll.Anonymous{ExpiresAt: a.end},
 	}
 	for _, s := range req.Hello.Services {
 		d.Served = append(d.Served, tunnel.WelcomeService{Kind: s.Kind, Name: s.Name, URL: "https://gate.example/agents/anon-0123456789abcdef/" + s.Name})

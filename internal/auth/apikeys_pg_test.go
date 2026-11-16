@@ -53,7 +53,7 @@ func (e *pgEnv) mint(t *testing.T, k *APIKeys, req MintRequest) Minted {
 }
 
 // Mint stores only sha256 and the prefix; Authenticate maps the key to key:<prefix> with its tenant (and
-// slug), buyer and scopes; unknown, expired and revoked keys are 401; each change is an audit row.
+// slug), caller and scopes; unknown, expired and revoked keys are 401; each change is an audit row.
 func TestMintAndAuthenticate(t *testing.T) {
 	e := newPGEnv(t)
 	ctx := context.Background()
@@ -65,17 +65,17 @@ func TestMintAndAuthenticate(t *testing.T) {
 	var (
 		hash, prefix, name string
 		scopes             []string
-		tenantID, buyer    uuid.UUID
+		tenantID, caller   uuid.UUID
 		rawHash            []byte
 	)
-	err := e.pool.QueryRow(ctx, `select encode(hash, 'hex'), hash, prefix, name, scopes, tenant_id, buyer_id from kontra.api_keys where id = $1`, m.ID).
-		Scan(&hash, &rawHash, &prefix, &name, &scopes, &tenantID, &buyer)
+	err := e.pool.QueryRow(ctx, `select encode(hash, 'hex'), hash, prefix, name, scopes, tenant_id, caller_id from kontra.api_keys where id = $1`, m.ID).
+		Scan(&hash, &rawHash, &prefix, &name, &scopes, &tenantID, &caller)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(m.Secret))
-	if !bytes.Equal(rawHash, sum[:]) || prefix != m.Prefix || name != "demo" || len(scopes) != 1 || scopes[0] != "hire" || tenantID != e.tenant || buyer != m.BuyerID {
-		t.Errorf("row: hash %s prefix %q name %q scopes %v tenant %s buyer %s", hash, prefix, name, scopes, tenantID, buyer)
+	if !bytes.Equal(rawHash, sum[:]) || prefix != m.Prefix || name != "demo" || len(scopes) != 1 || scopes[0] != "call" || tenantID != e.tenant || caller != m.CallerID {
+		t.Errorf("row: hash %s prefix %q name %q scopes %v tenant %s caller %s", hash, prefix, name, scopes, tenantID, caller)
 	}
 	// Nothing in the database holds the secret or its random tail.
 	var leaks int
@@ -90,7 +90,7 @@ func TestMintAndAuthenticate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.Kind != KindKey || p.ID != "key:"+m.Prefix || *p.TenantID != e.tenant || p.TenantSlug != tenant.TeamSlug ||
-		p.BuyerID != m.BuyerID || p.Via != ViaAPIKey || *p.KeyID != m.ID || len(p.Scopes) != 1 || p.Scopes[0] != ScopeHire {
+		p.CallerID != m.CallerID || p.Via != ViaAPIKey || *p.KeyID != m.ID || len(p.Scopes) != 1 || p.Scopes[0] != ScopeCall {
 		t.Errorf("principal %+v", p)
 	}
 	if !mustList(t, "org:default").Admits(p) || !mustList(t, "key:kk_demo_*").Admits(p) || mustList(t, "key:kk_other_*").Admits(p) {
@@ -144,8 +144,8 @@ func TestMintAndAuthenticate(t *testing.T) {
 	if err != nil || !authed || p.ID != "key:"+fut.Prefix {
 		t.Errorf("Authenticator: %+v %v %v", p, authed, err)
 	}
-	// On an anonymous service the authenticated caller keeps its own principal, buyer and via.
-	if !mustList(t, "anonymous").Admits(p) || p.Kind != KindKey || p.BuyerID != fut.BuyerID || p.Via != ViaAPIKey {
+	// On an anonymous service the authenticated caller keeps its own principal, caller and via.
+	if !mustList(t, "anonymous").Admits(p) || p.Kind != KindKey || p.CallerID != fut.CallerID || p.Via != ViaAPIKey {
 		t.Errorf("on an anonymous service: %+v", p)
 	}
 	r.Header.Set("Authorization", "Bearer "+m.Secret)
@@ -189,23 +189,23 @@ func TestMintAndAuthenticate(t *testing.T) {
 func TestMintRequest(t *testing.T) {
 	e := newPGEnv(t)
 	keys := NewAPIKeys(e.pool, nil)
-	m := e.mint(t, keys, MintRequest{Name: "Node Enroller", Prefix: "acme", Scopes: []Scope{"enroll:hello", ScopeHire, "enroll:hello"}})
-	if !strings.HasPrefix(m.Secret, "kk_acme_") || len(m.Scopes) != 2 || m.Scopes[0] != "enroll:hello" || m.Scopes[1] != ScopeHire {
+	m := e.mint(t, keys, MintRequest{Name: "Node Enroller", Prefix: "acme", Scopes: []Scope{"enroll:hello", ScopeCall, "enroll:hello"}})
+	if !strings.HasPrefix(m.Secret, "kk_acme_") || len(m.Scopes) != 2 || m.Scopes[0] != "enroll:hello" || m.Scopes[1] != ScopeCall {
 		t.Errorf("minted %q scopes %v", m.Secret, m.Scopes)
 	}
 	p, err := keys.Authenticate(context.Background(), m.Secret)
-	if err != nil || !p.HasScope("enroll:hello") || !p.HasScope(ScopeHire) {
+	if err != nil || !p.HasScope("enroll:hello") || !p.HasScope(ScopeCall) {
 		t.Errorf("principal %+v %v", p, err)
 	}
 	enrollOnly := e.mint(t, keys, MintRequest{Name: "enroller", Scopes: []Scope{ScopeEnrollAll}})
 	p, err = keys.Authenticate(context.Background(), enrollOnly.Secret)
-	if err != nil || p.MayHire() || mustList(t, "org:default").Admits(p) {
+	if err != nil || p.MayCall() || mustList(t, "org:default").Admits(p) {
 		t.Errorf("an enroll-only key may call a service: %+v %v", p, err)
 	}
-	// Two keys minted without a buyer get two buyers; one minted with a buyer shares it.
-	shared := e.mint(t, keys, MintRequest{Name: "second", BuyerID: &m.BuyerID})
-	if shared.BuyerID != m.BuyerID || enrollOnly.BuyerID == m.BuyerID {
-		t.Errorf("buyers: %s %s %s", m.BuyerID, shared.BuyerID, enrollOnly.BuyerID)
+	// Two keys minted without a caller get two callers; one minted with a caller shares it.
+	shared := e.mint(t, keys, MintRequest{Name: "second", CallerID: &m.CallerID})
+	if shared.CallerID != m.CallerID || enrollOnly.CallerID == m.CallerID {
+		t.Errorf("callers: %s %s %s", m.CallerID, shared.CallerID, enrollOnly.CallerID)
 	}
 	for name, req := range map[string]MintRequest{
 		"bad scope":      {TenantID: e.tenant, Name: "x", Scopes: []Scope{"admin"}},
@@ -664,7 +664,7 @@ func TestRevokedBeforeStart(t *testing.T) {
 	}
 }
 
-// Revalidate is the per-request check of a tunnel session's hiring API key (spec/relay.md §2.3, spec/tunnel.md
+// Revalidate is the per-request check of a tunnel session's calling API key (spec/relay.md §2.3, spec/tunnel.md
 // §12). A held key is answered from memory after one read while the cache is fresh, and every re-read checks
 // its row: a revocation stamped a day ago (no NOTIFY, outside the cache's window) is refused after the next
 // re-read and stays refused while the key is held. Revoke on the replica tells the subscribers once.
@@ -676,7 +676,7 @@ func TestRevalidateHeldKey(t *testing.T) {
 	rc.Subscribe(func(id uuid.UUID) { told = append(told, id) })
 	rc.Catchup()
 	keys := NewAPIKeys(e.pool, rc)
-	m := e.mint(t, keys, MintRequest{Name: "hirer"})
+	m := e.mint(t, keys, MintRequest{Name: "caller"})
 	p, err := keys.Authenticate(ctx, m.Secret)
 	if err != nil {
 		t.Fatal(err)
@@ -684,7 +684,7 @@ func TestRevalidateHeldKey(t *testing.T) {
 	release := keys.Hold(p)
 	defer release()
 	got, err := keys.Revalidate(ctx, p)
-	if err != nil || got.ID != p.ID || got.BuyerID != m.BuyerID || !got.MayHire() || got.TenantSlug != "default" {
+	if err != nil || got.ID != p.ID || got.CallerID != m.CallerID || !got.MayCall() || got.TenantSlug != "default" {
 		t.Fatalf("Revalidate = %+v, %v", got, err)
 	}
 	// From memory: a revocation behind the replica's back is not seen before a re-read.

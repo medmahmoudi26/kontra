@@ -50,7 +50,7 @@ import (
 //     its anon_calls row), and at the end after the purge; with a positive control showing the scan reads each type;
 //   - an anon-<16 hex> slug is refused for an account tenant.
 func TestAnonLifecycle(t *testing.T) {
-	seller := StartSeller(t)
+	service := StartService(t)
 	calc := mcptest.New()
 	calc.Tools = []json.RawMessage{mcptest.Tool("add", "")}
 	release := make(chan struct{}) // a tools/call asking to "hold" waits for it: a plain call in flight
@@ -67,12 +67,12 @@ func TestAnonLifecycle(t *testing.T) {
 	ctx := ctxFor(t, 12*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
 	v4, v6, v4c := netip.MustParseAddr("198.51.100.10"), netip.MustParseAddr("2001:db8:5:5::20"), netip.MustParseAddr("203.0.113.40")
-	// late's seller holds a task's first event, so the gate has no upstream task id for it (§6.4's before-the-first-id).
+	// late's service holds a task's first event, so the gate has no upstream task id for it (§6.4's before-the-first-id).
 	late, err := h.Agent(slowagent.Config{FirstEventDelay: 10 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
-	serves := map[string]string{"hello": seller.URL, "secret": seller.URL, "late": late.URL()}
+	serves := map[string]string{"hello": service.URL, "secret": service.URL, "late": late.URL()}
 
 	// The session, and the same key again before expiry: the same tenant.
 	h.Front.Route(a)
@@ -105,7 +105,7 @@ func TestAnonLifecycle(t *testing.T) {
 	if st, _, body := rawJSONRPC(t, ctx, b.URL+"/agents/"+s1+"/secret", "", "SendMessage", sendParams("hi"), nil); st != http.StatusNotFound {
 		t.Errorf("secret to a caller with no credential: %d %.200s, want 404", st, body)
 	}
-	l2 := anonNode(t, ctx, h, v6.String(), map[string]string{"other": seller.URL}, nil)
+	l2 := anonNode(t, ctx, h, v6.String(), map[string]string{"other": service.URL}, nil)
 	key2, t2 := l2.KeyID, h.TenantOf(ctx, slugOf(l2))
 	local2, err := l2.Local(30 * time.Second)
 	if err != nil {
@@ -205,7 +205,7 @@ func TestAnonLifecycle(t *testing.T) {
 		t.Fatalf("the task with no upstream id: %d %.200s", st, body)
 	}
 	noUpstream := created.Result.Task.ID
-	eventually(t, 30*time.Second, "the late task's dispatch reaches its seller", func() bool { return late.Sends() >= 1 })
+	eventually(t, 30*time.Second, "the late task's dispatch reaches its service", func() bool { return late.Sends() >= 1 })
 	for what, n := range map[string]int64{
 		"calls":                             count(t, h, `select count(*) from kontra.calls where tenant_id = $1`, t1),
 		"mcp_sessions of calc":              count(t, h, `select count(*) from kontra.mcp_sessions where tenant_id = $1 and service = 'calc'`, t1),
@@ -293,7 +293,7 @@ func TestAnonLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.Front.SetSource(netip.MustParseAddr("203.0.113.30"))
-	probe, err := h.StartNode(ctx, NodeOptions{Home: home, Serves: map[string]string{"hello": seller.URL}})
+	probe, err := h.StartNode(ctx, NodeOptions{Home: home, Serves: map[string]string{"hello": service.URL}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +314,7 @@ func TestAnonLifecycle(t *testing.T) {
 	}
 
 	// D286: enroll tokens from a key of a live anonymous tenant convert it.
-	l3 := anonNode(t, ctx, h, v4c.String(), map[string]string{"hello": seller.URL}, nil)
+	l3 := anonNode(t, ctx, h, v4c.String(), map[string]string{"hello": service.URL}, nil)
 	s3, t3 := slugOf(l3), h.TenantOf(ctx, slugOf(l3))
 	if err := l3.Kill(); err != nil {
 		t.Fatal(err)
@@ -324,7 +324,7 @@ func TestAnonLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.Front.SetSource(v4c)
-	conv, err := h.StartNode(ctx, NodeOptions{Home: l3.Home, Serves: map[string]string{"hello": seller.URL}, Enroll: []string{tok3}})
+	conv, err := h.StartNode(ctx, NodeOptions{Home: l3.Home, Serves: map[string]string{"hello": service.URL}, Enroll: []string{tok3}})
 	if err != nil {
 		t.Fatal(err)
 	}

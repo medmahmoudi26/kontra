@@ -520,7 +520,7 @@ func TestRealAdmissionProbeOnRevokedBinding(t *testing.T) {
 // enroll: scope would enroll the new key of a rotation that did not commit: the node took that welcome for
 // the rotation's, stamped it, and would later prune an old key the gate still holds enrolled. Without it,
 // the probe of an uncommitted rotation is unknown_key and the rotation goes again; the probe of a committed
-// one is welcomed, and the node dials again with its API key, the session's hiring principal.
+// one is welcomed, and the node dials again with its API key, the session's calling principal.
 func TestRealAdmissionLostRotationWithAPIKey(t *testing.T) {
 	for _, committed := range []bool{false, true} {
 		name := "not committed"
@@ -530,7 +530,7 @@ func TestRealAdmissionLostRotationWithAPIKey(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rg := newRealGateWith(t, func(o *enroll.Options) { o.EnrollWithAPIKey = true }, "hello")
 			key, err := rg.keys.Mint(context.Background(), auth.MintRequest{TenantID: rg.team, Name: "node",
-				Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+				Scopes: []auth.Scope{auth.ScopeCall, auth.ScopeEnrollAll}})
 			if err != nil {
 				t.Fatal(err)
 			}

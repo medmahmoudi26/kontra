@@ -43,7 +43,7 @@ func TestDurableMCPTaskThroughTheGate(t *testing.T) {
     allow: ["org:default"]
 `
 	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), fastTiming)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	endpoint := a.url + "/mcp/web"
 	st, h, body := mcpPost(t, endpoint, key, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{"elicitation":{}}}}`)
 	sid := h.Get("Mcp-Session-Id")

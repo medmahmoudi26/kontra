@@ -19,7 +19,7 @@ import (
 // tenant token naming only the new service and every --serve, it is welcomed for all three: the key keeps its
 // bindings, and the used token still on the command line is not sent. A later restart needs no --enroll.
 //
-// D331: the same with kontra login's API key (hire + enroll:*) on a gate that takes enroll: scopes, as Kontra
+// D331: the same with kontra login's API key (call + enroll:*) on a gate that takes enroll: scopes, as Kontra
 // Cloud's does: the scope names the new service but never creates it ("no such service", the same hint), and the
 // tenant token naming it creates it although the scope is tried first.
 func TestRealAdmissionAddAService(t *testing.T) {
@@ -40,7 +40,7 @@ func testAddAService(t *testing.T, login bool) {
 	refusal := "translate: the key is not enrolled for it; nothing was enrolled"
 	if login {
 		key, err := rg.keys.Mint(ctx, auth.MintRequest{TenantID: rg.team, Name: "login",
-			Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+			Scopes: []auth.Scope{auth.ScopeCall, auth.ScopeEnrollAll}})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -46,7 +46,7 @@ var ErrBasePath = errors.New("an A2A --serve target with a base path is refused 
 //
 // SPEC-CONFLICT (M2 plan C1; spec/tunnel.md §8.2 against relay.md §6.2 and §3, D71): §8.2 makes the node
 // prefix the target's base path to every request path, while the gate takes the path of an exchange from
-// the upstream card's interface URL, which is the seller's absolute path and already holds that base:
+// the upstream card's interface URL, which is the service's absolute path and already holds that base:
 // target http://h:9/base with interface http://h:9/base/rpc would be called at /base/base/rpc. The gate
 // cannot strip a base it does not know without new wire protocol. Until the owner amends §8.2 (proposal:
 // a path already under the base is forwarded as is, any other is prefixed), M2 fails closed and refuses

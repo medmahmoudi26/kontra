@@ -57,7 +57,7 @@ type (
 		Turn int `json:"turn"`
 	}
 	// CancelUpdate is kontra.cancel. Mode CancelModeMCP asks for MCP's tasks/cancel (spec §11.6, D57) on a task of
-	// any protocol: the /mcp tasks/cancel of a hire task, an A2A task followed over MCP (relay.md §12.2). Empty, a
+	// any protocol: the /mcp tasks/cancel of a send_message task, an A2A task followed over MCP (relay.md §12.2). Empty, a
 	// task's cancel follows its protocol: §8's table for an A2A task, §11.6's for an MCP task.
 	CancelUpdate struct {
 		Mode string `json:"mode,omitempty"`
@@ -110,7 +110,7 @@ const (
 	// SPEC-CONFLICT (D107): spec §14.1 names kontra.cancel's outcomes canceled | not_cancelable | unsupported, and §8
 	// gives the caller "whatever the upstream answers, with gate ids": a canceled task or the upstream's
 	// error. An upstream may answer with a task that is not canceled and no error, which none of the three
-	// describes: canceled would log canceled for a task the seller keeps running (§8: the gate writes
+	// describes: canceled would log canceled for a task the service keeps running (§8: the gate writes
 	// canceled only for "the upstream's canceled status"), and not_cancelable or unsupported would answer an
 	// error the upstream never sent. The closest faithful behaviour is this fourth outcome, whose caller
 	// answer is the stored task; an upstream task already terminal otherwise is not_cancelable.

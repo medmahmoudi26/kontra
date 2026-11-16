@@ -149,11 +149,11 @@ type APIKeys struct {
 	mu       sync.Mutex
 	cache    map[[32]byte]*cachedKey
 	lastUsed map[uuid.UUID]time.Time // when this replica last wrote, or tried to write, last_used_at
-	held     map[uuid.UUID]*heldKey  // the hiring API keys of tunnel sessions (Hold)
+	held     map[uuid.UUID]*heldKey  // the calling API keys of tunnel sessions (Hold)
 	writes   sync.WaitGroup
 }
 
-// heldKey is a key a tunnel session hires with (Hold): every re-read of the revocation cache checks it, as it
+// heldKey is a key a tunnel session calls with (Hold): every re-read of the revocation cache checks it, as it
 // checks the keys in cache, and one found ended stays ended while it is held.
 type heldKey struct {
 	n         int // the sessions holding it
@@ -190,7 +190,7 @@ func NewAPIKeys(db *pgxpool.Pool, revoked *RevocationCache) *APIKeys {
 	return k
 }
 
-// Authenticate maps a bearer key to its principal key:<prefix>, with the key's tenant, buyer and scopes.
+// Authenticate maps a bearer key to its principal key:<prefix>, with the key's tenant, caller and scopes.
 // An unknown, revoked or expired key (or one whose tenant is deleted or expired) is ErrUnauthenticated.
 // last_used_at is written at most once a minute, after the answer, off the request's path.
 func (k *APIKeys) Authenticate(ctx context.Context, bearer string) (Principal, error) {
@@ -214,7 +214,7 @@ func (k *APIKeys) Authenticate(ctx context.Context, bearer string) (Principal, e
 	}
 
 	var (
-		id, tenantID, buyer   uuid.UUID
+		id, tenantID, caller  uuid.UUID
 		slug, prefix          string
 		scopes                []string
 		expiresAt, tenantEnds *time.Time
@@ -225,10 +225,10 @@ func (k *APIKeys) Authenticate(ctx context.Context, bearer string) (Principal, e
 		reads = k.revoked.started() // before the row is read: see remember
 	}
 	err := k.db.QueryRow(ctx, `
-		select k.id, k.tenant_id, t.slug, k.buyer_id, k.prefix, k.scopes, k.expires_at, t.expires_at, k.revoked_at
+		select k.id, k.tenant_id, t.slug, k.caller_id, k.prefix, k.scopes, k.expires_at, t.expires_at, k.revoked_at
 		from kontra.api_keys k join kontra.tenants t on t.id = k.tenant_id
 		where k.hash = $1 and t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`,
-		h[:]).Scan(&id, &tenantID, &slug, &buyer, &prefix, &scopes, &expiresAt, &tenantEnds, &revokedAt)
+		h[:]).Scan(&id, &tenantID, &slug, &caller, &prefix, &scopes, &expiresAt, &tenantEnds, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -248,7 +248,7 @@ func (k *APIKeys) Authenticate(ctx context.Context, bearer string) (Principal, e
 		ID:         string(KindKey) + ":" + prefix,
 		TenantID:   &tenantID,
 		TenantSlug: slug,
-		BuyerID:    buyer,
+		CallerID:   caller,
 		Via:        ViaAPIKey,
 		KeyID:      &id,
 	}
@@ -353,7 +353,7 @@ func (k *APIKeys) dropKeys(ids []uuid.UUID) {
 	}
 }
 
-// Hold keeps the key of p, a principal Authenticate returned (a tunnel session's hiring API key, spec/tunnel.md
+// Hold keeps the key of p, a principal Authenticate returned (a tunnel session's calling API key, spec/tunnel.md
 // §9), under the revocation cache's watch until release is called: every re-read checks its row, as it checks
 // the keys answered from memory, so Revalidate can answer from memory while the cache is fresh, and a key found
 // revoked, expired or deleted stays refused while it is held, however long ago that happened. A principal that
@@ -385,8 +385,8 @@ func (k *APIKeys) Hold(p Principal) (release func()) {
 	}
 }
 
-// Revalidate re-validates p, a principal Authenticate returned earlier (a tunnel session's hiring API key), and
-// returns it as the key's row says now (its scopes, tenant and buyer): spec/relay.md §2.3's "revocation is
+// Revalidate re-validates p, a principal Authenticate returned earlier (a tunnel session's calling API key), and
+// returns it as the key's row says now (its scopes, tenant and caller): spec/relay.md §2.3's "revocation is
 // checked on every request", for the requests a node opens with the key its handshake carried (spec/tunnel.md
 // §12). A key revoked (by NOTIFY or a re-read), expired, deleted, or of a tenant that ended is
 // ErrUnauthenticated; any other error is the gate's own (Postgres unreachable).
@@ -424,7 +424,7 @@ func (k *APIKeys) Revalidate(ctx context.Context, p Principal) (Principal, error
 	}
 
 	var (
-		tenantID, buyer       uuid.UUID
+		tenantID, caller      uuid.UUID
 		slug, prefix          string
 		scopes                []string
 		expiresAt, tenantEnds *time.Time
@@ -435,10 +435,10 @@ func (k *APIKeys) Revalidate(ctx context.Context, p Principal) (Principal, error
 		reads = k.revoked.started() // before the row is read, as remember does
 	}
 	err := k.db.QueryRow(ctx, `
-		select k.tenant_id, t.slug, k.buyer_id, k.prefix, k.scopes, k.expires_at, t.expires_at, k.revoked_at
+		select k.tenant_id, t.slug, k.caller_id, k.prefix, k.scopes, k.expires_at, t.expires_at, k.revoked_at
 		from kontra.api_keys k join kontra.tenants t on t.id = k.tenant_id
 		where k.id = $1 and t.deleted_at is null and (t.expires_at is null or t.expires_at > now())`,
-		id).Scan(&tenantID, &slug, &buyer, &prefix, &scopes, &expiresAt, &tenantEnds, &revokedAt)
+		id).Scan(&tenantID, &slug, &caller, &prefix, &scopes, &expiresAt, &tenantEnds, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		k.dropKeys([]uuid.UUID{id})
 		return Principal{}, ErrUnauthenticated
@@ -458,7 +458,7 @@ func (k *APIKeys) Revalidate(ctx context.Context, p Principal) (Principal, error
 		ID:         string(KindKey) + ":" + prefix,
 		TenantID:   &tenantID,
 		TenantSlug: slug,
-		BuyerID:    buyer,
+		CallerID:   caller,
 		Via:        ViaAPIKey,
 		KeyID:      &id,
 	}
@@ -512,8 +512,8 @@ func (k *APIKeys) Wait() { k.writes.Wait() }
 type MintRequest struct {
 	TenantID  uuid.UUID
 	Name      string
-	BuyerID   *uuid.UUID // nil mints a new buyer
-	Scopes    []Scope    // default [hire]
+	CallerID  *uuid.UUID // nil mints a new caller
+	Scopes    []Scope    // default [call]
 	ExpiresAt *time.Time
 	// Prefix is the operator prefix, 1 to 16 characters [a-z0-9], so key: globs can name a group of keys
 	// (key:kk_<prefix>_*); empty derives it from Name (OperatorPrefix).
@@ -527,7 +527,7 @@ type Minted struct {
 	ID       uuid.UUID
 	Prefix   string // api_keys.prefix; the principal is key:<Prefix>
 	Secret   string
-	BuyerID  uuid.UUID
+	CallerID uuid.UUID
 	TenantID uuid.UUID
 	Scopes   []Scope
 }
@@ -564,7 +564,7 @@ func (k *APIKeys) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 	if err := CheckOperatorPrefix(op); err != nil {
 		return Minted{}, err
 	}
-	scopes := []Scope{ScopeHire}
+	scopes := []Scope{ScopeCall}
 	if len(req.Scopes) > 0 {
 		scopes = nil
 		for _, s := range req.Scopes {
@@ -579,15 +579,15 @@ func (k *APIKeys) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 	if req.TenantID == uuid.Nil {
 		return Minted{}, errors.New("auth: mint: a key needs a tenant")
 	}
-	buyer := uuid.Nil
-	if req.BuyerID != nil {
-		buyer = *req.BuyerID
+	caller := uuid.Nil
+	if req.CallerID != nil {
+		caller = *req.CallerID
 	} else {
 		b, err := uuid.NewV7()
 		if err != nil {
 			return Minted{}, err
 		}
-		buyer = b
+		caller = b
 	}
 	actor := req.Actor
 	if actor == "" {
@@ -612,8 +612,8 @@ func (k *APIKeys) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 		}
 		h := KeyHash(secret)
 		err = k.inTx(ctx, func(tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `insert into kontra.api_keys (id, tenant_id, buyer_id, name, prefix, hash, scopes, expires_at)
-				values ($1, $2, $3, $4, $5, $6, $7, $8)`, id, req.TenantID, buyer, req.Name, prefix, h[:], scopeText, req.ExpiresAt)
+			_, err := tx.Exec(ctx, `insert into kontra.api_keys (id, tenant_id, caller_id, name, prefix, hash, scopes, expires_at)
+				values ($1, $2, $3, $4, $5, $6, $7, $8)`, id, req.TenantID, caller, req.Name, prefix, h[:], scopeText, req.ExpiresAt)
 			if err != nil {
 				return err
 			}
@@ -623,7 +623,7 @@ func (k *APIKeys) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 				"principal":  string(KindKey) + ":" + prefix,
 				"name":       req.Name,
 				"tenant_id":  req.TenantID,
-				"buyer_id":   buyer,
+				"caller_id":  caller,
 				"scopes":     scopeText,
 				"expires_at": req.ExpiresAt,
 			})
@@ -632,7 +632,7 @@ func (k *APIKeys) Mint(ctx context.Context, req MintRequest) (Minted, error) {
 		var pgErr *pgconn.PgError
 		switch {
 		case err == nil:
-			return Minted{ID: id, Prefix: prefix, Secret: secret, BuyerID: buyer, TenantID: req.TenantID, Scopes: scopes}, nil
+			return Minted{ID: id, Prefix: prefix, Secret: secret, CallerID: caller, TenantID: req.TenantID, Scopes: scopes}, nil
 		case errors.As(err, &pgErr) && pgErr.Code == "23505" &&
 			(pgErr.ConstraintName == "api_keys_prefix_key" || pgErr.ConstraintName == "api_keys_hash_key"):
 			if attempt+1 >= mintAttempts {
@@ -738,29 +738,29 @@ func NewAuthenticator(keys *APIKeys) *Authenticator {
 }
 
 // NewLocalAuthenticator is the local development profile's authenticator: every request, with a credential or
-// without, a request a node opened included, is the anonymous caller with the given buyer, authenticated=false. No
+// without, a request a node opened included, is the anonymous caller with the given caller, authenticated=false. No
 // header is read, so no credential is checked, refused or kept. The profile's services all admit anonymous.
 func NewLocalAuthenticator() *Authenticator {
 	return &Authenticator{local: true}
 }
 
 // Authenticate reads Authorization as an API key. No credential returns the anonymous principal with the given
-// buyer and authenticated=false, so the route can decide (only an allow: list with `anonymous` admits it). A bad
+// caller and authenticated=false, so the route can decide (only an allow: list with `anonymous` admits it). A bad
 // credential (not exactly one `Bearer <token>`, an unknown, revoked or expired key, or a token that is not an API
 // key, such as a JWT on a route whose issuer is not configured) is ErrUnauthenticated even on an anonymous service.
 // Any other error is the gate's own. The routes call it through AuthenticateA2A and AuthenticateMCP, which verify a
 // JWT of their configured issuer first.
 //
-// A request a node opened on its tunnel session (HireSourceFrom) takes the session's principal and nothing
+// A request a node opened on its tunnel session (CallSourceFrom) takes the session's principal and nothing
 // else: Authorization is not read (spec/tunnel.md §9: a local client never sends a credential to the node, and
-// the gate never lets a node's request choose its principal), and a session whose hiring API key was revoked is
+// the gate never lets a node's request choose its principal), and a session whose calling API key was revoked is
 // ErrUnauthenticated, the 401 of every later stream it opens (§12).
-func (a *Authenticator) Authenticate(r *http.Request, anonymousBuyer uuid.UUID) (p Principal, authenticated bool, err error) {
+func (a *Authenticator) Authenticate(r *http.Request, anonymousCaller uuid.UUID) (p Principal, authenticated bool, err error) {
 	if a.local {
-		return Anonymous(anonymousBuyer), false, nil
+		return Anonymous(anonymousCaller), false, nil
 	}
-	if src, ok := HireSourceFrom(r.Context()); ok {
-		p, err := src.HirePrincipal(r.Context())
+	if src, ok := CallSourceFrom(r.Context()); ok {
+		p, err := src.CallerPrincipal(r.Context())
 		if err != nil {
 			return Principal{}, false, err
 		}
@@ -768,7 +768,7 @@ func (a *Authenticator) Authenticate(r *http.Request, anonymousBuyer uuid.UUID) 
 	}
 	token, present, err := BearerToken(r.Header)
 	if !present {
-		return Anonymous(anonymousBuyer), false, nil
+		return Anonymous(anonymousCaller), false, nil
 	}
 	if err != nil || a.keys == nil {
 		return Principal{}, false, ErrUnauthenticated

@@ -1,6 +1,6 @@
 // Package a2awire reads and rewrites the parts of A2A 1.0 bodies on the nodes (spec/relay.md §10.4,
 // spec/tunnel.md §8.3, §9; D56, D165, D181): JSON-RPC and HTTP+JSON, requests and answers, unary and SSE. It is
-// the one part walker the hosting and hiring nodes share: the blob inlining here (WP-03), and the sealing around
+// the one part walker the hosting and calling nodes share: the blob inlining here (WP-03), and the sealing around
 // it (internal/sealing, WP-08), which seals and opens parts at the same levels.
 //
 // The levels. Parts live in a Message (its parts) and an Artifact (its parts); a Message appears as a request's

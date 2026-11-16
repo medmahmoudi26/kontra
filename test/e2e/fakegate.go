@@ -44,9 +44,9 @@ type fixedAdmitter struct{ served []tunnel.WelcomeService }
 func (a fixedAdmitter) Admit(_ context.Context, req enroll.Request) (*enroll.Decision, error) {
 	kid := tunnel.KeyID(req.Hello.Recipient)
 	return &enroll.Decision{
-		Key:           enroll.Key{KeyID: kid, TenantID: uuid.Nil, Tenant: "default", PubKey: req.PubKey, NodeName: req.Hello.Name},
-		Served:        a.served,
-		HirePrincipal: "node:" + kid,
+		Key:             enroll.Key{KeyID: kid, TenantID: uuid.Nil, Tenant: "default", PubKey: req.PubKey, NodeName: req.Hello.Name},
+		Served:          a.served,
+		CallerPrincipal: "node:" + kid,
 	}, nil
 }
 

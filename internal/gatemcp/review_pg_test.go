@@ -30,7 +30,7 @@ import (
 
 // The fixes of M4's review on /mcp (relay.md §12, D303).
 
-// followRecorder is a Hirer whose Reply records the follow-up and appends it to the task's log as the work queue
+// followRecorder is a Caller whose Reply records the follow-up and appends it to the task's log as the work queue
 // would (a message event; the task stays input-required until its turn ends), answering the version before it.
 type followRecorder struct {
 	pool *pgxpool.Pool
@@ -38,8 +38,8 @@ type followRecorder struct {
 	got  []string
 }
 
-func (f *followRecorder) Hire(context.Context, HireRequest) (HireOutcome, error) {
-	return HireOutcome{}, errStub
+func (f *followRecorder) SendMessage(context.Context, MCPSendRequest) (MCPSendOutcome, error) {
+	return MCPSendOutcome{}, errStub
 }
 
 func (f *followRecorder) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow, parts a2a.ContentParts) (int64, error) {
@@ -100,10 +100,10 @@ func toolAnswer(t *testing.T, w *httptest.ResponseRecorder) (rendered, answer) {
 // next reply was refused. Now the wait goes on, and the reply answers the completed turn.
 func TestReplyAnswersTheTurnItStarted(t *testing.T) {
 	e := newModernEnv(t)
-	hirer := &followRecorder{pool: e.pool}
-	id := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
+	sender := &followRecorder{pool: e.pool}
+	id := e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
 	var reads atomic.Int32
-	h := &Handler{deps: Deps{PublicURL: "https://gate.example", Hirer: hirer, Tasks: e.tasks, Log: store.NewLog(e.pool),
+	h := &Handler{deps: Deps{PublicURL: "https://gate.example", Sender: sender, Tasks: e.tasks, Log: store.NewLog(e.pool),
 		Waker: noWake{}, PlainWait: 10 * time.Second,
 		afterRead: func(row *store.TaskRow) {
 			// The first read after the follow-up: the row still at input-required (version 4, its message), and the turn's
@@ -112,7 +112,7 @@ func TestReplyAnswersTheTurnItStarted(t *testing.T) {
 				complete(t, e.pool, row.ID, "booked for tomorrow")
 			}
 		}}, log: slog.New(slog.DiscardHandler)}
-	rq, w := legacyCall(t, e.buyer, ToolReply, map[string]any{"taskId": id.String(), "message": "tomorrow"})
+	rq, w := legacyCall(t, e.caller, ToolReply, map[string]any{"taskId": id.String(), "message": "tomorrow"})
 	h.toolsCall(rq)
 	r, a := toolAnswer(t, w)
 	if reads.Load() < 2 {
@@ -122,7 +122,7 @@ func TestReplyAnswersTheTurnItStarted(t *testing.T) {
 		!strings.Contains(string(r.StructuredContent["state"]), "TASK_STATE_COMPLETED") {
 		t.Fatalf("the reply answered %s, want the completed turn", a.body)
 	}
-	if got := hirer.replies(); len(got) != 1 {
+	if got := sender.replies(); len(got) != 1 {
 		t.Fatalf("follow-ups %v", got)
 	}
 }
@@ -160,25 +160,25 @@ func allowOf(t *testing.T, entries ...string) auth.AllowList {
 	return l
 }
 
-// MCP-1: a hire task is the reader's on /mcp only while this replica serves its service to the reader, as the A2A route
-// answers GetTask, CancelTask and a follow-up 404 "unknown service" otherwise. A key that shares the buyer of the key
-// that hired, but that the service's allow: does not admit, gets -32602 from tasks/get, tasks/result, tasks/cancel
+// MCP-1: a send_message task is the reader's on /mcp only while this replica serves its service to the reader, as the A2A route
+// answers GetTask, CancelTask and a follow-up 404 "unknown service" otherwise. A key that shares the caller of the key
+// that called, but that the service's allow: does not admit, gets -32602 from tasks/get, tasks/result, tasks/cancel
 // and tasks/update, sees nothing in tasks/list, and its reply is "unknown task": nothing is cancelled or sent. So does
-// the hiring key once its allow: entry is removed, and once the service is disabled; the task is left as it was.
-func TestHireTaskSurfacesFollowTheRegistry(t *testing.T) {
+// the calling key once its allow: entry is removed, and once the service is disabled; the task is left as it was.
+func TestSendMessageTaskSurfacesFollowTheRegistry(t *testing.T) {
 	e := newModernEnv(t)
-	hirer := &followRecorder{pool: e.pool}
-	reg := &servedMap{m: map[string]ServedService{"hello": {Kind: config.KindA2A, Allow: allowOf(t, "key:kk_buyer")}}}
-	tasks, err := NewHireTasks(HireTasksConfig{Log: store.NewLog(e.pool), Waker: noWake{}, Lifecycle: e.cancel, Hirer: hirer,
+	sender := &followRecorder{pool: e.pool}
+	reg := &servedMap{m: map[string]ServedService{"hello": {Kind: config.KindA2A, Allow: allowOf(t, "key:kk_caller")}}}
+	tasks, err := NewSendMessageTasks(SendMessageTasksConfig{Log: store.NewLog(e.pool), Waker: noWake{}, Lifecycle: e.cancel, Sender: sender,
 		Served: reg.served, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &Handler{deps: Deps{PublicURL: "https://gate.example", Hirer: hirer, Tasks: tasks, Log: store.NewLog(e.pool),
+	h := &Handler{deps: Deps{PublicURL: "https://gate.example", Sender: sender, Tasks: tasks, Log: store.NewLog(e.pool),
 		Waker: noWake{}, Served: reg.served, PlainWait: time.Second}, log: slog.New(slog.DiscardHandler)}
-	other := e.buyer
-	other.ID = "key:kk_other" // the same buyer, another key
-	asking := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
+	other := e.caller
+	other.ID = "key:kk_other" // the same caller, another key
+	asking := e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
 	ctx := context.Background()
 	key := store.GateRequestID(asking, 3)
 
@@ -214,7 +214,7 @@ func TestHireTaskSurfacesFollowTheRegistry(t *testing.T) {
 		if r, a := toolAnswer(t, rw); !r.IsError || len(r.Content) != 1 || r.Content[0].Text != "unknown task" {
 			t.Errorf("%s: reply %s", what, a.body)
 		}
-		if got := hirer.replies(); len(got) != 0 {
+		if got := sender.replies(); len(got) != 0 {
 			t.Fatalf("%s: follow-ups sent %v", what, got)
 		}
 		if got := e.cancel.calls(); len(got) != 0 {
@@ -224,24 +224,24 @@ func TestHireTaskSurfacesFollowTheRegistry(t *testing.T) {
 			t.Fatalf("%s: the task is %s", what, st)
 		}
 	}
-	// The control: the hiring key reads it.
-	rd := Reader{Principal: e.buyer, Era: mcpwire.EraLegacy}
+	// The control: the calling key reads it.
+	rd := Reader{Principal: e.caller, Era: mcpwire.EraLegacy}
 	if res, rpcErr, err := tasks.Get(ctx, rd, asking); err != nil || rpcErr != nil || !strings.Contains(string(res), asking.String()) {
-		t.Fatalf("the hiring key's tasks/get: %s %v %v", res, rpcErr, err)
+		t.Fatalf("the calling key's tasks/get: %s %v %v", res, rpcErr, err)
 	}
-	refused("a key of the same buyer that allow: does not admit", other)
+	refused("a key of the same caller that allow: does not admit", other)
 	reg.set("hello", &ServedService{Kind: config.KindA2A, Allow: allowOf(t, "key:kk_someone")})
-	refused("the hiring key once its allow: entry is removed", e.buyer)
+	refused("the calling key once its allow: entry is removed", e.caller)
 	reg.set("hello", nil)
-	refused("the hiring key once the service is disabled", e.buyer)
-	reg.set("hello", &ServedService{Kind: config.KindMCP, Allow: allowOf(t, "key:kk_buyer")})
-	refused("a service of another kind under that name", e.buyer)
+	refused("the calling key once the service is disabled", e.caller)
+	reg.set("hello", &ServedService{Kind: config.KindMCP, Allow: allowOf(t, "key:kk_caller")})
+	refused("a service of another kind under that name", e.caller)
 }
 
-// MCP-3, MCP-4: search, describe and hire see exactly what the replica's registry serves. A row the registry does not
-// serve (one it refused, or has not loaded yet) is left out of search and is an unknown service to describe and hire;
+// MCP-3, MCP-4: search, describe and send_message see exactly what the replica's registry serves. A row the registry does not
+// serve (one it refused, or has not loaded yet) is left out of search and is an unknown service to describe and send_message;
 // the registry's allow: decides. A row whose allow: does not parse (a stored oidc:sub:*, refused since D301) never
-// fails a search, whoever asks, nor describe or hire: it is left out, as the registry leaves it out.
+// fails a search, whoever asks, nor describe or send_message: it is left out, as the registry leaves it out.
 func TestCatalogServesWhatTheRegistryServes(t *testing.T) {
 	e := newCatalogEnv(t)
 	ctx := context.Background()
@@ -271,9 +271,9 @@ func TestCatalogServesWhatTheRegistryServes(t *testing.T) {
 	}
 	for _, c := range []struct{ name string }{{"bad"}, {"agent"}} {
 		ref := Ref{Tenant: "acme", Name: c.name}
-		svc, err := plain.Hireable(ctx, p, ref)
+		svc, err := plain.Callable(ctx, p, ref)
 		if err != nil || (svc == nil) != (c.name == "bad") {
-			t.Errorf("hire of %s: %v %v", c.name, svc, err)
+			t.Errorf("send_message of %s: %v %v", c.name, svc, err)
 		}
 		if _, err := plain.Describe(ctx, p, ref); (err == ErrUnknownService) != (c.name == "bad") || (err != nil && err != ErrUnknownService) {
 			t.Errorf("describe of %s: %v", c.name, err)
@@ -291,9 +291,9 @@ func TestCatalogServesWhatTheRegistryServes(t *testing.T) {
 	}
 	for name, want := range map[string]bool{"agent": true, "bad": false, "notloaded": false, "zzz": false} {
 		ref := Ref{Tenant: "acme", Name: name}
-		svc, err := c.Hireable(ctx, p, ref)
+		svc, err := c.Callable(ctx, p, ref)
 		if err != nil || (svc != nil) != want {
-			t.Errorf("hire of %s: %v %v, want hireable %v", name, svc, err, want)
+			t.Errorf("send_message of %s: %v %v, want callable %v", name, svc, err, want)
 		}
 		if _, err := c.Describe(ctx, p, ref); (err == nil) != want || (err != nil && err != ErrUnknownService) {
 			t.Errorf("describe of %s: %v", name, err)
@@ -317,8 +317,8 @@ func TestGateSessionInUseOutlivesTheIdleSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if err := sessions.OpenGate(ctx, sid, mcprelay.Session{TenantID: e.team, BuyerID: e.buyer.BuyerID, Principal: e.buyer.ID,
-		Via: string(e.buyer.Via), ProtocolVersion: mcpwire.V20251125}); err != nil {
+	if err := sessions.OpenGate(ctx, sid, mcprelay.Session{TenantID: e.team, CallerID: e.caller.CallerID, Principal: e.caller.ID,
+		Via: string(e.caller.Via), ProtocolVersion: mcpwire.V20251125}); err != nil {
 		t.Fatal(err)
 	}
 	serve := func(ctx context.Context, method, body string) *httptest.ResponseRecorder {
@@ -329,7 +329,7 @@ func TestGateSessionInUseOutlivesTheIdleSweep(t *testing.T) {
 		r := httptest.NewRequestWithContext(ctx, method, Path, rdr)
 		r.Header.Set(mcpwire.HeaderSessionID, sid)
 		w := httptest.NewRecorder()
-		rq := &request{w: w, r: r, p: e.buyer, start: time.Now()}
+		rq := &request{w: w, r: r, p: e.caller, start: time.Now()}
 		if body != "" {
 			m, err := mcpwire.Parse([]byte(body), mcpwire.FromClient)
 			if err != nil {
@@ -362,13 +362,13 @@ func TestGateSessionInUseOutlivesTheIdleSweep(t *testing.T) {
 	}
 }
 
-// merge-3: the response stream of /mcp's tasks/result carries no event ids, as /mcp's GET stream and a plain hire's do
+// merge-3: the response stream of /mcp's tasks/result carries no event ids, as /mcp's GET stream and a plain send_message's do
 // (relay.md §12.3): its elicitation/create and its outcome are plain events, since /mcp resumes no stream.
 func TestGateTasksResultStreamHasNoEventIDs(t *testing.T) {
 	e := newModernEnv(t)
 	e.tasks.reread = 50 * time.Millisecond
-	id := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
-	rd := Reader{Principal: e.buyer, Era: mcpwire.EraLegacy, FormElicitation: true}
+	id := e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
+	rd := Reader{Principal: e.caller, Era: mcpwire.EraLegacy, FormElicitation: true}
 	go func() {
 		time.Sleep(300 * time.Millisecond)
 		complete(t, e.pool, id, "booked")
@@ -400,8 +400,8 @@ func (presignStore) Presign(_ context.Context, k blob.Key, _ time.Duration) (str
 	return "https://bucket.example/" + string(k.Ref) + "?sig=1", nil
 }
 
-// merge-2: /mcp renders a hire task's bucketed parts as presigned GETs for every reader, a request that arrived on a
-// node's hiring stream (blob.WithKeepRefs) included: the node relays an MCP answer as it is, so a kontra-blob: ref left
+// merge-2: /mcp renders a send_message task's bucketed parts as presigned GETs for every reader, a request that arrived on a
+// node's calling stream (blob.WithKeepRefs) included: the node relays an MCP answer as it is, so a kontra-blob: ref left
 // in it would be a resource_link no client can fetch.
 func TestGateMCPRendersBlobsThroughANode(t *testing.T) {
 	e := newModernEnv(t)
@@ -411,18 +411,18 @@ func TestGateMCPRendersBlobsThroughANode(t *testing.T) {
 	}
 	task := taskWith(a2a.TaskStateCompleted, &a2a.Message{ID: "m", Role: a2a.MessageRoleAgent, Parts: a2a.ContentParts{
 		a2a.NewTextPart("done"), &a2a.Part{Content: a2a.URL(ref.URL()), Filename: "big.bin", MediaType: "application/octet-stream"}}}, nil)
-	id := e.task(e.buyer.BuyerID, store.StateCompleted, task, 2, true)
+	id := e.task(e.caller.CallerID, store.StateCompleted, task, 2, true)
 	if _, err := e.pool.Exec(context.Background(), `insert into kontra.blobs (ref, tenant_id, task_id, size) values ($1, $2, $3, 300000)`,
 		string(ref), e.team, id); err != nil {
 		t.Fatal(err)
 	}
 	render := blob.NewRenderer(presignStore{}, e.pool, slog.New(slog.DiscardHandler))
-	tasks, err := NewHireTasks(HireTasksConfig{Log: store.NewLog(e.pool), Waker: noWake{}, Lifecycle: e.cancel, Hirer: e.hirer,
+	tasks, err := NewSendMessageTasks(SendMessageTasksConfig{Log: store.NewLog(e.pool), Waker: noWake{}, Lifecycle: e.cancel, Sender: e.sender,
 		Render: render, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := blob.WithKeepRefs(context.Background()) // a request on a hiring stream
+	node := blob.WithKeepRefs(context.Background()) // a request on a calling stream
 	check := func(what, body string) {
 		t.Helper()
 		if strings.Contains(body, blob.URIScheme) || !strings.Contains(body, "https://bucket.example/") {
@@ -430,10 +430,10 @@ func TestGateMCPRendersBlobsThroughANode(t *testing.T) {
 		}
 	}
 	w := httptest.NewRecorder()
-	tasks.Result(node, w, "", Reader{Principal: e.buyer, Era: mcpwire.EraLegacy}, &mcpwire.Message{ID: json.RawMessage(`1`),
+	tasks.Result(node, w, "", Reader{Principal: e.caller, Era: mcpwire.EraLegacy}, &mcpwire.Message{ID: json.RawMessage(`1`),
 		Method: "tasks/result", Params: json.RawMessage(`{"taskId":"` + id.String() + `"}`)})
 	check("tasks/result", w.Body.String())
-	res, _, err := tasks.Get(node, Reader{Principal: e.buyer, Era: mcpwire.EraModern}, id)
+	res, _, err := tasks.Get(node, Reader{Principal: e.caller, Era: mcpwire.EraModern}, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,5 +443,5 @@ func TestGateMCPRendersBlobsThroughANode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	check("a plain hire's answer", string(h.plainAnswer(node, row, e.buyer)))
+	check("a plain send_message's answer", string(h.plainAnswer(node, row, e.caller)))
 }

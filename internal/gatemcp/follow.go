@@ -20,9 +20,9 @@ import (
 	"kontra.sh/kontra/internal/store"
 )
 
-// The tools that follow, list, cancel and read a hire task for a client that sees only tools (spec §12.2; D332..D337):
-// status, tasks, cancel and artifact, over the same hire tasks as the MCP Tasks of /mcp, with the same scoping (a hire
-// task of the principal's buyer whose service this replica serves to the principal: HireTasks.load, D303), the same
+// The tools that follow, list, cancel and read a send_message task for a client that sees only tools (spec §12.2; D332..D337):
+// status, tasks, cancel and artifact, over the same send_message tasks as the MCP Tasks of /mcp, with the same scoping (a send_message
+// task of the principal's caller whose service this replica serves to the principal: SendMessageTasks.load, D303), the same
 // renderers and the same waker. The MCP Tasks stay as they are.
 
 // Bounds of status's events (D332): at most StatusEvents rows and about StatusBytes of their payloads per call; more is
@@ -35,11 +35,11 @@ const (
 // TaskTextMax bounds an entry's text in the tasks tool (D333).
 const TaskTextMax = 200
 
-// UnknownTask is the one answer of the tools for a task id that is unknown, malformed, another buyer's, unhired, or of
+// UnknownTask is the one answer of the tools for a task id that is unknown, malformed, another caller's, non-send_message, or of
 // a service no longer served to the principal (§12.2, D303).
 const UnknownTask = "unknown task"
 
-// TaskEvent is one row of a hire task's log as status renders it (mcp-tools.json#/$defs/event): a task, status,
+// TaskEvent is one row of a send_message task's log as status renders it (mcp-tools.json#/$defs/event): a task, status,
 // artifact or message row, compactly: the state a task or status row sets, the role of a message, the text, data and
 // file links of its parts, an artifact's id and name, and when it was logged.
 type TaskEvent struct {
@@ -55,10 +55,10 @@ type TaskEvent struct {
 	At         string    `json:"at"`
 }
 
-// StatusResult is status's structuredContent (mcp-tools.json#/$defs/statusResult): the hire result, the events after
+// StatusResult is status's structuredContent (mcp-tools.json#/$defs/statusResult): the send_message result, the events after
 // the cursor asked when after was given, and the cursor to ask from next.
 type StatusResult struct {
-	HireResult
+	SendMessageResult
 	Events []TaskEvent `json:"events,omitempty"`
 	Cursor int64       `json:"cursor"`
 	More   bool        `json:"more,omitempty"`
@@ -91,23 +91,23 @@ type ArtifactResult struct {
 	Files       []FileRef `json:"files,omitempty"`
 }
 
-// loadTool is the principal's hire task id names for a tool (HireTasks.load's scoping); nil when it names none of
+// loadTool is the principal's send_message task id names for a tool (SendMessageTasks.load's scoping); nil when it names none of
 // them, which the caller answers UnknownTask.
 func (h *Handler) loadTool(rq *request, id uuid.UUID) (*store.TaskRow, error) {
 	row, _, err := h.deps.Tasks.load(rq.ctx(), rq.reader(), id)
 	return row, err
 }
 
-// answerOf is the CallToolResult of a hire task as row has it, as a plain hire, reply, status and cancel answer it
+// answerOf is the CallToolResult of a send_message task as row has it, as a plain send_message, reply, status and cancel answer it
 // (§12.2): an ended task as tasks/result renders it; input-required as §12.4's reply-tool text; a task still running
-// with the text saying how to follow it. Its structuredContent is the hire result, with the task's contextId and
+// with the text saying how to follow it. Its structuredContent is the send_message result, with the task's contextId and
 // service ref (D336).
 func (h *Handler) answerOf(ctx context.Context, row *store.TaskRow, p auth.Principal) callToolResult {
 	return h.answerFrom(ctx, row, p, 0)
 }
 
 // answerFrom is answerOf, a running task's text naming follow as the after of the status call that follows it: 0 in a
-// hire's or a reply's answer (the task's whole story), the cursor status returns in status's own answer (D332), so that
+// send_message's or a reply's answer (the task's whole story), the cursor status returns in status's own answer (D332), so that
 // a model that does what the text says reads from where it is and waits instead of reading the history again.
 func (h *Handler) answerFrom(ctx context.Context, row *store.TaskRow, p auth.Principal, follow int64) callToolResult {
 	var res callToolResult
@@ -123,7 +123,7 @@ func (h *Handler) answerFrom(ctx context.Context, row *store.TaskRow, p auth.Pri
 	case row.State == store.StateInputRequired:
 		_, text, _ := Question(row.Snapshot, Reader{Principal: p, Era: mcpwire.EraLegacy})
 		res = callToolResult{Content: []content{{Type: "text", Text: text}},
-			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), Text: text},
+			StructuredContent: SendMessageResult{TaskID: row.ID.String(), State: string(row.State.A2A()), Text: text},
 			Meta:              map[string]any{MetaInputRequired: true}}
 	default:
 		a2aURL := strings.TrimRight(h.deps.PublicURL, "/") + "/agents/" + h.serviceRef(row)
@@ -131,20 +131,20 @@ func (h *Handler) answerFrom(ctx context.Context, row *store.TaskRow, p auth.Pri
 			"{taskId: \"" + row.ID.String() + "\", after: " + strconv.FormatInt(follow, 10) + ", wait: 25}, or with GetTask at " + a2aURL +
 			" (the same credential); call reply when it asks a question."
 		res = callToolResult{Content: []content{{Type: "text", Text: text}},
-			StructuredContent: HireResult{TaskID: row.ID.String(), State: string(row.State.A2A()), Text: text}}
+			StructuredContent: SendMessageResult{TaskID: row.ID.String(), State: string(row.State.A2A()), Text: text}}
 	}
-	if hr, ok := res.StructuredContent.(HireResult); ok {
+	if hr, ok := res.StructuredContent.(SendMessageResult); ok {
 		hr.ContextID, hr.Service = row.ContextID, h.serviceRef(row)
 		res.StructuredContent = hr
 	}
 	return res
 }
 
-// status answers the status tool (§12.2, D332): the hire result of the principal's hire task, its contextId and
+// status answers the status tool (§12.2, D332): the send_message result of the principal's send_message task, its contextId and
 // service, and when after is given its task, status, artifact and message rows with seq > after (at most StatusEvents
 // rows or about StatusBytes, more when cut) and the cursor, the last seq read (else the log's tail). An after beyond
 // the log's tail (another task's cursor, a mistyped number) is read as the tail, so the cursor answered never skips a
-// row that lands later. With after, the hire result is its summary (statusSummary): the events carry the content, so
+// row that lands later. With after, the send_message result is its summary (statusSummary): the events carry the content, so
 // paging a long history does not repeat every artifact on every page. With wait, when the task has neither ended nor
 // asked a question (only this principal's reply moves a task at input-required), and its log holds no task, status or
 // artifact row after the cursor asked (or after its tail when after is absent), it first waits on the waker until
@@ -187,7 +187,7 @@ func (h *Handler) status(rq *request, args json.RawMessage) {
 		if !h.awaitRow(rq, aw, row.ID, base, wait) {
 			return
 		}
-		if row, _, err = h.deps.Log.LoadHiredAsked(ctx, rq.p.BuyerID, row.ID); err != nil {
+		if row, _, err = h.deps.Log.LoadSentByMCPAsked(ctx, rq.p.CallerID, row.ID); err != nil {
 			aw.internal(h, "read the task", err)
 			return
 		}
@@ -222,7 +222,7 @@ func (h *Handler) status(rq *request, args json.RawMessage) {
 	if after >= 0 {
 		res = statusSummary(row, res)
 	}
-	sr.HireResult = res.StructuredContent.(HireResult)
+	sr.SendMessageResult = res.StructuredContent.(SendMessageResult)
 	res.StructuredContent = sr
 	// A client that reads only content gets the cursor and the events as a text block of their own.
 	tailBlock := map[string]any{"cursor": sr.Cursor}
@@ -245,7 +245,7 @@ func (h *Handler) status(rq *request, args json.RawMessage) {
 // SummaryTextMax bounds the text of status's summary of an ended task (D332).
 const SummaryTextMax = 2000
 
-// statusSummary is the hire result status answers when after is given (D332): an ended task's answer without its
+// statusSummary is the send_message result status answers when after is given (D332): an ended task's answer without its
 // artifacts' content (the events carry it, the artifact tool gives one in full), its text the status message's (at
 // most SummaryTextMax characters) and how to read the artifacts; any other answer is short already and stays as it is.
 // isError and _meta are kept.
@@ -253,7 +253,7 @@ func statusSummary(row *store.TaskRow, res callToolResult) callToolResult {
 	if !row.State.Terminal() {
 		return res
 	}
-	hr, _ := res.StructuredContent.(HireResult)
+	hr, _ := res.StructuredContent.(SendMessageResult)
 	text := "The task ended " + string(row.State) + "."
 	if st := truncateRunes(statusText(row.Snapshot), SummaryTextMax); st != "" {
 		text += "\n" + st
@@ -401,9 +401,9 @@ func partsOf(task uuid.UUID, parts a2a.ContentParts, n *int) (string, []any, []F
 	return text.String(), data, files
 }
 
-// tasksTool answers the tasks tool (§12.2, D333): the principal's hire tasks, newest first by status_at, 50 a page,
-// of one service, one contextId and the states the state argument selects, read through tasks_hired, at most 1000 rows
-// per request (store.Log.ListHiredFiltered), less those whose service this replica does not serve to the principal
+// tasksTool answers the tasks tool (§12.2, D333): the principal's send_message tasks, newest first by status_at, 50 a page,
+// of one service, one contextId and the states the state argument selects, read through tasks_sent_by_mcp, at most 1000 rows
+// per request (store.Log.ListSentByMCPFiltered), less those whose service this replica does not serve to the principal
 // (D303); nextCursor an opaque keyset position.
 func (h *Handler) tasksTool(rq *request, args json.RawMessage) {
 	a, err := parseTasksArgs(args)
@@ -412,7 +412,7 @@ func (h *Handler) tasksTool(rq *request, args json.RawMessage) {
 		return
 	}
 	ctx := rq.ctx()
-	f := store.HiredFilter{ContextID: a.ContextID}
+	f := store.SentByMCPFilter{ContextID: a.ContextID}
 	if a.State != "" {
 		f.States = statesOf(a.State)
 	}
@@ -433,7 +433,7 @@ func (h *Handler) tasksTool(rq *request, args json.RawMessage) {
 		}
 		f.TenantID, f.Service = s.ref.TenantID, s.ref.Name
 	}
-	rows, next, err := h.deps.Log.ListHiredFiltered(ctx, rq.p.BuyerID, f, a.Cursor)
+	rows, next, err := h.deps.Log.ListSentByMCPFiltered(ctx, rq.p.CallerID, f, a.Cursor)
 	switch {
 	case errors.Is(err, store.ErrBadCursor):
 		rq.result(errorResult("invalid arguments: cursor is not one the gate gave", nil))
@@ -472,7 +472,7 @@ func truncateRunes(s string, n int) string {
 }
 
 // cancelTool answers the cancel tool (§12.2, D334): MCP tasks/cancel's legacy semantics (§11.6, D57: kontra.cancel in
-// MCP mode, the task canceled within 10 s, the upstream receiving §8's CancelTask), awaited, and the task after it as hire answers it (a canceled task's hire result, which is no error here:
+// MCP mode, the task canceled within 10 s, the upstream receiving §8's CancelTask), awaited, and the task after it as send_message answers it (a canceled task's send_message result, which is no error here:
 // the cancel did what was asked). A task that has ended is isError "the task already ended (<state>)".
 func (h *Handler) cancelTool(rq *request, args json.RawMessage) {
 	id, err := parseTaskOnly(args)
@@ -523,8 +523,8 @@ func (h *Handler) cancelTool(rq *request, args json.RawMessage) {
 	rq.result(b)
 }
 
-// artifactTool answers the artifact tool (§12.2, D335): one artifact of the principal's hire task, in full, as the
-// hire result renders an artifact: text parts as text, data parts as JSON text and in data, file parts as resources (raw
+// artifactTool answers the artifact tool (§12.2, D335): one artifact of the principal's send_message task, in full, as the
+// send_message result renders an artifact: text parts as text, data parts as JSON text and in data, file parts as resources (raw
 // bytes embedded; a URL, kontra-blob parts presigned for the caller now, as a resource_link) and in files, each part
 // bounded as §10.4 bounds it. An artifact id the task does not hold is isError "unknown artifact".
 func (h *Handler) artifactTool(rq *request, args json.RawMessage) {
@@ -620,14 +620,16 @@ func stateWord(ts a2a.TaskState) string {
 	return string(ts)
 }
 
-// keyedNS is the namespace of the messageIds a hire's idempotencyKey mints (D338).
+// keyedNS is the namespace of the messageIds a send_message's idempotencyKey mints (D338).
+// The namespace URL keeps the tool's name before D363: it derives stored ids, and a new one would make a keyed
+// send_message retried across the upgrade a second task.
 var keyedNS = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://kontra.sh/ns/v1/hire-idempotency-key"))
 
-// keyIdentity is a hire's idempotencyKey key as p's (D338): a UUIDv5 of the principal's tenant, buyer and id and the
-// key, each length-prefixed. It names the key in every period (store.HireKey.Lock) and is never sent anywhere.
+// keyIdentity is a send_message's idempotencyKey key as p's (D338): a UUIDv5 of the principal's tenant, caller and id and the
+// key, each length-prefixed. It names the key in every period (store.SendMessageKey.Lock) and is never sent anywhere.
 func keyIdentity(p auth.Principal, key string) uuid.UUID {
 	var b strings.Builder
-	for _, part := range []string{tenantOf(p).String(), p.BuyerID.String(), p.ID, key} {
+	for _, part := range []string{tenantOf(p).String(), p.CallerID.String(), p.ID, key} {
 		b.WriteString(strconv.Itoa(len(part)))
 		b.WriteByte(':')
 		b.WriteString(part)
@@ -636,15 +638,15 @@ func keyIdentity(p auth.Principal, key string) uuid.UUID {
 	return uuid.NewSHA1(keyedNS, []byte(b.String()))
 }
 
-// HireKeyOf is how a hire with idempotencyKey key by p at now finds its task (D338, store.HireKey): the key's
-// identity, and the A2A messageIds it mints in now's period of store.HireKeyWindow (the hire's own), in the period
+// SendMessageKeyOf is how a send_message with idempotencyKey key by p at now finds its task (D338, store.SendMessageKey): the key's
+// identity, and the A2A messageIds it mints in now's period of store.SendMessageKeyWindow (the send_message's own), in the period
 // before and in the period after (a replica whose clock is a little ahead may have created the task in it), each a
-// UUIDv5 of the identity and the period's number. Within the window a re-issued hire finds the task the first one
-// created; after it the key mints another messageId, so a seller never sees one messageId on two tasks, nor links two
-// of a principal's hires days apart by a reused key.
-func HireKeyOf(p auth.Principal, key string, now time.Time) store.HireKey {
+// UUIDv5 of the identity and the period's number. Within the window a re-issued send_message finds the task the first one
+// created; after it the key mints another messageId, so a service never sees one messageId on two tasks, nor links two
+// of a principal's send_message calls days apart by a reused key.
+func SendMessageKeyOf(p auth.Principal, key string, now time.Time) store.SendMessageKey {
 	id := keyIdentity(p, key)
-	period := now.UTC().UnixNano() / int64(store.HireKeyWindow)
+	period := now.UTC().UnixNano() / int64(store.SendMessageKeyWindow)
 	mint := func(n int64) string { return uuid.NewSHA1(id, []byte("period:"+strconv.FormatInt(n, 10))).String() }
-	return store.HireKey{Lock: id.String(), MessageIDs: []string{mint(period), mint(period - 1), mint(period + 1)}}
+	return store.SendMessageKey{Lock: id.String(), MessageIDs: []string{mint(period), mint(period - 1), mint(period + 1)}}
 }

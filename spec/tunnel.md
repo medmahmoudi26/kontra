@@ -15,7 +15,7 @@ escrow: a job key is deleted at terminal, and a listing has no price (§2.3, §6
 
 The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
 node, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the node sends
-HTTP requests to the gate (hiring). It is a reverse HTTP proxy over a multiplexed WebSocket. It carries
+HTTP requests to the gate (calling). It is a reverse HTTP proxy over a multiplexed WebSocket. It carries
 ordinary HTTP/1.1 exchanges and does not care whether their bytes are A2A JSON-RPC, A2A HTTP+JSON or MCP
 Streamable HTTP.
 
@@ -41,7 +41,7 @@ notes are cited as **D*n*** ([`../docs/decisions.md`](../docs/decisions.md)).
 |---|---|---|
 | Opens the TCP/TLS/WebSocket connection | **always** | **never**: the gate never initiates a connection to a node (PRD §12) |
 | yamux role | `yamux.Client` | `yamux.Server` |
-| Opens streams | for **hiring** (§9) and blob fetches (§8.3) | for **hosting** (§8): each inbound request to a service on the node |
+| Opens streams | for **calling** (§9) and blob fetches (§8.3) | for **hosting** (§8): each inbound request to a service on the node |
 | Holds keys | its identity key and per-job keys (private halves) | public keys only |
 
 ## 2. Identity and credentials
@@ -75,7 +75,7 @@ recipient would use the same rule).
 
 ### 2.3 Per-job keys
 
-When the node hires a sealed service, it mints an X25519 key for that job (an A2A task, an MCP task, or an MCP
+When the node calls a sealed service, it mints an X25519 key for that job (an A2A task, an MCP task, or an MCP
 session for plain calls) and keeps it at `~/.kontra/jobs/<gate host>/<job id>.key` (0600). It is what replies
 are sealed to ([`ext-sealed.md`](ext-sealed.md)). It is deleted when the job is terminal (a
 `kontra.keyRetainUntil` that an earlier release let the operator write is ignored, D351); an MCP session's key when the session closes and every task created in it is done. The node
@@ -147,9 +147,9 @@ closes the connection.
 | `origin` | The origin the node **dialed** (`scheme://host[:port]`, lowercase, default port elided). The gate requires it to equal the origin of its `public_url`. |
 | `kid`, `recipient` | The active key. `kid` must equal the derivation of `recipient` (§2.2). |
 | `name` | The node's name, shown in the operator's view of nodes: `--name`, default the hostname; 1–64 characters. |
-| `services` | What the node wants to host on this connection: `kind` and `name` (the name alone; the tenant comes from the key). May be empty (a node that only hires). |
+| `services` | What the node wants to host on this connection: `kind` and `name` (the name alone; the tenant comes from the key). May be empty (a node that only calls). |
 | `enroll` | Optional. Enrollment tokens (§5). |
-| `auth` | Optional. An API key: the principal for hiring (§9), and with an `enroll:` scope also the authority to enroll (§5) and to convert an anonymous key (§6.3). |
+| `auth` | Optional. An API key: the principal for calling (§9), and with an `enroll:` scope also the authority to enroll (§5) and to convert an anonymous key (§6.3). |
 | `rotate_from` | Optional. The key this one replaces (§12). |
 | `public` | Optional, anonymous sessions only: services that accept unauthenticated callers (§6.1). Each must be one of `services` (else `service_denied`); on any other session it is ignored. |
 | `anonymous` | Optional, `true` only: the node asks for an anonymous session (§6, D285). `kontra connect` sends it only when it holds no API key and no pending or consumed enrollment token for this origin and was given neither `--enroll` nor `--api-key`; a probe (§2.4) never sends it. Without it an unknown key is `unknown_key`; a gate without `tunnel.anonymous` answers it, from a key it does not know, `anonymous_unavailable`. |
@@ -245,12 +245,12 @@ the proof. A service the gate creates during a handshake gets `allow: [org:<its 
 |---|---|---|
 | Service token | Self-hosted gates: `kontra-gate enroll <service>` prints one (and `kontra-gate enroll --api-key <name> [--prefix <p>] [--scope …]` prints an API key, note 2 §3; the key format is [`relay.md`](relay.md) §2.3). Cloud: `POST /v1/enroll` | Single use, 15 minutes, stored as sha256, bound to one service of one tenant (PRD §12). Format `ket_` + 32 base62 characters. |
 | Tenant token | Issued by the operator only (Cloud's "Add a node", kontra-cloud#59) | Single use, 15 minutes, bound to the tenant **and a list of service names** it may bind (D40). It creates those services that do not exist yet. |
-| API key (`auth`) with scope `enroll:<service>` or `enroll:*` | Cloud (`tunnel.enroll_with_api_key`, default `false` on self-hosted gates) | Enrolls the node's key for the services the scope names. A key without an `enroll:` scope only hires. |
+| API key (`auth`) with scope `enroll:<service>` or `enroll:*` | Cloud (`tunnel.enroll_with_api_key`, default `false` on self-hosted gates) | Enrolls the node's key for the services the scope names. A key without an `enroll:` scope only calls. |
 
 - **Adding a key to a service that already has an enrolled key** — another node becoming a replica of it,
   which also adds a sealing recipient — needs a service token or an `enroll:` scope; a tenant token never does
   it. The service's existing nodes are told on their control streams (`{"t": "enrolled", "service", "key"}`,
-  §13), and hiring nodes see it as a recipient change ([`ext-sealed.md`](ext-sealed.md) §7).
+  §13), and calling nodes see it as a recipient change ([`ext-sealed.md`](ext-sealed.md) §7).
 - A token is consumed in the transaction that inserts `key_services`, after the proof verified (`UPDATE … SET
   used_at = now() WHERE token_hash = $h AND used_at IS NULL AND expires_at > now() RETURNING …`).
 - An enrollment that would bind a key already enrolled under another tenant is `enroll_invalid`; a token for a
@@ -263,11 +263,11 @@ the proof. A service the gate creates during a handshake gets `allow: [org:<its 
   is `enroll_invalid` and is not consumed (D132).
 - A declared service the key was never enrolled for, and is not enrolling in this handshake, is `service_denied`,
   and nothing is enrolled (the handshake is all-or-nothing); an unknown key that nothing in its hello enrolls is
-  `unknown_key`, whatever else the hello carries (D133), except a node that only hires and a node that asks for an
-  anonymous session on a gate that opens them (§6, D285). A node that only hires: a hello that declares no service
-  and carries an `auth` API key with the `hire` scope (and no token) admits its key hire-only, a `tunnel_keys` row in
+  `unknown_key`, whatever else the hello carries (D133), except a node that only calls and a node that asks for an
+  anonymous session on a gate that opens them (§6, D285). A node that only calls: a hello that declares no service
+  and carries an `auth` API key with the `call` scope (and no token) admits its key call-only, a `tunnel_keys` row in
   the API key's tenant with no binding, without `tunnel.enroll_with_api_key`. A known key with no binding at all is
-  admitted only on such a hello, or one that enrolls it, so a hire-only key never hires as `node:<key_id>` (§9) once
+  admitted only on such a hello, or one that enrolls it, so a call-only key never calls as `node:<key_id>` (§9) once
   its API key is revoked (D206). A declared service whose binding was revoked (`key_services.revoked_at` set) is left
   out of `welcome.services` and `tunnels.services`; the handshake still succeeds for the others. Only a service or
   tenant token in the hello enrolls it again, never the `auth` API key's `enroll:` scope (D130).
@@ -313,14 +313,14 @@ tenant is admitted as §5 says, for its existing bindings, with or without the f
   applied anew (D287).
 - **A key of a live anonymous tenant presenting more (D286).** With `enroll` tokens it converts into the tokens'
   tenant, as §6.3 converts with an `auth` key: the key is bound as §5 says, and the anonymous tenant expires at once.
-  With an `auth` API key that has no `enroll:` scope (a hire-only key), the hello is admitted as the anonymous
-  session, resumed as above, with that key as the session's hiring principal (§9); nothing is converted. Every move
+  With an `auth` API key that has no `enroll:` scope (a call-only key), the hello is admitted as the anonymous
+  session, resumed as above, with that key as the session's calling principal (§9); nothing is converted. Every move
   of a key to another tenant (these conversions, §6.3's, and a new anonymous tenant after expiry) is one transaction
   under the key's row lock that deletes the key's `key_services` rows of the old tenant before it changes
   `tunnel_keys.tenant_id`.
 - **A key of an anonymous tenant is not rotated (D304).** A hello whose `rotate_from` names it, the tenant live or
   ended, is `enroll_invalid` (§12), whatever else it carries, and nothing is written: a rotation would admit the new
-  key into the tenant without the anonymous session's decision (no `welcome.anonymous`, no end, the full hiring-stream
+  key into the tenant without the anonymous session's decision (no `welcome.anonymous`, no end, the full calling-stream
   cap) and without opening a tenant §6.2 counts. The node's next hello, without `rotate_from`, asks for an anonymous
   session of its own (§4), or enrolls the new key with its tokens or `auth` key.
 - Ten minutes before `expires_at` the gate sends `{"t": "expiring", "at"}` on the control stream (§13). At
@@ -345,10 +345,10 @@ tenant is admitted as §5 says, for its existing bindings, with or without the f
 | Session TTL | 2 h | `ttl` |
 | Anonymous tenants per network (IPv4 /24, IPv6 /48) at once | 3 | `tenants_per_network` |
 | Services per anonymous tenant (not disabled) | 4 | `services` |
-| Concurrent tasks per anonymous tenant, as host and as hirer | 4 each | `tasks` |
+| Concurrent tasks per anonymous tenant, as host and as caller | 4 each | `tasks` |
 | Concurrent MCP requests relayed to an anonymous tenant's services (as host) | 8 | `calls` |
 | MCP streams (`GET`, `subscriptions/listen`) open at once to an anonymous tenant's services (as host) | 8 | `streams` |
-| Node-opened (hiring) streams in flight per session | 8 | `hiring_streams` |
+| Node-opened (calling) streams in flight per session | 8 | `calling_streams` |
 | Parts stored per anonymous tenant | 64 MiB ([`relay.md`](relay.md) §6.6) | `parts_bytes` |
 | Live anonymous tenants, gate-wide | 1000 | `max_tenants` |
 | Purge after expiry | 24 h | `purge_after` |
@@ -366,10 +366,10 @@ relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never t
 - A tenant's services are its services that are not disabled, whichever hello declared them: a hello whose new names
   would take the tenant past `services` is `service_denied`, and nothing is enrolled. A resumed hello disables what
   it no longer declares (§6.1), so reconnecting with new names never grows a tenant past the limit.
-- Tasks as host are the non-terminal tasks of the tenant's services, whoever called them; as hirer, the non-terminal
+- Tasks as host are the non-terminal tasks of the tenant's services, whoever called them; as caller, the non-terminal
   tasks whose principal is a key of the tenant. Both are counted under a per-tenant lock when a task is created. Over
   the cap, A2A answers `429` as [`relay.md`](relay.md) §2.2 says (on JSON-RPC, `-32600` `rate limited`), a
-  task-augmented MCP call `429` with `-32600`, and `hire` a `CallToolResult` with `isError`.
+  task-augmented MCP call `429` with `-32600`, and `send_message` a `CallToolResult` with `isError`.
 - A plain MCP call is not a task. The requests the gate relays to the tenant's services, whoever sent them, are at most
   `calls` in flight: every request with an `id` and a method that is forwarded (`initialize`, a plain `tools/call`,
   `resources/read`, `prompts/get`, `completion/complete`, `server/discover`, a method the gate does not know). An
@@ -386,7 +386,7 @@ relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never t
   with it is closed unread ([`relay.md`](relay.md) §11.1, D307). They are counted gate-wide: each request or stream
   being relayed is a row of `anon_calls` (migration 0003, `stream` telling them apart), deleted when its answer has
   been relayed or the stream closed, and with the replica that held it when that replica dies (§11; D292). The node's
-  own hiring streams are bounded by `hiring_streams` and the edge.
+  own calling streams are bounded by `calling_streams` and the edge.
 - Parts: a caller's message whose parts would take the tenant's stored parts past `parts_bytes` is `InvalidParams`
   `anonymous storage limit`, before any task row; upstream bytes past it fail the task `upstream_error`, as
   [`relay.md`](relay.md) §6.6 says.
@@ -429,7 +429,7 @@ that origin's API key in `~/.kontra/credentials` (§2.4), which `kontra connect`
    neither the code nor the verifier is ever printed or logged.
 4. In this revision, the token response's `access_token` must be an API key of the gate (`kk_…`); anything else, a
    JWT included, is refused and not stored. The authorization server is the operator's (Cloud's control plane): it
-   issues the key for the person's account, with the scopes `hire` and `enroll:*`. **It MUST issue a gate API key
+   issues the key for the person's account, with the scopes `call` and `enroll:*`. **It MUST issue a gate API key
    only when `resource` is the origin of the gate whose keys it issues** (compared as an origin, as above), answer any
    other `invalid_target` (RFC 8707 §2) at its authorization endpoint or its token endpoint, and name that gate's origin
    on its consent page (D305). An API key has no audience: a gate whose RFC 9728 document names another gate's
@@ -450,7 +450,7 @@ tells the person to restart it. Otherwise the binding is §5's, through the API 
 existing account service is bound, not created again, and one that is disabled or not a tunnel service is
 `service_denied`; a declared name the session does not serve and the account does not have is `service_denied` (only a
 tenant token or the operator creates a service, §5), and nothing moves; a service's other nodes are told of the new
-key; a hello declaring no service converts the key hire-only when the API key may hire (§9). A team tenant's key
+key; a hello declaring no service converts the key call-only when the API key may call (§9). A team tenant's key
 converts into the team as an account's does; a gate that stopped opening anonymous sessions still converts.
 
 ### 6.4 `kontra publish` (D323)
@@ -461,7 +461,7 @@ JSON), one document, at most 64 KiB, as [`schema/listing.json`](schema/listing.j
 at the gate, under the person's tenant), `visibility` (`public`, `unlisted`, `private`), `sealed`, `published` and
 `taskTimeoutSeconds` (1 to 604800, default 3600: the service's `task.timeout`, [`relay.md`](relay.md) §6.5). Listings
 are A2A only: an MCP service is not listed, and the control plane refuses a listing for one (D350). A listing has no
-price: Kontra runs no payment, and a seller that wants to be paid declares AP2 in its own card ([`relay.md`](relay.md)
+price: Kontra runs no payment, and a service that wants to be paid declares AP2 in its own card ([`relay.md`](relay.md)
 §2.6; D351). A file that still carries `price` is refused, naming it.
 
 1. It checks the file against the schema, and stops at a file it refuses, naming each problem. `--dry-run` stops
@@ -576,7 +576,7 @@ HTTP response, or while the session is closing, is `tunnel_lost` to the gate.
 A part larger than 256 KiB reaches a node as a `url` part whose URL is `kontra-blob:<ref>`
 ([`relay.md`](relay.md) §10.4). The node fetches it by opening a stream with the preamble `{"v": 1, "op":
 "blob", "ref": "<ref>"}`. The gate resolves the ref through its `blobs` row and checks that the row's task is one
-this session is serving (an attempt of it is on the session) or one whose buyer is this session's hiring
+this session is serving (an attempt of it is on the session) or one whose caller is this session's calling
 principal's. It then writes one JSON line, `{"size": <n>}` followed by exactly `n` bytes of the object, or
 `{"error": "not_found" | "forbidden" | "too_large"}` (`too_large`: an object over 64 MiB), and closes the stream
 (D181). The node refuses an announced size over 64 MiB and more bytes than announced, and, for a sealed part,
@@ -587,10 +587,10 @@ for 30 s. A hosting exchange whose `kontra-blob:` part cannot be fetched answers
 without `Kontra-Node` when asking again would fail alike (a refused ref, a bad answer, more bytes than announced),
 and `503` with `Kontra-Node: full`, which the gate retries, when it may succeed (D209).
 
-## 9. Hiring: streams the node opens
+## 9. Calling: streams the node opens
 
 The node serves `127.0.0.1:7777` (`--listen`) to local clients, a node that only hosts too, unless `--listen off`
-turns the hiring endpoint off: such a node binds no local port and hires for no one, and `--local-token` and
+turns the calling endpoint off: such a node binds no local port and calls for no one, and `--local-token` and
 `--allow-origin`, which guard `--listen`, are refused beside it, as is `--listen off` without a `--serve` (D208). A
 loopback `--listen` binds the port on both loopback families, `127.0.0.1` and `[::1]`: the node sends its clients to
 `localhost` (the cards it serves, its documentation), which a stock Linux resolves to `::1` first, so a port it left
@@ -646,7 +646,7 @@ differences:
 **The node reads the gate's answers before a local client does**, whatever the service's sealing:
 
 - Redirects: the node never relays a `3xx` of the gate's, on any path: the client gets the node's own `502` (an A2A
-  or MCP error body) and no `Location`. The gate has no hiring route that redirects, and a stock client follows a
+  or MCP error body) and no `Location`. The gate has no calling route that redirects, and a stock client follows a
   `307` or `308` with its own request body to whatever `Location` names, the gate's origin or a local path the node
   does not seal (D258).
 - MCP sessions: an answer names the session only on an `initialize` (the node removes `Mcp-Session-Id` from every
@@ -654,7 +654,7 @@ differences:
   the service it was initialized for only: a request on it to another path, or on an unsealed session to a service
   whose pin says sealed, is `404`, and the client initializes again (D260).
 
-Sealing and unsealing for hired jobs happen in the node, around this forwarding ([`ext-sealed.md`](ext-sealed.md)).
+Sealing and unsealing for called jobs happen in the node, around this forwarding ([`ext-sealed.md`](ext-sealed.md)).
 
 ## 10. MCP servers on the node: stdio and roots
 
@@ -721,7 +721,7 @@ node's filesystem exposes.
 
 - **Ping loop, both sides:** `Session.Ping()` every 20 s; three consecutive failures close the session. A silent
   peer is detected within about 75 s on either side.
-- On `welcome` the gate inserts `tunnels(session_id, key_id, tenant_id, replica_id, services, hire_principal,
+- On `welcome` the gate inserts `tunnels(session_id, key_id, tenant_id, replica_id, services, caller_principal,
   cli_version, connected_at, last_ping_at)`. It updates `last_ping_at` every 60 s (not per ping) and deletes the
   row when the session closes.
 - **One session per key per gate.** A completed handshake for a key that already has a non-draining session at
@@ -762,7 +762,7 @@ node's filesystem exposes.
   gate does not rely on the node honouring that message: it opens no further stream for the service
   ([`relay.md`](relay.md) §6.1, `mcp_session_revoked`).
 - **Revoke an API key** (`NOTIFY kontra_revoke, 'apikey:<id>'`): every later stream a session opens with it as
-  its hiring principal gets `401`, and the replica sends `{"t": "auth_revoked"}` on that session's control stream.
+  its calling principal gets `401`, and the replica sends `{"t": "auth_revoked"}` on that session's control stream.
   Hosting on the session is unaffected.
 - NOTIFY only shortens the delay: each replica re-reads revocations since its last check whenever its `LISTEN`
   connection (re)connects and at least every 5 s ([`relay.md`](relay.md) §2.3).
@@ -793,9 +793,9 @@ The control stream carries JSON lines, gate to node (D35):
 
 | Message | Meaning |
 |---|---|
-| `{"t": "drain"}` | This replica is shutting down. The node dials a **new** session at once (make-before-break), opens no new hiring streams on the old one, keeps serving inbound streams on it, and closes it when the gate does (at the end of the gate's `drain_timeout`, [`relay.md`](relay.md) §14.3). |
+| `{"t": "drain"}` | This replica is shutting down. The node dials a **new** session at once (make-before-break), opens no new calling streams on the old one, keeps serving inbound streams on it, and closes it when the gate does (at the end of the gate's `drain_timeout`, [`relay.md`](relay.md) §14.3). |
 | `{"t": "revoked"}` / `{"t": "revoked", "service": "<name>"}` | §12 |
-| `{"t": "auth_revoked"}` | The session's hiring API key was revoked: hiring streams now get `401`; hosting goes on (§12) |
+| `{"t": "auth_revoked"}` | The session's calling API key was revoked: calling streams now get `401`; hosting goes on (§12) |
 | `{"t": "enrolled", "service": "<name>", "key": "<key_id>"}` | Another key was enrolled for a service this node hosts (§5) |
 | `{"t": "expiring", "at": "<RFC 3339>"}` | An anonymous session ends at that time |
 
@@ -856,7 +856,7 @@ compressed where a row waits on a clock, in the tests' own configuration.
 | `sidecar_not_a_proxy` | §8.2–§8.3: a foreign `Host`, an absolute URL, a `..` or encoded path outside the base (M2: the root base, D123), `CONNECT`, `Upgrade`, and a `url` part pointing at a private address all reach only the configured target or are refused, and the node dials nothing else |
 | `key_scope` | §5, §8.1; [`relay.md`](relay.md) §6.1 |
 | `replica_kill` | §11; [`relay.md`](relay.md) §14.2 |
-| `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`, and a 4th from one IPv6 /48; one past `max_tenants` is `anonymous_unavailable`; a 5th declared service is `service_denied`, with nothing enrolled, and reconnecting with new names never takes the tenant past 4 services; a 5th concurrent task is `429`, as host and as hirer; a 9th concurrent plain MCP call to the tenant's services is `429`, and so is a 9th relayed request or open `GET` stream of any other kind (D304); a 9th hiring stream is `429`; a caller's parts over the tenant's total are `InvalidParams` before any task row, an upstream's fail the task `upstream_error`; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |
+| `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`, and a 4th from one IPv6 /48; one past `max_tenants` is `anonymous_unavailable`; a 5th declared service is `service_denied`, with nothing enrolled, and reconnecting with new names never takes the tenant past 4 services; a 5th concurrent task is `429`, as host and as caller; a 9th concurrent plain MCP call to the tenant's services is `429`, and so is a 9th relayed request or open `GET` stream of any other kind (D304); a 9th calling stream is `429`; a caller's parts over the tenant's total are `InvalidParams` before any task row, an upstream's fail the task `upstream_error`; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |
 | `anon_lifecycle` | §6.1: the same key before expiry gets its tenant back; a `--public` service answers a caller without a credential and a service not public answers `404` to it and to another node; `expiring` arrives before the end; at the end a task in flight fails `tunnel_lost` once an upstream task exists and `service_unavailable` at its next dispatch otherwise (D297), the node exits saying so, and the key's next hello opens a new tenant with a new slug; a probe after an enrollment that did not commit still gets `unknown_key`, and its tokens are sent again (D285); `enroll` from an anonymous key converts it; after `purge_after` the tenant's keys, services, enrollments, tasks, calls, MCP sessions and bucket objects are gone, its row is a tombstone with `created_from` a CIDR, and no table holds the client's address in any form; an `anon-…` slug is refused for an account tenant |
 | `login_converts` | §6.3, against an in-repository authorization server: `kontra login --no-browser` registers once, sends PKCE `S256` and `resource` = the gate's origin, accepts the code on its loopback port only, stores the `kk_` key for that origin only (0600), and refuses an access token that is not an API key; `kontra connect` with it converts the tenant: `welcome` has no `anonymous` and names the account's URLs, the services stop expiring, the anonymous URLs answer `404`, and an `audit` row records it; a gate without `auth.mcp_oauth` makes `kontra login` exit 1 naming `--api-key` |
 | `local_rebinding` | §9: `Host: evil.example:7777` or `Origin: http://evil.example:7777` on `/mcp/…`, `/agents/…` and `/.well-known/…` gets `403` and opens no stream |

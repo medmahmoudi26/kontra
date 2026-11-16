@@ -20,7 +20,7 @@ import (
 // 2025-11-25 (initialize, Mcp-Session-Id, event streams with their ids, a GET stream and Last-Event-ID, tasks/*,
 // answers to gate request ids, DELETE), and ModernClient speaks 2026-07-28 (no session; _meta, MCP-Protocol-Version,
 // Mcp-Method and Mcp-Name on every request; tasks/get, tasks/update and tasks/cancel). Either talks to a replica's
-// /mcp/{svc} with an API key, or to a hiring node's local /mcp/{svc} with none.
+// /mcp/{svc} with an API key, or to a calling node's local /mcp/{svc} with none.
 
 // SSEEvent is one event of an event stream.
 type SSEEvent struct {
@@ -115,7 +115,7 @@ func (r *MCPResponse) ToolText() (string, bool) {
 // MCPClient is a 2025-11-25 client.
 type MCPClient struct {
 	Endpoint string // http://127.0.0.1:<port>/mcp/<svc>
-	Key      string // the API key; "" sends no Authorization (a hiring node's local endpoint)
+	Key      string // the API key; "" sends no Authorization (a calling node's local endpoint)
 	SID      string // the gate's Mcp-Session-Id, once initialize has answered
 	Version  string // MCP-Protocol-Version on requests after initialize (default 2025-11-25)
 	// Capabilities are the client's initialize capabilities (default {"elicitation":{}}).

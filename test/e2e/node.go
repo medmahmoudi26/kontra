@@ -30,7 +30,7 @@ import (
 // new connection to the replica the test chose (Front.Route), replica A by default. Tunnel services are
 // services with backend tunnel, each served by a `kontra connect` subprocess (a Node) of the binary built
 // once from ./cmd/kontra, with its own HOME under the run's directory (its identity key and credentials)
-// and a slowagent (or the helloworld seller) as its --serve target. Every Node carries KONTRA_E2E_RUN and
+// and a slowagent (or the helloworld service) as its --serve target. Every Node carries KONTRA_E2E_RUN and
 // the script's KONTRA_E2E_SESSION, so scripts/test_e2e.sh can prove none outlived the run.
 
 // The spec's numbers every tunnel test's deadlines derive from (spec/tunnel.md §11, §13; relay.md §14.2).
@@ -297,7 +297,7 @@ type NodeOptions struct {
 	// (--env KONTRA_E2E_RUN --env KONTRA_E2E_SESSION, D185), so the leak check finds one that outlives the run.
 	MCP    map[string]string
 	Roots  []string // --roots <name>=<dir>, each (spec/tunnel.md §10, D173)
-	APIKey string   // --api-key: whom the node hires as (spec/tunnel.md §9)
+	APIKey string   // --api-key: whom the node calls as (spec/tunnel.md §9)
 	Enroll []string // service tokens from Harness.EnrollToken (--enroll, each)
 	Rotate bool     // --rotate
 	Home   string   // HOME: another node's to share its ~/.kontra (default a fresh directory)
@@ -405,7 +405,7 @@ func (n *Node) args() []string {
 	if n.opts.Key != "" {
 		args = append(args, "--key", n.opts.Key)
 	}
-	// The hiring endpoint (spec/tunnel.md §9) on a free loopback port: 7777 is one per host.
+	// The calling endpoint (spec/tunnel.md §9) on a free loopback port: 7777 is one per host.
 	if !slices.Contains(n.opts.Args, "--listen") {
 		args = append(args, "--listen", "127.0.0.1:0")
 	}
@@ -507,10 +507,10 @@ func (n *Node) Session() string {
 	return ws[len(ws)-1].Session
 }
 
-// hiringAtRE is the line `kontra connect` prints on stdout when its hiring endpoint listens (internal/node run.go).
-var hiringAtRE = regexp.MustCompile(`kontra connect: hiring at http://localhost:(\d+) `)
+// callingAtRE is the line `kontra connect` prints on stdout when its calling endpoint listens (internal/node run.go).
+var callingAtRE = regexp.MustCompile(`kontra connect: calling at http://localhost:(\d+) `)
 
-// Local waits for the current launch's hiring endpoint (spec/tunnel.md §9) and returns its base URL,
+// Local waits for the current launch's calling endpoint (spec/tunnel.md §9) and returns its base URL,
 // http://127.0.0.1:<port>.
 func (n *Node) Local(within time.Duration) (string, error) {
 	n.mu.Lock()
@@ -520,14 +520,14 @@ func (n *Node) Local(within time.Duration) (string, error) {
 	for {
 		b, _ := os.ReadFile(n.OutPath)
 		// The current launch's line is the last one; a relaunch binds another port.
-		if m := hiringAtRE.FindAllSubmatch(b, -1); len(m) > 0 && len(n.Welcomes()) > seen {
+		if m := callingAtRE.FindAllSubmatch(b, -1); len(m) > 0 && len(n.Welcomes()) > seen {
 			return "http://127.0.0.1:" + string(m[len(m)-1][1]), nil
 		}
 		if n.Exited() {
-			return "", fmt.Errorf("e2e: node %s exited before its hiring endpoint was up:\n%s", n.Name, tail(n.LogPath, 30))
+			return "", fmt.Errorf("e2e: node %s exited before its calling endpoint was up:\n%s", n.Name, tail(n.LogPath, 30))
 		}
 		if time.Now().After(deadline) {
-			return "", fmt.Errorf("e2e: node %s printed no hiring endpoint and welcome within %v:\n%s", n.Name, within, tail(n.LogPath, 30))
+			return "", fmt.Errorf("e2e: node %s printed no calling endpoint and welcome within %v:\n%s", n.Name, within, tail(n.LogPath, 30))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

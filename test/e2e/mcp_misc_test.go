@@ -69,17 +69,17 @@ func TestMCPBatchRefused(t *testing.T) {
 // sh.kontra/escrow and sh.kontra/approve-url (a result's _meta), capabilities.experimental["sh.kontra/sealed"] and
 // capabilities.extensions["sh.kontra/x"] never reach a client; on a service without sealed, an upstream
 // elicitation/create's _meta["sh.kontra/sealed"] is removed, and on a sealed service only an exact {v, envelope}
-// reaches the client (a malformed one is removed, and so is any other sh.kontra/ key beside it). An A2A seller's
+// reaches the client (a malformed one is removed, and so is any other sh.kontra/ key beside it). An A2A service's
 // kontra.approve.url and kontra.escrow.* never reach a caller, in a task, a status message, an artifact or a part.
 // The upstreams sit behind a FakeNode, which relays them byte for byte: what is removed, the gate removes.
 func TestMCPMetaSpoof(t *testing.T) {
-	spoofSeller := &spoofExec{}
+	spoofService := &spoofExec{}
 	h := start(t, Options{
 		MCP:    map[string]MCPService{"plain": {}, "sealedsvc": {Sealed: "true"}},
 		Tunnel: map[string]TunnelService{"spoof": {}},
 	})
 	ctx := ctxFor(t, 5*time.Minute)
-	spoofURL := serveA2A(t, h, spoofSeller)
+	spoofURL := serveA2A(t, h, spoofService)
 	spoofing := func() *mcptest.Server {
 		up := mcptest.New()
 		up.InitMeta = json.RawMessage(`{"sh.kontra/note":"1 USD","vendor/keep":"yes"}`)
@@ -201,8 +201,8 @@ func TestMCPMetaSpoof(t *testing.T) {
 		cancel()
 	}
 
-	// A2A: the seller's kontra.approve.url and kontra.escrow.* never reach a caller.
-	res, err := h.BuyerA().Client(t, h.Gates[0], "spoof").SendMessage(ctx, newMessage("spoof"))
+	// A2A: the service's kontra.approve.url and kontra.escrow.* never reach a caller.
+	res, err := h.CallerA().Client(t, h.Gates[0], "spoof").SendMessage(ctx, newMessage("spoof"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +214,7 @@ func TestMCPMetaSpoof(t *testing.T) {
 	if !ok {
 		t.Fatalf("the A2A answer is a %T", res)
 	}
-	got, err := h.BuyerA().Client(t, h.Gates[1], "spoof").GetTask(ctx, &a2a.GetTaskRequest{ID: task.ID})
+	got, err := h.CallerA().Client(t, h.Gates[1], "spoof").GetTask(ctx, &a2a.GetTaskRequest{ID: task.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,12 +224,12 @@ func TestMCPMetaSpoof(t *testing.T) {
 	}
 	for _, ev := range texts(t, h, `select payload::text from kontra.task_events where task_id = $1`, string(task.ID)) {
 		if strings.Contains(ev, "kontra.approve") || strings.Contains(ev, "kontra.escrow") {
-			t.Fatalf("the seller's spoofed keys were logged: %s", ev)
+			t.Fatalf("the service's spoofed keys were logged: %s", ev)
 		}
 	}
 }
 
-// spoofExec is an A2A seller that writes Kontra's keys into every metadata it can: the task's, its status
+// spoofExec is an A2A service that writes Kontra's keys into every metadata it can: the task's, its status
 // message's, its artifact's and its parts'.
 type spoofExec struct{}
 
@@ -447,7 +447,7 @@ func TestMCPCaseSmuggling(t *testing.T) {
 
 // a2a_case_smuggling (§2.4, D172), through both replicas: a JSON-RPC SendMessage carrying "method" and "METHOD",
 // "tenant" and "TENANT" in params, or a part with two mediaType keys, is -32600 with HTTP 400, before any task row,
-// and the seller receives nothing.
+// and the service receives nothing.
 func TestA2ACaseSmuggling(t *testing.T) {
 	h := start(t, Options{})
 	ctx := ctxFor(t, 3*time.Minute)
@@ -490,6 +490,6 @@ func TestA2ACaseSmuggling(t *testing.T) {
 		t.Fatalf("%d tasks rows for refused requests", n)
 	}
 	if n := h.Upstream.Sends(); n != sends {
-		t.Fatalf("the seller received %d sends", n-sends)
+		t.Fatalf("the service received %d sends", n-sends)
 	}
 }

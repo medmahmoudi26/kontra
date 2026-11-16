@@ -41,13 +41,13 @@ func toolNames(t *testing.T, rep reply) ([]string, map[string]map[string]any, bo
 }
 
 // mcp_tool_denied (§11.3): with deny ["ec*"] and an upstream of 3 pages, tools/list lists none of the denied tools,
-// has no nextCursor and carries the tool_meta annotations (the seller's sh.kontra/ keys removed); tools/call echo is
+// has no nextCursor and carries the tool_meta annotations (the service's sh.kontra/ keys removed); tools/call echo is
 // -32602 "Unknown tool: echo", as for a tool that does not exist, and the upstream sees no call and the meter no row.
 func TestToolPolicy(t *testing.T) {
 	e := newEnv(t)
 	up, url := upstreamDouble(t)
 	for _, n := range []string{"add", "echo", "echo2", "mul", "sub"} {
-		up.Tools = append(up.Tools, mcptest.Tool(n, `{"sh.kontra/note":"seller's","io.example/x":1}`))
+		up.Tools = append(up.Tools, mcptest.Tool(n, `{"sh.kontra/note":"service's","io.example/x":1}`))
 	}
 	up.Tools = up.Tools[1:] // drop the default echo
 	up.PageSize = 2
@@ -59,7 +59,7 @@ func TestToolPolicy(t *testing.T) {
 		}
 	})
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/fs")
 	rep := c.do(http.MethodPost, r.url+"/mcp/fs", `{"jsonrpc":"2.0","id":"l1","method":"tools/list","params":{}}`, nil)
@@ -129,7 +129,7 @@ func TestMetering(t *testing.T) {
 			}
 			e.service("fs", url, nil)
 			r := e.replica("a", replicaOpts{})
-			key, principal := e.apiKey("buyer")
+			key, principal := e.apiKey("caller")
 			c := newClient(t, key)
 			c.initialize(r.url + "/mcp/fs")
 			for i, tool := range []string{"ok", "fails", "boom"} {
@@ -185,7 +185,7 @@ func TestMeteringReadsWhatTheClientReads(t *testing.T) {
 	}
 	e.service("fs", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/fs")
 
@@ -393,7 +393,7 @@ func TestMetaSpoof(t *testing.T) {
 			}
 			e.service("fs", url, func(s *Service) { s.Sealed = sealed })
 			r := e.replica("a", replicaOpts{})
-			key, _ := e.apiKey("buyer")
+			key, _ := e.apiKey("caller")
 			c := newClient(t, key)
 			rep := c.initialize(r.url + "/mcp/fs")
 			// The one Kontra key of an initialize result is the gate's own statement of session_idle_s (D224), never
@@ -504,7 +504,7 @@ func TestCaseSmuggling(t *testing.T) {
 	e.service("fs", url, func(s *Service) { s.Tools = Policy{Deny: []string{"echo"}} })
 	adm := &fakeAdmission{}
 	r := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpCall}})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/fs")
 	seen := len(up.Requests())
@@ -570,7 +570,7 @@ func TestOriginAndUpstreamRefusals(t *testing.T) {
 	up, url := upstreamDouble(t)
 	e.service("fs", url, nil)
 	r := e.replica("a", replicaOpts{origins: []string{"https://app.example"}})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
 	if rep := c.do(http.MethodPost, r.url+"/mcp/fs", init, map[string]string{"Origin": "https://evil.example"}); rep.status != 403 {
@@ -614,7 +614,7 @@ func TestAdmission(t *testing.T) {
 	e.service("fs", url, nil)
 	adm := &fakeAdmission{}
 	r := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpSession, hooks.OpCall}})
-	key, principal := e.apiKey("buyer")
+	key, principal := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/fs")
 	if adm.n() != 1 || adm.asked[0].Operation != hooks.OpSession || adm.asked[0].Principal.ID != principal || adm.asked[0].Service.Name != "fs" {
@@ -659,7 +659,7 @@ func TestVersionNegotiation(t *testing.T) {
 	up.Negotiate = "2024-11-05"
 	e.service("fs", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	rep := c.do(http.MethodPost, r.url+"/mcp/fs", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{}}}`, nil)
 	if rep.errCode(t) != -32602 || rep.header.Get("Mcp-Session-Id") != "" || !strings.Contains(string(rep.body), "2025-11-25") {
@@ -721,7 +721,7 @@ func TestTasksModes(t *testing.T) {
 	e.service("pass", url, func(s *Service) { s.Tasks = config.TasksPassthrough })
 	e.service("off", url, func(s *Service) { s.Tasks = config.TasksOff })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	taskCall := `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{},"task":{"ttl":1000}}}`
 	for _, tc := range []struct {
 		svc   string
@@ -772,9 +772,9 @@ func TestIdleSweep(t *testing.T) {
 	up, url := upstreamDouble(t)
 	e.service("fs", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
-	// The initialize result states the service's session_idle_s (D224): a hiring node keeps a sealed session's key
+	// The initialize result states the service's session_idle_s (D224): a calling node keeps a sealed session's key
 	// that long.
 	if rep := c.initialize(r.url + "/mcp/fs"); !strings.Contains(string(rep.body), `"_meta":{"sh.kontra/session_idle_s":3600}`) {
 		t.Errorf("the initialize result does not state session_idle_s: %s", rep.body)
@@ -818,7 +818,7 @@ func TestListChangedInvalidates(t *testing.T) {
 	up, url := upstreamDouble(t)
 	e.service("fs", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/fs")
 	list := func() []string {

@@ -565,8 +565,8 @@ func TestP7ReplayingPullerBreaksFollowUps(t *testing.T) {
 	}
 }
 
-// P7b: a tail puller that emits user-message rows answers turn 2 with the buyer's own message.
-func TestP7bUserRowsReturnTheBuyersMessage(t *testing.T) {
+// P7b: a tail puller that emits user-message rows answers turn 2 with the caller's own message.
+func TestP7bUserRowsReturnTheCallersMessage(t *testing.T) {
 	t.Parallel()
 	res, err, _, _, _ := runTwoTurns(t, probeConfig{tail: true}, false)
 	if m, ok := res.(*a2a.Message); !ok || m.Role != a2a.MessageRoleUser || err != nil {

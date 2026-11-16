@@ -1568,7 +1568,7 @@ func TestCancelAnsweredWithARunningTaskContinues(t *testing.T) {
 					case <-forwarded:
 					case <-w.release:
 					}
-					time.Sleep(100 * time.Millisecond) // the seller keeps working, then completes
+					time.Sleep(100 * time.Millisecond) // the service keeps working, then completes
 					w.setState(string(store.StateCompleted))
 					return DispatchResult{Outcome: DispatchTerminal}, nil
 				}

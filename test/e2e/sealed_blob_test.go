@@ -13,25 +13,25 @@ import (
 )
 
 // A sealed part through the bucket (D167, D171, D181; ext-sealed.md §3; spec/tunnel.md §8.3): a 2 MiB file part
-// sealed by the hiring node (replica B) goes to sealedecho hosted by a node on replica A and comes back as an
+// sealed by the calling node (replica B) goes to sealedecho hosted by a node on replica A and comes back as an
 // artifact. The bucket holds age ciphertext only, every object is a blobs row of the task, the hosting node fetched
 // the part over a blob stream (the gate logs serving it to that session) and dialed nothing but the gate and its
-// seller, and the local client gets the original bytes (the same SHA-256), as the seller did.
+// service, and the local client gets the original bytes (the same SHA-256), as the service did.
 func TestSealedBlob(t *testing.T) {
 	h := start(t, Options{Tunnel: map[string]TunnelService{"vault": {Sealed: "true"}}, Blobs: true, Peer: true})
 	ctx := ctxFor(t, 5*time.Minute)
-	seller, err := h.StartEchoSeller()
+	service, err := h.StartEchoService()
 	if err != nil {
 		t.Fatal(err)
 	}
-	host, hostSession := startNode(t, ctx, h, "host", map[string]string{"vault": seller.URL})
+	host, hostSession := startNode(t, ctx, h, "host", map[string]string{"vault": service.URL})
 	waitSealedCard(t, ctx, h, "vault")
 	h.Front.Route(h.Gates[1])
-	hirer, err := h.StartNode(ctx, NodeOptions{Name: "hirer", APIKey: h.APIKey})
+	callingNode, err := h.StartNode(ctx, NodeOptions{Name: "caller", APIKey: h.APIKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	local, err := hirer.Local(30 * time.Second)
+	local, err := callingNode.Local(30 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,9 +49,9 @@ func TestSealedBlob(t *testing.T) {
 	if len(task.Artifacts) != 1 || len(task.Artifacts[0].Parts) != 1 || sha256.Sum256(task.Artifacts[0].Parts[0].Raw()) != sum {
 		t.Fatal("the local client did not get the original 2 MiB back")
 	}
-	turns := seller.Turns()
+	turns := service.Turns()
 	if len(turns) != 1 || sha256.Sum256(turns[0][0].Raw()) != sum || turns[0][0].Filename != "two.bin" {
-		t.Fatal("the seller did not get the original 2 MiB")
+		t.Fatal("the service did not get the original 2 MiB")
 	}
 	refs := texts(t, h, `select ref from kontra.blobs where task_id = $1`, string(task.ID))
 	if len(refs) < 2 {
@@ -81,23 +81,23 @@ func TestSealedBlob(t *testing.T) {
 	if served == 0 {
 		t.Fatal("the gate served no blob stream of the task to the hosting node")
 	}
-	// The hosting node dialed nothing but the gate (through the Front) and its seller.
-	sellerAddr := strings.TrimPrefix(seller.URL, "http://")
+	// The hosting node dialed nothing but the gate (through the Front) and its service.
+	serviceAddr := strings.TrimPrefix(service.URL, "http://")
 	for _, s := range checkNoListener(t, host.Pid(), "the hosting node") {
 		if s.State == tcpListen {
 			continue
 		}
 		_, localPort, _ := net.SplitHostPort(s.Local)
-		local, _ := hirerListenPort(host)
-		if s.Remote != h.Front.Addr && s.Remote != sellerAddr && localPort != local {
-			t.Fatalf("the hosting node has a connection to %s (local %s): it dials only the gate and its seller", s.Remote, s.Local)
+		local, _ := callingNodeListenPort(host)
+		if s.Remote != h.Front.Addr && s.Remote != serviceAddr && localPort != local {
+			t.Fatalf("the hosting node has a connection to %s (local %s): it dials only the gate and its service", s.Remote, s.Local)
 		}
 	}
 }
 
-// hirerListenPort is the port of a node's own hiring endpoint, from its stdout.
-func hirerListenPort(n *Node) (string, bool) {
-	m := hiringAtRE.FindAllStringSubmatch(readFile(n.OutPath), -1)
+// callingNodeListenPort is the port of a node's own calling endpoint, from its stdout.
+func callingNodeListenPort(n *Node) (string, bool) {
+	m := callingAtRE.FindAllStringSubmatch(readFile(n.OutPath), -1)
 	if len(m) == 0 {
 		return "", false
 	}

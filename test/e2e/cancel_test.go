@@ -26,7 +26,7 @@ func checkCanceledForGood(t *testing.T, ctx context.Context, h *Harness, taskID 
 func checkCanceledForGoodOn(t *testing.T, ctx context.Context, h *Harness, svc string, agent *slowagent.Agent, taskID a2a.TaskID, wait time.Duration) {
 	t.Helper()
 	for _, g := range h.Gates {
-		task, err := h.BuyerA().Client(t, g, svc).GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
+		task, err := h.CallerA().Client(t, g, svc).GetTask(ctx, &a2a.GetTaskRequest{ID: taskID})
 		if err != nil || task.Status.State != a2a.TaskStateCanceled {
 			t.Fatalf("GetTask on %s right after CancelTask: %v %v, want canceled (D79)", g.Name, task, err)
 		}
@@ -88,21 +88,21 @@ func endedAttempt(t *testing.T, ctx context.Context, h *Harness, taskID a2a.Task
 }
 
 // TestCancelForwarded is cancel_forwarded, direct backend (spec/relay.md §8, §16; D79, D80), against an
-// a2a-go seller that handles cancel: a working task whose upstream task exists, canceled through the
+// a2a-go service that handles cancel: a working task whose upstream task exists, canceled through the
 // other replica over JSON-RPC, and an input-required task (no dispatch running), canceled over HTTP+JSON.
 // Each time the upstream receives CancelTask, the caller gets the canceled task, GetTask right after
-// agrees, the canceled status is the last carried row, and no completed follows. An a2a-go seller never
-// sends anything after its canceled status (a2a-go ends the execution there), so the seller here ignores
+// agrees, the canceled status is the last carried row, and no completed follows. An a2a-go service never
+// sends anything after its canceled status (a2a-go ends the execution there), so the service here ignores
 // its own cancel (TalksAfterCancel): the stream the gate follows goes on with a chunk and a completed
 // status right after the canceled one, and the gate must log neither. A second CancelTask of the canceled
 // task is TaskNotCancelableError on both bindings.
 func TestCancelForwarded(t *testing.T) {
 	h := start(t, Options{Upstream: slowagent.Config{Chunks: 30, Interval: 500 * time.Millisecond, Streaming: true, TalksAfterCancel: true}})
 	ctx := ctxFor(t, 5*time.Minute)
-	buyer := h.BuyerA()
+	caller := h.CallerA()
 
 	// A working task: its upstream task exists and streams.
-	s, err := buyer.SendStreaming(ctx, h.Gates[0], newMessage("cancel_forwarded working"), Call{})
+	s, err := caller.SendStreaming(ctx, h.Gates[0], newMessage("cancel_forwarded working"), Call{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestCancelForwarded(t *testing.T) {
 		t.Fatalf("attempts.replica_id %q is neither replica", att.ReplicaID)
 	}
 	other := h.Other(x)
-	canceled, err := buyer.Client(t, other, "").CancelTask(ctx, &a2a.CancelTaskRequest{ID: working})
+	canceled, err := caller.Client(t, other, "").CancelTask(ctx, &a2a.CancelTaskRequest{ID: working})
 	if err != nil {
 		t.Fatalf("CancelTask on %s: %v", other.Name, err)
 	}
@@ -139,9 +139,9 @@ func TestCancelForwarded(t *testing.T) {
 	}
 	checkCanceledForGood(t, ctx, h, working, 3*time.Second)
 	if n := h.Upstream.LateEvents(); n == 0 {
-		t.Fatal("the seller wrote nothing after its canceled status: the check above proved nothing")
+		t.Fatal("the service wrote nothing after its canceled status: the check above proved nothing")
 	} else {
-		t.Logf("the seller wrote %d events after its canceled status; the gate logged none", n)
+		t.Logf("the service wrote %d events after its canceled status; the gate logged none", n)
 	}
 	if a := endedAttempt(t, ctx, h, working); a.Outcome != "canceled" {
 		t.Fatalf("the attempt of the canceled working task: %+v, want ended canceled", a)
@@ -152,23 +152,23 @@ func TestCancelForwarded(t *testing.T) {
 		client  interface {
 			CancelTask(context.Context, *a2a.CancelTaskRequest) (*a2a.Task, error)
 		}
-	}{{"JSON-RPC", buyer.Client(t, h.Gates[0], "")}, {"HTTP+JSON", buyer.ClientREST(t, h.Gates[1], "")}} {
+	}{{"JSON-RPC", caller.Client(t, h.Gates[0], "")}, {"HTTP+JSON", caller.ClientREST(t, h.Gates[1], "")}} {
 		if _, err := c.client.CancelTask(ctx, &a2a.CancelTaskRequest{ID: working}); !errors.Is(err, a2a.ErrTaskNotCancelable) {
 			t.Fatalf("a second CancelTask of a canceled task over %s: %v, want TaskNotCancelableError (spec §8)", c.binding, err)
 		}
 	}
-	r, err := buyer.RPC(ctx, h.Gates[1], "", "CancelTask", &a2a.CancelTaskRequest{ID: working})
+	r, err := caller.RPC(ctx, h.Gates[1], "", "CancelTask", &a2a.CancelTaskRequest{ID: working})
 	if err != nil || r.Error == nil || r.Error.Code != -32002 {
 		t.Fatalf("a second CancelTask over JSON-RPC: %v %s, want -32002", err, r.Body)
 	}
-	rr, err := buyer.REST(ctx, h.Gates[0], "", http.MethodPost, "/tasks/"+string(working)+":cancel", map[string]any{})
+	rr, err := caller.REST(ctx, h.Gates[0], "", http.MethodPost, "/tasks/"+string(working)+":cancel", map[string]any{})
 	if err != nil || rr.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("a second CancelTask over HTTP+JSON: %v %s, want HTTP 400", err, rr.Body)
 	}
 	checkHistory(t, h, working, "e2e_cancel_forwarded_working", slowagent.ChunkMarker, h.APIKey)
 
 	// An input-required task: no dispatch runs, the attempt waits; cancel over HTTP+JSON.
-	res, err := buyer.Client(t, h.Gates[1], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel_forwarded"))
+	res, err := caller.Client(t, h.Gates[1], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel_forwarded"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestCancelForwarded(t *testing.T) {
 	if !ok || waiting.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("SendMessage answered %#v, want an input-required task", res)
 	}
-	rr, err = buyer.REST(ctx, h.Gates[0], "", http.MethodPost, "/tasks/"+string(waiting.ID)+":cancel", map[string]any{})
+	rr, err = caller.REST(ctx, h.Gates[0], "", http.MethodPost, "/tasks/"+string(waiting.ID)+":cancel", map[string]any{})
 	if err != nil {
 		t.Fatal(err)
 	}

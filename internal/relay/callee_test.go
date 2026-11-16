@@ -84,7 +84,7 @@ func TestCalleeLegStreaming(t *testing.T) {
 	_, b, info := newAgent(t, spoofer(2), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "go"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "go"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
 		t.Fatalf("result %+v", res)
 	}
@@ -115,7 +115,7 @@ func TestCalleeLegPolling(t *testing.T) {
 	})
 	_, b, info := newAgent(t, exec, agentConfig{})
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "hi"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "hi"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
 		t.Fatalf("result %+v", res)
 	}
@@ -140,7 +140,7 @@ func TestCalleeLegCancel(t *testing.T) {
 	_, b, info := newAgent(t, g, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	done := make(chan lifecycle.DispatchResult, 1)
 	go func() { done <- e.dispatch(context.Background(), id, 1, wid, false) }()
 	waitFor(t, "the first upstream id", func() bool { return e.attempt(id, 1).FirstUpstreamIDAt != nil })
@@ -163,7 +163,7 @@ func TestCalleeLegUnreachable(t *testing.T) {
 	closed.Close()
 	b, _ := upstream.NewDirect(url, true)
 	e.backends.set(b, rpcInfo, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchRetryable {
 		t.Fatalf("result %+v", res)
 	}
@@ -180,7 +180,7 @@ func TestCalleeLegOff(t *testing.T) {
 	_, b, info := newAgent(t, spoofer(1), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "go"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "go"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
 		t.Fatalf("result %+v", res)
 	}

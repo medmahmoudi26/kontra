@@ -2,7 +2,7 @@
 // carries, read for display only. The gate relays AP2 untouched (D351) and so does the console: nothing here checks a
 // signature, a hash or an expiry -- the agents do. A JWT's claims are decoded to show what it says, and the card says
 // they are not verified. The keys are the AP2 samples' (code/samples/python/src/common/constants.py), as
-// examples/sellers/ap2-merchant emits them.
+// examples/agents/ap2-merchant emits them.
 
 /** AP2's A2A extension. */
 export const AP2_EXTENSION = "https://github.com/google-agentic-commerce/ap2/v1";

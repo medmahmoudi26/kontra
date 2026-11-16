@@ -20,7 +20,7 @@ import (
 // mints only a team gate's, D37). With Options.Multi the harness writes them as Cloud would: tenants, services
 // (source db) and API keys as rows of the gate's database, each service change followed by NOTIFY kontra_services
 // '<tenant>/<name>', which every replica applies (and its periodic re-read would). A service's ref there is
-// <tenant>/<name>. The team tenant is "default" (tenant.TeamTenant): buyer A's and B's keys, and the direct services of
+// <tenant>/<name>. The team tenant is "default" (tenant.TeamTenant): caller A's and B's keys, and the direct services of
 // Options.Upstream and Options.Services, are its.
 
 // TeamTenant is the team tenant's slug.
@@ -109,7 +109,7 @@ func (h *Harness) SeedServices(ctx context.Context, svcs ...SeededService) error
 	})
 }
 
-// MintKey writes an API key of the tenant slug (hire by default), as an operator's control plane does, and returns it.
+// MintKey writes an API key of the tenant slug (call by default), as an operator's control plane does, and returns it.
 func (h *Harness) MintKey(ctx context.Context, slug, name string, scopes ...auth.Scope) (auth.Minted, error) {
 	var id uuid.UUID
 	if err := h.Pool.QueryRow(ctx, `select id from kontra.tenants where slug = $1`, slug).Scan(&id); err != nil {
@@ -183,7 +183,7 @@ func (h *Harness) TenantOf(ctx context.Context, slug string) uuid.UUID {
 	return id
 }
 
-// seedTeam writes, at Start of a multi-tenant harness, the team tenant, buyer A's and B's keys, and the direct services
+// seedTeam writes, at Start of a multi-tenant harness, the team tenant, caller A's and B's keys, and the direct services
 // of Options.Upstream and Options.Services as rows of the team tenant (the replicas read them when they start).
 func (h *Harness) seedTeam(ctx context.Context) error {
 	if _, err := tenant.EnsureTeam(ctx, h.Pool); err != nil {

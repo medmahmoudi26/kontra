@@ -83,11 +83,12 @@ const (
 	// for a lost replica's heartbeat timeout is for A2A CancelTask only. Only MCP tasks (Input.Protocol mcp, M3)
 	// reach it.
 	changeMCPCancel = "mcp-cancel"
-	// changeHireMCPCancel: a kontra.cancel with Mode mcp (CancelModeMCP) on an A2A task, the /mcp tasks/cancel of a
-	// hire task (relay.md §12.2, D272, D293; M4 WP-04), follows changeMCPCancel's rule (§11.6, D57): canceled within
+	// changeSendMessageMCPCancel: a kontra.cancel with Mode mcp (CancelModeMCP) on an A2A task, the /mcp tasks/cancel of a
+	// send_message task (relay.md §12.2, D272, D293; M4 WP-04), follows changeMCPCancel's rule (§11.6, D57): canceled within
 	// 10 s whatever the upstream answers, the upstream sent §8's CancelTask through forward_cancel. Before it, no
 	// Update carried a mode, and every A2A task's cancel followed §8's table, as it still does without one.
-	changeHireMCPCancel = "hire-mcp-cancel"
+	// Its value keeps the tool's name before D363: it is a recorded GetVersion change id, and histories replay by it.
+	changeSendMessageMCPCancel = "hire-mcp-cancel"
 	// changeReconnect: a tunnel attempt of an A2A task whose session is lost after its first upstream task id (the
 	// dispatch's tunnel_lost, a heartbeat or schedule-to-start timeout of its replica) waits for its node to reconnect
 	// instead of failing tunnel_lost (relay.md §6.4, D340..D349): reconnect_wait logs the waiting status,
@@ -909,7 +910,7 @@ func (l *lc) lostWith(ctx workflow.Context, st AttemptState, hint store.FailureR
 // context, direct backend" row re-attaches after the first upstream task id, and the plan applied it to a
 // schedule-to-start timeout too. For a follow-up turn that is wrong: a resume skips the work item's
 // consume and re-attaches without sending, finds the upstream still at input-required and ends the turn,
-// so the follow-up is in the log (a2a-go appends it to history) but the seller never received it. A new
+// so the follow-up is in the log (a2a-go appends it to history) but the service never received it. A new
 // attempt is no fix either: after the first upstream id §6.4 allows none. The closest faithful behaviour:
 // before the first upstream id, a new attempt as before; after it, a direct backend dispatches the same
 // turn again on the same attempt as it was (a follow-up's dispatch stays the turn's first, which consumes
@@ -1254,13 +1255,13 @@ func (l *lc) cancelIdle(ctx workflow.Context) {
 }
 
 // mcpCancel reports whether the cancel in flight follows spec §11.6's MCP rule: the task is a gate-owned MCP task
-// (changeMCPCancel), or the cancel was asked in MCP mode, the /mcp tasks/cancel of a hire task (changeHireMCPCancel).
+// (changeMCPCancel), or the cancel was asked in MCP mode, the /mcp tasks/cancel of a send_message task (changeSendMessageMCPCancel).
 // The second version marker is read only for a cancel that asked for the mode, which no history before it holds.
 func (l *lc) mcpCancel(ctx workflow.Context) bool {
 	if l.in.Protocol == ProtocolMCP {
 		return workflow.GetVersion(ctx, changeMCPCancel, workflow.DefaultVersion, 1) >= 1
 	}
-	return l.cancel != nil && l.cancel.mcp && workflow.GetVersion(ctx, changeHireMCPCancel, workflow.DefaultVersion, 1) >= 1
+	return l.cancel != nil && l.cancel.mcp && workflow.GetVersion(ctx, changeSendMessageMCPCancel, workflow.DefaultVersion, 1) >= 1
 }
 
 // cancelMCP is spec §11.6's tasks/cancel (D57), while a dispatch runs (c) or none does (c nil): with no upstream

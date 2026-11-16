@@ -99,7 +99,7 @@ func TestMCPRowsFollowTheSession(t *testing.T) {
 	}
 	pin := func(s *Session, service, name string) [32]byte {
 		h := sha256.Sum256([]byte(name))
-		if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via,
+		if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via,
 			tunnel_session, replica_id, protocol_version) values ($1, $2, $3, $4, 'key:kk_t_x', 'api_key', $5, $6, '2025-11-25')`,
 			h[:], e.team, service, uuid.New(), s.ID, r.id); err != nil {
 			t.Fatal(err)
@@ -255,7 +255,7 @@ func TestSupersedeIsNotHeldByMCPRows(t *testing.T) {
 	e.waitRow(t, old.session)
 	held(old)
 	pin := sha256.Sum256([]byte("fs-pinned"))
-	if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via,
+	if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via,
 		tunnel_session, replica_id, protocol_version) values ($1, $2, 'fs', $3, 'key:kk_t_x', 'api_key', $4, $5, '2025-11-25')`,
 		pin[:], e.team, uuid.New(), old.session, a.id); err != nil {
 		t.Fatal(err)

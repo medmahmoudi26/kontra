@@ -34,7 +34,7 @@ type taskView struct {
 	Kind           string     `json:"kind"` // a2a | mcp (tasks.protocol)
 	State          string     `json:"state"`
 	Caller         string     `json:"caller"`    // the principal
-	CallerID       string     `json:"caller_id"` // the buyer id: the conversation's scope (spec §4)
+	CallerID       string     `json:"caller_id"` // the caller id: the conversation's scope (spec §4)
 	Via            string     `json:"via"`       // "console" for a task the console started
 	ContextID      string     `json:"context_id"`
 	CreatedAt      time.Time  `json:"created_at"`
@@ -98,7 +98,7 @@ func (c *Console) attemptsOf(ctx context.Context, id uuid.UUID) ([]attemptView, 
 }
 
 // taskColumns are what every task read selects: never a payload of another table, never first_request.
-const taskColumns = `t.id, t.service, t.protocol, t.state, t.principal, t.buyer_id, t.via, t.context_id, t.created_at,
+const taskColumns = `t.id, t.service, t.protocol, t.state, t.principal, t.caller_id, t.via, t.context_id, t.created_at,
 	t.status_at, t.terminal_at, t.retention_until, t.version, coalesce(s.sealed, 'off'), coalesce(s.retention_s, 0),
 	ct.task_id is not null, t.exposed_at is not null,
 	case when coalesce(s.sealed, 'off') = 'off' and json_typeof(t.snapshot -> 'history' -> 0 -> 'parts') = 'array' then
@@ -113,15 +113,15 @@ func scanTask(row pgx.Row, extra ...any) (*taskView, error) {
 	var (
 		v      taskView
 		id     uuid.UUID
-		buyer  uuid.UUID
+		caller uuid.UUID
 		sealed string
 	)
-	dst := append([]any{&id, &v.Service, &v.Kind, &v.State, &v.Caller, &buyer, &v.Via, &v.ContextID, &v.CreatedAt,
+	dst := append([]any{&id, &v.Service, &v.Kind, &v.State, &v.Caller, &caller, &v.Via, &v.ContextID, &v.CreatedAt,
 		&v.StatusAt, &v.TerminalAt, &v.RetentionUntil, &v.Version, &sealed, &v.Retention, &v.Console, &v.Exposed, &v.Summary}, extra...)
 	if err := row.Scan(dst...); err != nil {
 		return nil, err
 	}
-	v.TaskID, v.CallerID = id.String(), buyer.String()
+	v.TaskID, v.CallerID = id.String(), caller.String()
 	v.Sealed = sealed != "off"
 	v.Content = !v.Sealed
 	if v.Console {

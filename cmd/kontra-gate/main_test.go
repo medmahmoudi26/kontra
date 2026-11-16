@@ -54,21 +54,21 @@ func TestUsageErrors(t *testing.T) {
 
 // serve applies the per-replica overrides on top of the file, and validates them.
 func TestServeConfigOverrides(t *testing.T) {
-	cfg, err := serveConfig([]string{"-f", "../../examples/sellers/hello-exec/kontra.yaml", "--listen", "127.0.0.1:18081", "--metrics-listen", "127.0.0.1:19091"})
+	cfg, err := serveConfig([]string{"-f", "../../examples/agents/hello-exec/kontra.yaml", "--listen", "127.0.0.1:18081", "--metrics-listen", "127.0.0.1:19091"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Listen != "127.0.0.1:18081" || cfg.Metrics.Listen != "127.0.0.1:19091" {
 		t.Errorf("listen %q metrics %q", cfg.Listen, cfg.Metrics.Listen)
 	}
-	cfg, err = serveConfig([]string{"-f", "../../examples/sellers/hello-exec/kontra.yaml"})
+	cfg, err = serveConfig([]string{"-f", "../../examples/agents/hello-exec/kontra.yaml"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Listen != "127.0.0.1:8080" || cfg.Metrics.Listen != ":9090" {
 		t.Errorf("without overrides: listen %q metrics %q", cfg.Listen, cfg.Metrics.Listen)
 	}
-	if _, err := serveConfig([]string{"-f", "../../examples/sellers/hello-exec/kontra.yaml", "--metrics-listen", "127.0.0.1:8080", "--listen", "127.0.0.1:8080"}); err == nil ||
+	if _, err := serveConfig([]string{"-f", "../../examples/agents/hello-exec/kontra.yaml", "--metrics-listen", "127.0.0.1:8080", "--listen", "127.0.0.1:8080"}); err == nil ||
 		!strings.Contains(err.Error(), "must differ from listen") {
 		t.Errorf("colliding overrides = %v", err)
 	}
@@ -76,12 +76,12 @@ func TestServeConfigOverrides(t *testing.T) {
 		t.Error("a missing file loads")
 	}
 	// --peer-listen (spec §11.2): a file without peer: still needs its secret_env.
-	if _, err := serveConfig([]string{"-f", "../../examples/sellers/hello-exec/kontra.yaml", "--peer-listen", "127.0.0.1:18444"}); err == nil ||
+	if _, err := serveConfig([]string{"-f", "../../examples/agents/hello-exec/kontra.yaml", "--peer-listen", "127.0.0.1:18444"}); err == nil ||
 		!strings.Contains(err.Error(), "peer.secret_env") {
 		t.Errorf("--peer-listen without peer: = %v", err)
 	}
 	dir := t.TempDir()
-	doc, err := os.ReadFile("../../examples/sellers/hello-exec/kontra.yaml")
+	doc, err := os.ReadFile("../../examples/agents/hello-exec/kontra.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestServeConfigOverrides(t *testing.T) {
 
 // --log-level sets the replica's lowest logged level (info by default); anything but the four names is a usage error.
 func TestServeLogLevel(t *testing.T) {
-	file := "../../examples/sellers/hello-exec/kontra.yaml"
+	file := "../../examples/agents/hello-exec/kontra.yaml"
 	for flag, want := range map[string]slog.Level{"": slog.LevelInfo, "debug": slog.LevelDebug, "info": slog.LevelInfo,
 		"warn": slog.LevelWarn, "error": slog.LevelError} {
 		args := []string{"-f", file}
@@ -143,7 +143,8 @@ func TestMigrateCommand(t *testing.T) {
 		!regexp.MustCompile(`(?m)^OK up 0006_local_console\.sql \(`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^OK up 0007_a2a_wire\.sql \(`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^OK up 0008_exposed_tasks\.sql \(`).MatchString(out) ||
-		!strings.Contains(out, "database at version 8; this gate needs 8") {
+		!regexp.MustCompile(`(?m)^OK up 0009_caller_callee\.sql \(`).MatchString(out) ||
+		!strings.Contains(out, "database at version 9; this gate needs 9") {
 		t.Errorf("migrate up printed:\n%s", out)
 	}
 	m, err := migrate.Open(context.Background(), dsn)
@@ -167,17 +168,22 @@ func TestMigrateCommand(t *testing.T) {
 		!regexp.MustCompile(`(?m)^5\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0005_mcp_tools\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^6\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0006_local_console\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^7\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0007_a2a_wire\.sql$`).MatchString(out) ||
-		!regexp.MustCompile(`(?m)^8\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0008_exposed_tasks\.sql$`).MatchString(out) {
+		!regexp.MustCompile(`(?m)^8\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0008_exposed_tasks\.sql$`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^9\s+applied\s+\d{4}-\d\d-\d\dT\S+\s+0009_caller_callee\.sql$`).MatchString(out) {
 		t.Errorf("migrate status = %v:\n%s", err, out)
 	}
 
-	// The URL from the configuration file; down (0008, 0007, 0006, 0005, 0004, 0003, 0002, then 0001), then status shows all
-	// eight pending.
+	// The URL from the configuration file; down (0009, 0008, 0007, 0006, 0005, 0004, 0003, 0002, then 0001), then status shows all
+	// nine pending.
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "kontra.yaml")
 	y := "public_url: http://localhost:8080\npostgres: \"" + dsn + "\"\n"
 	if err := os.WriteFile(cfg, []byte(y), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	out, err = runCmd(t, "migrate", "-f", cfg, "down")
+	if err != nil || !strings.Contains(out, "OK down 0009_caller_callee.sql") || !strings.Contains(out, "database at version 8") {
+		t.Errorf("migrate down = %v:\n%s", err, out)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg, "down")
 	if err != nil || !strings.Contains(out, "OK down 0008_exposed_tasks.sql") || !strings.Contains(out, "database at version 7") {
@@ -222,7 +228,8 @@ func TestMigrateCommand(t *testing.T) {
 		!regexp.MustCompile(`(?m)^5\s+pending\s+-\s+0005_mcp_tools\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^6\s+pending\s+-\s+0006_local_console\.sql$`).MatchString(out) ||
 		!regexp.MustCompile(`(?m)^7\s+pending\s+-\s+0007_a2a_wire\.sql$`).MatchString(out) ||
-		!regexp.MustCompile(`(?m)^8\s+pending\s+-\s+0008_exposed_tasks\.sql$`).MatchString(out) {
+		!regexp.MustCompile(`(?m)^8\s+pending\s+-\s+0008_exposed_tasks\.sql$`).MatchString(out) ||
+		!regexp.MustCompile(`(?m)^9\s+pending\s+-\s+0009_caller_callee\.sql$`).MatchString(out) {
 		t.Errorf("status after down = %v:\n%s", err, out)
 	}
 	out, err = runCmd(t, "migrate", "-f", cfg, "down")
@@ -233,7 +240,7 @@ func TestMigrateCommand(t *testing.T) {
 	if err != nil || !strings.Contains(out, "OK up 0001_init.sql") || !strings.Contains(out, "OK up 0002_m3.sql") || !strings.Contains(out, "OK up 0003_m4.sql") ||
 		!strings.Contains(out, "OK up 0004_m5.sql") || !strings.Contains(out, "OK up 0005_mcp_tools.sql") ||
 		!strings.Contains(out, "OK up 0006_local_console.sql") || !strings.Contains(out, "OK up 0007_a2a_wire.sql") ||
-		!strings.Contains(out, "OK up 0008_exposed_tasks.sql") {
+		!strings.Contains(out, "OK up 0008_exposed_tasks.sql") || !strings.Contains(out, "OK up 0009_caller_callee.sql") {
 		t.Errorf("migrate (default up) = %q, %v", out, err)
 	}
 	if err := m.Check(context.Background()); err != nil {

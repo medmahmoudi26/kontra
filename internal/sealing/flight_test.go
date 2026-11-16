@@ -16,7 +16,7 @@ import (
 // becomes the record when the service accepts the first (a 2xx), and it is dropped, with nothing recorded, when the
 // node answers the first itself or the service refuses it, so the gate's retry is not a replay (spec §5).
 func TestHostingReplayInFlight(t *testing.T) {
-	b := newBuyer(t)
+	b := newCaller(t)
 	const ctx = "ctx-r"
 	first := func(f *fixture) []byte {
 		return send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "pay 100")))
@@ -83,7 +83,7 @@ func TestHostingReplayInFlight(t *testing.T) {
 // exactly one passes the node's checks.
 func TestHostingReplayConcurrent(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const ctx = "ctx-c"
 	body := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "pay 100")))
 	tasks := []string{"0193c0de-0000-7000-8000-0000000000b1", "0193c0de-0000-7000-8000-0000000000b2", "0193c0de-0000-7000-8000-0000000000b3"}
@@ -117,7 +117,7 @@ func TestHostingReplayConcurrent(t *testing.T) {
 // answer to an input request is held the same way.
 func TestHostingMCPReplayInFlight(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-1")
 	body := f.sealedCallBody(b, s1, "transfer", "1", `{"amount":100}`, false)
 	x1 := f.h.MCP(mcpPre(s1, "1", ""))

@@ -202,7 +202,7 @@ func (l *Log) OrphanCandidates(ctx context.Context, olderThan time.Time, after O
 // FailOrphan ends a task whose workflow does not exist with `failed: lifecycle_unavailable` (spec §14.5,
 // D63), written through the log like every terminal event, and in the same transaction marks the task's
 // push configs failed: no workflow will ever deliver them, and until then they would count toward the
-// buyer's delivering configs for the task's whole retention (spec §10.2). It reports whether it ended the
+// caller's delivering configs for the task's whole retention (spec §10.2). It reports whether it ended the
 // task: a task no longer in submitted or a leftover quoted (its workflow started meanwhile and moved it, or another
 // replica's sweep ended it) is left as it is. A task that does not exist is a2a.ErrTaskNotFound.
 func (l *Log) FailOrphan(ctx context.Context, taskID uuid.UUID) (bool, error) {

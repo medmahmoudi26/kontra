@@ -127,9 +127,9 @@ func (g *askThenWork) Cancel(ctx context.Context, ec *a2asrv.ExecutorContext) it
 }
 
 // A follow-up turn's dispatch that dies after consuming its work item and before the upstream received the
-// follow-up is resumed by sending the follow-up again: the upstream (an a2a-go seller that asks for input
+// follow-up is resumed by sending the follow-up again: the upstream (an a2a-go service that asks for input
 // once) receives it exactly once, with the caller's messageId and the upstream ids, and the task completes
-// with the seller's answer to it. The delivery is recorded when the upstream answers.
+// with the service's answer to it. The delivery is recorded when the upstream answers.
 func TestFollowUpResentWhenNotDelivered(t *testing.T) {
 	for _, streaming := range []bool{true, false} {
 		t.Run(fmt.Sprintf("streaming=%v", streaming), func(t *testing.T) {
@@ -138,7 +138,7 @@ func TestFollowUpResentWhenNotDelivered(t *testing.T) {
 			agent, b, info := newAgent(t, askingAgent(), agentConfig{streaming: streaming})
 			info.Streaming = streaming
 			e.backends.set(b, info, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room"})
 			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 				t.Fatalf("turn 1: %+v", res)
 			}
@@ -147,7 +147,7 @@ func TestFollowUpResentWhenNotDelivered(t *testing.T) {
 			}
 			a := e.attempt(id, 1)
 
-			fid := e.followUp(id, buyerA, "the blue one")
+			fid := e.followUp(id, callerA, "the blue one")
 			ctx, kill := context.WithCancel(context.Background())
 			defer kill()
 			hb.onNextBackend(kill) // the replica dies after the consume, before the upstream call
@@ -189,7 +189,7 @@ func TestFollowUpResentWhenNotDelivered(t *testing.T) {
 
 // A follow-up turn's dispatch that dies after the upstream answered the follow-up (its delivery recorded)
 // is resumed by a re-attach that sends nothing: the upstream receives the follow-up exactly once, and the
-// resume follows the task to the seller's answer.
+// resume follows the task to the service's answer.
 func TestFollowUpNotResentWhenDelivered(t *testing.T) {
 	for _, streaming := range []bool{true, false} {
 		t.Run(fmt.Sprintf("streaming=%v", streaming), func(t *testing.T) {
@@ -198,11 +198,11 @@ func TestFollowUpNotResentWhenDelivered(t *testing.T) {
 			agent, b, info := newAgent(t, g, agentConfig{streaming: streaming})
 			info.Streaming = streaming
 			e.backends.set(b, info, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room"})
 			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 				t.Fatalf("turn 1: %+v", res)
 			}
-			fid := e.followUp(id, buyerA, "the blue one")
+			fid := e.followUp(id, callerA, "the blue one")
 			ctx, kill := context.WithCancel(context.Background())
 			defer kill()
 			first := make(chan lifecycle.DispatchResult, 1)
@@ -213,8 +213,8 @@ func TestFollowUpNotResentWhenDelivered(t *testing.T) {
 			if res := <-first; res.Outcome != lifecycle.DispatchContextLost {
 				t.Fatalf("the killed follow-up dispatch: %+v", res)
 			}
-			g.release <- struct{}{} // the seller finishes while nobody follows it
-			waitFor(t, "the seller to complete", g.done.Load)
+			g.release <- struct{}{} // the service finishes while nobody follows it
+			waitFor(t, "the service to complete", g.done.Load)
 
 			res := e.dispatch(bounded(t), id, 1, fid, true)
 			p := projection(t, e, id)
@@ -234,10 +234,10 @@ func TestFollowUpNotResentWhenDelivered(t *testing.T) {
 	}
 }
 
-// staleSeller is a scripted JSON-RPC upstream task up-1 that asks for input on its first SendMessage and
+// staleService is a scripted JSON-RPC upstream task up-1 that asks for input on its first SendMessage and
 // answers every later SendMessage with the task as it still is (input-required, as A2A 1.0.1 allows for
 // returnImmediately); GetTask shows it completed once moved is set. It records every message sent to it.
-type staleSeller struct {
+type staleService struct {
 	moved atomic.Bool
 	sends atomic.Int64
 	gets  atomic.Int64
@@ -253,7 +253,7 @@ const (
 	staleDone = `{"id":"up-1","contextId":"up-ctx","status":{"state":"TASK_STATE_COMPLETED","timestamp":"2026-10-25T10:00:05Z","message":{"messageId":"a1","role":"ROLE_AGENT","parts":[{"text":"booked"}]}}}`
 )
 
-func (s *staleSeller) backend(t *testing.T) upstream.Backend {
+func (s *staleService) backend(t *testing.T) upstream.Backend {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var rpc struct {
@@ -290,7 +290,7 @@ func (s *staleSeller) backend(t *testing.T) upstream.Backend {
 	return b
 }
 
-func (s *staleSeller) messages() []*a2a.Message {
+func (s *staleService) messages() []*a2a.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*a2a.Message(nil), s.sent...)
@@ -304,13 +304,13 @@ func (s *staleSeller) messages() []*a2a.Message {
 func TestFollowUpResumeTellsTurnEnds(t *testing.T) {
 	t.Run("previous turn's end", func(t *testing.T) {
 		e := newEnv(t, envOptions{opts: ExecutorOptions{PollInterval: 30 * time.Millisecond}})
-		s := &staleSeller{}
+		s := &staleService{}
 		e.backends.set(s.backend(t), rpcInfo, nil)
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "book"})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "book"})
 		if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 			t.Fatalf("turn 1: %+v", res)
 		}
-		fid := e.followUp(id, buyerA, "the blue one")
+		fid := e.followUp(id, callerA, "the blue one")
 		ctx, kill := context.WithCancel(context.Background())
 		defer kill()
 		first := make(chan lifecycle.DispatchResult, 1)
@@ -350,11 +350,11 @@ func TestFollowUpResumeTellsTurnEnds(t *testing.T) {
 		agent, b, info := newAgent(t, twiceAsking(), agentConfig{streaming: true})
 		info.Streaming = true
 		e.backends.set(b, info, nil)
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "book"})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "book"})
 		if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 			t.Fatalf("turn 1: %+v", res)
 		}
-		fid := e.followUp(id, buyerA, "the blue one")
+		fid := e.followUp(id, callerA, "the blue one")
 		if res := e.dispatch(context.Background(), id, 1, fid, false); res.Outcome != lifecycle.DispatchInterrupted {
 			t.Fatalf("turn 2: %+v", res)
 		}
@@ -401,7 +401,7 @@ func twiceAsking() a2asrv.AgentExecutor {
 
 // A resent follow-up the upstream refuses is checked against the upstream task (D81; SPEC-CONFLICT D98 in
 // refusedResend): when the earlier send was processed and only its answer lost, the upstream's task has
-// moved on (here, completed, so it refuses any further message), and the resume logs the seller's result
+// moved on (here, completed, so it refuses any further message), and the resume logs the service's result
 // instead of failing a finished task; an upstream that keeps no history and moves within GetTaskGrace is
 // followed the same way; only an upstream task that stays at the projection's input-required for
 // GetTaskGrace fails the task upstream_error, as §6.4's table says.
@@ -414,7 +414,7 @@ func TestResentFollowUpRefused(t *testing.T) {
 	}{{"processed, answer lost", true, false}, {"taken, moves within the grace", false, true}, {"never taken", false, false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t, envOptions{opts: ExecutorOptions{PollInterval: 30 * time.Millisecond, GetTaskGrace: grace}})
-			s := &staleSeller{}
+			s := &staleService{}
 			ctx, kill := context.WithCancel(context.Background())
 			defer kill()
 			s.onSend = func(w http.ResponseWriter, id json.RawMessage, r *http.Request) bool {
@@ -444,11 +444,11 @@ func TestResentFollowUpRefused(t *testing.T) {
 				}
 			}
 			e.backends.set(s.backend(t), rpcInfo, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "book"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "book"})
 			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 				t.Fatalf("turn 1: %+v", res)
 			}
-			fid := e.followUp(id, buyerA, "the blue one")
+			fid := e.followUp(id, callerA, "the blue one")
 			if res := e.dispatch(ctx, id, 1, fid, false); res.Outcome != lifecycle.DispatchContextLost {
 				t.Fatalf("the killed follow-up dispatch: %+v", res)
 			}
@@ -494,7 +494,7 @@ func TestFirstTurnNeverResent(t *testing.T) {
 		agent, b, info := newAgent(t, g, agentConfig{streaming: true})
 		info.Streaming = true
 		e.backends.set(b, info, nil)
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "long job"})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "long job"})
 		ctx, kill := context.WithCancel(context.Background())
 		defer kill()
 		first := make(chan lifecycle.DispatchResult, 1)
@@ -525,7 +525,7 @@ func TestFirstTurnNeverResent(t *testing.T) {
 			rpcResult(w, id, `"result":{"task":`+upWorking+`}`)
 		})
 		e.backends.set(b, rpcInfo, nil)
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 		res := e.dispatch(bounded(t), id, 1, wid, true)
 		if res.Outcome != lifecycle.DispatchRetryable || sends.Load() != 0 {
 			t.Fatalf("a resume before the first upstream id: %+v after %d upstream calls", res, sends.Load())
@@ -585,22 +585,22 @@ func (g *asksTwiceThenWorks) Cancel(ctx context.Context, ec *a2asrv.ExecutorCont
 // A resume of a delivered follow-up re-attaches and follows the task to its end whatever the log's rows
 // carry: U+0000 in this follow-up's text and an earlier one's (json, D49) is no error, because the turn's
 // boundary is the version its work item was stored at, not a read inside the payloads. (It used to end
-// every resume context_lost, until the re-attach limit failed a task the seller had completed.)
+// every resume context_lost, until the re-attach limit failed a task the service had completed.)
 func TestFollowUpResumeWithNUL(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	g := &asksTwiceThenWorks{release: make(chan struct{}, 1)}
 	agent, b, info := newAgent(t, g, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "book\x00a room"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "book\x00a room"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 		t.Fatalf("turn 1: %+v", res)
 	}
-	f1 := e.followUp(id, buyerA, "the blue\x00one")
+	f1 := e.followUp(id, callerA, "the blue\x00one")
 	if res := e.dispatch(context.Background(), id, 1, f1, false); res.Outcome != lifecycle.DispatchInterrupted {
 		t.Fatalf("turn 2: %+v, log %v", res, e.states(id))
 	}
-	f2 := e.followUp(id, buyerA, "red\x00please")
+	f2 := e.followUp(id, callerA, "red\x00please")
 	ctx, kill := context.WithCancel(context.Background())
 	defer kill()
 	first := make(chan lifecycle.DispatchResult, 1)
@@ -611,7 +611,7 @@ func TestFollowUpResumeWithNUL(t *testing.T) {
 		t.Fatalf("the killed follow-up dispatch: %+v", res)
 	}
 	g.release <- struct{}{}
-	waitFor(t, "the seller to complete", g.done.Load)
+	waitFor(t, "the service to complete", g.done.Load)
 
 	res := e.dispatch(bounded(t), id, 1, f2, true)
 	p := projection(t, e, id)
@@ -671,7 +671,7 @@ func TestFollowUpResumeTurnBoundary(t *testing.T) {
 			e := newEnv(t, envOptions{opts: ExecutorOptions{PollInterval: 30 * time.Millisecond}})
 			s := &staleTurns{}
 			e.backends.set(s.backend(t), rpcInfo, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "book\x00a room"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "book\x00a room"})
 			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 				t.Fatalf("turn 1: %+v", res)
 			}
@@ -684,7 +684,7 @@ func TestFollowUpResumeTurnBoundary(t *testing.T) {
 				}
 				w := uuid.Must(uuid.NewV7())
 				if err := e.log.InsertWorkItem(context.Background(), nil, store.WorkItem{ID: w, TaskID: uid(t, id), Kind: store.WorkExecute,
-					Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, CallContext: callContext(buyerA, nil), Owner: buyerA}}); err != nil {
+					Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, CallContext: callContext(callerA, nil), Owner: callerA}}); err != nil {
 					t.Fatal(err)
 				}
 				return w
@@ -743,7 +743,7 @@ func TestFollowUpResumeOwnEndRepeatedFirstID(t *testing.T) {
 	agent, b, info := newAgent(t, twiceAsking(), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "book"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "book"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 		t.Fatalf("turn 1: %+v", res)
 	}
@@ -751,7 +751,7 @@ func TestFollowUpResumeOwnEndRepeatedFirstID(t *testing.T) {
 	msg.ID, msg.TaskID = e.workItem(id, wid).Payload.Request.Message.ID, id
 	fid := uuid.Must(uuid.NewV7())
 	if err := e.log.InsertWorkItem(context.Background(), nil, store.WorkItem{ID: fid, TaskID: uid(t, id), Kind: store.WorkExecute,
-		Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, CallContext: callContext(buyerA, nil), Owner: buyerA}}); err != nil {
+		Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, CallContext: callContext(callerA, nil), Owner: callerA}}); err != nil {
 		t.Fatal(err)
 	}
 	if res := e.dispatch(context.Background(), id, 1, fid, false); res.Outcome != lifecycle.DispatchInterrupted {
@@ -806,10 +806,10 @@ func (g *slowFirstYield) Cancel(ctx context.Context, ec *a2asrv.ExecutorContext)
 	}
 }
 
-// The replica dies after an a2a-go seller took a follow-up and before its first event (no delivery
+// The replica dies after an a2a-go service took a follow-up and before its first event (no delivery
 // recorded): the resume resends it, a2a-go refuses the copy while the first runs, and its task still shows
-// the previous turn's input-required. The resume continues as a re-attach (D81) and follows the seller to
-// its result, past GetTaskGrace, because the seller's history shows the follow-up; it used to fail the task
+// the previous turn's input-required. The resume continues as a re-attach (D81) and follows the service to
+// its result, past GetTaskGrace, because the service's history shows the follow-up; it used to fail the task
 // upstream_error and lose the result.
 func TestResentFollowUpRefusedWhileUpstreamWorks(t *testing.T) {
 	for _, streaming := range []bool{true, false} {
@@ -819,16 +819,16 @@ func TestResentFollowUpRefusedWhileUpstreamWorks(t *testing.T) {
 			agent, b, info := newAgent(t, g, agentConfig{streaming: streaming})
 			info.Streaming = streaming
 			e.backends.set(b, info, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room"})
 			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 				t.Fatalf("turn 1: %+v", res)
 			}
-			fid := e.followUp(id, buyerA, "the blue one")
+			fid := e.followUp(id, callerA, "the blue one")
 			ctx, kill := context.WithCancel(context.Background())
 			defer kill()
 			first := make(chan lifecycle.DispatchResult, 1)
 			go func() { first <- e.dispatch(ctx, id, 1, fid, false) }()
-			waitFor(t, "the seller to take the follow-up", func() bool { return g.runs.Load() == 1 })
+			waitFor(t, "the service to take the follow-up", func() bool { return g.runs.Load() == 1 })
 			kill()
 			if res := <-first; res.Outcome != lifecycle.DispatchContextLost {
 				t.Fatalf("the killed follow-up dispatch: %+v", res)
@@ -839,10 +839,10 @@ func TestResentFollowUpRefusedWhileUpstreamWorks(t *testing.T) {
 			resumed := make(chan lifecycle.DispatchResult, 1)
 			go func() { resumed <- e.dispatch(bounded(t), id, 1, fid, true) }()
 			waitFor(t, "the resend", func() bool { return agent.sends.Load() == 3 })
-			time.Sleep(time.Second) // past GetTaskGrace, the seller still working
+			time.Sleep(time.Second) // past GetTaskGrace, the service still working
 			select {
 			case res := <-resumed:
-				t.Fatalf("the resume ended while the seller worked on the follow-up: %+v %+v, log %v", res, projection(t, e, id).Status, e.states(id))
+				t.Fatalf("the resume ended while the service worked on the follow-up: %+v %+v, log %v", res, projection(t, e, id).Status, e.states(id))
 			default:
 			}
 			g.release <- struct{}{}
@@ -852,7 +852,7 @@ func TestResentFollowUpRefusedWhileUpstreamWorks(t *testing.T) {
 				t.Fatalf("the resume: %+v %+v %v, log %v", res, p.Status, p.Metadata, e.states(id))
 			}
 			if g.runs.Load() != 1 || len(received(t, agent, "the blue one")) != 2 {
-				t.Errorf("the seller ran the follow-up %d times; it received it %d times", g.runs.Load(), len(received(t, agent, "the blue one")))
+				t.Errorf("the service ran the follow-up %d times; it received it %d times", g.runs.Load(), len(received(t, agent, "the blue one")))
 			}
 			if e.countState(id, a2a.TaskStateFailed) != 0 || e.countState(id, a2a.TaskStateCompleted) != 1 {
 				t.Errorf("log %v", e.states(id))
@@ -871,7 +871,7 @@ func TestConsumedFollowUpNotSentAgain(t *testing.T) {
 	info.Streaming = true
 	e.backends.set(b, info, nil)
 	ctx := context.Background()
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room"})
 	// Attempt 1 consumed the first item and failed before the first upstream id; attempt 2 retries the turn.
 	if err := e.log.ConsumeWorkItem(ctx, wid, uid(t, id)); err != nil {
 		t.Fatal(err)
@@ -885,7 +885,7 @@ func TestConsumedFollowUpNotSentAgain(t *testing.T) {
 	if res := e.dispatch(ctx, id, 2, wid, false); res.Outcome != lifecycle.DispatchInterrupted || agent.sends.Load() != 1 {
 		t.Fatalf("the first turn's retry on attempt 2: %+v after %d sends", res, agent.sends.Load())
 	}
-	fid := e.followUp(id, buyerA, "the blue one")
+	fid := e.followUp(id, callerA, "the blue one")
 	if err := e.log.ConsumeWorkItem(ctx, fid, uid(t, id)); err != nil { // a resume took it
 		t.Fatal(err)
 	}

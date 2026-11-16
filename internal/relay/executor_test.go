@@ -31,7 +31,7 @@ func spoofer(chunks int) a2asrv.AgentExecutor {
 	return a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 		return func(yield func(a2a.Event, error) bool) {
 			task := a2a.NewSubmittedTask(ec, ec.Message)
-			task.Metadata = map[string]any{"kontra.approve.url": "https://evil.example/approve", "seller.note": "kept"}
+			task.Metadata = map[string]any{"kontra.approve.url": "https://evil.example/approve", "service.note": "kept"}
 			if !yield(task, nil) {
 				return
 			}
@@ -77,7 +77,7 @@ func TestStreamingRelayed(t *testing.T) {
 	agent, b, info := newAgent(t, spoofer(3), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "go"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "go"})
 
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	if res.Outcome != lifecycle.DispatchTerminal || res.Reason != "" {
@@ -92,8 +92,8 @@ func TestStreamingRelayed(t *testing.T) {
 		p.Artifacts[0].Parts[2].Text() != "chunk-2;" || p.Status.Message.Parts[0].Text() != "all done" {
 		t.Errorf("projection %+v", p)
 	}
-	if p.Metadata["seller.note"] != "kept" {
-		t.Errorf("seller metadata lost: %v", p.Metadata)
+	if p.Metadata["service.note"] != "kept" {
+		t.Errorf("service metadata lost: %v", p.Metadata)
 	}
 	a := e.attempt(id, 1)
 	if a.UpstreamTaskID == "" || a.UpstreamContextID == "" || a.FirstUpstreamIDAt == nil || a.EndedAt == nil ||
@@ -145,7 +145,7 @@ func TestStreamingRefusedFallsBackToPolling(t *testing.T) {
 	agent, b, info := newAgent(t, exec, agentConfig{streaming: true, refuse: true, binding: a2a.TransportProtocolHTTPJSON})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "hi"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "hi"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	if res.Outcome != lifecycle.DispatchTerminal {
 		t.Fatalf("result %+v", res)
@@ -186,7 +186,7 @@ func TestMessageReplyBecomesCompletedTask(t *testing.T) {
 		_, b, info := newAgent(t, exec, agentConfig{streaming: streaming})
 		info.Streaming = streaming
 		e.backends.set(b, info, nil)
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 		res := e.dispatch(context.Background(), id, 1, wid, false)
 		p := projection(t, e, id)
 		if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted ||
@@ -249,7 +249,7 @@ func TestForeignTaskFails(t *testing.T) {
 	info := rpcInfo
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || res.Reason != "upstream_error" || p.Status.State != a2a.TaskStateFailed ||
@@ -296,10 +296,10 @@ func TestErrorsBeforeFirstUpstreamID(t *testing.T) {
 		}, lifecycle.DispatchRetryable, "upstream_error", 7, ""},
 		{"JSON-RPC error", false, func() upstream.Backend {
 			b, _ := scripted(t, func(_ string, id json.RawMessage, w http.ResponseWriter, _ *http.Request) {
-				rpcResult(w, id, `"error":{"code":-32602,"message":"the seller says no"}`)
+				rpcResult(w, id, `"error":{"code":-32602,"message":"the service says no"}`)
 			})
 			return b
-		}, lifecycle.DispatchTerminal, "upstream_error", 0, "the seller says no"},
+		}, lifecycle.DispatchTerminal, "upstream_error", 0, "the service says no"},
 		{"HTTP 400", false, func() upstream.Backend {
 			b, _ := scripted(t, func(_ string, _ json.RawMessage, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(400) })
 			return b
@@ -321,7 +321,7 @@ func TestErrorsBeforeFirstUpstreamID(t *testing.T) {
 			info := rpcInfo
 			info.Streaming = tc.streaming
 			e.backends.set(tc.backend(), info, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 			res := e.dispatch(context.Background(), id, 1, wid, false)
 			if res.Outcome != tc.outcome || res.Reason != tc.reason || res.RetryAfterSeconds != tc.retry {
 				t.Fatalf("result %+v", res)
@@ -358,14 +358,14 @@ func TestErrorAfterFirstUpstreamID(t *testing.T) {
 	b, _ := scripted(t, func(_ string, id json.RawMessage, w http.ResponseWriter, _ *http.Request) {
 		sse(w, id,
 			`"result":{"task":{"id":"up-1","contextId":"up-ctx","status":{"state":"TASK_STATE_WORKING"}}}`,
-			`"error":{"code":-32603,"message":"seller exploded mid-task"}`)
+			`"error":{"code":-32603,"message":"service exploded mid-task"}`)
 	})
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateFailed || p.Metadata[store.MetaFailure] != "upstream_error" ||
-		!strings.Contains(p.Status.Message.Parts[0].Text(), "seller exploded mid-task") {
+		!strings.Contains(p.Status.Message.Parts[0].Text(), "service exploded mid-task") {
 		t.Fatalf("%+v %+v", res, p.Status)
 	}
 	if a := e.attempt(id, 1); a.UpstreamTaskID != "up-1" || a.FirstUpstreamIDAt == nil {
@@ -385,7 +385,7 @@ func TestErrorAfterFirstUpstreamID(t *testing.T) {
 		}
 	})
 	e.backends.set(b2, info, nil)
-	id2, wid2 := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id2, wid2 := e.newTask(taskSpec{owner: callerA, text: "q"})
 	res = e.dispatch(context.Background(), id2, 1, wid2, false)
 	if p := projection(t, e, id2); res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "upstream_unreachable" {
 		t.Errorf("dropped stream: %+v %+v", res, p.Status)
@@ -414,7 +414,7 @@ func TestAuthRequiredFollowed(t *testing.T) {
 		_, b, info := newAgent(t, exec, agentConfig{streaming: streaming})
 		info.Streaming = streaming
 		e.backends.set(b, info, nil)
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "pay"})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "pay"})
 		res := e.dispatch(context.Background(), id, 1, wid, false)
 		got := e.states(id)
 		if res.Outcome != lifecycle.DispatchTerminal || got[len(got)-1] != "status:TASK_STATE_COMPLETED" ||
@@ -447,7 +447,7 @@ func TestFollowUpTurn(t *testing.T) {
 	agent, b, info := newAgent(t, askingAgent(), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "book a room"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "book a room"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 		t.Fatalf("turn 1: %+v", res)
 	}
@@ -455,7 +455,7 @@ func TestFollowUpTurn(t *testing.T) {
 	if a.EndedAt != nil || a.UpstreamTaskID == "" {
 		t.Fatalf("an input-required turn ended the attempt: %+v", a)
 	}
-	wid2 := e.followUp(id, buyerA, "the blue one")
+	wid2 := e.followUp(id, callerA, "the blue one")
 	res := e.dispatch(context.Background(), id, 1, wid2, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted || p.Status.Message.Parts[0].Text() != "done: the blue one" {
@@ -555,7 +555,7 @@ func TestReattach(t *testing.T) {
 	agent, b, info := newAgent(t, g, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "long job"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "long job"})
 
 	ctx1, lose := context.WithCancel(context.Background())
 	first := make(chan lifecycle.DispatchResult, 1)
@@ -637,7 +637,7 @@ func TestReattachGivesUp(t *testing.T) {
 	e := newEnv(t, envOptions{opts: ExecutorOptions{GetTaskGrace: 300 * time.Millisecond, PollInterval: 50 * time.Millisecond}})
 	b, calls := scripted(t, func(_ string, _ json.RawMessage, w http.ResponseWriter, _ *http.Request) { w.WriteHeader(502) })
 	e.backends.set(b, rpcInfo, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.firstID(id, 1, "up-gone", "up-ctx")
 	if err := e.log.ConsumeWorkItem(context.Background(), wid, uid(t, id)); err != nil {
 		t.Fatal(err)
@@ -655,8 +655,8 @@ func TestReattachGivesUp(t *testing.T) {
 
 // Upstream ids stay with the backend that issued them (spec §4: a recorded upstream context id is reused,
 // and referenceTaskIds mapped, only on the same direct backend): after the service's backend moves to
-// another seller (a SIGHUP or NOTIFY changes its URL), a later task of the same gate context reaches the
-// new seller with no contextId and no referenceTaskIds of the old one.
+// another service (a SIGHUP or NOTIFY changes its URL), a later task of the same gate context reaches the
+// new service with no contextId and no referenceTaskIds of the old one.
 func TestUpstreamIDsStayWithTheirBackend(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	echo := a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
@@ -667,39 +667,39 @@ func TestUpstreamIDsStayWithTheirBackend(t *testing.T) {
 			yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
 		}
 	})
-	sellerA, bA, infoA := newAgent(t, echo, agentConfig{})
-	sellerB, bB, infoB := newAgent(t, echo, agentConfig{})
+	serviceA, bA, infoA := newAgent(t, echo, agentConfig{})
+	serviceB, bB, infoB := newAgent(t, echo, agentConfig{})
 	e.backends.set(bA, infoA, nil)
-	t1, w1 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "one"})
+	t1, w1 := e.newTask(taskSpec{owner: callerA, contextID: "conv", text: "one"})
 	e.dispatch(context.Background(), t1, 1, w1, false)
 	// The same backend: the second task carries the upstream context and its reference (the control).
-	t2, w2 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "two", refs: []a2a.TaskID{t1}})
+	t2, w2 := e.newTask(taskSpec{owner: callerA, contextID: "conv", text: "two", refs: []a2a.TaskID{t1}})
 	e.dispatch(context.Background(), t2, 1, w2, false)
 	up1 := e.attempt(t1, 1)
-	if sent := sellerA.sentMessages(t); len(sent) != 2 || sent[1].ContextID != up1.UpstreamContextID || len(sent[1].ReferenceTasks) != 1 {
+	if sent := serviceA.sentMessages(t); len(sent) != 2 || sent[1].ContextID != up1.UpstreamContextID || len(sent[1].ReferenceTasks) != 1 {
 		t.Fatalf("on the same backend: %+v", sent)
 	}
 
-	// The configuration moves the service to seller B (gate/services.go's Sync writes the row so).
-	e.exec(`update kontra.services set backend = '{"a2a": {"url": "http://seller-b.internal"}}', updated_at = now()
+	// The configuration moves the service to service B (gate/services.go's Sync writes the row so).
+	e.exec(`update kontra.services set backend = '{"a2a": {"url": "http://service-b.internal"}}', updated_at = now()
 		where tenant_id = $1 and name = $2`, e.svc.TenantID, e.svc.Name)
 	e.backends.set(bB, infoB, nil)
-	t3, w3 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "three", refs: []a2a.TaskID{t1, t2}})
+	t3, w3 := e.newTask(taskSpec{owner: callerA, contextID: "conv", text: "three", refs: []a2a.TaskID{t1, t2}})
 	e.dispatch(context.Background(), t3, 1, w3, false)
-	sent := sellerB.sentMessages(t)
+	sent := serviceB.sentMessages(t)
 	if len(sent) != 1 {
-		t.Fatalf("%d sends to seller B", len(sent))
+		t.Fatalf("%d sends to service B", len(sent))
 	}
 	if sent[0].ContextID != "" || len(sent[0].ReferenceTasks) != 0 {
-		t.Errorf("seller B got seller A's ids: contextId %q, referenceTaskIds %v", sent[0].ContextID, sent[0].ReferenceTasks)
+		t.Errorf("service B got service A's ids: contextId %q, referenceTaskIds %v", sent[0].ContextID, sent[0].ReferenceTasks)
 	}
-	// Seller B's own context is then reused on seller B.
+	// Service B's own context is then reused on service B.
 	up3 := e.attempt(t3, 1)
-	t4, w4 := e.newTask(taskSpec{owner: buyerA, contextID: "conv", text: "four", refs: []a2a.TaskID{t3}})
+	t4, w4 := e.newTask(taskSpec{owner: callerA, contextID: "conv", text: "four", refs: []a2a.TaskID{t3}})
 	e.dispatch(context.Background(), t4, 1, w4, false)
-	if sent := sellerB.sentMessages(t); len(sent) != 2 || sent[1].ContextID != up3.UpstreamContextID ||
+	if sent := serviceB.sentMessages(t); len(sent) != 2 || sent[1].ContextID != up3.UpstreamContextID ||
 		fmt.Sprint(sent[1].ReferenceTasks) != fmt.Sprint([]a2a.TaskID{a2a.TaskID(up3.UpstreamTaskID)}) {
-		t.Errorf("on seller B after the move: %+v", sent)
+		t.Errorf("on service B after the move: %+v", sent)
 	}
 }
 
@@ -710,7 +710,7 @@ func TestUpstreamSeesNoCallerSecrets(t *testing.T) {
 	agent, b, info := newAgent(t, askingAgent(), agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "hi",
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "hi",
 		headers: map[string][]string{"Authorization": {"Bearer kontra_sk_SECRET"}, "Cookie": {"session=abc"}, "X-Caller": {"private"}},
 		config:  &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: "https://hooks.example/cb", Token: "push-token"}}})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
@@ -737,10 +737,10 @@ func TestUpstreamSeesNoCallerSecrets(t *testing.T) {
 	}
 }
 
-// cross_buyer, upstream half (spec §4, D53): the first task of a gate context goes upstream with no
-// contextId; two buyers using the same context string reach two upstream contexts; a later task of the
-// same buyer and context carries the context id the upstream gave the first.
-func TestCrossBuyerUpstreamContexts(t *testing.T) {
+// cross_caller, upstream half (spec §4, D53): the first task of a gate context goes upstream with no
+// contextId; two callers using the same context string reach two upstream contexts; a later task of the
+// same caller and context carries the context id the upstream gave the first.
+func TestCrossCallerUpstreamContexts(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	echo := a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 		return func(yield func(a2a.Event, error) bool) {
@@ -752,11 +752,11 @@ func TestCrossBuyerUpstreamContexts(t *testing.T) {
 	})
 	agent, b, info := newAgent(t, echo, agentConfig{})
 	e.backends.set(b, info, nil)
-	a1, w1 := e.newTask(taskSpec{owner: buyerA, contextID: "shared", text: "a1"})
+	a1, w1 := e.newTask(taskSpec{owner: callerA, contextID: "shared", text: "a1"})
 	e.dispatch(context.Background(), a1, 1, w1, false)
-	b1, wb := e.newTask(taskSpec{owner: buyerB, contextID: "shared", text: "b1"})
+	b1, wb := e.newTask(taskSpec{owner: callerB, contextID: "shared", text: "b1"})
 	e.dispatch(context.Background(), b1, 1, wb, false)
-	a2, w2 := e.newTask(taskSpec{owner: buyerA, contextID: "shared", text: "a2", refs: []a2a.TaskID{a1, b1}})
+	a2, w2 := e.newTask(taskSpec{owner: callerA, contextID: "shared", text: "a2", refs: []a2a.TaskID{a1, b1}})
 	e.dispatch(context.Background(), a2, 1, w2, false)
 
 	sent := agent.sentMessages(t)
@@ -768,10 +768,10 @@ func TestCrossBuyerUpstreamContexts(t *testing.T) {
 		t.Errorf("a first task of a gate context sent contextId %q / %q", sent[0].ContextID, sent[1].ContextID)
 	}
 	if upA1.UpstreamContextID == "" || upA1.UpstreamContextID == upB1.UpstreamContextID {
-		t.Errorf("buyers A and B share an upstream context: %q %q", upA1.UpstreamContextID, upB1.UpstreamContextID)
+		t.Errorf("callers A and B share an upstream context: %q %q", upA1.UpstreamContextID, upB1.UpstreamContextID)
 	}
 	if sent[2].ContextID != upA1.UpstreamContextID {
-		t.Errorf("buyer A's second task went with context %q, want %q", sent[2].ContextID, upA1.UpstreamContextID)
+		t.Errorf("caller A's second task went with context %q, want %q", sent[2].ContextID, upA1.UpstreamContextID)
 	}
 	// referenceTaskIds: A's own task maps to its upstream id; B's task is not A's and is dropped.
 	if fmt.Sprint(sent[2].ReferenceTasks) != fmt.Sprint([]a2a.TaskID{a2a.TaskID(upA1.UpstreamTaskID)}) {
@@ -801,7 +801,7 @@ func TestUpstreamPartLimit(t *testing.T) {
 	_, b, info := newAgent(t, exec, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "upstream_error" || len(p.Artifacts) != 0 {
@@ -851,7 +851,7 @@ func TestTaskBytesCountsWholeEvents(t *testing.T) {
 			_, b, info := newAgent(t, exec, agentConfig{streaming: true})
 			info.Streaming = true
 			e.backends.set(b, info, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 			res := e.dispatch(context.Background(), id, 1, wid, false)
 			p := projection(t, e, id)
 			if res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "upstream_error" {
@@ -872,7 +872,7 @@ func TestTaskBytesCountsWholeEvents(t *testing.T) {
 func TestServiceUnavailable(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	e.backends.set(nil, upstream.Info{}, card.ErrUnavailable)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	if p := projection(t, e, id); res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "service_unavailable" {
 		t.Errorf("%+v %+v", res, p.Status)
@@ -887,8 +887,8 @@ func TestMissingWorkItem(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	_, b, info := newAgent(t, askingAgent(), agentConfig{})
 	e.backends.set(b, info, nil)
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
-	other, otherItem := e.newTask(taskSpec{owner: buyerA, text: "other"})
+	id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
+	other, otherItem := e.newTask(taskSpec{owner: callerA, text: "other"})
 	res := e.dispatch(context.Background(), id, 1, otherItem, false) // another task's item
 	if p := projection(t, e, id); res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "lifecycle_unavailable" {
 		t.Errorf("%+v %+v", res, p.Status)
@@ -906,7 +906,7 @@ func TestNewerDispatchFencesOlder(t *testing.T) {
 	agent, b, info := newAgent(t, g, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	first := make(chan lifecycle.DispatchResult, 1)
 	go func() { first <- e.dispatch(context.Background(), id, 1, wid, false) }()
 	waitFor(t, "the first upstream id", func() bool { return e.attempt(id, 1).FirstUpstreamIDAt != nil })
@@ -942,7 +942,7 @@ func TestAbortBeforeFirstUpstreamID(t *testing.T) {
 		<-r.Context().Done() // the upstream has not answered yet
 	})
 	e.backends.set(b, rpcInfo, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	done := make(chan lifecycle.DispatchResult, 1)
 	go func() { done <- e.dispatch(context.Background(), id, 1, wid, false) }()
 	<-entered
@@ -977,7 +977,7 @@ func TestForwardCancel(t *testing.T) {
 	_, b, info := newAgent(t, g, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	done := make(chan lifecycle.DispatchResult, 1)
 	go func() { done <- e.dispatch(context.Background(), id, 1, wid, false) }()
 	waitFor(t, "the first upstream id", func() bool { return e.attempt(id, 1).FirstUpstreamIDAt != nil })
@@ -1009,7 +1009,7 @@ func TestForwardCancel(t *testing.T) {
 			rpcResult(w, id, tc.rpc)
 		})
 		e.backends.set(b2, rpcInfo, nil)
-		id2, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		id2, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 		e.firstID(id2, 1, "up-x", "c")
 		res, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id2), N: 1})
 		if err != nil || res.Outcome != tc.outcome || res.UpstreamError == nil || res.UpstreamError.Code != tc.code {
@@ -1044,7 +1044,7 @@ func TestForwardCancel(t *testing.T) {
 			rpcResult(w, id, `"result":{"id":"up-x","contextId":"c","status":{"state":"`+tc.state+`"}}`)
 		})
 		e.backends.set(b2, rpcInfo, nil)
-		id2, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		id2, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 		e.firstID(id2, 1, "up-x", "c")
 		res, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id2), N: 1})
 		if err != nil || res.Outcome != tc.outcome || res.UpstreamState != tc.state || res.UpstreamError != nil {
@@ -1055,7 +1055,7 @@ func TestForwardCancel(t *testing.T) {
 		}
 	}
 	// No upstream task: nothing to forward.
-	id3, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id3, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	if _, err := e.disp.ForwardCancel(context.Background(), lifecycle.AttemptRef{TaskID: string(id3), N: 1}); err == nil {
 		t.Error("forward_cancel without an upstream task succeeded")
 	}
@@ -1067,7 +1067,7 @@ func TestRegistryGuardsTheStore(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	_, b, info := newAgent(t, askingAgent(), agentConfig{})
 	e.backends.set(b, info, nil)
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	sh, err := e.handlers.For(context.Background(), e.svc)
 	if err != nil {
 		t.Fatal(err)
@@ -1075,7 +1075,7 @@ func TestRegistryGuardsTheStore(t *testing.T) {
 	_, cancel := context.WithCancelCause(context.Background())
 	d, _ := e.reg.Register(Key{TaskID: id, N: 1}, cancel)
 	ctx, cc := a2asrv.NewCallContext(context.Background(), nil)
-	cc.User = &a2asrv.User{Name: buyerA.BuyerID.String(), Authenticated: true, Attributes: map[string]any{AttrPrincipal: buyerA.Principal, AttrVia: buyerA.Via}}
+	cc.User = &a2asrv.User{Name: callerA.CallerID.String(), Authenticated: true, Attributes: map[string]any{AttrPrincipal: callerA.Principal, AttrVia: callerA.Via}}
 	st, err := sh.Store.Get(ctx, id)
 	if err != nil {
 		t.Fatal(err)
@@ -1102,12 +1102,12 @@ func TestHandlerErrorIsUpstreamError(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	agent, b, info := newAgent(t, askingAgent(), agentConfig{})
 	e.backends.set(b, info, nil)
-	id, _ := e.newTask(taskSpec{owner: buyerA, contextID: "ctx-x", text: "q"})
+	id, _ := e.newTask(taskSpec{owner: callerA, contextID: "ctx-x", text: "q"})
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q"))
 	msg.ContextID = "ctx-other"
 	wid := uuid.Must(uuid.NewV7())
 	if err := e.log.InsertWorkItem(context.Background(), nil, store.WorkItem{ID: wid, TaskID: uid(t, id), Kind: store.WorkExecute,
-		Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, CallContext: callContext(buyerA, nil), Owner: buyerA}}); err != nil {
+		Payload: store.WorkPayload{Request: &a2a.SendMessageRequest{Message: msg}, CallContext: callContext(callerA, nil), Owner: callerA}}); err != nil {
 		t.Fatal(err)
 	}
 	res := e.dispatch(context.Background(), id, 1, wid, false)

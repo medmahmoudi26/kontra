@@ -44,7 +44,7 @@ type env struct {
 	pool   *pgxpool.Pool
 	log    *store.Log
 	team   uuid.UUID
-	buyer  uuid.UUID
+	caller uuid.UUID
 	c      *Console
 	srv    *httptest.Server
 	gate   *httptest.Server
@@ -64,7 +64,7 @@ func newEnv(t *testing.T, blobs blob.Store) *env {
 	if e.team, err = tenant.EnsureTeam(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	e.buyer, _ = ids.AnonymousBuyer(uuid.Nil)
+	e.caller, _ = ids.AnonymousCaller(uuid.Nil)
 	e.exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, source, card, card_fetched_at)
 		values ($1, 'hello', 'a2a', '{"tunnel": {}}', '{anonymous}', 'db', $2::json, now()),
 		       ($1, 'tools', 'mcp', '{"tunnel": {}}', '{anonymous}', 'db', null, null)`, e.team, helloCard)
@@ -138,7 +138,7 @@ func (e *env) taskWith(state store.State, text, ctxID string, console bool, orig
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: ctxID, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{msg}}
 	svc := store.ServiceRef{TenantID: e.team, Tenant: "default", Name: "hello", Kind: "a2a"}
 	nt := store.NewTask{ID: id, Service: svc, Protocol: store.ProtocolA2A, ContextID: ctxID, State: store.StateSubmitted, Snapshot: snap,
-		Owner: store.Owner{BuyerID: e.buyer, Principal: "anonymous", Via: store.ViaAnonymous}, Origin: origin}
+		Owner: store.Owner{CallerID: e.caller, Principal: "anonymous", Via: store.ViaAnonymous}, Origin: origin}
 	if _, err := e.log.CreateTask(context.Background(), nil, nt); err != nil {
 		e.t.Fatal(err)
 	}
@@ -379,15 +379,15 @@ func TestConversations(t *testing.T) {
 			c1 = c
 		}
 	}
-	if c1 == nil || c1["tasks"] != float64(2) || c1["state"] != "input-required" || c1["caller"] != e.buyer.String() {
+	if c1 == nil || c1["tasks"] != float64(2) || c1["state"] != "input-required" || c1["caller"] != e.caller.String() {
 		t.Fatalf("ctx-1 %v", c1)
 	}
-	one := e.json("GET", "/v1/conversations/hello/"+e.buyer.String()+"/ctx-1", "", 200)
+	one := e.json("GET", "/v1/conversations/hello/"+e.caller.String()+"/ctx-1", "", 200)
 	ts := one["tasks"].([]any)
 	if len(ts) != 2 || ts[0].(map[string]any)["task_id"] != first.String() || ts[1].(map[string]any)["task_id"] != second.String() {
 		t.Fatalf("conversation tasks %v", ts)
 	}
-	e.json("GET", "/v1/conversations/hello/"+e.buyer.String()+"/nope", "", 404)
+	e.json("GET", "/v1/conversations/hello/"+e.caller.String()+"/nope", "", 404)
 	e.json("GET", "/v1/conversations/hello/not-a-uuid/ctx-1", "", 404)
 	if p := e.json("GET", "/v1/conversations?limit=1", "", 200); p["next"] == nil ||
 		len(items(e.json("GET", "/v1/conversations?limit=1&before="+p["next"].(string), "", 200))) != 1 {
@@ -653,9 +653,9 @@ func TestExchangesAndCalls(t *testing.T) {
 	if rest := items(e.json("GET", "/v1/exchanges?limit=3&before="+p["next"].(string), "", 200)); len(rest) != 1 || rest[0]["method"] != "SendMessage" {
 		t.Fatalf("second page %v", rest)
 	}
-	e.exec(`insert into kontra.calls (id, tenant_id, service, tool, buyer_id, principal, bytes_in, bytes_out, duration_ms, is_error)
+	e.exec(`insert into kontra.calls (id, tenant_id, service, tool, caller_id, principal, bytes_in, bytes_out, duration_ms, is_error)
 		values ($1, $2, 'tools', 'search', $3, 'anonymous', 10, 20, 30, false), ($4, $2, 'tools', 'fetch', $3, 'anonymous', 1, 2, 3, null)`,
-		uuid.Must(uuid.NewV7()), e.team, e.buyer, uuid.Must(uuid.NewV7()))
+		uuid.Must(uuid.NewV7()), e.team, e.caller, uuid.Must(uuid.NewV7()))
 	calls := items(e.json("GET", "/v1/calls?service=tools", "", 200))
 	if len(calls) != 2 || calls[0]["tool"] != "fetch" || calls[0]["outcome"] != "unknown" || calls[1]["outcome"] != "ok" {
 		t.Fatalf("calls %v", calls)
@@ -790,7 +790,7 @@ func TestNeverReadsSecrets(t *testing.T) {
 		`{"url":"`+url+`","token":"`+token+`","authentication":{"scheme":"Bearer","credentials":"cred-secret"}}`)
 	e.exec(`insert into kontra.work_items (id, task_id, kind, payload) values ($1, $2, 'execute', '{"secret":"wi-secret"}')`, uuid.Must(uuid.NewV7()), id)
 	var all bytes.Buffer
-	for _, p := range []string{"/v1/tasks", "/v1/tasks/" + id.String(), "/v1/conversations", "/v1/conversations/hello/" + e.buyer.String() + "/ctx-p",
+	for _, p := range []string{"/v1/tasks", "/v1/tasks/" + id.String(), "/v1/conversations", "/v1/conversations/hello/" + e.caller.String() + "/ctx-p",
 		"/v1/services", "/v1/services/hello", "/v1/exchanges", "/v1/info"} {
 		resp := e.do("GET", p, "")
 		b, _ := io.ReadAll(resp.Body)

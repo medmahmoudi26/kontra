@@ -27,7 +27,7 @@ func (directOnly) BackendFor(context.Context, uuid.UUID, string) (store.Backend,
 
 // TestTurnsOverTheLifecycle runs the relay over the real lifecycle: a2a-go's handler with the gate's
 // interceptors, the Temporal-backed work queue, TaskLifecycle on a development server, the dispatch
-// activity (this package's Dispatcher) and an a2a-go seller that asks for input once (spec §7, §9, §14.1;
+// activity (this package's Dispatcher) and an a2a-go service that asks for input once (spec §7, §9, §14.1;
 // the audit's "follow-up turn through the real stack"). Then a cancel of an input-required task through
 // the cancel interceptor and kontra.cancel (spec §8), and a message to a finished task, refused (spec §7).
 func TestTurnsOverTheLifecycle(t *testing.T) {
@@ -80,7 +80,7 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	h := sh.Handler
 
 	// Turn 1 asks for input; the blocking SendMessage answers at input-required.
-	res, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
+	res, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	// The follow-up goes to the same upstream task, on the same attempt, and completes.
 	m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("blue"))
 	m.TaskID = task.ID
-	res, err = h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m})
+	res, err = h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: m})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	// The workflow has ended: a message to the completed task is refused before any work item (D351).
 	m3 := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("again"))
 	m3.TaskID = task.ID
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m3}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: m3}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
 		t.Errorf("a message to a completed task: %v", err)
 	}
 	var items int
@@ -128,9 +128,9 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 		t.Errorf("%d work items: the refused message stores none", items)
 	}
 
-	// Cancel of an input-required task: forward_cancel to the seller, then canceled in the log, before
+	// Cancel of an input-required task: forward_cancel to the service, then canceled in the log, before
 	// CancelTask answers (spec §8, D79).
-	res, err = h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book again"))})
+	res, err = h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book again"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,14 +138,14 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 	if t2.Status.State != a2a.TaskStateInputRequired {
 		t.Fatalf("task 2: %s", t2.Status.State)
 	}
-	canceled, err := h.CancelTask(asCaller(buyerA), &a2a.CancelTaskRequest{ID: t2.ID})
+	canceled, err := h.CancelTask(asCaller(callerA), &a2a.CancelTaskRequest{ID: t2.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if canceled.Status.State != a2a.TaskStateCanceled || canceled.Metadata[store.MetaCanceled] != store.CanceledClient {
 		t.Fatalf("CancelTask answered %s %v", canceled.Status.State, canceled.Metadata)
 	}
-	if got, _ := h.GetTask(asCaller(buyerA), &a2a.GetTaskRequest{ID: t2.ID}); got.Status.State != a2a.TaskStateCanceled {
+	if got, _ := h.GetTask(asCaller(callerA), &a2a.GetTaskRequest{ID: t2.ID}); got.Status.State != a2a.TaskStateCanceled {
 		t.Errorf("GetTask right after CancelTask: %s", got.Status.State)
 	}
 	cancels := 0
@@ -155,13 +155,13 @@ func TestTurnsOverTheLifecycle(t *testing.T) {
 		}
 	}
 	if cancels != 1 {
-		t.Errorf("the seller received %d CancelTask", cancels)
+		t.Errorf("the service received %d CancelTask", cancels)
 	}
 	a2, _ := log.GetAttempt(ctx, uid(t, t2.ID), 1)
 	if a2.Outcome != store.OutcomeInterrupted {
 		t.Errorf("attempt outcome %q, want interrupted (D77)", a2.Outcome)
 	}
-	if _, err := h.CancelTask(asCaller(buyerA), &a2a.CancelTaskRequest{ID: t2.ID}); !errors.Is(err, a2a.ErrTaskNotCancelable) {
+	if _, err := h.CancelTask(asCaller(callerA), &a2a.CancelTaskRequest{ID: t2.ID}); !errors.Is(err, a2a.ErrTaskNotCancelable) {
 		t.Errorf("a second cancel: %v", err)
 	}
 }

@@ -8,7 +8,7 @@ and literally: a value is never read as a pattern (``&``, ``|`` and ``\\`` in a 
 parameters survive, which a sed replacement corrupted) and never scanned for placeholders again. The templates put
 every placeholder inside a YAML double-quoted scalar, so a value is escaped for one (``\\`` and ``"``), and a value
 with a control character is refused. A placeholder with no value is an error (exit status 2), a value for a
-placeholder the template lacks is not (gate-tunnel.yaml has no @SELLER@); the output is written with mode 0600 (it
+placeholder the template lacks is not (gate-tunnel.yaml has no @SERVICE@); the output is written with mode 0600 (it
 holds the database URL).
 """
 

@@ -229,13 +229,13 @@ func TestPushDelivery(t *testing.T) {
 		Auth: &a2a.PushAuthInfo{Scheme: "Bearer", Credentials: "cred-inline-" + secret}}
 	req := newMessage("push_delivery")
 	req.Config = &a2a.SendMessageConfig{PushConfig: inline}
-	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[0], req, cookieCall)
+	s, err := h.CallerA().SendStreaming(ctx, h.Gates[0], req, cookieCall)
 	if err != nil {
 		t.Fatal(err)
 	}
 	readUntil(t, ctx, s, func(ev Event) bool { return ev.State == a2a.TaskStateWorking })
 	taskID := s.TaskID()
-	rpc, rest := h.BuyerA().Client(t, h.Gates[1], ""), h.BuyerA().ClientREST(t, h.Gates[0], "")
+	rpc, rest := h.CallerA().Client(t, h.Gates[1], ""), h.CallerA().ClientREST(t, h.Gates[0], "")
 
 	// A config created after the start, over JSON-RPC, with an id the caller chose.
 	callerID := "e2e-caller-config-" + secret
@@ -350,13 +350,13 @@ func TestPushFailedRestart(t *testing.T) {
 	ctx := ctxFor(t, 5*time.Minute)
 	hook := newWebhook(t, "127.0.0.1")
 	hook.start(t)
-	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[0], newMessage("push_failed_restart"), Call{})
+	s, err := h.CallerA().SendStreaming(ctx, h.Gates[0], newMessage("push_failed_restart"), Call{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	readUntil(t, ctx, s, func(ev Event) bool { return ev.State == a2a.TaskStateWorking })
 	taskID := s.TaskID()
-	rpc := h.BuyerA().Client(t, h.Gates[1], "")
+	rpc := h.CallerA().Client(t, h.Gates[1], "")
 	secret := randomHex(6)
 	cfg := &a2a.PushConfig{TaskID: taskID, ID: "e2e-failing-" + secret, URL: hook.url("/failing"), Token: "tok-failing-" + secret}
 	if _, err := rpc.CreateTaskPushConfig(ctx, cfg); err != nil {
@@ -424,7 +424,7 @@ func TestSSRFWebhook(t *testing.T) {
 	t.Run("refused when set", func(t *testing.T) {
 		h := start(t, Options{Upstream: slowagent.Config{Chunks: 1, Interval: 10 * time.Millisecond, Streaming: true}})
 		ctx := ctxFor(t, 3*time.Minute)
-		res, err := h.BuyerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" ssrf"))
+		res, err := h.CallerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" ssrf"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -454,7 +454,7 @@ func TestSSRFWebhook(t *testing.T) {
 			t.Fatal(err)
 		}
 		begin := time.Now()
-		rpc, rest := h.BuyerA().Client(t, h.Gates[1], ""), h.BuyerA().ClientREST(t, h.Gates[0], "")
+		rpc, rest := h.CallerA().Client(t, h.Gates[1], ""), h.CallerA().ClientREST(t, h.Gates[0], "")
 		for _, u := range urls {
 			cfg := &a2a.PushConfig{TaskID: task.ID, URL: u, Token: "t"}
 			if _, err := rpc.CreateTaskPushConfig(ctx, cfg); !errors.Is(err, a2a.ErrInvalidParams) {
@@ -492,7 +492,7 @@ func TestSSRFWebhook(t *testing.T) {
 		if n := h.Upstream.Sends(); n != 1 {
 			t.Fatalf("the upstream received %d sends, want only the first task's", n)
 		}
-		// The control: the same buyer may set an https URL at a global address. The task is ended first, so
+		// The control: the same caller may set an https URL at a global address. The task is ended first, so
 		// the config is done when set and nothing is ever sent to that address (spec §10.1-§10.2).
 		if _, err := rpc.CancelTask(ctx, &a2a.CancelTaskRequest{ID: task.ID}); err != nil {
 			t.Fatal(err)
@@ -510,7 +510,7 @@ func TestSSRFWebhook(t *testing.T) {
 	t.Run("a redirect is a failed delivery, never followed", func(t *testing.T) {
 		h := start(t, Options{Upstream: slowagent.Config{Chunks: 1, Interval: 10 * time.Millisecond, Streaming: true}, PushAllowPrivate: true})
 		ctx := ctxFor(t, 3*time.Minute)
-		res, err := h.BuyerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" ssrf redirect"))
+		res, err := h.CallerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" ssrf redirect"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -522,7 +522,7 @@ func TestSSRFWebhook(t *testing.T) {
 			http.Redirect(w, r, target.url("/target"), http.StatusFound)
 		}
 		redirector.start(t)
-		cfg, err := h.BuyerA().Client(t, h.Gates[1], "").CreateTaskPushConfig(ctx, &a2a.PushConfig{TaskID: task.ID, URL: redirector.url("/redirect"), Token: "t"})
+		cfg, err := h.CallerA().Client(t, h.Gates[1], "").CreateTaskPushConfig(ctx, &a2a.PushConfig{TaskID: task.ID, URL: redirector.url("/redirect"), Token: "t"})
 		if err != nil {
 			t.Fatalf("a redirecting URL is accepted when set (D60): %v", err)
 		}

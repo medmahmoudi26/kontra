@@ -42,7 +42,7 @@ func ctxOwner(ctx context.Context) (store.Owner, error) {
 
 // TestThroughA2AGoHandler drives the push config calls through a2a-go's request handler with the gate's
 // task store (spec §15: WithPushNotifications(pgPushConfigStore, noopSender)): a2a-go authorizes each call
-// with the caller-scoped task store, so buyer B never reaches buyer A's configs; a created config comes
+// with the caller-scoped task store, so caller B never reaches caller A's configs; a created config comes
 // back with its id and the gate task id; and a missing config is TaskNotFound (-32001) on JSON-RPC.
 func TestThroughA2AGoHandler(t *testing.T) {
 	e := newEnv(t)
@@ -51,9 +51,9 @@ func TestThroughA2AGoHandler(t *testing.T) {
 	h := a2asrv.NewHandler(noExecutor{},
 		a2asrv.WithTaskStore(store.New(e.pool, e.svc, ctxOwner, nil, e.log)),
 		a2asrv.WithPushNotifications(cs, NoopSender{}))
-	id := e.newTask(buyerA)
-	a := asOwner(context.Background(), buyerA)
-	b := asOwner(context.Background(), buyerB)
+	id := e.newTask(callerA)
+	a := asOwner(context.Background(), callerA)
+	b := asOwner(context.Background(), callerB)
 
 	created, err := h.CreateTaskPushConfig(a, &a2a.PushConfig{TaskID: tid(id), URL: "http://127.0.0.1:9/hook", Token: "t"})
 	if err != nil {
@@ -73,18 +73,18 @@ func TestThroughA2AGoHandler(t *testing.T) {
 	if err != nil || len(list.Configs) != 1 {
 		t.Fatalf("list: %+v %v", list, err)
 	}
-	// Buyer B: TaskNotFound on every call, and nothing changes.
+	// Caller B: TaskNotFound on every call, and nothing changes.
 	if _, err := h.CreateTaskPushConfig(b, &a2a.PushConfig{TaskID: tid(id), URL: "http://127.0.0.1:9/b"}); !errors.Is(err, a2a.ErrTaskNotFound) {
-		t.Errorf("buyer B create: %v", err)
+		t.Errorf("caller B create: %v", err)
 	}
 	if _, err := h.GetTaskPushConfig(b, &a2a.GetTaskPushConfigRequest{TaskID: tid(id), ID: created.ID}); !errors.Is(err, a2a.ErrTaskNotFound) {
-		t.Errorf("buyer B get: %v", err)
+		t.Errorf("caller B get: %v", err)
 	}
 	if err := h.DeleteTaskPushConfig(b, &a2a.DeleteTaskPushConfigRequest{TaskID: tid(id), ID: created.ID}); !errors.Is(err, a2a.ErrTaskNotFound) {
-		t.Errorf("buyer B delete: %v", err)
+		t.Errorf("caller B delete: %v", err)
 	}
 	if n := e.count(`select count(*) from kontra.push_configs where task_id = $1`, id); n != 1 {
-		t.Fatalf("%d configs after buyer B's calls", n)
+		t.Fatalf("%d configs after caller B's calls", n)
 	}
 	// The 11th config through the handler is InvalidParams (-32602).
 	for i := range MaxPerTask - 1 {
@@ -98,7 +98,7 @@ func TestThroughA2AGoHandler(t *testing.T) {
 
 	// JSON-RPC: a missing config is TaskNotFoundError (A2A §3.1.8), deleting it is not an error.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a2asrv.NewJSONRPCHandler(h).ServeHTTP(w, r.WithContext(asOwner(r.Context(), buyerA)))
+		a2asrv.NewJSONRPCHandler(h).ServeHTTP(w, r.WithContext(asOwner(r.Context(), callerA)))
 	}))
 	defer srv.Close()
 	call := func(method, params string) map[string]any {

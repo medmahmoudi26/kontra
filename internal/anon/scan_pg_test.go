@@ -215,7 +215,7 @@ func TestNoTableHoldsTheClientAddress(t *testing.T) {
 	d1 := n1.admit(t, s, v4, "hello")
 	n1.admit(t, s, netip.MustParseAddr("::ffff:203.0.113.77"), "hello", "other")
 	d2 := n2.admit(t, s, v6, "echo")
-	if _, err := pool.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state,
+	if _, err := pool.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state,
 		version, snapshot, status_at) values ($1, $2, 'hello', 'a2a', $3, 'anonymous', 'anonymous', 'ctx', 'working', 1, '{}', now())`,
 		uuid.Must(uuid.NewV7()), d1.Key.TenantID, uuid.New()); err != nil {
 		t.Fatal(err)

@@ -98,7 +98,7 @@ hooks:
   admission: { url: "` + adm.srv.URL + `/admit", secret_env: KONTRA_TEST_ADMISSION_SECRET, timeout: 3s, operations: [task, call] }
 `
 	run := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), fastTiming)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	c := a2aClient(t, run.url, key)
 
 	// An allow: the task is created submitted with the decision's metadata under the id the hook was shown, and runs.
@@ -118,8 +118,8 @@ hooks:
 	if done.Status.Message == nil || len(done.Status.Message.Parts) == 0 || done.Status.Message.Parts[0].Text() != "Hello World" {
 		t.Errorf("the completed task's status message: %+v", done.Status.Message)
 	}
-	if n := e.seller.count("SendMessage") + e.seller.count("SendStreamingMessage"); n != 1 {
-		t.Errorf("the seller received %d messages, want 1", n)
+	if n := e.service.count("SendMessage") + e.service.count("SendStreamingMessage"); n != 1 {
+		t.Errorf("the service received %d messages, want 1", n)
 	}
 	if !scalar[bool](t, e.pool, `select quote_expires_at is null and state = 'completed' from kontra.tasks where id = $1`, string(task.ID)) {
 		t.Error("the allowed task has a quote expiry, or did not complete")

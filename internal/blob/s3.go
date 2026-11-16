@@ -43,7 +43,7 @@ var _ Store = (*s3Store)(nil)
 // the bucket's endpoint would go through the SSRF dialer, https only and globally reachable addresses only, with no
 // allow_private for blobs:. The bucket is the gate's own storage, like its Postgres and Temporal, and a team
 // gate's is usually on a private network (MinIO or SeaweedFS beside the gate, the e2e harness's gofakes3 on
-// 127.0.0.1); nothing a caller or a seller writes ever chooses the address. The closest faithful behaviour:
+// 127.0.0.1); nothing a caller or a service writes ever chooses the address. The closest faithful behaviour:
 // the endpoint is dialed as configured (http:// only when the operator wrote it), the environment's proxy is
 // ignored and redirects are never followed, as §10.3 says of every connection.
 func Open(ctx context.Context, cfg Config) (Store, error) {

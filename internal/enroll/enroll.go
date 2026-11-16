@@ -175,12 +175,12 @@ type Decision struct {
 	// (after this handshake's enrollments), revoked bindings left out; the welcome's services and
 	// tunnels.services.
 	Served []tunnel.WelcomeService
-	// HirePrincipal is tunnels.hire_principal: the auth API key's principal, else node:<key_id> (relay.md
+	// CallerPrincipal is tunnels.caller_principal: the auth API key's principal, else node:<key_id> (relay.md
 	// §2.3), the principal of the streams the node opens (spec/tunnel.md §9).
-	HirePrincipal string
-	// Hire is the auth API key's principal as the admission authenticated it, nil without auth: the session
+	CallerPrincipal string
+	// Call is the auth API key's principal as the admission authenticated it, nil without auth: the session
 	// re-validates it on every stream it opens (spec/tunnel.md §12, relay.md §2.3).
-	Hire *auth.Principal
+	Call *auth.Principal
 	// Enrolled are the bindings this handshake added to services that already had a key: their other
 	// nodes are told on their control streams (§5). Admit announces each with NOTIFY kontra_tunnel
 	// (EnrolledPayload) in its own transaction, so the notice rides the binding's commit.

@@ -44,11 +44,11 @@ func TestSealedUnsealedPart(t *testing.T) {
 	e.backends.set(b, info, nil)
 	h := e.handler()
 	plain := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: plain}); !errors.Is(err, a2a.ErrInvalidRequest) {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: plain}); !errors.Is(err, a2a.ErrInvalidRequest) {
 		t.Fatalf("an unsealed part to a required service: %v", err)
 	}
 	mixed := a2a.NewMessage(a2a.MessageRoleUser, envelopePart(), a2a.NewTextPart("plain beside it"))
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: mixed}); !errors.Is(err, a2a.ErrInvalidRequest) {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: mixed}); !errors.Is(err, a2a.ErrInvalidRequest) {
 		t.Fatalf("an unsealed part beside a sealed one: %v", err)
 	}
 	for _, form := range []*a2a.Part{
@@ -57,7 +57,7 @@ func TestSealedUnsealedPart(t *testing.T) {
 		{Content: a2a.Data{Value: map[string]any{"x": 1}}, MediaType: hooks.SealedMediaType},
 	} {
 		msg := a2a.NewMessage(a2a.MessageRoleUser, form)
-		if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidRequest) {
+		if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidRequest) {
 			t.Errorf("a sealed type in a form other than raw (%T): %v", form.Content, err)
 		}
 	}
@@ -66,7 +66,7 @@ func TestSealedUnsealedPart(t *testing.T) {
 	}
 	sealedMsg := a2a.NewMessage(a2a.MessageRoleUser, envelopePart())
 	sealedMsg.Metadata = map[string]any{hooks.KeySealedReplyTo: "age1replyto"}
-	res, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: sealedMsg})
+	res, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: sealedMsg})
 	if err != nil {
 		t.Fatalf("a sealed message: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestSealedOptionalMarksUnsealedParts(t *testing.T) {
 	e.backends.set(b, info, nil)
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"), envelopePart())
 	msg.Parts[0].Metadata = map[string]any{hooks.KeySealed: map[string]any{"original": "spoof"}}
-	if _, err := e.handler().SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg}); err != nil {
+	if _, err := e.handler().SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg}); err != nil {
 		t.Fatal(err)
 	}
 	e.queue.wait(t)
@@ -117,7 +117,7 @@ func TestSealedFormFromService(t *testing.T) {
 	})
 	_, b, info := newAgent(t, bad, agentConfig{})
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.dispatch(context.Background(), id, 1, wid, false)
 	row := e.row(id)
 	if row.State != store.StateFailed || !strings.Contains(e.logText(id), `"kontra.failure":"upstream_error"`) {
@@ -141,7 +141,7 @@ func TestTunnelSealedRejected(t *testing.T) {
 			nodeAnswer(w, http.StatusBadRequest, tunnel.NodeSealedRejected)
 			return true
 		})
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "q", session: &s1})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "q", session: &s1})
 		res := e.dispatch(context.Background(), id, 1, wid, false)
 		if res.Outcome == lifecycle.DispatchRetryable {
 			t.Fatalf("after=%v: retried %+v", after, res)

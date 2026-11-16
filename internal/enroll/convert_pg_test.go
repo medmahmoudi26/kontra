@@ -15,7 +15,7 @@ import (
 )
 
 // convertEnv is a multi-tenant gate with tunnel.anonymous and tunnel.enroll_with_api_key, an account "acme" and a key
-// of it with hire and enroll:* (what kontra login stores, spec/tunnel.md §6.3).
+// of it with call and enroll:* (what kontra login stores, spec/tunnel.md §6.3).
 type convertEnv struct {
 	*pgEnv
 	account uuid.UUID
@@ -29,7 +29,7 @@ func newConvertEnv(t *testing.T, mod ...func(*Options)) *convertEnv {
 	c := &convertEnv{pgEnv: e, account: e.tenant("acme")}
 	var err error
 	c.key, err = e.keys.Mint(context.Background(), auth.MintRequest{TenantID: c.account, Name: "login",
-		Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+		Scopes: []auth.Scope{auth.ScopeCall, auth.ScopeEnrollAll}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func withAuth(k *testKey, key string, services ...tunnel.Service) *tunnel.Hello 
 // created in the account where it has none (same names, allow [org:<account>]; an existing one is bound, not
 // recreated), the key moves to the account with bindings to them (its anonymous bindings gone), the anonymous tenant
 // ends at once (expires_at now, services disabled), the decision names the account's URLs with no anonymous part and
-// the API key as the hiring principal, and an audit row records the conversion; the next hello is §5's, with no
+// the API key as the calling principal, and an audit row records the conversion; the next hello is §5's, with no
 // conversion.
 func TestAdmitConvertsWithAnAccountKey(t *testing.T) {
 	c := newConvertEnv(t)
@@ -74,8 +74,8 @@ func TestAdmitConvertsWithAnAccountKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Anonymous != nil || d.Key.TenantID != c.account || d.Key.Tenant != "acme" || d.HirePrincipal != c.key.Principal() ||
-		d.Hire == nil || d.Hire.ID != c.key.Principal() {
+	if d.Anonymous != nil || d.Key.TenantID != c.account || d.Key.Tenant != "acme" || d.CallerPrincipal != c.key.Principal() ||
+		d.Call == nil || d.Call.ID != c.key.Principal() {
 		t.Fatalf("the conversion's decision %+v %+v", d.Key, d.Anonymous)
 	}
 	if got := served(d); !slices.Equal(got, []string{"a2a:hello@https://gate.example/agents/acme/hello",
@@ -193,9 +193,9 @@ func TestAdmitConversionKindMismatchMovesNothing(t *testing.T) {
 	}
 }
 
-// What does not convert (§6.3, D286): a hire-only key, an enroll: scope for some services only, and an enroll:* key
-// on a gate without tunnel.enroll_with_api_key resume the anonymous session with the key as its hiring principal;
-// what does: a hello declaring no service (admitted hire-only in the account), the team tenant's enroll:* key, and an
+// What does not convert (§6.3, D286): a call-only key, an enroll: scope for some services only, and an enroll:* key
+// on a gate without tunnel.enroll_with_api_key resume the anonymous session with the key as its calling principal;
+// what does: a hello declaring no service (admitted call-only in the account), the team tenant's enroll:* key, and an
 // enroll:* key on a gate that stopped opening anonymous sessions.
 func TestAdmitConversionCases(t *testing.T) {
 	ctx := context.Background()
@@ -208,26 +208,26 @@ func TestAdmitConversionCases(t *testing.T) {
 		k := newTestKey(t)
 		d1 := c.anonymous(k, a2a("hello"))
 		d, err := c.admitFrom(k, withAuth(k, key.Secret, a2a("hello")), "203.0.113.9")
-		if err != nil || d.Anonymous == nil || d.Key.TenantID != d1.Key.TenantID || d.HirePrincipal != key.Principal() {
+		if err != nil || d.Anonymous == nil || d.Key.TenantID != d1.Key.TenantID || d.CallerPrincipal != key.Principal() {
 			t.Fatalf("%v: %+v %v", scopes, d, err)
 		}
 		if n := c.count(`select count(*) from kontra.services where tenant_id = $1`, c.account); n != 0 {
 			t.Errorf("%v: created %d account services", scopes, n)
 		}
 	}
-	t.Run("hire only", func(t *testing.T) { resumed(t, newConvertEnv(t), []auth.Scope{auth.ScopeHire}) })
+	t.Run("call only", func(t *testing.T) { resumed(t, newConvertEnv(t), []auth.Scope{auth.ScopeCall}) })
 	t.Run("enroll:hello", func(t *testing.T) {
-		resumed(t, newConvertEnv(t), []auth.Scope{auth.ScopeHire, auth.EnrollScope("hello")})
+		resumed(t, newConvertEnv(t), []auth.Scope{auth.ScopeCall, auth.EnrollScope("hello")})
 	})
 	t.Run("without enroll_with_api_key", func(t *testing.T) {
-		resumed(t, newConvertEnv(t, func(o *Options) { o.EnrollWithAPIKey = false }), []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll})
+		resumed(t, newConvertEnv(t, func(o *Options) { o.EnrollWithAPIKey = false }), []auth.Scope{auth.ScopeCall, auth.ScopeEnrollAll})
 	})
 	t.Run("no services", func(t *testing.T) {
 		c := newConvertEnv(t)
 		k := newTestKey(t)
 		d1 := c.anonymous(k, a2a("hello"))
 		d, err := c.admitFrom(k, withAuth(k, c.key.Secret), "203.0.113.9")
-		if err != nil || d.Anonymous != nil || d.Key.TenantID != c.account || len(d.Served) != 0 || d.HirePrincipal != c.key.Principal() {
+		if err != nil || d.Anonymous != nil || d.Key.TenantID != c.account || len(d.Served) != 0 || d.CallerPrincipal != c.key.Principal() {
 			t.Fatalf("%+v %v", d, err)
 		}
 		if n := c.count(`select count(*) from kontra.tenants where id = $1 and expires_at <= now()`, d1.Key.TenantID); n != 1 {
@@ -236,7 +236,7 @@ func TestAdmitConversionCases(t *testing.T) {
 	})
 	t.Run("the team's key", func(t *testing.T) {
 		c := newConvertEnv(t)
-		key, err := c.keys.Mint(ctx, auth.MintRequest{TenantID: c.team, Name: "team", Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}})
+		key, err := c.keys.Mint(ctx, auth.MintRequest{TenantID: c.team, Name: "team", Scopes: []auth.Scope{auth.ScopeCall, auth.ScopeEnrollAll}})
 		if err != nil {
 			t.Fatal(err)
 		}

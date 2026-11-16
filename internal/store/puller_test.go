@@ -73,8 +73,8 @@ func (w *countingWaker) WaitTask(ctx context.Context, taskID uuid.UUID) (<-chan 
 func TestPullerTailSkipsAndVersions(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "q")
+	ctx := asOwner(context.Background(), callerA)
+	task := e.newTask(e.svc, callerA, "", "q")
 	id := uid(t, task.ID)
 	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateInputRequired, "which?")) // 2: an old final event
 	mustApply(t, ctx, s, task.ID, userMessage(task, "this one"))                      // 3
@@ -164,8 +164,8 @@ func TestPullerLongPollHoldsNoConnection(t *testing.T) {
 	small := pgtest.Pool(t, e.dsn+sep+"pool_max_conns=2")
 	log := NewLog(small)
 	s := New(small, e.svc, ctxOwner, nil, log)
-	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "q")
+	ctx := asOwner(context.Background(), callerA)
+	task := e.newTask(e.svc, callerA, "", "q")
 	p, err := NewPullerProvider(log, listener)(ctx, task.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestPullerLongPollHoldsNoConnection(t *testing.T) {
 // Database errors are backed off inside Pull, which a2a-go retries every PollInterval without a backoff.
 func TestPullerBacksOff(t *testing.T) {
 	e := newEnv(t)
-	task := e.newTask(e.svc, buyerA, "", "q")
+	task := e.newTask(e.svc, callerA, "", "q")
 	closed := pgtest.Pool(t, e.dsn)
 	log := NewLog(closed)
 	p, err := newPullerProvider(log, nil, time.Second)(context.Background(), task.ID)
@@ -258,10 +258,10 @@ func callerOwner(ctx context.Context) (Owner, error) {
 		return Owner{}, a2a.ErrUnauthenticated
 	}
 	switch cc.User.Name {
-	case "buyer-a":
-		return buyerA, nil
-	case "buyer-b":
-		return buyerB, nil
+	case "caller-a":
+		return callerA, nil
+	case "caller-b":
+		return callerB, nil
 	}
 	return Owner{}, a2a.ErrUnauthenticated
 }
@@ -368,12 +368,12 @@ func newCluster(t *testing.T, e *env, exec a2asrv.AgentExecutor, guard FailureGu
 	ft.handler = hfn
 	h := a2asrv.NewHandler(exec,
 		a2asrv.WithClusterMode(a2asrv.ClusterConfig{QueueManager: qm, WorkQueue: q, TaskStore: store}),
-		a2asrv.WithCallInterceptors(authInterceptor{name: "buyer-a"}))
+		a2asrv.WithCallInterceptors(authInterceptor{name: "caller-a"}))
 	return h, ft
 }
 
 // The a2a-go probes P7/P7b/P7c on Postgres (a2a-go brief C11): behind a real cluster-mode handler, a
-// two-turn input-required task completes, and turn 2 returns the task, not the buyer's own message.
+// two-turn input-required task completes, and turn 2 returns the task, not the caller's own message.
 func TestClusterTwoTurnTask(t *testing.T) { clusterTwoTurnTask(t, 0) }
 
 // The same, with every turn's handler running ahead of the caller's subscription (the P15 order, which
@@ -435,7 +435,7 @@ func clusterTwoTurnTask(t *testing.T, ahead time.Duration) {
 	}
 	final, ok := res.(*a2a.Task)
 	if !ok {
-		t.Fatalf("turn 2 answered %T (the buyer's own message?): %+v", res, res)
+		t.Fatalf("turn 2 answered %T (the caller's own message?): %+v", res, res)
 	}
 	if final.Status.State != a2a.TaskStateCompleted || final.Status.Message.Parts[0].Text() != "done: the blue one" {
 		t.Fatalf("turn 2: %+v", final.Status)

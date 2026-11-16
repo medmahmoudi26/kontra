@@ -44,7 +44,7 @@ func changeErr(t *testing.T, err error) *ChangeError {
 	return ce
 }
 
-var base = Pin{Sealed: true, Recipients: []string{"k1_b", "k1_a"}, SellerKeys: []string{"tp1"}, Signed: true}
+var base = Pin{Sealed: true, Recipients: []string{"k1_b", "k1_a"}, ServiceKeys: []string{"tp1"}, Signed: true}
 
 func TestFirstSight(t *testing.T) {
 	s, p := open(t)
@@ -65,7 +65,7 @@ func TestFirstSight(t *testing.T) {
 		t.Fatalf("Get = %v, %v", ok, err)
 	}
 	if !pin.Sealed || !pin.Signed || !slices.Equal(pin.Recipients, []string{"k1_a", "k1_b"}) ||
-		!slices.Equal(pin.SellerKeys, []string{"tp1"}) || !pin.At.Equal(clock) {
+		!slices.Equal(pin.ServiceKeys, []string{"tp1"}) || !pin.At.Equal(clock) {
 		t.Fatalf("recorded %+v", pin)
 	}
 	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
@@ -86,7 +86,7 @@ func TestFirstSight(t *testing.T) {
 	// The same thing seen again changes nothing and writes nothing.
 	clock = clock.Add(time.Hour)
 	before, _ := os.ReadFile(p)
-	out, err = s.Check(gate, "booking", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b", "k1_a"}, SellerKeys: []string{"tp1"}, Signed: true}, Options{})
+	out, err = s.Check(gate, "booking", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b", "k1_a"}, ServiceKeys: []string{"tp1"}, Signed: true}, Options{})
 	if err != nil || out.First || len(out.Changes) != 0 {
 		t.Fatalf("unchanged: %+v, %v", out, err)
 	}
@@ -105,8 +105,8 @@ func TestDowngradesAlwaysRefused(t *testing.T) {
 		now  Pin
 		want Change
 	}{
-		{"unsealed", Pin{Sealed: false, Recipients: base.Recipients, SellerKeys: base.SellerKeys, Signed: true}, ChangeUnsealed},
-		{"unsigned", Pin{Sealed: true, Recipients: base.Recipients, SellerKeys: base.SellerKeys, Signed: false}, ChangeUnsigned},
+		{"unsealed", Pin{Sealed: false, Recipients: base.Recipients, ServiceKeys: base.ServiceKeys, Signed: true}, ChangeUnsealed},
+		{"unsigned", Pin{Sealed: true, Recipients: base.Recipients, ServiceKeys: base.ServiceKeys, Signed: false}, ChangeUnsigned},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, _ := open(t)
@@ -131,15 +131,15 @@ func TestDowngradesAlwaysRefused(t *testing.T) {
 	}
 }
 
-func TestNewRecipientAndSellerKey(t *testing.T) {
+func TestNewRecipientAndServiceKey(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		now  Pin
 		want Change
 	}{
-		{"recipient", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b", "k1_c"}, SellerKeys: []string{"tp1"}, Signed: true}, ChangeNewRecipient},
-		{"seller key", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b"}, SellerKeys: []string{"tp1", "tp2"}, Signed: true}, ChangeNewSellerKey},
-		{"substituted recipient", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_evil"}, SellerKeys: []string{"tp1"}, Signed: true}, ChangeNewRecipient},
+		{"recipient", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b", "k1_c"}, ServiceKeys: []string{"tp1"}, Signed: true}, ChangeNewRecipient},
+		{"service key", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b"}, ServiceKeys: []string{"tp1", "tp2"}, Signed: true}, ChangeNewServiceKey},
+		{"substituted recipient", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_evil"}, ServiceKeys: []string{"tp1"}, Signed: true}, ChangeNewRecipient},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s, p := open(t)
@@ -163,7 +163,7 @@ func TestNewRecipientAndSellerKey(t *testing.T) {
 					t.Fatalf("Detail = %s", ce.Detail(opts))
 				}
 			}
-			if pin, _, _ := s.Get(gate, "booking"); !slices.Equal(pin.Recipients, []string{"k1_a", "k1_b"}) || !slices.Equal(pin.SellerKeys, []string{"tp1"}) {
+			if pin, _, _ := s.Get(gate, "booking"); !slices.Equal(pin.Recipients, []string{"k1_a", "k1_b"}) || !slices.Equal(pin.ServiceKeys, []string{"tp1"}) {
 				t.Fatalf("a refused change was recorded: %+v", pin)
 			}
 			// Accepted for that service only, and recorded, by a run started with --accept-change (D248: what is pending
@@ -174,7 +174,7 @@ func TestNewRecipientAndSellerKey(t *testing.T) {
 				t.Fatalf("accepted: %+v, %v", out, err)
 			}
 			pin, _, _ := s.Get(gate, "booking")
-			if !slices.Equal(pin.Recipients, normalize(c.now).Recipients) || !slices.Equal(pin.SellerKeys, normalize(c.now).SellerKeys) {
+			if !slices.Equal(pin.Recipients, normalize(c.now).Recipients) || !slices.Equal(pin.ServiceKeys, normalize(c.now).ServiceKeys) {
 				t.Fatalf("recorded %+v, want %+v", pin, c.now)
 			}
 			if out.Prev.Recipients == nil || !slices.Equal(out.Prev.Recipients, []string{"k1_a", "k1_b"}) {
@@ -195,47 +195,47 @@ func TestNewRecipientAndSellerKey(t *testing.T) {
 
 func TestAcceptedChanges(t *testing.T) {
 	s, p := open(t)
-	start := Pin{Sealed: false, Recipients: nil, SellerKeys: []string{"tp1", "tp2"}, Signed: false}
+	start := Pin{Sealed: false, Recipients: nil, ServiceKeys: []string{"tp1", "tp2"}, Signed: false}
 	if _, err := s.Check(gate, "svc", start, Options{}); err != nil {
 		t.Fatal(err)
 	}
-	// Upgrades pass without --accept-change, even under --pin-recipients, and are recorded; a removed seller key does
+	// Upgrades pass without --accept-change, even under --pin-recipients, and are recorded; a removed service key does
 	// not (round 2 sealing-fixes-5, D228): it is refused under --pin-recipients, and otherwise until accepted.
-	now := Pin{Sealed: true, Recipients: nil, SellerKeys: []string{"tp1"}, Signed: true}
+	now := Pin{Sealed: true, Recipients: nil, ServiceKeys: []string{"tp1"}, Signed: true}
 	if _, err := s.Check(gate, "svc", now, Options{PinRecipients: true}); err == nil {
-		t.Fatal("a removed seller key was accepted under --pin-recipients")
+		t.Fatal("a removed service key was accepted under --pin-recipients")
 	}
 	if _, err := s.Check(gate, "svc", now, Options{}); err == nil {
-		t.Fatal("a removed seller key was accepted without --accept-change")
+		t.Fatal("a removed service key was accepted without --accept-change")
 	}
 	s = reopen(t, p) // a run started with --accept-change svc (D248)
 	out, err := s.Check(gate, "svc", now, Options{Accept: []string{"svc"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(out.Changes, []Change{ChangeSealed, ChangeSigned, ChangeLessSellerKey}) {
+	if !slices.Equal(out.Changes, []Change{ChangeSealed, ChangeSigned, ChangeLessServiceKey}) {
 		t.Fatalf("Changes = %v", out.Changes)
 	}
-	if out, err := s.Check(gate, "svc", Pin{Sealed: true, SellerKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true}); err != nil || len(out.Changes) != 0 {
+	if out, err := s.Check(gate, "svc", Pin{Sealed: true, ServiceKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true}); err != nil || len(out.Changes) != 0 {
 		t.Fatalf("the accepted pin again: %+v %v", out, err)
 	}
-	if _, err := s.Check(gate, "svc2", Pin{SellerKeys: []string{"tp1"}}, Options{}); err != nil {
+	if _, err := s.Check(gate, "svc2", Pin{ServiceKeys: []string{"tp1"}}, Options{}); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := s.Check(gate, "svc2", Pin{Sealed: true, SellerKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true}); err != nil ||
+	if out, err := s.Check(gate, "svc2", Pin{Sealed: true, ServiceKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true}); err != nil ||
 		!slices.Equal(out.Changes, []Change{ChangeSealed, ChangeSigned}) {
 		t.Fatalf("upgrades under --pin-recipients: %+v %v", out, err)
 	}
 	// Going from no recipients (unsealed) to sealed with recipients is a new recipient: the first recipients of a
 	// service that was unsealed are exactly what an active gate would substitute.
-	if _, err := s.Check(gate, "svc", Pin{Sealed: true, Recipients: []string{"k1_a"}, SellerKeys: []string{"tp1"}, Signed: true}, Options{}); err == nil {
+	if _, err := s.Check(gate, "svc", Pin{Sealed: true, Recipients: []string{"k1_a"}, ServiceKeys: []string{"tp1"}, Signed: true}, Options{}); err == nil {
 		t.Fatal("the first recipients after a pin without any were accepted silently")
 	}
 	s = reopen(t, p)
-	if _, err := s.Check(gate, "svc", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b"}, SellerKeys: []string{"tp1"}, Signed: true}, Options{Accept: []string{"svc"}}); err != nil {
+	if _, err := s.Check(gate, "svc", Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b"}, ServiceKeys: []string{"tp1"}, Signed: true}, Options{Accept: []string{"svc"}}); err != nil {
 		t.Fatal(err)
 	}
-	out, err = s.Check(gate, "svc", Pin{Sealed: true, Recipients: []string{"k1_b"}, SellerKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true})
+	out, err = s.Check(gate, "svc", Pin{Sealed: true, Recipients: []string{"k1_b"}, ServiceKeys: []string{"tp1"}, Signed: true}, Options{PinRecipients: true})
 	if err != nil || !slices.Equal(out.Changes, []Change{ChangeLessRecipient}) {
 		t.Fatalf("a removed recipient: %+v, %v", out, err)
 	}
@@ -324,15 +324,15 @@ func TestFileModes(t *testing.T) {
 	}
 }
 
-// r3-hiring-11 (D248): --accept-change <service> accepts the change pending at the service's first check of the run,
+// r3-calling-11 (D248): --accept-change <service> accepts the change pending at the service's first check of the run,
 // not every later one: a node left running with the flag refuses the next recipient substitution.
 func TestAcceptChangeIsOnce(t *testing.T) {
 	s, p := open(t)
-	base := Pin{Sealed: true, Recipients: []string{"k1_a"}, SellerKeys: []string{"tp1"}, Signed: true}
+	base := Pin{Sealed: true, Recipients: []string{"k1_a"}, ServiceKeys: []string{"tp1"}, Signed: true}
 	if _, err := s.Check(gate, "booking", base, Options{}); err != nil {
 		t.Fatal(err)
 	}
-	rotated := Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b"}, SellerKeys: []string{"tp1"}, Signed: true}
+	rotated := Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b"}, ServiceKeys: []string{"tp1"}, Signed: true}
 	if _, err := s.Check(gate, "booking", rotated, Options{}); err == nil {
 		t.Fatal("a new recipient was accepted without --accept-change")
 	}
@@ -344,11 +344,44 @@ func TestAcceptChangeIsOnce(t *testing.T) {
 	if _, err := s.Check(gate, "booking", rotated, opts); err != nil {
 		t.Fatalf("the accepted pin again: %v", err)
 	}
-	evil := Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b", "k1_evil"}, SellerKeys: []string{"tp1", "tp-evil"}, Signed: true}
+	evil := Pin{Sealed: true, Recipients: []string{"k1_a", "k1_b", "k1_evil"}, ServiceKeys: []string{"tp1", "tp-evil"}, Signed: true}
 	if _, err := s.Check(gate, "booking", evil, opts); err == nil {
 		t.Fatal("a later substitution in the same run was accepted by the earlier --accept-change")
 	}
 	if pin, _, _ := s.Get(gate, "booking"); slices.Contains(pin.Recipients, "k1_evil") {
 		t.Fatalf("recorded %+v", pin)
+	}
+}
+
+// A pins file a node saved before D363 names its service keys seller_keys: an upgraded node reads them as
+// service_keys, so the same card is no change, and its next save writes service_keys only.
+func TestPinsBeforeTheRename(t *testing.T) {
+	p := filepath.Join(t.TempDir(), FileName)
+	old := `{"v":1,"pins":{"` + gate + `":{"booking":{"sealed":true,"recipients":["k1_a","k1_b"],"seller_keys":["tp1"],"signed":true,"at":"2026-11-01T00:00:00Z"}}}}`
+	if err := os.WriteFile(p, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := reopen(t, p)
+	if pin, ok, err := s.Get(gate, "booking"); err != nil || !ok || !slices.Equal(pin.ServiceKeys, []string{"tp1"}) {
+		t.Fatalf("Get = %+v, %v, %v; want the seller_keys read as service_keys", pin, ok, err)
+	}
+	out, err := s.Check(gate, "booking", base, Options{})
+	if err != nil || out.First || len(out.Changes) != 0 {
+		t.Fatalf("Check of the same card = %+v, %v; want no change", out, err)
+	}
+	// A new service key is still a change the old file's keys are compared with.
+	if _, err := s.Check(gate, "booking", Pin{Sealed: true, Recipients: base.Recipients, ServiceKeys: []string{"tp2"}, Signed: true}, Options{}); err == nil {
+		t.Fatal("a substituted service key was accepted against a pre-rename pin")
+	}
+	// Any save writes the new name only.
+	if _, err := s.Check(gate, "recon", base, Options{}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "seller_keys") || !strings.Contains(string(b), `"service_keys"`) {
+		t.Fatalf("the saved file: %s", b)
 	}
 }

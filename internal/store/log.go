@@ -240,7 +240,7 @@ type Write struct {
 }
 
 // Call is the calls row of a gate-owned MCP task (spec/relay.md §11.4, §11.5 step 6, §11.8): the tool, the
-// creating session's hash, the byte counts and the outcome. Its tenant, service, buyer and principal are the
+// creating session's hash, the byte counts and the outcome. Its tenant, service, caller and principal are the
 // task row's and its duration runs from the task's creation to the terminal event, all read in the statement.
 type Call struct {
 	Tool       string
@@ -333,7 +333,7 @@ with u as (
 				(select nullif(s.retention_s, 0) * interval '1 second' from kontra.services s where s.tenant_id = t.tenant_id and s.name = t.service))
 			else t.retention_until end
 	where t.id = $1 and t.version = $2
-	  and ($12::uuid is null or (t.tenant_id = $12::uuid and t.service = $13::text and t.buyer_id = $14::uuid))
+	  and ($12::uuid is null or (t.tenant_id = $12::uuid and t.service = $13::text and t.caller_id = $14::uuid))
 	  and (t.state not in ('completed', 'failed', 'canceled', 'rejected')
 	       or ($3::text = 'metadata' and coalesce($4::text, t.state) = t.state and $9::bool))
 	  and ($15::integer is null or exists (
@@ -379,9 +379,9 @@ func appendBlobs(stmt string, args []any, rows []blob.Row) (string, []any) {
 // writes nothing when the UPDATE was refused. Its parameters are numbered from $%d: the row's id, the tool, the
 // session hash, bytes in, bytes out and is_error.
 const callsCTE = `), c as (
-	insert into kontra.calls (id, tenant_id, service, tool, buyer_id, principal, mcp_session, task_id, bytes_in,
+	insert into kontra.calls (id, tenant_id, service, tool, caller_id, principal, mcp_session, task_id, bytes_in,
 		bytes_out, duration_ms, is_error)
-	select $%[1]d::uuid, t.tenant_id, t.service, $%[2]d::text, t.buyer_id, t.principal, $%[3]d::bytea, u.id,
+	select $%[1]d::uuid, t.tenant_id, t.service, $%[2]d::text, t.caller_id, t.principal, $%[3]d::bytea, u.id,
 		$%[4]d::bigint, $%[5]d::bigint,
 		least(greatest((extract(epoch from (now() - t.created_at)) * 1000)::bigint, 0), 2147483647)::integer, $%[6]d::bool
 	  from u join kontra.tasks t on t.id = u.id
@@ -422,18 +422,18 @@ select e.seq, u.deadline, pg_notify('kontra_task_events', e.task_id::text || ':'
 // longer holds, or else the version moved or the terminal rule refused the write.
 const classifySQL = `
 select t.version, t.state,
-       ($2::uuid is null or (t.tenant_id = $2::uuid and t.service = $3::text and t.buyer_id = $4::uuid)),
+       ($2::uuid is null or (t.tenant_id = $2::uuid and t.service = $3::text and t.caller_id = $4::uuid)),
        ($5::integer is null or exists (
 		select 1 from kontra.attempts a
 		 where a.task_id = t.id and a.n = $5::integer and a.ended_at is null and a.dispatch_id = $6::uuid
 		   and not exists (select 1 from kontra.attempts b where b.task_id = a.task_id and b.n > a.n)))
   from kontra.tasks t where t.id = $1`
 
-func scopeArgs(s *Scope) (tenant, service, buyer any) {
+func scopeArgs(s *Scope) (tenant, service, caller any) {
 	if s == nil {
 		return nil, nil, nil
 	}
-	return s.TenantID, s.Service, s.BuyerID
+	return s.TenantID, s.Service, s.CallerID
 }
 
 func fenceArgs(f *Fence) (n, dispatch any) {
@@ -564,7 +564,7 @@ type NewTask struct {
 	// Origin is the `task` row's origin (D357): the caller's first message; nil writes none.
 	Origin *Origin
 	// Provisional leaves the task unexposed (tasks.exposed_at null, D362): a new A2A message the caller awaits the
-	// answer to (not returnImmediately, not a /mcp hire), until the callee's first answer shows it is a task. Every
+	// answer to (not returnImmediately, not a /mcp call), until the callee's first answer shows it is a task. Every
 	// other task is exposed at creation.
 	Provisional bool
 }
@@ -615,7 +615,7 @@ func storableText(s string) bool { return utf8.ValidString(s) && strings.IndexBy
 // is no longer written (D351; the column stays until a later migration drops it).
 const createSQL = `
 with t as (
-	insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id,
+	insert into kontra.tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id,
 		first_message_id, first_request, state, version, snapshot, status_at,
 		deadline, submitted_at, terminal_at, retention_until, exposed_at)
 	select $1::uuid, s.tenant_id, s.name, $4::text, $5::uuid, $6::text, $7::text, $8::text, $9::text, $10::bytea,
@@ -673,7 +673,7 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 		firstMsg, firstReq = t.FirstMessageID, t.FirstRequest[:]
 	}
 	args := []any{
-		t.ID, t.Service.TenantID, t.Service.Name, string(t.Protocol), t.Owner.BuyerID, t.Owner.Principal,
+		t.ID, t.Service.TenantID, t.Service.Name, string(t.Protocol), t.Owner.CallerID, t.Owner.Principal,
 		t.Owner.Via, t.ContextID, firstMsg, firstReq, string(t.State), snap,
 		nullTime(StatusTime(t.Snapshot.Status.Timestamp)),
 		micros(t.Service.Timeout), micros(t.Service.Retention), payload, t.Origin.encode(), t.Provisional,
@@ -701,7 +701,7 @@ func (l *Log) CreateTask(ctx context.Context, tx pgx.Tx, t NewTask) (Appended, e
 }
 
 // taskCols are the columns scanTask reads, from kontra.tasks aliased t.
-const taskCols = `t.id, t.tenant_id, t.service, t.protocol, t.buyer_id, t.principal, t.via, t.context_id,
+const taskCols = `t.id, t.tenant_id, t.service, t.protocol, t.caller_id, t.principal, t.via, t.context_id,
 	coalesce(t.first_message_id, ''), t.state, t.version, t.snapshot, t.status_at, t.deadline,
 	t.created_at, t.submitted_at, t.terminal_at, t.retention_until, t.exposed_at`
 
@@ -710,7 +710,7 @@ func scanTask(row pgx.Row) (*TaskRow, error) {
 		r    TaskRow
 		snap []byte
 	)
-	err := row.Scan(&r.ID, &r.TenantID, &r.Service, &r.Protocol, &r.Owner.BuyerID, &r.Owner.Principal,
+	err := row.Scan(&r.ID, &r.TenantID, &r.Service, &r.Protocol, &r.Owner.CallerID, &r.Owner.Principal,
 		&r.Owner.Via, &r.ContextID, &r.FirstMessageID, &r.State, &r.Version, &snap, &r.StatusAt,
 		&r.Deadline, &r.CreatedAt, &r.SubmittedAt, &r.TerminalAt, &r.RetentionUntil, &r.ExposedAt)
 	if err != nil {
@@ -782,8 +782,8 @@ func (l *Log) LoadScopedAll(ctx context.Context, svc ServiceRef, o Owner, taskID
 
 func (l *Log) loadScoped(ctx context.Context, svc ServiceRef, o Owner, taskID uuid.UUID, exposed string) (*TaskRow, error) {
 	r, err := scanTask(l.db.QueryRow(ctx, `select `+taskCols+` from kontra.tasks t
-		where t.id = $1 and t.tenant_id = $2 and t.service = $3 and t.buyer_id = $4`+exposed,
-		taskID, svc.TenantID, svc.Name, o.BuyerID))
+		where t.id = $1 and t.tenant_id = $2 and t.service = $3 and t.caller_id = $4`+exposed,
+		taskID, svc.TenantID, svc.Name, o.CallerID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, notFound()
 	}
@@ -793,7 +793,7 @@ func (l *Log) loadScoped(ctx context.Context, svc ServiceRef, o Owner, taskID uu
 	return r, nil
 }
 
-// FindResend returns the task a resend is answered with: same tenant, service, buyer and principal,
+// FindResend returns the task a resend is answered with: same tenant, service, caller and principal,
 // the same first messageId and request hash, created after since (24 h, spec §15). Nil when none. A
 // messageId that is not UTF-8 text without U+0000 is a2a.ErrInvalidParams, before any query: CreateTask
 // refuses it too, and Postgres would refuse the query (a 500 to the caller).
@@ -808,7 +808,7 @@ func (l *Log) FindResend(ctx context.Context, svc ServiceRef, o Owner, messageID
 }
 
 // FindResendLocked is FindResend inside tx, the transaction that creates the task, after taking the
-// transaction-scoped advisory lock of the resend key (tenant, service, buyer, principal, messageId). Of two
+// transaction-scoped advisory lock of the resend key (tenant, service, caller, principal, messageId). Of two
 // identical requests arriving together, which both miss FindResend, the second waits here until the first's
 // transaction ends and then finds its task, so the request is not made into two tasks and dispatched twice
 // (spec §15). The lock is held until tx ends.
@@ -829,7 +829,7 @@ func (l *Log) FindResendLocked(ctx context.Context, tx pgx.Tx, svc ServiceRef, o
 // under a prefix of its own. Two keys that collide only wait for each other.
 func resendLockKey(svc ServiceRef, o Owner, messageID string) int64 {
 	h := sha256.New()
-	for _, part := range []string{"kontra.resend", svc.TenantID.String(), svc.Name, o.BuyerID.String(), o.Principal, messageID} {
+	for _, part := range []string{"kontra.resend", svc.TenantID.String(), svc.Name, o.CallerID.String(), o.Principal, messageID} {
 		h.Write([]byte(part))
 		h.Write([]byte{0})
 	}
@@ -840,10 +840,10 @@ func resendLockKey(svc ServiceRef, o Owner, messageID string) int64 {
 
 func (l *Log) findResend(ctx context.Context, q querier, svc ServiceRef, o Owner, messageID string, requestHash [32]byte, since time.Time) (*TaskRow, error) {
 	r, err := scanTask(q.QueryRow(ctx, `select `+taskCols+` from kontra.tasks t
-		where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.principal = $4
+		where t.tenant_id = $1 and t.service = $2 and t.caller_id = $3 and t.principal = $4
 		  and t.first_message_id = $5 and t.first_request = $6 and t.created_at > $7
 		order by t.created_at desc, t.id desc limit 1`,
-		svc.TenantID, svc.Name, o.BuyerID, o.Principal, messageID, requestHash[:], since))
+		svc.TenantID, svc.Name, o.CallerID, o.Principal, messageID, requestHash[:], since))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

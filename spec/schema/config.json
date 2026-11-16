@@ -218,7 +218,7 @@
                 "tasks": { "type": "integer", "minimum": 1, "default": 4 },
                 "calls": { "type": "integer", "minimum": 1, "default": 8, "description": "Concurrent MCP requests relayed to an anonymous tenant's services, as host (D304)." },
                 "streams": { "type": "integer", "minimum": 1, "default": 8, "description": "GET and subscriptions/listen streams open at once to an anonymous tenant's services, as host; counted apart from calls (D308)." },
-                "hiring_streams": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 },
+                "calling_streams": { "type": "integer", "minimum": 1, "maximum": 32, "default": 8 },
                 "parts_bytes": { "$ref": "#/$defs/byteSize", "default": "64MiB" },
                 "purge_after": { "$ref": "#/$defs/duration", "default": "24h" },
                 "max_tenants": { "type": "integer", "minimum": 1, "default": 1000, "description": "Live anonymous tenants, gate-wide; past it a hello is anonymous_unavailable." }
@@ -320,12 +320,12 @@
         },
         "tasks": { "enum": ["durable", "required", "passthrough", "off"], "description": "durable (the default): the gate owns task-augmented calls (spec §11.5); on 2026-07-28 every tools/call that declares the tasks extension, on a service whose upstream declares it, becomes a gate task whose request and result are kept until the task's retention ends, as an A2A task's are (§11.12, D178). required: durable, and every tools/call must be a task: a plain call is refused (-32601 on 2025-11-25, -32021 on 2026-07-28), tools/list shows execution.taskSupport required and leaves out the tools the upstream cannot run as tasks, so Admission sees every call as a task (D322). passthrough: the upstream owns them. off: plain calls only, nothing kept." },
         "sealed": { "$ref": "#/$defs/sealed" },
-        "seller_keys": {
+        "service_keys": {
           "oneOf": [
             { "type": "object", "additionalProperties": true, "required": ["keys"], "properties": { "keys": { "type": "array", "minItems": 1, "items": { "type": "object" } } }, "not": { "required": ["url"] } },
             { "type": "object", "additionalProperties": false, "required": ["url"], "properties": { "url": { "$ref": "#/$defs/httpsURL" } } }
           ],
-          "description": "An inline JWKS or {url}; seller card signatures are verified against it (spec §3)."
+          "description": "An inline JWKS or {url}; service card signatures are verified against it (spec §3)."
         },
         "session_idle_s": { "type": "integer", "minimum": 1, "maximum": 2147483647, "default": 3600 },
         "max_sessions_per_principal": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 4, "description": "mcp only: the open MCP sessions one principal other than anonymous may hold on a tunnel service; an initialize beyond it closes that principal's sessions idle for 2 minutes (EvictIdle; none with a request or stream in flight), the longest idle first, with an upstream DELETE, or is refused 429 when too few are, with a Retry-After that says when a retry finds room (spec §11.2, D213, D231, D249)." },

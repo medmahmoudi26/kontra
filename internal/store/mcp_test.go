@@ -57,7 +57,7 @@ func (e *env) mcpTask() (uuid.UUID, ServiceRef) {
 		on conflict do nothing`, e.tenant)
 	svc := ServiceRef{TenantID: e.tenant, Tenant: "default", Name: "research", Kind: "mcp"}
 	id := uuid.Must(uuid.NewV7())
-	nt, err := NewMCPTask(id, svc, buyerA, map[string]any{"kontra.op.id": "e-1"},
+	nt, err := NewMCPTask(id, svc, callerA, map[string]any{"kontra.op.id": "e-1"},
 		map[string]any{"sh.kontra/note": "1 USD"})
 	if err != nil {
 		e.t.Fatal(err)
@@ -69,14 +69,14 @@ func (e *env) mcpTask() (uuid.UUID, ServiceRef) {
 	work := &MCPWork{Request: []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"research","arguments":{"q":"<x>"}}}`),
 		Tool: "research", RequestID: json.RawMessage(`7`), Version: "2025-11-25", Session: strings.Repeat("0f", 32)}
 	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: uuid.Must(uuid.NewV7()), TaskID: id, Kind: WorkExecute,
-		Payload: WorkPayload{Owner: buyerA, MCP: work}}); err != nil {
+		Payload: WorkPayload{Owner: callerA, MCP: work}}); err != nil {
 		e.t.Fatal(err)
 	}
 	return id, svc
 }
 
 // An MCP task's projection and log (spec §11.9): every writer's projection is the fold of its rows (Folder.MCP);
-// an input response is logged once per input request (a second, a foreign buyer's, one after the end are not);
+// an input response is logged once per input request (a second, a foreign caller's, one after the end are not);
 // the terminal event writes the task's one calls row in its statement; a write after it is refused.
 func TestMCPTaskLog(t *testing.T) {
 	e := newEnv(t)
@@ -123,10 +123,10 @@ func TestMCPTaskLog(t *testing.T) {
 		string(reqs[0].UpstreamID) != "41" || reqs[0].Method != "elicitation/create" {
 		t.Fatalf("pending input requests: %+v %v", reqs, err)
 	}
-	scope := Scope{TenantID: e.tenant, Service: svc.Name, BuyerID: buyerA.BuyerID}
+	scope := Scope{TenantID: e.tenant, Service: svc.Name, CallerID: callerA.CallerID}
 	answer := json.RawMessage(`{"jsonrpc":"2.0","id":"` + GateRequestID(id, reqSeq) + `","result":{"action":"accept"}}`)
-	if _, ok, err := e.log.AppendInputResponse(ctx, Scope{TenantID: e.tenant, Service: svc.Name, BuyerID: buyerB.BuyerID}, id, reqSeq, answer); ok || !errors.Is(err, a2a.ErrTaskNotFound) {
-		t.Fatalf("a foreign buyer's answer: %v %v", ok, err)
+	if _, ok, err := e.log.AppendInputResponse(ctx, Scope{TenantID: e.tenant, Service: svc.Name, CallerID: callerB.CallerID}, id, reqSeq, answer); ok || !errors.Is(err, a2a.ErrTaskNotFound) {
+		t.Fatalf("a foreign caller's answer: %v %v", ok, err)
 	}
 	if _, ok, err := e.log.AppendInputResponse(ctx, scope, id, reqSeq-1, answer); err != nil || ok {
 		t.Fatalf("an answer to a seq that is not an input request: %v %v", ok, err)
@@ -302,7 +302,7 @@ func TestMarkAnswerDelivered(t *testing.T) {
 		t.Fatalf("the delivered answers: %+v %v", after, err)
 	}
 	if string(after.Payload.MCP.Request) != string(before.Payload.MCP.Request) || after.TaskVersion != before.TaskVersion ||
-		after.Payload.Owner.BuyerID != before.Payload.Owner.BuyerID || string(after.Payload.MCP.RequestID) != "7" {
+		after.Payload.Owner.CallerID != before.Payload.Owner.CallerID || string(after.Payload.MCP.RequestID) != "7" {
 		t.Fatalf("the work item changed beyond its delivered answers:\n%+v\n%+v", before, after)
 	}
 	if err := e.log.MarkAnswerDelivered(ctx, f, uuid.Must(uuid.NewV7()), 11); !errors.Is(err, ErrWorkItemNotFound) {
@@ -388,7 +388,7 @@ func TestSetFirstUpstreamTask(t *testing.T) {
 	}
 }
 
-// ListMCP lists the buyer's own MCP tasks of the service, newest first, with gate-minted cursors.
+// ListMCP lists the caller's own MCP tasks of the service, newest first, with gate-minted cursors.
 func TestListMCP(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -397,7 +397,7 @@ func TestListMCP(t *testing.T) {
 		id, _ := e.mcpTask()
 		ids = append(ids, id)
 	}
-	scope := Scope{TenantID: e.tenant, Service: "research", BuyerID: buyerA.BuyerID}
+	scope := Scope{TenantID: e.tenant, Service: "research", CallerID: callerA.CallerID}
 	page, next, err := e.log.ListMCP(ctx, scope, "")
 	if err != nil || len(page) != MCPPageSize || next == "" || page[0].ID != ids[len(ids)-1] {
 		t.Fatalf("first page: %d %q %v", len(page), next, err)
@@ -406,8 +406,8 @@ func TestListMCP(t *testing.T) {
 	if err != nil || len(rest) != 3 || last != "" || rest[2].ID != ids[0] {
 		t.Fatalf("second page: %d %q %v", len(rest), last, err)
 	}
-	if other, _, err := e.log.ListMCP(ctx, Scope{TenantID: e.tenant, Service: "research", BuyerID: buyerB.BuyerID}, ""); err != nil || len(other) != 0 {
-		t.Fatalf("another buyer's list: %d %v", len(other), err)
+	if other, _, err := e.log.ListMCP(ctx, Scope{TenantID: e.tenant, Service: "research", CallerID: callerB.CallerID}, ""); err != nil || len(other) != 0 {
+		t.Fatalf("another caller's list: %d %v", len(other), err)
 	}
 	if _, _, err := e.log.ListMCP(ctx, scope, "not-a-cursor"); !errors.Is(err, ErrBadCursor) {
 		t.Fatalf("a bad cursor: %v", err)

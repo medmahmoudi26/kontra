@@ -10,8 +10,8 @@
 // Options.PostgresProxy, replica A reads a copy whose postgres: is a proxy the test can cut). public_url is
 // the Front, a TCP proxy in the test process that sends each new connection to the replica the test routes
 // it to (replica A by default), so a node's hello names public_url as its origin whichever replica its
-// tunnel lands on (spec/tunnel.md §4). Two API keys with distinct buyers are minted with `kontra-gate enroll
-// --api-key`. The buyer is a minimal SSE client that keeps every `id:` line, because a2a-go's client
+// tunnel lands on (spec/tunnel.md §4). Two API keys with distinct callers are minted with `kontra-gate enroll
+// --api-key`. The caller is a minimal SSE client that keeps every `id:` line, because a2a-go's client
 // ignores them; unary calls use a2a-go's own client.
 //
 // Tunnel services (Options.Tunnel, backend tunnel) are hosted by nodes: `kontra connect` subprocesses of the
@@ -21,7 +21,7 @@
 // and no Postgres or Temporal, which drives crafted streams at a real `kontra connect`.
 //
 // Everything the harness starts it removes, including on failure; every process it starts (replicas,
-// Temporal, nodes, the helloworld seller) carries KONTRA_E2E_RUN in its environment, and every file it writes
+// Temporal, nodes, the helloworld service) carries KONTRA_E2E_RUN in its environment, and every file it writes
 // lives under TempRoot, so `make test-e2e` can prove none outlived the run.
 //
 // The pinned CLI is temporal 1.9.1 (Server 1.32.0); its linux amd64 binary's sha256 is
@@ -31,14 +31,14 @@
 //
 // M1's tests (D80): relay_resume (TestRelayResume), replica_kill direct (TestReplicaKillDirect, and its
 // SIGSTOP variant TestReplicaStallDirect, D77), cancel_forwarded (TestCancelForwarded), push_delivery
-// (TestPushDelivery), ssrf_webhook (TestSSRFWebhook), card_compat (TestCardCompat), cross_buyer
-// (TestCrossBuyer) and version_conflict (TestVersionConflict), plus follow-up turns through the real stack
+// (TestPushDelivery), ssrf_webhook (TestSSRFWebhook), card_compat (TestCardCompat), cross_caller
+// (TestCrossCaller) and version_conflict (TestVersionConflict), plus follow-up turns through the real stack
 // (TestFollowUp; TestFollowUpTemporalUnreachable, an Update Temporal does not accept; TestFollowUpLateRead,
 // a2a-go's read failing after Write accepted the turn) and the failed push config set again
 // (TestPushFailedRestart). M2's (PRD §14 M2 row; spec/tunnel.md §16, spec/relay.md §16): tunnel_kill
 // (TestTunnelKill), input_required_sticky (TestInputRequiredSticky), cancel_forwarded through the tunnel
 // (TestCancelForwardedTunnel), key_scope (TestKeyScope), sidecar_not_a_proxy (TestSidecarNotAProxy),
-// replica_kill's tunnel variant (TestReplicaKillTunnel), the helloworld seller through the tunnel
+// replica_kill's tunnel variant (TestReplicaKillTunnel), the helloworld service through the tunnel
 // (TestHelloworldTunnel) and the make-before-break drain (TestTunnelDrain), plus the rotation after a leak
 // at the binary level (TestNodeRotateAfterLeak, D125), a welcome lost after the gate committed
 // (TestTunnelLostWelcome, D124, D139), a stream refused while the revocation view is stale
@@ -51,9 +51,9 @@
 // M3's (D171, D172, D189; m3_test.go lists them): the six gate tests sealed_no_plaintext, sealed_replay,
 // sealed_unsealed_part, mcp_session_cross_node, mcp_tool_denied and mcp_task_resume, and card_passthrough,
 // mcp_batch_refused, mcp_meta_spoof, mcp_session_revoked, mcp_case_smuggling, a2a_case_smuggling, stdio_roots,
-// local_rebinding and the hiring row, mcp_modern_task, mcp_era_fallback, mcp_peer_hop and a sealed part through the
+// local_rebinding and the calling row, mcp_modern_task, mcp_era_fallback, mcp_peer_hop and a sealed part through the
 // bucket. For them both replicas share one signing_key (D166), log at debug level, and get a peer listener and a
-// gofakes3 bucket when a test asks (Options.Peer, Options.Blobs); nodes host MCP services and hire; the stock npm
+// gofakes3 bucket when a test asks (Options.Peer, Options.Blobs); nodes host MCP services and call; the stock npm
 // servers and every other server the harness starts listen on 127.0.0.1 only, which each test asserts at its end
 // (D185, CheckLoopback).
 //
@@ -65,9 +65,9 @@
 // Front.SetSource, proxyproto.go), so nodes come from chosen /24s and /48s; an Admission double on loopback that allows,
 // denies or answers a raw decision and records each request (admission.go); internal/oidc/oidctest as auth.mcp_oauth's authorization server over HTTPS, trusted through
 // SSL_CERT_FILE by the replicas and kontra login (authserver.go, Harness.Login); clients of the gate's own /mcp in both
-// eras (gatemcp_client.go); a third replica configured otherwise on the same database (StartReplica); and the sellers
-// (sellers.go): examples/sellers/tck and booking built from this checkout and run unmodified, and an in-test a2a-go
-// seller standing in for hello-exec.
+// eras (gatemcp_client.go); a third replica configured otherwise on the same database (StartReplica); and the services
+// (services.go): examples/agents/tck and booking built from this checkout and run unmodified, and an in-test a2a-go
+// service standing in for hello-exec.
 package e2e
 
 import (
@@ -141,7 +141,7 @@ type Options struct {
 	TemporalCLI   string // default: $KONTRA_TEMPORAL_CLI
 	// Upstream is the service `slow`: a direct a2a backend at a slowagent with allow_private (D67).
 	Upstream slowagent.Config
-	// Services adds more direct a2a services, each with its own slowagent (card_compat's 0.2.5 seller).
+	// Services adds more direct a2a services, each with its own slowagent (card_compat's 0.2.5 service).
 	Services map[string]slowagent.Config
 	// PushAllowPrivate is push.allow_private (spec §10.3): loopback http:// webhooks. Off by default, as in
 	// the gate.
@@ -177,10 +177,10 @@ type Options struct {
 	// Peer gives each replica a peer listener on a loopback port of its own (--peer-listen) and both the shared
 	// secret in KONTRA_PEER_SECRET (spec §11.2, D163, D179).
 	Peer bool
-	// SellerKeys is services.<name>.seller_keys of a direct A2A service (spec §3): a JWKS document, inline.
-	SellerKeys map[string]string
+	// ServiceKeys is services.<name>.service_keys of a direct A2A service (spec §3): a JWKS document, inline.
+	ServiceKeys map[string]string
 
-	// M4 (WP-07). Direct adds direct A2A services at any agent's root URL (a Seller, an example seller), beside the
+	// M4 (WP-07). Direct adds direct A2A services at any agent's root URL (a Service, an example service), beside the
 	// slowagents of Upstream and Services.
 	Direct map[string]string
 	// Allow replaces a service's allow: (default org:default) in the services: block.
@@ -188,7 +188,7 @@ type Options struct {
 	// ServiceYAML adds lines to a service's entry of the services: block, each already indented four spaces (listed,
 	// annotations, sealed …).
 	ServiceYAML map[string]string
-	// Multi makes the gate multi-tenant (tenancy: multi): no services: block; the team tenant, buyer A's and B's keys
+	// Multi makes the gate multi-tenant (tenancy: multi): no services: block; the team tenant, caller A's and B's keys
 	// and the direct services of Upstream, Services and Direct are rows the harness writes (tenants.go, D116), and a
 	// test seeds more with SeedServices and MintKey. A service's ref is <tenant>/<name> there.
 	Multi bool
@@ -248,8 +248,8 @@ type Harness struct {
 	Gates       [2]*Gate
 	Upstream    *slowagent.Agent            // the service slow
 	Upstreams   map[string]*slowagent.Agent // every service's upstream, slow included
-	APIKey      string                      // buyer A's key
-	APIKeyB     string                      // buyer B's key: another buyer of the same tenant
+	APIKey      string                      // caller A's key
+	APIKeyB     string                      // caller B's key: another caller of the same tenant
 	Pool        *pgxpool.Pool               // probes
 	TC          client.Client               // the test's own Temporal client (histories)
 	// TemporalProxy is set with Options.TemporalProxy: the address the replicas dial.
@@ -281,7 +281,7 @@ type Harness struct {
 
 	mu      sync.Mutex
 	nodes   []*Node            // every `kontra connect` started, killed at Close
-	cleanup []func() error     // what tests added (sellers, fake doubles), run at Close, last first
+	cleanup []func() error     // what tests added (services, fake doubles), run at Close, last first
 	agents  []*slowagent.Agent // slowagents started for a test (Agent), closed at Close
 	pgids   []int              // process groups of the stock servers the harness started (CheckLoopback)
 	extra   []*Gate            // replicas a test started besides the two (StartReplica), killed at Close
@@ -505,7 +505,7 @@ func Start(ctx context.Context, o Options) (h *Harness, err error) {
 		}
 	}
 	if o.Multi {
-		// The operator's rows (D116, D37): the team tenant, the two buyers' keys and the direct services.
+		// The operator's rows (D116, D37): the team tenant, the two callers' keys and the direct services.
 		if err := h.seedTeam(ctx); err != nil {
 			return h, err
 		}
@@ -641,7 +641,7 @@ func (h *Harness) gateCommand(ctx context.Context, args ...string) ([]byte, erro
 	return cmd.CombinedOutput()
 }
 
-// enroll mints an API key with `kontra-gate enroll --api-key <name>`: a new key, and with it a new buyer.
+// enroll mints an API key with `kontra-gate enroll --api-key <name>`: a new key, and with it a new caller.
 func (h *Harness) enroll(ctx context.Context, name string) (string, error) {
 	out, err := h.gateStdout(ctx, "enroll", "-f", h.configPath, "--api-key", name)
 	if err != nil {
@@ -785,8 +785,8 @@ signing_key: %q
     allow: %s
     task: { timeout: 10m, retries: %d }
 `, name, u, allowOf(name), retries)
-		if keys, ok := h.opts.SellerKeys[name]; ok {
-			fmt.Fprintf(&b, "    seller_keys: %s\n", keys)
+		if keys, ok := h.opts.ServiceKeys[name]; ok {
+			fmt.Fprintf(&b, "    service_keys: %s\n", keys)
 		}
 		b.WriteString(h.opts.ServiceYAML[name])
 	}

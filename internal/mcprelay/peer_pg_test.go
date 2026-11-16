@@ -29,10 +29,10 @@ func TestPeerHop(t *testing.T) {
 	a := e.replica("a", replicaOpts{peer: true})
 	b := e.replica("b", replicaOpts{peer: true})
 	up := mcptest.New()
-	up.Tools = []json.RawMessage{mcptest.Tool("echo", `{"sh.kontra/note":"seller's"}`)}
+	up.Tools = []json.RawMessage{mcptest.Tool("echo", `{"sh.kontra/note":"service's"}`)}
 	up.SSE = true
 	n := e.node(b, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	rep := c.initialize(a.url + "/mcp/tun")
 	if rep.header.Get("Content-Type") != "text/event-stream" {
@@ -49,7 +49,7 @@ func TestPeerHop(t *testing.T) {
 	if got := lastRequest(t, up, "tools/call"); got.SessionID != row.upstreamSID || got.Header.Get("Authorization") != "" {
 		t.Errorf("upstream saw %q %q", got.SessionID, got.Header.Get("Authorization"))
 	}
-	// Policy and the scrub ran once, on A: the list has no seller key.
+	// Policy and the scrub ran once, on A: the list has no service key.
 	rep = c.do(http.MethodPost, a.url+"/mcp/tun", `{"jsonrpc":"2.0","id":8,"method":"tools/list"}`, nil)
 	if rep.status != 200 || strings.Contains(string(rep.body), "sh.kontra/") || !strings.Contains(string(rep.body), "echo") {
 		t.Errorf("tools/list: %s", rep.body)
@@ -109,7 +109,7 @@ func TestSessionsPerPrincipalThroughTheHop(t *testing.T) {
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	e.node(b, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c1, c2, c3 := newClient(t, key), newClient(t, key), newClient(t, key)
 	c1.initialize(a.url + "/mcp/tun")
 	first := e.row(c1.sid).upstreamSID
@@ -147,7 +147,7 @@ func TestPeerHopIdleGET(t *testing.T) {
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	up.NoPriming = true
 	e.node(b, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(a.url + "/mcp/tun")
 	row := e.row(c.sid)
@@ -186,7 +186,7 @@ func TestPeerHopGone(t *testing.T) {
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	n := e.node(b, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(a.url + "/mcp/tun")
 	if err := e.store.RevokeBinding(context.Background(), n.key, "tun", "test"); err != nil {
@@ -217,7 +217,7 @@ func TestNoCallsRowWithoutAnAnswer(t *testing.T) {
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	n := e.node(b, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	viaPeer, local := newClient(t, key), newClient(t, key)
 	viaPeer.initialize(a.url + "/mcp/tun")
 	local.initialize(b.url + "/mcp/tun")
@@ -272,7 +272,7 @@ func TestPeerListenerRefusals(t *testing.T) {
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	n := e.node(b, up, "tun")
-	key, principal := e.apiKey("buyer")
+	key, principal := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(b.url + "/mcp/tun")
 	upSID := e.row(c.sid).upstreamSID
@@ -281,7 +281,7 @@ func TestPeerListenerRefusals(t *testing.T) {
 	assertion := func(at time.Time, sid string, hdr http.Header) (peer.Assertion, http.Header) {
 		fwd, sum := peer.ForwardedHeaders(hdr)
 		return peer.Assertion{Replica: "r-other", TenantID: e.team, Service: "tun", TunnelSession: n.session.ID,
-			Principal: principal, BuyerID: uuid.New(), Via: "api_key", MCPSession: sha(c.sid), UpstreamSID: sid,
+			Principal: principal, CallerID: uuid.New(), Via: "api_key", MCPSession: sha(c.sid), UpstreamSID: sid,
 			Headers: hex.EncodeToString(sum[:]), Nonce: uuid.NewString(), At: at}, fwd
 	}
 	base := http.Header{}
@@ -397,7 +397,7 @@ func TestWithoutPeerOnlyLocal(t *testing.T) {
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	e.node(b, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	rep := c.do(http.MethodPost, a.url+"/mcp/tun", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`, nil)
 	if rep.status != 503 || up.Count("initialize") != 0 {

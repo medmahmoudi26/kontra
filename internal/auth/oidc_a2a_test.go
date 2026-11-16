@@ -22,7 +22,7 @@ func (f *fakeA2A) VerifyA2A(_ context.Context, token string) (Principal, error) 
 	if f.err != nil {
 		return Principal{}, f.err
 	}
-	return Principal{Kind: KindOIDC, ID: "oidc:sub:alice", BuyerID: buyer1, Via: ViaOIDC}, nil
+	return Principal{Kind: KindOIDC, ID: "oidc:sub:alice", CallerID: caller1, Via: ViaOIDC}, nil
 }
 
 // spec §2.3, D314: on the A2A routes, with auth.oidc, a bearer shaped as a JWT is verified as a token of the issuer
@@ -82,11 +82,11 @@ func TestAuthenticateA2A(t *testing.T) {
 	if _, _, err := a.AuthenticateMCP(req("Bearer "+jwtShaped), uuid.Nil, "fs"); err != nil || len(v.calls) != n || len(rs.calls) != 1 {
 		t.Fatalf("a JWT on an MCP route: %v (A2A %d, MCP %d)", err, len(v.calls)-n, len(rs.calls))
 	}
-	if p, ok, err := a.AuthenticateA2A(req(""), buyer1); err != nil || ok || p.Kind != KindAnonymous || p.BuyerID != buyer1 {
+	if p, ok, err := a.AuthenticateA2A(req(""), caller1); err != nil || ok || p.Kind != KindAnonymous || p.CallerID != caller1 {
 		t.Fatalf("no credential: %+v %v %v", p, ok, err)
 	}
-	sess := Principal{Kind: KindNode, ID: "node:k1_x", BuyerID: buyer1, Via: ViaNode}
-	r := req("Bearer " + jwtShaped).WithContext(WithHireSource(context.Background(), sessionSource{sess}))
+	sess := Principal{Kind: KindNode, ID: "node:k1_x", CallerID: caller1, Via: ViaNode}
+	r := req("Bearer " + jwtShaped).WithContext(WithCallSource(context.Background(), sessionSource{sess}))
 	if p, ok, err := a.AuthenticateA2A(r, uuid.Nil); err != nil || !ok || p.ID != sess.ID || len(v.calls) != n {
 		t.Fatalf("a node's request: %+v %v %v", p, ok, err)
 	}

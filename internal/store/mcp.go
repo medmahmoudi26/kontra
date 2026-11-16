@@ -609,7 +609,7 @@ func (l *Log) AppendInputResponse(ctx context.Context, scope Scope, taskID uuid.
 		if err != nil {
 			return err
 		}
-		if row.TenantID != scope.TenantID || row.Service != scope.Service || row.Owner.BuyerID != scope.BuyerID || row.Protocol != ProtocolMCP {
+		if row.TenantID != scope.TenantID || row.Service != scope.Service || row.Owner.CallerID != scope.CallerID || row.Protocol != ProtocolMCP {
 			return notFound()
 		}
 		if row.State.Terminal() {
@@ -812,7 +812,7 @@ func EncodeMCPCursor(createdAt time.Time, id uuid.UUID) string {
 // ErrBadCursor is a tasks/list cursor the gate did not mint.
 var ErrBadCursor = errors.New("store: not a cursor this gate minted")
 
-// ListMCP returns one page of the buyer's own MCP tasks of the service, newest first (created_at desc, id desc),
+// ListMCP returns one page of the caller's own MCP tasks of the service, newest first (created_at desc, id desc),
 // after cursor ("" for the first page), and the next page's cursor ("" when it is the last) (spec §11.6).
 func (l *Log) ListMCP(ctx context.Context, scope Scope, cursor string) ([]*TaskRow, string, error) {
 	var at, after any
@@ -828,9 +828,9 @@ func (l *Log) ListMCP(ctx context.Context, scope Scope, cursor string) ([]*TaskR
 		at, after = time.UnixMicro(int64(binary.BigEndian.Uint64(b[1:9]))).UTC(), id
 	}
 	rows, err := l.db.Query(ctx, `select `+taskCols+` from kontra.tasks t
-		where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.protocol = 'mcp'
+		where t.tenant_id = $1 and t.service = $2 and t.caller_id = $3 and t.protocol = 'mcp'
 		  and ($4::timestamptz is null or (t.created_at, t.id) < ($4::timestamptz, $5::uuid))
-		order by t.created_at desc, t.id desc limit $6`, scope.TenantID, scope.Service, scope.BuyerID, at, after, MCPPageSize+1)
+		order by t.created_at desc, t.id desc limit $6`, scope.TenantID, scope.Service, scope.CallerID, at, after, MCPPageSize+1)
 	if err != nil {
 		return nil, "", fmt.Errorf("store: list MCP tasks: %w", err)
 	}

@@ -13,10 +13,10 @@ import (
 )
 
 // External is a gate the harness attaches to instead of starting its own (Attach): M3 WP-10's compose team gate,
-// whose containers the pentest runs, while the nodes, sellers, stock servers and doubles the harness starts run on
+// whose containers the pentest runs, while the nodes, services, stock servers and doubles the harness starts run on
 // the host, as a team's machines would (D168).
 type External struct {
-	URL  string        // public_url, which every node dials and every buyer calls
+	URL  string        // public_url, which every node dials and every caller calls
 	Pool *pgxpool.Pool // the gate's database, for the probes' reads
 	TC   client.Client // the gate's Temporal, for histories; nil when the run has none
 	// ConfigPath is the configuration file as kontra-gate reads it where Gate runs it (enroll -f).
@@ -27,13 +27,13 @@ type External struct {
 	// Env is the environment every process the harness starts begins from, before the run's marker (D185: a
 	// minimal one); nil is this process's.
 	Env []string
-	// APIKeyNames name the two API keys Attach mints with `kontra-gate enroll --api-key` (buyer A's and B's).
+	// APIKeyNames name the two API keys Attach mints with `kontra-gate enroll --api-key` (caller A's and B's).
 	APIKeyNames [2]string
 }
 
 // Attach returns a harness whose one gate is x's: Gates holds it twice (there is one replica), Front is nil, and
-// LaunchNode needs NodeOptions.Gate. Close stops what the harness started (nodes, sellers, doubles) and never the
-// gate. Buyer A's and B's keys are minted on the gate.
+// LaunchNode needs NodeOptions.Gate. Close stops what the harness started (nodes, services, doubles) and never the
+// gate. Caller A's and B's keys are minted on the gate.
 func Attach(ctx context.Context, x External) (h *Harness, err error) {
 	if x.URL == "" || x.Gate == nil || x.ConfigPath == "" {
 		return nil, errors.New("e2e: Attach needs the gate's URL, its configuration path and a way to run kontra-gate")

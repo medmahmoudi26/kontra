@@ -21,14 +21,14 @@ func TestLocalProfileSharedCaller(t *testing.T) {
 	}
 
 	f.srv = New(Deps{Services: f.reg, Handlers: handlers{f.h}, SSE: f.st, Auth: auth.NewLocalAuthenticator()})
-	want, _ := ids.AnonymousBuyer(uuid.Nil)
+	want, _ := ids.AnonymousCaller(uuid.Nil)
 	for _, token := range []string{"bogus", "alice", ""} {
 		w := f.do(req{"POST", "/agents/open", body, v1(token)})
 		if r := decodeRPC(t, w); w.Code != 200 || r.Error != nil {
 			t.Fatalf("local, token %q: %d %s", token, w.Code, w.Body)
 		}
 		c, _ := f.h.last()
-		if c.principal.Kind != auth.KindAnonymous || c.principal.BuyerID != want {
+		if c.principal.Kind != auth.KindAnonymous || c.principal.CallerID != want {
 			t.Fatalf("local, token %q: principal %+v, want the anonymous caller %s", token, c.principal, want)
 		}
 	}

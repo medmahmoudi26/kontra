@@ -24,7 +24,7 @@ What it runs:
 - **Traefik** (`ingressRouteTCP.enabled`): an `IngressRouteTCP` passing TLS through by SNI to the gate, with
   PROXY protocol v2; set `kontra.yaml`'s `edge.client_ip` to `proxy_protocol` and trust the Traefik pods (D69).
 - **NetworkPolicies** (`networkPolicy.enabled`, on by default): the gate takes connections on 8443 only from
-  the front (Traefik's pods by default) and reaches DNS, its Postgres and Temporal, the sellers you list, and
+  the front (Traefik's pods by default) and reaches DNS, its Postgres and Temporal, the services you list, and
   public addresses on 443, never the private ranges; the bundled Postgres and Temporal take connections from
   the gate alone.
 
@@ -64,6 +64,6 @@ Every pod and container meets the `restricted` Pod Security Standard (non-root, 
 privilege escalation, all capabilities dropped, read-only root), so the namespace can enforce it:
 `kubectl label namespace kontra pod-security.kubernetes.io/enforce=restricted`.
 
-`ci/production-values.yaml` is the shape gateway.kontra.sh runs (its Secret names and sellers rule are
+`ci/production-values.yaml` is the shape gateway.kontra.sh runs (its Secret names and services rule are
 placeholders); `ci/team-values.yaml` is a small team gate. Both are what `helm lint` and `helm template` are
 run with.

@@ -70,11 +70,11 @@ func TestLocalProfileWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	const secret, pushToken = "kk_wire_secret_00000001", "push-token-wire-1"
-	buyer := &Buyer{Key: secret}
+	caller := &Caller{Key: secret}
 	tasks := map[string]a2a.TaskID{}
 	msgContext := "" // the Message agent's interaction is no task: its caller leg names its context
 	for _, svc := range []string{"stream", "poll", "msg"} {
-		c := buyer.Client(t, g, svc)
+		c := caller.Client(t, g, svc)
 		res, err := c.SendMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("wire "+svc))})
 		if err != nil {
 			t.Fatalf("%s: SendMessage: %v", svc, err)
@@ -103,7 +103,7 @@ func TestLocalProfileWire(t *testing.T) {
 		})
 	}
 	// ListTasks and a push config, as the shared caller (D361).
-	c := buyer.Client(t, g, "poll")
+	c := caller.Client(t, g, "poll")
 	list, err := c.ListTasks(ctx, &a2a.ListTasksRequest{})
 	if err != nil || len(list.Tasks) == 0 {
 		t.Fatalf("ListTasks in the local profile: %+v %v", list, err)

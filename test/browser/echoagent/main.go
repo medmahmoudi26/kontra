@@ -108,7 +108,7 @@ func streamTest(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
 	yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, a2a.NewMessageForTask(a2a.MessageRoleAgent, ec, a2a.NewTextPart("Streamed."))), nil)
 }
 
-// a2uiPart holds A2UI v0.9.1 messages: a data part marked by metadata.mimeType, as examples/sellers/a2ui writes it.
+// a2uiPart holds A2UI v0.9.1 messages: a data part marked by metadata.mimeType, as examples/agents/a2ui writes it.
 func a2uiPart(msgs ...any) *a2a.Part {
 	return &a2a.Part{Content: a2a.Data{Value: msgs}, MediaType: "application/a2ui+json",
 		Metadata: map[string]any{"mimeType": "application/a2ui+json"}}

@@ -43,10 +43,10 @@ func ownerFrom(ctx context.Context) (store.Owner, error) {
 	return o, nil
 }
 
-// caller is a request context as the interceptors leave it: the owner and, for a new task, the id
+// callerCtx is a request context as the interceptors leave it: the owner and, for a new task, the id
 // Admission pre-minted.
-func caller(preminted bool) (context.Context, string) {
-	ctx := context.WithValue(context.Background(), ownerKey{}, buyer)
+func callerCtx(preminted bool) (context.Context, string) {
+	ctx := context.WithValue(context.Background(), ownerKey{}, caller)
 	if !preminted {
 		return ctx, ""
 	}
@@ -55,7 +55,7 @@ func caller(preminted bool) (context.Context, string) {
 }
 
 func payloadOf(req *a2a.SendMessageRequest) *workqueue.Payload {
-	return &workqueue.Payload{Type: workqueue.PayloadTypeExecute, TaskID: a2a.NewTaskID(), ExecuteRequest: req, CallContext: callContextOf(buyer)}
+	return &workqueue.Payload{Type: workqueue.PayloadTypeExecute, TaskID: a2a.NewTaskID(), ExecuteRequest: req, CallContext: callContextOf(caller)}
 }
 
 // turn is what the fake dispatch does with one dispatch of a task: the state it logs, the outcome it
@@ -249,7 +249,7 @@ func TestQueueWriteOverTemporal(t *testing.T) {
 	// attempt fails before an upstream task id and is retried; the second asks for input.
 	var aID string
 	t.Run("new task", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		d.set(pre,
 			turn{outcome: DispatchRetryable, reason: string(store.ReasonUpstreamUnreachable)},
 			turn{state: a2a.TaskStateInputRequired, outcome: DispatchInterrupted},
@@ -307,7 +307,7 @@ func TestQueueWriteOverTemporal(t *testing.T) {
 	})
 
 	t.Run("resend", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		var ss StreamStart
 		id, err := q.Write(WithStreamStart(cctx, &ss), payloadOf(requestOf("m-1", "hello there")))
 		if err != nil {
@@ -330,7 +330,7 @@ func TestQueueWriteOverTemporal(t *testing.T) {
 	})
 
 	t.Run("reused message id", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		d.set(pre, turn{state: a2a.TaskStateCompleted, outcome: DispatchTerminal})
 		id, err := q.Write(cctx, payloadOf(requestOf("m-1", "a different request")))
 		if err != nil {
@@ -346,7 +346,7 @@ func TestQueueWriteOverTemporal(t *testing.T) {
 	})
 
 	t.Run("follow-up", func(t *testing.T) {
-		cctx, _ := caller(false)
+		cctx, _ := callerCtx(false)
 		row, _ := e.log.Load(ctx, uuid.MustParse(aID))
 		var ss StreamStart
 		req := requestOf("m-2", "here is more")
@@ -370,7 +370,7 @@ func TestQueueWriteOverTemporal(t *testing.T) {
 
 	t.Run("refused follow-up", func(t *testing.T) {
 		// The workflow has ended: refused, and the work item is not kept.
-		cctx, _ := caller(false)
+		cctx, _ := callerCtx(false)
 		req := requestOf("m-3", "too late")
 		req.Message.TaskID = a2a.TaskID(aID)
 		_, err := q.Write(cctx, payloadOf(req))
@@ -383,7 +383,7 @@ func TestQueueWriteOverTemporal(t *testing.T) {
 
 		// The validator refuses a follow-up while a turn runs.
 		hold := make(chan struct{})
-		bctx, pre := caller(true)
+		bctx, pre := callerCtx(true)
 		d.set(pre, turn{state: a2a.TaskStateInputRequired, outcome: DispatchInterrupted, hold: hold})
 		if _, err := q.Write(bctx, payloadOf(requestOf("b-1", "task b"))); err != nil {
 			t.Fatal(err)
@@ -444,7 +444,7 @@ func TestQueueWriteOverTemporal(t *testing.T) {
 
 	// An Update no kontra-lifecycle worker accepts within 10 s is ErrUnavailable, and keeps its work item.
 	t.Run("not accepted", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		d.set(pre, turn{state: a2a.TaskStateInputRequired, outcome: DispatchInterrupted})
 		if _, err := q.Write(cctx, payloadOf(requestOf("c-1", "task c"))); err != nil {
 			t.Fatal(err)

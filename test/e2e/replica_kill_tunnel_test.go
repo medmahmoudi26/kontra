@@ -27,17 +27,17 @@ func replicaGone(t *testing.T, ctx context.Context, h *Harness, g *Gate, session
 // TestReplicaKillTunnel is replica_kill's tunnel variant (spec/relay.md §6.4, §14.2, §16; spec/tunnel.md
 // §11; PRD §15: "kill the one holding the tunnel mid-task: dispatch activity times out within 60 s; task
 // retried or failed per retry policy; tunnels row gone"). A node's session is on replica A, through the
-// Front; the buyers call replica B.
+// Front; the callers call replica B.
 //
 // After the first upstream id: the Front is routed to B and A is SIGKILLed mid-stream. The dispatch's
 // heartbeat times out within 60 s of the kill; the node has redialed B meanwhile, so the task's reconnect wait finds
 // its session there at once and the attempt is re-attached on B (D340): the task completes on its one attempt, now
-// recorded on the node's session on B, with every chunk, and the seller saw its message once. A's gate_replicas row
+// recorded on the node's session on B, with every chunk, and the service saw its message once. A's gate_replicas row
 // is reaped within 40 s, and its tunnels row with it. A second task completes on B.
 //
-// Before the first upstream id (the seller holds its first event back 5 s): A is SIGKILLed while the
-// seller holds the task. Attempt 1 ends with no upstream id, and the task completes on a later attempt on
-// the node's session on B; the seller answered once per attempt that reached it.
+// Before the first upstream id (the service holds its first event back 5 s): A is SIGKILLed while the
+// service holds the task. Attempt 1 ends with no upstream id, and the task completes on a later attempt on
+// the node's session on B; the service answered once per attempt that reached it.
 func TestReplicaKillTunnel(t *testing.T) {
 	t.Run("after the first upstream id", func(t *testing.T) {
 		// 20 chunks 500 ms apart: still streaming when A is killed. A tunnel attempt is not re-attached, so
@@ -53,7 +53,7 @@ func TestReplicaKillTunnel(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := newMessage("replica_kill tunnel")
-		s, err := h.BuyerA().SendStreaming(ctx, b, req, cookieCall)
+		s, err := h.CallerA().SendStreaming(ctx, b, req, cookieCall)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +79,7 @@ func TestReplicaKillTunnel(t *testing.T) {
 		}
 		t.Logf("the task completed %.1f s after A's SIGKILL, re-attached on B", ended.Seconds())
 		if got := sendsOf(h.Upstream, req.Message.ID); got != 1 {
-			t.Fatalf("the seller received the message %d times, want once", got)
+			t.Fatalf("the service received the message %d times, want once", got)
 		}
 		reaped := replicaGone(t, ctx, h, a, sess, killed)
 		t.Logf("A's gate_replicas and tunnels rows were reaped %.1f s after the kill", reaped.Seconds())
@@ -101,7 +101,7 @@ func TestReplicaKillTunnel(t *testing.T) {
 		if got := chunksLogged(t, ctx, h, task); got != 20 {
 			t.Fatalf("%d chunks in the task's log, want all 20", got)
 		}
-		res, err := h.BuyerA().Client(t, b, "").SendMessage(ctx, newMessage("replica_kill tunnel, after"))
+		res, err := h.CallerA().Client(t, b, "").SendMessage(ctx, newMessage("replica_kill tunnel, after"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,13 +127,13 @@ func TestReplicaKillTunnel(t *testing.T) {
 			t.Fatal(err)
 		}
 		req := newMessage("replica_kill tunnel, before the first id")
-		s, err := h.BuyerA().SendStreaming(ctx, b, req, cookieCall)
+		s, err := h.CallerA().SendStreaming(ctx, b, req, cookieCall)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer s.Close()
-		eventually(t, 30*time.Second, "the seller holds the task", func() bool { return sendsOf(h.Upstream, req.Message.ID) == 1 })
-		task := taskOfMessage(t, ctx, h, req.Message.ID) // the stream holds its first event until the seller answers (D362)
+		eventually(t, 30*time.Second, "the service holds the task", func() bool { return sendsOf(h.Upstream, req.Message.ID) == 1 })
+		task := taskOfMessage(t, ctx, h, req.Message.ID) // the stream holds its first event until the service answers (D362)
 		if as, err := h.Attempts(ctx, task); err != nil || len(as) != 1 || as[0].FirstUpstreamIDAt != nil || as[0].ReplicaID != a.ReplicaID {
 			t.Fatalf("before the kill: attempts %+v %v, want one on A with no upstream id", as, err)
 		}
@@ -164,7 +164,7 @@ func TestReplicaKillTunnel(t *testing.T) {
 			}
 		}
 		if got := sendsOf(h.Upstream, req.Message.ID); got != reached {
-			t.Fatalf("the seller received the message %d times over attempts %v, want once per attempt that reached it (%d)", got, outcomes(as), reached)
+			t.Fatalf("the service received the message %d times over attempts %v, want once per attempt that reached it (%d)", got, outcomes(as), reached)
 		}
 		replicaGone(t, ctx, h, a, sess, killed)
 		checkHistory(t, h, task, "e2e_replica_kill_tunnel_before_first_id", tunnelForbidden(h)...)

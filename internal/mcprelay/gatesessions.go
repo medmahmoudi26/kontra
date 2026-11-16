@@ -13,7 +13,7 @@ import (
 // OpenGate inserts a legacy session of the gate's own /mcp (spec/relay.md §12, D269): an mcp_sessions row whose
 // service is NULL and whose tenant_id is the principal's (NULL when it has none), pinning nothing (no upstream, no
 // tunnel session, no replica), so any replica serves any request of it. Lookup finds it with service "" and the
-// principal's tenant (uuid.Nil for none). row gives the buyer, principal, via, version and the client's
+// principal's tenant (uuid.Nil for none). row gives the caller, principal, via, version and the client's
 // capabilities; its other fields are ignored. (M4 WP-04: a file of its own, so M3's sessions.go is unchanged.)
 func (s *Sessions) OpenGate(ctx context.Context, clientID string, row Session) error {
 	if len(clientID) != 22 {
@@ -29,10 +29,10 @@ func (s *Sessions) OpenGate(ctx context.Context, clientID string, row Session) e
 		t := row.TenantID
 		tenant = &t
 	}
-	_, err := s.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal,
+	_, err := s.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal,
 			via, protocol_version, client_capabilities)
 		values ($1, $2, null, $3, $4, $5, $6, $7::jsonb)`,
-		h[:], tenant, row.BuyerID, row.Principal, row.Via, row.ProtocolVersion, string(caps))
+		h[:], tenant, row.CallerID, row.Principal, row.Via, row.ProtocolVersion, string(caps))
 	if err != nil {
 		return fmt.Errorf("mcprelay: open a session of /mcp: %w", err)
 	}

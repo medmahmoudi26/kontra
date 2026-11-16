@@ -17,7 +17,7 @@ import (
 func askOn(t *testing.T, ctx context.Context, h *Harness, session, text string) (*a2a.Task, Attempt) {
 	t.Helper()
 	for i := 0; i < 16; i++ {
-		res, err := h.BuyerA().Client(t, h.Gates[i%2], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" "+text))
+		res, err := h.CallerA().Client(t, h.Gates[i%2], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" "+text))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -43,7 +43,7 @@ func followUp(t *testing.T, ctx context.Context, h *Harness, g *Gate, svc string
 	t.Helper()
 	req := newMessage(text)
 	req.Message.TaskID, req.Message.ContextID = task.ID, task.ContextID
-	res, err := h.BuyerA().Client(t, g, svc).SendMessage(ctx, req)
+	res, err := h.CallerA().Client(t, g, svc).SendMessage(ctx, req)
 	if err != nil {
 		t.Fatalf("the follow-up of %s on %s: %v", task.ID, g.Name, err)
 	}
@@ -65,11 +65,11 @@ func requestWith(a *slowagent.Agent, messageID string) *slowagent.Request {
 }
 
 // TestInputRequiredSticky is input_required_sticky through the tunnel (spec/relay.md §7, §16; PRD §15):
-// two nodes host `slow`, N1 (seller S1) on replica A and N2 (seller S2) on replica B. They are two `kontra
+// two nodes host `slow`, N1 (service S1) on replica A and N2 (service S2) on replica B. They are two `kontra
 // connect` processes sharing one HOME, each with its own --key and its own service token (M2 WP-06: one
 // credentials file, a token per key). An 'ask' task waits at input-required on each node; each reply,
-// sent through the other replica, reaches the seller holding the task, with that seller's own upstream
-// task and context ids, never the other seller; it runs on the same attempt, dispatched on the session's
+// sent through the other replica, reaches the service holding the task, with that service's own upstream
+// task and context ids, never the other service; it runs on the same attempt, dispatched on the session's
 // replica (attempts.replica_id), and both tasks complete. A third task waits on N1; N1 is SIGKILLed; the
 // reply waits for N1 (relay.md §7, D340) for task.reattach_grace (5 s here), then fails the task tunnel_lost on its
 // one attempt, and nothing reaches S2 (another node is never a candidate, D342). Both nodes then restart with
@@ -124,10 +124,10 @@ func TestInputRequiredSticky(t *testing.T) {
 		}
 		got := requestWith(x.mine, msg.ID)
 		if got == nil || got.TaskID != x.att.UpstreamTaskID || got.ContextID != x.att.UpstreamContextID {
-			t.Fatalf("the reply to %s at its seller: %+v, want upstream task %s context %s", x.task.ID, got, x.att.UpstreamTaskID, x.att.UpstreamContextID)
+			t.Fatalf("the reply to %s at its service: %+v, want upstream task %s context %s", x.task.ID, got, x.att.UpstreamTaskID, x.att.UpstreamContextID)
 		}
 		if stray := requestWith(x.other, msg.ID); stray != nil {
-			t.Fatalf("the reply to %s reached the other seller: %+v", x.task.ID, stray)
+			t.Fatalf("the reply to %s reached the other service: %+v", x.task.ID, stray)
 		}
 		// The dispatch ends the attempt (ended_at, outcome) only after it logged the terminal event that
 		// answered the reply (Dispatcher.settle): wait for it (M2 review, robustness-1).
@@ -143,7 +143,7 @@ func TestInputRequiredSticky(t *testing.T) {
 			}
 		}
 		if turns != 1 {
-			t.Fatalf("seller turns answering %s: %d, want 1 follow-up turn on the upstream task", x.task.ID, turns)
+			t.Fatalf("service turns answering %s: %d, want 1 follow-up turn on the upstream task", x.task.ID, turns)
 		}
 	}
 	checkHistory(t, h, t1.ID, "e2e_input_required_sticky", tunnelForbidden(h)...)

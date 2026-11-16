@@ -3,7 +3,7 @@
 # on a clean VPS"). It provisions a throwaway DigitalOcean droplet, names it under kontra.run through Cloudflare's API,
 # ships `git archive HEAD` to it, brings compose.yaml up with deploy/compose/kontra.vps.yaml (built-in ACME), checks it
 # from this host, enrolls a node from a team member's clean machine (the kontra-demo image, scripts/demo-clean-laptop.sh)
-# and hires through it with an API key, A2A and MCP. Then it destroys everything it made, and checks that it did.
+# and calls through it with an API key, A2A and MCP. Then it destroys everything it made, and checks that it did.
 #
 #   1. pre-flight (read-only): doctl's account; the DigitalOcean SSH key's MD5 fingerprint equals this host's key's
 #      (ssh-keygen -E md5 -lf <key>.pub); the size exists (else its -amd variant); no droplet tagged kontra-m4-gaterun;

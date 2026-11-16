@@ -275,7 +275,7 @@ func (h *Handler) openVirtual(rq *request) {
 	defer cancel()
 	caps := mcpwire.ClientCapabilities(rq.msg.Params)
 	s, err := h.deps.Sessions.Virtual(ctx, Session{TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name,
-		BuyerID: rq.p.BuyerID, Principal: rq.p.ID, Via: string(rq.p.Via), ClientCaps: caps})
+		CallerID: rq.p.CallerID, Principal: rq.p.ID, Via: string(rq.p.Via), ClientCaps: caps})
 	if err != nil {
 		h.log.Error("mcp: a virtual session was not opened", "service", rq.svc.Ref.Name, "error", err)
 		return
@@ -726,7 +726,7 @@ func (h *Handler) modernToolsCall(rq *request) {
 	}
 	defer release()
 	meter := &callMeter{start: rq.start, call: Call{TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name, Tool: name,
-		BuyerID: rq.p.BuyerID, Principal: rq.p.ID}}
+		CallerID: rq.p.CallerID, Principal: rq.p.ID}}
 	if rq.vsess != nil {
 		hash := rq.vsess.Hash
 		meter.call.MCPSession = &hash
@@ -763,7 +763,7 @@ func (h *Handler) modernTaskCall(rq *request, name string) {
 	}
 	h.openVirtual(rq)
 	ct := CreateTask{
-		TaskID: taskID, Service: rq.svc.Ref, BuyerID: rq.p.BuyerID, Principal: rq.p.ID, Via: string(rq.p.Via),
+		TaskID: taskID, Service: rq.svc.Ref, CallerID: rq.p.CallerID, Principal: rq.p.ID, Via: string(rq.p.Via),
 		Era: mcpwire.EraModern, Version: mcpwire.V20260728, Request: body, Tool: name, RequestID: m.ID,
 		ClientCapabilities: mcpwire.ClientCapabilities(m.Params), Decision: d, Headers: paramHeaders(rq.r.Header),
 	}

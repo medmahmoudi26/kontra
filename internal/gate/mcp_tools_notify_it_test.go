@@ -50,7 +50,7 @@ func TestToolsListChangedAcrossReplicas(t *testing.T) {
 `
 	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), fastTiming)
 	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, services), fastTiming)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
 	session := func(run *running) string {
 		t.Helper()

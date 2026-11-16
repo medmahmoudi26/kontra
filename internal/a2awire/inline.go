@@ -34,7 +34,7 @@ const (
 )
 
 // Fetcher writes the object a ref names to w: blob.Fetch on a blob stream the node opened in its own tunnel
-// (the session the exchange came on, for the hosting node; the current session, for the hiring node).
+// (the session the exchange came on, for the hosting node; the current session, for the calling node).
 type Fetcher func(ctx context.Context, ref blob.Ref, w io.Writer) (int64, error)
 
 // Inliner replaces the url parts kontra-blob:<ref> of A2A 1.0 bodies with raw parts holding the object's

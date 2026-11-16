@@ -30,7 +30,7 @@ import (
 )
 
 // Sealing through a real gate (spec/ext-sealed.md; sealed_no_plaintext's A2A case, sealed_unsealed_part): a stock
-// a2a-go client on a hiring node's 127.0.0.1 endpoint completes tasks, unary and streaming, over JSON-RPC and
+// a2a-go client on a calling node's 127.0.0.1 endpoint completes tasks, unary and streaming, over JSON-RPC and
 // HTTP+JSON, to hello-exec hosted by another node, and answers an input-required question with a sealed follow-up
 // (§5 rule 3); the agent receives plaintext and the client reads plaintext, while Postgres (tasks, task_events)
 // and the bucket hold only envelopes. A 300 KiB part travels through the bucket as ciphertext both ways and opens on
@@ -62,7 +62,7 @@ services:
 	}
 	keys := auth.NewAPIKeys(e.pool, nil)
 	defer keys.Wait()
-	buyer, err := keys.Mint(ctx, auth.MintRequest{TenantID: team, Name: "buyer", Actor: "test"})
+	caller, err := keys.Mint(ctx, auth.MintRequest{TenantID: team, Name: "caller", Actor: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,11 +80,11 @@ services:
 	host.local(t)
 	hostKey := host.keyID(t)
 	eventually(t, 20*time.Second, "the gate serves vault's card with the host's key as a recipient", func() bool {
-		status, body := cardRoute(t, a.url, buyer.Secret, "vault")
+		status, body := cardRoute(t, a.url, caller.Secret, "vault")
 		return status == http.StatusOK && strings.Contains(body, sealed.URI) && strings.Contains(body, "age1")
 	})
-	hirer := startNode(t, t.TempDir(), "--gate", a.url, "--name", "hirer", "--api-key", buyer.Secret)
-	local := hirer.local(t)
+	callingNode := startNode(t, t.TempDir(), "--gate", a.url, "--name", "caller", "--api-key", caller.Secret)
+	local := callingNode.local(t)
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	card, err := agentcard.DefaultResolver.Resolve(rctx, local+"/agents/vault")
 	cancel()
@@ -96,8 +96,8 @@ services:
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { c.Destroy() })
-	if !strings.Contains(hirer.logs.String(), "first seen") || !strings.Contains(hirer.logs.String(), hostKey) {
-		t.Errorf("the hiring node did not print the pin's first sight with the host's key id %s", hostKey)
+	if !strings.Contains(callingNode.logs.String(), "first seen") || !strings.Contains(callingNode.logs.String(), hostKey) {
+		t.Errorf("the calling node did not print the pin's first sight with the host's key id %s", hostKey)
 	}
 
 	marker := "MARKER-" + uuid.NewString()[:8]
@@ -128,7 +128,7 @@ services:
 				}
 			}
 		case *a2a.Task:
-			// The lead is the task as the seller's first answer exposed it (D362): already completed when the seller
+			// The lead is the task as the service's first answer exposed it (D362): already completed when the service
 			// was faster than the stream, its status message the answer.
 			final = v.Status.State
 			if v.Status.Message != nil {
@@ -143,7 +143,7 @@ services:
 		t.Fatalf("a sealed stream ended %s with %q", final, texts)
 	}
 
-	// The HTTP+JSON binding: the same through the hiring node's /message:send.
+	// The HTTP+JSON binding: the same through the calling node's /message:send.
 	rc, err := a2aclient.NewFromCard(ctx, card, a2aclient.WithConfig(a2aclient.Config{
 		PreferredTransports: []a2a.TransportProtocol{a2a.TransportProtocolHTTPJSON}}))
 	if err != nil {
@@ -194,7 +194,7 @@ services:
 		t.Fatalf("the agent received %d raw bytes, want the 300 KiB part", len(p.Raw()))
 	}
 	if len(bigTask.Artifacts) != 1 || !bytes.Equal(bigTask.Artifacts[0].Parts[0].Raw(), big) {
-		t.Fatalf("the hiring client received %+v, want the agent's 300 KiB artifact", bigTask.Artifacts)
+		t.Fatalf("the calling client received %+v, want the agent's 300 KiB artifact", bigTask.Artifacts)
 	}
 	rows, err := e.pool.Query(ctx, `select ref, tenant_id, task_id from kontra.blobs`)
 	if err != nil {
@@ -236,7 +236,7 @@ services:
 			t.Fatalf("no envelope in Postgres: %s", q)
 		}
 	}
-	for _, l := range []string{host.logs.String(), hirer.logs.String()} {
+	for _, l := range []string{host.logs.String(), callingNode.logs.String()} {
 		if strings.Contains(l, "MARKER") {
 			t.Fatal("a plaintext part reached a log")
 		}
@@ -245,13 +245,13 @@ services:
 	// D221: a message sealed for vault that the gate delivers to booth, another service of the same node (one identity
 	// key opens both): the hosting node refuses it wrong_job, so booth's agent never gets it, and the task fails
 	// sealed_rejected. The same message to vault, the service it names, completes.
-	_, vaultCard := cardRoute(t, a.url, buyer.Secret, "vault")
+	_, vaultCard := cardRoute(t, a.url, caller.Secret, "vault")
 	misdirected := sealedFor(t, vaultCard, "vault", "MARKER-misdirected")
 	postSend := func(service string, msg []byte) string {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/"+service, strings.NewReader(
 			`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":`+string(msg)+`,"configuration":{"returnImmediately":true}}}`))
-		req.Header.Set("Authorization", "Bearer "+buyer.Secret)
+		req.Header.Set("Authorization", "Bearer "+caller.Secret)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("A2A-Version", "1.0")
 		resp, err := http.DefaultClient.Do(req)
@@ -297,7 +297,7 @@ services:
 	before := scalar[int](t, e.pool, `select count(*) from kontra.tasks`)
 	req, _ := http.NewRequest(http.MethodPost, a.url+"/agents/vault", strings.NewReader(
 		`{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"messageId":"`+uuid.NewString()+`","role":"ROLE_USER","parts":[{"text":"plain"}]}}}`))
-	req.Header.Set("Authorization", "Bearer "+buyer.Secret)
+	req.Header.Set("Authorization", "Bearer "+caller.Secret)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("A2A-Version", "1.0")
 	resp, err := http.DefaultClient.Do(req)

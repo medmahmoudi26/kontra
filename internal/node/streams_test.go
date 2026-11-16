@@ -81,7 +81,7 @@ func serveTarget(t *testing.T, h http.Handler) string {
 // (A stream the node has seen end still counts at the gate until the gate's goroutine reads the node's FIN, so the
 // gate may briefly count a few more than 32 and answer one of them 429 itself, with Retry-After: a refusal the
 // local client sees as such, never a lost session.)
-func TestHiringBurstKeepsTheSession(t *testing.T) {
+func TestCallingBurstKeepsTheSession(t *testing.T) {
 	slow := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-time.After(time.Second):
@@ -89,7 +89,7 @@ func TestHiringBurstKeepsTheSession(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Hire: slow} })
+	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Call: slow} })
 	tn := mustNode(t, g, testConfig(t, g.url, ""))
 	tn.n.slotWait = 2 * time.Second
 	tn.run(t)
@@ -174,7 +174,7 @@ func (f *failingBlobs) ServeBlob(ctx context.Context, s *tunnelgate.Session, ref
 }
 
 // A hosted exchange whose part waits for a node-opened stream (spec/tunnel.md §8.3, §14) shares the session's 32
-// with hiring: its blob fetch waits for a slot instead of being refused by the gate; one that cannot have a slot
+// with calling: its blob fetch waits for a slot instead of being refused by the gate; one that cannot have a slot
 // in time, or whose blob stream fails in transit, is answered 503 Kontra-Node: full, which the gate retries, never
 // the final 400 kept for a ref the gate refuses (TestHostingInlinesBlobs).
 func TestHostingBlobFetchWaitsForASlot(t *testing.T) {
@@ -190,7 +190,7 @@ func TestHostingBlobFetchWaitsForASlot(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
-	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Blobs: bg, Hire: held} })
+	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Blobs: bg, Call: held} })
 	target := &recordingTarget{}
 	tn := mustNode(t, g, testConfig(t, g.url, "", mustServe(t, "a2a:hello="+serveTarget(t, target))))
 	tn.n.slotWait = time.Second
@@ -199,7 +199,7 @@ func TestHostingBlobFetchWaitsForASlot(t *testing.T) {
 	s := g.session(t)
 	port := tn.localPort(t)
 
-	// 32 hiring requests held open by the gate: every node-opened stream of the session is taken.
+	// 32 calling requests held open by the gate: every node-opened stream of the session is taken.
 	var wg sync.WaitGroup
 	client := &http.Client{Transport: &http.Transport{MaxIdleConnsPerHost: 64}}
 	defer client.CloseIdleConnections()
@@ -210,7 +210,7 @@ func TestHostingBlobFetchWaitsForASlot(t *testing.T) {
 			}
 		})
 	}
-	eventually(t, 10*time.Second, "32 hiring streams in flight", func() bool { return s.NodeInFlight() == tunnel.GateMaxInflight })
+	eventually(t, 10*time.Second, "32 calling streams in flight", func() bool { return s.NodeInFlight() == tunnel.GateMaxInflight })
 	accepted := s.NodeStreamsAccepted()
 
 	// No slot within the wait: 503 full, no stream opened, nothing reaches the agent.
@@ -294,18 +294,18 @@ func (n *Node) currentMux() (*yamux.Session, string) {
 
 // The node's own stream ids (spec/tunnel.md §14: on ErrStreamsExhausted the node reconnects): an open that takes
 // one of the last ids retires the session and dials a new one, and so does an open refused ErrStreamsExhausted
-// (that request is 503); hiring goes on on the new session.
+// (that request is 503); calling goes on on the new session.
 func TestNodeRedialsWhenItsStreamIDsRunOut(t *testing.T) {
-	router := &hireRouter{}
-	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Hire: router} })
+	router := &callRouter{}
+	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Call: router} })
 	tn := mustNode(t, g, testConfig(t, g.url, "")).run(t)
 	tn.welcomed(t)
 	s1 := g.session(t)
 	port := tn.localPort(t)
-	hiresOn := func(want string) func() bool {
+	callsOn := func(want string) func() bool {
 		return func() bool {
 			res, body := localGet(t, port, "/agents/hello", nil)
-			var seen hireSeen
+			var seen callSeen
 			return res.StatusCode == http.StatusOK && json.Unmarshal(body, &seen) == nil && seen.Session.String() == want
 		}
 	}
@@ -321,11 +321,11 @@ func TestNodeRedialsWhenItsStreamIDsRunOut(t *testing.T) {
 
 	// One of the last ids: the open succeeds, and the node dials a new session at once.
 	setNextStreamID(t, current(s1.ID.String()), math.MaxUint32-2)
-	if !hiresOn(s1.ID.String())() {
+	if !callsOn(s1.ID.String())() {
 		t.Fatal("the open with one of the last stream ids failed")
 	}
 	s2 := g.session(t)
-	eventually(t, 10*time.Second, "hiring on the new session", hiresOn(s2.ID.String()))
+	eventually(t, 10*time.Second, "calling on the new session", callsOn(s2.ID.String()))
 
 	// Exhausted: the open fails, that request is 503, and the node dials a new session.
 	setNextStreamID(t, current(s2.ID.String()), math.MaxUint32-1)
@@ -333,7 +333,7 @@ func TestNodeRedialsWhenItsStreamIDsRunOut(t *testing.T) {
 		t.Fatalf("an open refused ErrStreamsExhausted: %d, want 503", res.StatusCode)
 	}
 	s3 := g.session(t)
-	eventually(t, 10*time.Second, "hiring on the third session", hiresOn(s3.ID.String()))
+	eventually(t, 10*time.Second, "calling on the third session", callsOn(s3.ID.String()))
 	if !strings.Contains(tn.logs.String(), "stream ids are nearly exhausted") {
 		t.Fatal("the node did not say why it dialed a new session")
 	}
@@ -364,7 +364,7 @@ func TestNodeAuthRevokedDropsTheAPIKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventually(t, 5*time.Second, "the auth_revoked line", func() bool {
-		return strings.Contains(tn.logs.String(), "the gate revoked the session's hiring API key")
+		return strings.Contains(tn.logs.String(), "the gate revoked the session's calling API key")
 	})
 	eventually(t, 5*time.Second, "the API key dropped from the credentials file", func() bool { return tn.creds(t).APIKey == "" })
 	for _, w := range g.wires.All() {

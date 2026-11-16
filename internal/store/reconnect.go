@@ -16,7 +16,7 @@ import (
 )
 
 // A task whose tunnel session is lost after its first upstream task id waits for its node to reconnect (spec
-// relay.md §6.4, D340..D349). The buyer is told in band: a status event the gate writes on entering the wait, and
+// relay.md §6.4, D340..D349). The caller is told in band: a status event the gate writes on entering the wait, and
 // the re-attach's status event on resuming, each with metadata["kontra.reconnect"].
 
 // MetaReconnect is the metadata key of a reconnect wait's status events (D341): {state: "waiting", since, until} on
@@ -108,7 +108,7 @@ type ReconnectWait struct {
 // Nothing is logged for a task that is terminal or waits at input-required or auth-required: their status
 // message is the question or the instructions the caller acts on, and stays the status (D341). A task of a sealed
 // service (services.sealed optional or required, or a service no longer found) gets the status with no message, the
-// metadata alone: a hiring node refuses any unsealed part of a sealed job but a terminal status's gate text
+// metadata alone: a calling node refuses any unsealed part of a sealed job but a terminal status's gate text
 // (ext-sealed.md rule 4a), and would fail the task for its client at this one (D342). It is idempotent: a
 // task whose metadata already names this wait (state waiting, the same since) is left as it is, so a retried
 // activity logs one row.
@@ -161,7 +161,7 @@ func (l *Log) LogReconnectWait(ctx context.Context, taskID uuid.UUID, since, unt
 }
 
 // serviceSealed reports whether the service is sealed (optional or required), or no longer found: what the gate writes
-// in its tasks must then pass a hiring node's rule 4a (ext-sealed.md).
+// in its tasks must then pass a calling node's rule 4a (ext-sealed.md).
 func (l *Log) serviceSealed(ctx context.Context, tenantID uuid.UUID, service string) (bool, error) {
 	var sealed string
 	err := l.db.QueryRow(ctx, `select sealed from kontra.services where tenant_id = $1 and name = $2`, tenantID, service).Scan(&sealed)

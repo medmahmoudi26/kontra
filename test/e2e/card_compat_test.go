@@ -16,7 +16,7 @@ import (
 	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
-// getCard GETs a card route with the buyer's key and returns the body.
+// getCard GETs a card route with the caller's key and returns the body.
 func getCard(t *testing.T, ctx context.Context, u, key string) []byte {
 	t.Helper()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -33,13 +33,13 @@ func getCard(t *testing.T, ctx context.Context, u, key string) []byte {
 	return body
 }
 
-// TestCardCompat is card_compat (spec/relay.md §3, §16; D12): the a2a-samples helloworld seller at protocol
-// 0.2.5 behind the gate is served as a 1.0 agent. The seller is slowagent's Legacy025 stand-in for the
-// Python seller at a2a-samples 08dde55c070f: that seller's card byte for byte, a2a-go's 0.x JSON-RPC
+// TestCardCompat is card_compat (spec/relay.md §3, §16; D12): the a2a-samples helloworld service at protocol
+// 0.2.5 behind the gate is served as a 1.0 agent. The service is slowagent's Legacy025 stand-in for the
+// Python service at a2a-samples 08dde55c070f: that service's card byte for byte, a2a-go's 0.x JSON-RPC
 // binding, and its answer, one "Hello World" Message. The gate fetches the 0.2.5 card from .well-known/agent.json (D71), serves it verbatim at
 // agent-card.upstream.json, and serves at {svc} a 1.0 card a stock a2a-go client resolves: the gate's own
-// interfaces at protocol 1.0, none of the 0.x interface members, and every seller member byte-identical.
-// A 1.0 call through the gate reaches the seller as a 0.x message/send and comes back as the seller's Message, with
+// interfaces at protocol 1.0, none of the 0.x interface members, and every service member byte-identical.
+// A 1.0 call through the gate reaches the service as a 0.x message/send and comes back as the service's Message, with
 // the gate's contextId and no taskId (spec §6.3, D362), and a stream works the same way: its one event is that Message. Every served interface
 // names public_url, the harness's Front, on both replicas; the stock client calls through it.
 func TestCardCompat(t *testing.T) {
@@ -48,8 +48,8 @@ func TestCardCompat(t *testing.T) {
 		Services: map[string]slowagent.Config{"hello025": {Legacy025: true}},
 	})
 	ctx := ctxFor(t, 3*time.Minute)
-	seller := h.Upstreams["hello025"]
-	upstreamCard := []byte(fmt.Sprintf(slowagent.Legacy025Card, seller.URL()+"/"))
+	service := h.Upstreams["hello025"]
+	upstreamCard := []byte(fmt.Sprintf(slowagent.Legacy025Card, service.URL()+"/"))
 	publicURL := h.Front.URL + "/agents/hello025" // public_url is the Front's origin, whichever replica serves the card
 
 	for _, g := range h.Gates {
@@ -87,7 +87,7 @@ func TestCardCompat(t *testing.T) {
 			}
 			for _, same := range []string{"name", "description", "version", "defaultInputModes", "defaultOutputModes"} {
 				if string(card[same]) != string(up[same]) {
-					t.Fatalf("%s: the seller's %q is %s in the served card, %s upstream", g.Name, same, card[same], up[same])
+					t.Fatalf("%s: the service's %q is %s in the served card, %s upstream", g.Name, same, card[same], up[same])
 				}
 			}
 			var skills []map[string]json.RawMessage
@@ -124,15 +124,15 @@ func TestCardCompat(t *testing.T) {
 	}
 	msg, ok := res.(*a2a.Message)
 	if !ok || msg.TaskID != "" || msg.ContextID == "" || len(msg.Parts) == 0 || msg.Parts[0].Text() != slowagent.HelloWorld {
-		t.Fatalf("the 0.2.5 seller's Message must come back as that Message, with no taskId: %#v", res)
+		t.Fatalf("the 0.2.5 service's Message must come back as that Message, with no taskId: %#v", res)
 	}
 	// The card says streaming, so the dispatch streams: one 0.x message/stream, never a 1.0 method.
-	if n := seller.Count("message/send") + seller.Count("message/stream"); n != 1 || seller.Sends() != 1 {
-		t.Fatalf("the seller received %d 0.x sends, want 1 (requests %v)", n, methods(seller))
+	if n := service.Count("message/send") + service.Count("message/stream"); n != 1 || service.Sends() != 1 {
+		t.Fatalf("the service received %d 0.x sends, want 1 (requests %v)", n, methods(service))
 	}
 
-	// A stream through the gate, on HTTP+JSON this time: its one event is the seller's Message, without an id.
-	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[0], newMessage("hello world"), Call{Service: "hello025", Binding: HTTPJSON})
+	// A stream through the gate, on HTTP+JSON this time: its one event is the service's Message, without an id.
+	s, err := h.CallerA().SendStreaming(ctx, h.Gates[0], newMessage("hello world"), Call{Service: "hello025", Binding: HTTPJSON})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,17 +141,17 @@ func TestCardCompat(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(evs) != 1 || evs[0].Kind != "message" || evs[0].ID != nil {
-		t.Fatalf("the stream through the 0.2.5 seller: %d events, want one Message without an id", len(evs))
+		t.Fatalf("the stream through the 0.2.5 service: %d events, want one Message without an id", len(evs))
 	}
 	if m := evs[0].Event.(*a2a.Message); m.TaskID != "" || m.Parts[0].Text() != slowagent.HelloWorld {
 		t.Fatalf("the streamed Message: %+v", m)
 	}
-	if n := seller.Count("message/send") + seller.Count("message/stream"); n != 2 || seller.Sends() != 2 {
-		t.Fatalf("the seller received %d 0.x sends, want 2 (requests %v)", n, methods(seller))
+	if n := service.Count("message/send") + service.Count("message/stream"); n != 2 || service.Sends() != 2 {
+		t.Fatalf("the service received %d 0.x sends, want 2 (requests %v)", n, methods(service))
 	}
-	for _, r := range seller.Requests() {
+	for _, r := range service.Requests() {
 		if r.Header.Get("Authorization") != "" || r.Header.Get("A2A-Version") == "1.0" {
-			t.Fatalf("the seller got %s with Authorization %q, A2A-Version %q: a 0.x upstream is spoken to as 0.x, with no caller credential",
+			t.Fatalf("the service got %s with Authorization %q, A2A-Version %q: a 0.x upstream is spoken to as 0.x, with no caller credential",
 				r.Method, r.Header.Get("Authorization"), r.Header.Get("A2A-Version"))
 		}
 	}

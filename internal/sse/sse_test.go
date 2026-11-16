@@ -23,8 +23,8 @@ import (
 )
 
 var (
-	ownerA = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
-	ownerB = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: store.ViaAPIKey}
+	ownerA = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
+	ownerB = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: store.ViaAPIKey}
 	svc    = store.ServiceRef{TenantID: uuid.MustParse("0192f0b4-0000-7000-8000-0000000000ee"), Tenant: "default", Name: "hello", Kind: "a2a"}
 )
 
@@ -131,7 +131,7 @@ func (l *memLog) LoadScoped(ctx context.Context, s store.ServiceRef, o store.Own
 func (l *memLog) LoadScopedAll(_ context.Context, s store.ServiceRef, o store.Owner, id uuid.UUID) (*store.TaskRow, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if id != l.taskID || o.BuyerID != l.owner.BuyerID || s.Name != svc.Name {
+	if id != l.taskID || o.CallerID != l.owner.CallerID || s.Name != svc.Name {
 		return nil, a2a.NewError(a2a.ErrTaskNotFound, "task not found")
 	}
 	snap, err := l.fold(int64(len(l.rows)))
@@ -215,7 +215,7 @@ func (l *memLog) WaitTask(context.Context, uuid.UUID) (<-chan struct{}, func()) 
 	return l.wakeups, func() {}
 }
 
-// event is one SSE event as a buyer reads it.
+// event is one SSE event as a caller reads it.
 type event struct {
 	id      int64 // 0: no id line
 	data    string
@@ -252,7 +252,7 @@ func readEvents(body io.Reader, out chan<- event) {
 	}
 }
 
-// streamRes is one stream as the buyer saw it.
+// streamRes is one stream as the caller saw it.
 type streamRes struct {
 	status int
 	header http.Header
@@ -553,7 +553,7 @@ func TestSendStreamingErrorBeforeStream(t *testing.T) {
 
 // SubscribeToTask without Last-Event-ID: the current snapshot without an id, then the rows after its
 // version; the stream stays open through input-required and auth-required and closes after the terminal
-// row. A terminal task is UnsupportedOperationError before any header; another buyer's task does not exist.
+// row. A terminal task is UnsupportedOperationError before any header; another caller's task does not exist.
 func TestSubscribe(t *testing.T) {
 	l := newMemLog(t)
 	l.status(t, a2a.TaskStateWorking)                                // 2
@@ -646,12 +646,12 @@ func TestResume(t *testing.T) {
 			t.Errorf("K=%d: %d %s", c.k, rec.Code, rec.Body)
 		}
 	}
-	// Another buyer's task with a valid seq: TaskNotFound.
+	// Another caller's task with a valid seq: TaskNotFound.
 	k := int64(2)
 	rec := httptest.NewRecorder()
 	w.Subscribe(rec, httptest.NewRequest("GET", "/", nil), Stream{Binding: HTTPJSON, Service: svc, Owner: ownerB, TaskID: a2a.TaskID(l.taskID.String()), LastEventID: &k})
 	if rec.Code != 404 || !strings.Contains(rec.Body.String(), "TASK_NOT_FOUND") {
-		t.Errorf("other buyer: %d %s", rec.Code, rec.Body)
+		t.Errorf("other caller: %d %s", rec.Code, rec.Body)
 	}
 }
 

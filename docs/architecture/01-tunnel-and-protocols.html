@@ -93,7 +93,7 @@ a{color:var(--data)}
 <h2>1. The gateway story</h2>
 <p>Three ideas, in the order they were settled.</p>
 <p><b>The gate is the product.</b> It is an A2A server (and, now, an MCP server) toward anyone who calls, and an A2A/MCP client toward the servers enrolled behind it. It owns the task record and the policy. It never executes code, never holds a key that opens a sealed part, never opens a connection to a node.</p>
-<p><b>One node type.</b> There is no buyer sidecar and no seller sidecar. Every node runs one <code>kontra connect</code>, which dials out to a gate and does two things over that single connection: forwards the gate's inbound requests to servers on its localhost (hosting), and exposes the gate's catalog on its localhost so local clients can call out (hiring). A node that only hires has no <code>--serve</code>; a node that only hosts has local clients that never use port 7777. Same binary, same console, direction is a column.</p>
+<p><b>One node type.</b> There is no caller sidecar and no service sidecar. Every node runs one <code>kontra connect</code>, which dials out to a gate and does two things over that single connection: forwards the gate's inbound requests to servers on its localhost (hosting), and exposes the gate's catalog on its localhost so local clients can call out (calling). A node that only calls has no <code>--serve</code>; a node that only hosts has local clients that never use port 7777. Same binary, same console, direction is a column.</p>
 <p><b>Membership is which gate you dial.</b> <code>gateway.kontra.sh</code> is the marketplace: the public, multi-tenant gate with a catalog and, in Cloud, escrow. A team's own gate is the same open-source binary with one tenant, no catalog and no money code. A node can hold several gate connections at once with one identity key enrolled at each.</p>
 </section>
 
@@ -232,7 +232,7 @@ a{color:var(--data)}
 
 <section class="col">
 <h3>Identity</h3>
-<p>On first run <code>kontra connect</code> generates one X25519 key at <code>~/.kontra/identity.key</code> (0600). The same key proves possession in the handshake and is published as a sealing recipient for every service the node hosts. Enrollment binds a <code>key_id</code> to a service name at one gate, once, using a one-time token (<code>kontra enroll &lt;service&gt;</code> on a self-hosted gate) or the account's API key (Cloud). The binding lives in that gate's <code>tunnel_keys</code> table, so one key can be enrolled at several gates and revoked at each independently. When a node hires, it additionally mints a per-job X25519 key at send time; that key is what replies are sealed to, and it is deleted when the task is terminal plus any review window.</p>
+<p>On first run <code>kontra connect</code> generates one X25519 key at <code>~/.kontra/identity.key</code> (0600). The same key proves possession in the handshake and is published as a sealing recipient for every service the node hosts. Enrollment binds a <code>key_id</code> to a service name at one gate, once, using a one-time token (<code>kontra enroll &lt;service&gt;</code> on a self-hosted gate) or the account's API key (Cloud). The binding lives in that gate's <code>tunnel_keys</code> table, so one key can be enrolled at several gates and revoked at each independently. When a node calls, it additionally mints a per-job X25519 key at send time; that key is what replies are sealed to, and it is deleted when the task is terminal plus any review window.</p>
 <h3>Several replicas, several nodes</h3>
 <p>Several nodes may enroll for one service (replicas). A new task picks a connected session round-robin and stays sticky to it for its life. Under several gate replicas, the replica holding the socket is the only one that can use it; Temporal routes the dispatch to that replica through a per-replica task queue (next section). If that socket dies mid-task, the task fails with <code>tunnel_lost</code> or retries per policy; the node never learns which tasks it was serving, because it holds no task state.</p>
 </section>
@@ -320,7 +320,7 @@ a{color:var(--data)}
 <div class="tbl"><table>
 <tr><th>Concern</th><th>How the gate handles it</th></tr>
 <tr><td>Route</td><td><code>{public_url}/agents/{name}</code>, JSON-RPC and HTTP+JSON; gRPC later.</td></tr>
-<tr><td>Card</td><td>Fetched through the tunnel, seller signature verified and kept, exactly five fields rewritten (interfaces, security, push, extensions, signatures), re-signed with the gate's ES256 key.</td></tr>
+<tr><td>Card</td><td>Fetched through the tunnel, service signature verified and kept, exactly five fields rewritten (interfaces, security, push, extensions, signatures), re-signed with the gate's ES256 key.</td></tr>
 <tr><td>Ids</td><td>Gate mints <code>task_id</code>/<code>context_id</code>; every relayed event is rewritten; upstream ids live only in <code>attempts</code>.</td></tr>
 <tr><td>Streaming</td><td>Upstream SSE → one <code>task_events</code> row per event → client SSE resumable from <code>Last-Event-ID</code>.</td></tr>
 <tr><td>Follow-ups</td><td><code>input-required</code> replies go to the same upstream task over the same session (sticky).</td></tr>
@@ -411,7 +411,7 @@ a{color:var(--data)}
 
 <section class="col">
 <h2>6. Syntax: no Kontra protocol, standard bindings</h2>
-<p>The decision under the prototypes was whether Kontra needs a wire protocol of its own. It does not, and every attempt at one (the v3 engine Protocol, the pull/lease sketch) was dropped for the same reason: a bespoke protocol means an SDK, and an SDK means sellers write Kontra code. With A2A and MCP as the only two protocols the gate speaks, an unmodified server and a stock client work on day one, and everything Kontra adds rides in the extension slots those protocols already have: A2A <code>capabilities.extensions</code> and <code>metadata</code>, MCP <code>capabilities</code> and <code>_meta</code>.</p>
+<p>The decision under the prototypes was whether Kontra needs a wire protocol of its own. It does not, and every attempt at one (the v3 engine Protocol, the pull/lease sketch) was dropped for the same reason: a bespoke protocol means an SDK, and an SDK means services write Kontra code. With A2A and MCP as the only two protocols the gate speaks, an unmodified server and a stock client work on day one, and everything Kontra adds rides in the extension slots those protocols already have: A2A <code>capabilities.extensions</code> and <code>metadata</code>, MCP <code>capabilities</code> and <code>_meta</code>.</p>
 </section>
 
 <div class="tbl" style="max-width:1120px"><table>
@@ -429,7 +429,7 @@ a{color:var(--data)}
 <p>gRPC is the one binding the tunnel does not carry for free. yamux streams carry HTTP/1.1; gRPC needs HTTP/2. Two routes when it is wanted: terminate gRPC at the gate and speak JSON-RPC upstream (the gate is already a protocol translator for cards), or run h2c inside a yamux stream, which hashicorp/yamux permits but a2a-go's client would need to be told to use. Neither changes a node's setup, so it stays deferred.</p>
 
 <h3>What a node runs</h3>
-<pre><code><span class="c"># host one A2A agent and one stdio MCP server, hire through localhost:7777</span>
+<pre><code><span class="c"># host one A2A agent and one stdio MCP server, call through localhost:7777</span>
 kontra connect --gate https://gateway.kontra.sh \
   --serve a2a:hello=http://localhost:9999 \
   --serve mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem ~/docs \
@@ -438,7 +438,7 @@ kontra connect --gate https://gateway.kontra.sh \
 <span class="c"># a second gate, same identity key, enrolled separately</span>
 kontra connect --gate https://gate.team.internal --serve mcp:fs=http://localhost:8000
 
-<span class="c"># only hiring: no --serve; the catalog appears on localhost:7777</span>
+<span class="c"># only calling: no --serve; the catalog appears on localhost:7777</span>
 kontra connect --gate https://gateway.kontra.sh</code></pre>
 
 <h3>What a gate operator writes</h3>
@@ -485,10 +485,10 @@ a2a send http://localhost:7777/agents/acme/hello "hi"
 <h2>7. What this changes in the v4 PRD</h2>
 <div class="tbl"><table>
 <tr><th>Section</th><th>Change</th></tr>
-<tr><td>§3 Roles</td><td>Buyer and Seller become hats a <b>node</b> wears per request, not identities. Add <b>Service</b> (an A2A agent or MCP server behind a node) and retire Agent as the only hosted thing.</td></tr>
+<tr><td>§3 Roles</td><td>Caller and Service become hats a <b>node</b> wears per request, not identities. Add <b>Service</b> (an A2A agent or MCP server behind a node) and retire Agent as the only hosted thing.</td></tr>
 <tr><td>§4 Architecture</td><td>Topology diagram above replaces the one-gate-two-sidecars figure.</td></tr>
 <tr><td>§6 Tunnel</td><td>Mechanics unchanged. <code>--to</code> becomes repeatable <code>--serve kind:name=target</code>; add the stdio bridge. Identity key file renamed from <code>tunnel.key</code> to <code>identity.key</code>.</td></tr>
-<tr><td>§8 Sealing</td><td>Key table collapses to: one identity key per node (handshake + hosting recipient), one per-job key per hire. Add the MCP sealing scope (<code>arguments</code>, <code>content</code>) and its both-ends-nodes condition.</td></tr>
+<tr><td>§8 Sealing</td><td>Key table collapses to: one identity key per node (handshake + hosting recipient), one per-job key per call. Add the MCP sealing scope (<code>arguments</code>, <code>content</code>) and its both-ends-nodes condition.</td></tr>
 <tr><td>§9 Extensions</td><td>Add the MCP mirrors: escrow state under <code>_meta["kontra.escrow"]</code>; sealed as a declared server capability.</td></tr>
 <tr><td>§10 Data model</td><td><code>agents</code> → <code>services(kind, …)</code>; add <code>mcp_sessions(client_sid, upstream_sid, tunnel_session, service)</code>; <code>tasks.protocol</code> column.</td></tr>
 <tr><td>§11 CLI</td><td><code>kontra tunnel</code> and <code>kontra proxy</code> merge into <code>kontra connect</code>; <code>--console</code> on it; <code>kontra dev</code> unchanged.</td></tr>

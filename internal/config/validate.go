@@ -537,7 +537,7 @@ func checkHTTPSURL(s string, loopbackHTTP bool) error {
 func (c *Config) validateMetadata(v *validator) {
 	// SPEC-CONFLICT (D113): spec §13.2 and spec/schema/config.json accept any non-empty prefix, but §2.5 strips only
 	// kontra. keys from callers and services, and a2a-go copies a service event's metadata into the task's.
-	// Under another prefix (acme.) a seller could write keys that TaskRef.metadata hands the Lifecycle hooks
+	// Under another prefix (acme.) a service could write keys that TaskRef.metadata hands the Lifecycle hooks
 	// as operator-written, which §13.3 says it never holds ("never caller or service metadata"). The closest
 	// faithful behaviour: an operator prefix must lie under kontra. (kontra.op., say), so §2.5's stripping
 	// vouches for every key under it; kontra. alone, which would cover the gate's own keys, is refused too.
@@ -602,8 +602,8 @@ func (c *Config) validateTunnel(v *validator) {
 	if a.Enabled && c.Tenancy != TenancyMulti {
 		v.add("tunnel.anonymous: needs tenancy: multi, since an anonymous service's URL names its tenant (tunnel.md §6, D277)")
 	}
-	if a.HiringStreams > MaxAnonHiringStreams {
-		v.add("tunnel.anonymous.hiring_streams %d: at most %d, the gate's per-session stream cap (tunnel.md §14)", a.HiringStreams, MaxAnonHiringStreams)
+	if a.CallingStreams > MaxAnonCallingStreams {
+		v.add("tunnel.anonymous.calling_streams %d: at most %d, the gate's per-session stream cap (tunnel.md §14)", a.CallingStreams, MaxAnonCallingStreams)
 	}
 }
 
@@ -697,11 +697,11 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 	// sealed: on a tunnel service is served since M3 WP-08 (ext-sealed.md §1, §5), which lifts D144's refusal:
 	// the gate publishes the service's recipients, refuses unsealed parts to a required service and relays the
 	// envelopes, and the hosting node unseals. D91's refusal above stays for direct backends.
-	if !s.SellerKeys.IsZero() {
-		// Seller card signatures are verified (spec §3; M3 WP-02 lifts D90 and the seller_keys half of D144): an
+	if !s.ServiceKeys.IsZero() {
+		// Service card signatures are verified (spec §3; M3 WP-02 lifts D90 and the service_keys half of D144): an
 		// a2a service's card none of whose signatures its keys verify makes it unavailable.
-		if err := checkSellerKeys(s.SellerKeys); err != nil {
-			v.add("%s.seller_keys: %v", at, err)
+		if err := checkServiceKeys(s.ServiceKeys); err != nil {
+			v.add("%s.service_keys: %v", at, err)
 		}
 	}
 	if !s.Annotations.IsZero() && (len(s.Annotations) == 0 || s.Annotations[0] != '{') {
@@ -749,7 +749,7 @@ func CheckBackendURL(s string, allowPrivate bool) error {
 		return fmt.Errorf("%q: want an absolute URL", shown)
 	}
 	if u.User != nil {
-		return fmt.Errorf("%q: credentials do not belong in the URL (the gate holds no seller secret)", shown)
+		return fmt.Errorf("%q: credentials do not belong in the URL (the gate holds no service secret)", shown)
 	}
 	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
 		return fmt.Errorf("%q: no query or fragment (the URL is the base the card is fetched from, D71)", shown)
@@ -769,7 +769,7 @@ func CheckBackendURL(s string, allowPrivate bool) error {
 	return nil
 }
 
-func checkSellerKeys(j JSON) error {
+func checkServiceKeys(j JSON) error {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(j, &m); err != nil {
 		return fmt.Errorf("want an inline JWKS {keys: [...]} or {url: https://...}")
@@ -895,9 +895,9 @@ func ParseAllowEntry(s string) (AllowEntry, error) {
 
 // unbuilt lists the keys this build accepts but does not act on yet. Each one fails closed when ignored
 // (nobody is admitted by it, nothing is served for it); keys that would fail open are refused by
-// Validate instead (sealed on a direct backend). seller_keys on an MCP service, which has no card
+// Validate instead (sealed on a direct backend). service_keys on an MCP service, which has no card
 // (spec §3), is accepted and noted. Remove an entry when the work that builds it lands. Tunnel backends are
-// served since M2; signing_key, seller_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
+// served since M2; signing_key, service_keys on a2a services and blobs since M3 WP-02; MCP services and peer: since
 // M3 WP-04; sealed: on tunnel services since M3 WP-08; tunnel.anonymous since M4 WP-03; auth.mcp_oauth since M4 WP-06
 // (D276); auth.oidc, tenant claims and revocation feeds since M5 (D314 to D316).
 func (c *Config) unbuilt() []string {
@@ -905,8 +905,8 @@ func (c *Config) unbuilt() []string {
 	note := func(format string, args ...any) { w = append(w, fmt.Sprintf(format, args...)) }
 	for _, name := range sortedKeys(c.Services) {
 		s := c.Services[name]
-		if !s.SellerKeys.IsZero() && s.Kind == KindMCP {
-			note("services.%s.seller_keys: an MCP service has no card, so its seller_keys verify nothing (spec §3)", name)
+		if !s.ServiceKeys.IsZero() && s.Kind == KindMCP {
+			note("services.%s.service_keys: an MCP service has no card, so its service_keys verify nothing (spec §3)", name)
 		}
 	}
 	return w

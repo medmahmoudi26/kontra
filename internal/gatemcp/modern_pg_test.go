@@ -27,7 +27,7 @@ import (
 	"kontra.sh/kontra/internal/tenant"
 )
 
-// replyRecorder is a Hirer whose Reply records each follow-up and, as the task's dispatch would, moves the task out
+// replyRecorder is a Caller whose Reply records each follow-up and, as the task's dispatch would, moves the task out
 // of input-required (a status row: working); err, when set, refuses the follow-up instead.
 type replyRecorder struct {
 	pool *pgxpool.Pool
@@ -36,8 +36,8 @@ type replyRecorder struct {
 	err  error
 }
 
-func (r *replyRecorder) Hire(context.Context, HireRequest) (HireOutcome, error) {
-	return HireOutcome{}, errors.New("not in this test")
+func (r *replyRecorder) SendMessage(context.Context, MCPSendRequest) (MCPSendOutcome, error) {
+	return MCPSendOutcome{}, errors.New("not in this test")
 }
 
 func (r *replyRecorder) Reply(ctx context.Context, p auth.Principal, task *store.TaskRow, parts a2a.ContentParts) (int64, error) {
@@ -46,7 +46,7 @@ func (r *replyRecorder) Reply(ctx context.Context, p auth.Principal, task *store
 	if r.err != nil {
 		return 0, r.err
 	}
-	if task.Owner.BuyerID != p.BuyerID {
+	if task.Owner.CallerID != p.CallerID {
 		return 0, a2a.ErrTaskNotFound
 	}
 	r.got = append(r.got, task.ID.String()+":"+parts[0].Text())
@@ -112,10 +112,10 @@ type modernEnv struct {
 	t      *testing.T
 	pool   *pgxpool.Pool
 	team   uuid.UUID
-	tasks  *HireTasks
-	hirer  *replyRecorder
+	tasks  *SendMessageTasks
+	sender *replyRecorder
 	cancel *cancelRecorder
-	buyer  auth.Principal
+	caller auth.Principal
 }
 
 func newModernEnv(t *testing.T) *modernEnv {
@@ -130,20 +130,20 @@ func newModernEnv(t *testing.T) *modernEnv {
 		values ($1, 'hello', 'a2a', '{"a2a": {"url": "http://127.0.0.1:1"}}'::jsonb, '{org:default}', 'db')`, e.team); err != nil {
 		t.Fatal(err)
 	}
-	e.hirer = &replyRecorder{pool: e.pool}
+	e.sender = &replyRecorder{pool: e.pool}
 	e.cancel = &cancelRecorder{}
-	e.tasks, err = NewHireTasks(HireTasksConfig{Log: store.NewLog(e.pool), Waker: noWake{}, Lifecycle: e.cancel, Hirer: e.hirer,
+	e.tasks, err = NewSendMessageTasks(SendMessageTasksConfig{Log: store.NewLog(e.pool), Waker: noWake{}, Lifecycle: e.cancel, Sender: e.sender,
 		Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	e.buyer = keyPrincipal(e.team, "default", "kk_buyer")
+	e.caller = keyPrincipal(e.team, "default", "kk_caller")
 	return e
 }
 
-// task inserts a hire task of the buyer in state with snapshot task, its log a task row and then one status row per
-// entry of statuses (the last one's seq is the task's version); hired marks it as hire's.
-func (e *modernEnv) task(buyer uuid.UUID, state store.State, task *a2a.Task, statuses int, hired bool) uuid.UUID {
+// task inserts a send_message task of the caller in state with snapshot task, its log a task row and then one status row per
+// entry of statuses (the last one's seq is the task's version); called marks it as send_message's.
+func (e *modernEnv) task(caller uuid.UUID, state store.State, task *a2a.Task, statuses int, sentByMCP bool) uuid.UUID {
 	e.t.Helper()
 	id := uuid.Must(uuid.NewV7())
 	task.ID = a2a.TaskID(id.String())
@@ -153,11 +153,11 @@ func (e *modernEnv) task(buyer uuid.UUID, state store.State, task *a2a.Task, sta
 	}
 	ctx := context.Background()
 	version := 1 + statuses
-	_, err = e.pool.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id,
-			state, version, snapshot, status_at, submitted_at, terminal_at, hired)
-		values ($1, $2, 'hello', 'a2a', $3, 'key:kk_buyer', 'api_key', 'ctx', $4, $5, $6::json, now(), now(),
+	_, err = e.pool.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id,
+			state, version, snapshot, status_at, submitted_at, terminal_at, sent_by_mcp)
+		values ($1, $2, 'hello', 'a2a', $3, 'key:kk_caller', 'api_key', 'ctx', $4, $5, $6::json, now(), now(),
 			case when $4 in ('completed', 'failed', 'canceled', 'rejected') then now() end, $7)`,
-		id, e.team, buyer, string(state), version, string(snap), hired)
+		id, e.team, caller, string(state), version, string(snap), sentByMCP)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -225,18 +225,18 @@ func serve(t *testing.T, h *Handler, p auth.Principal, method string, params map
 // the question outstanding now, as the reader's own request sees it in tasks/get; its accept {reply} is the §7
 // follow-up, once. A task asking nothing, an earlier turn's key, another task's key, a
 // malformed key, a decline, an accept without a string reply, a question the reader did not declare form elicitation
-// for, and a question that is not text only are all acknowledged and forward nothing. Another buyer's task is
+// for, and a question that is not text only are all acknowledged and forward nothing. Another caller's task is
 // -32602, as an unknown one; inputResponses that is not an object is -32602. The outstanding key's answer that the A2A
 // route refuses is acknowledged only when the question stopped being outstanding; any other refusal is an error the
 // client can answer again after (503 for the lifecycle or the gate, 429 for a limit, the A2A refusal's JSON-RPC error).
 func TestModernUpdate(t *testing.T) {
 	e := newModernEnv(t)
-	form := Reader{Principal: e.buyer, Era: mcpwire.EraModern, FormElicitation: true}
-	noForm := Reader{Principal: e.buyer, Era: mcpwire.EraModern}
-	asking := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
-	dataQ := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired,
+	form := Reader{Principal: e.caller, Era: mcpwire.EraModern, FormElicitation: true}
+	noForm := Reader{Principal: e.caller, Era: mcpwire.EraModern}
+	asking := e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 2, true)
+	dataQ := e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired,
 		&a2a.Message{ID: "m", Role: a2a.MessageRoleAgent, Parts: a2a.ContentParts{a2a.NewDataPart(map[string]any{"pick": "date"})}}, nil), 2, true)
-	working := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
+	working := e.task(e.caller.CallerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
 	key := func(id uuid.UUID, seq int64) string { return store.GateRequestID(id, seq) }
 
 	ignored := []struct {
@@ -264,24 +264,24 @@ func TestModernUpdate(t *testing.T) {
 			t.Errorf("%s: %s %v %v", tc.name, res, rpcErr, err)
 		}
 	}
-	if got := e.hirer.replies(); len(got) != 0 {
+	if got := e.sender.replies(); len(got) != 0 {
 		t.Fatalf("ignored answers were sent: %v", got)
 	}
 	if e.state(asking) != "input-required" {
 		t.Fatalf("after the ignored answers: asking %s", e.state(asking))
 	}
 
-	// Another buyer's task, an unknown one, a non-object inputResponses.
+	// Another caller's task, an unknown one, a non-object inputResponses.
 	other := Reader{Principal: keyPrincipal(e.team, "default", "kk_other"), Era: mcpwire.EraModern, FormElicitation: true}
 	for name, call := range map[string]func() (json.RawMessage, *mcpwire.Error, error){
-		"another buyer": func() (json.RawMessage, *mcpwire.Error, error) {
+		"another caller": func() (json.RawMessage, *mcpwire.Error, error) {
 			return e.update(other, asking, `{"`+key(asking, 3)+`":`+accept("x")+`}`)
 		},
 		"an unknown task": func() (json.RawMessage, *mcpwire.Error, error) {
 			return e.update(form, uuid.Must(uuid.NewV7()), `{}`)
 		},
-		"an unhired task": func() (json.RawMessage, *mcpwire.Error, error) {
-			return e.update(form, e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("?"), nil), 1, false), `{}`)
+		"a non-send_message task": func() (json.RawMessage, *mcpwire.Error, error) {
+			return e.update(form, e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("?"), nil), 1, false), `{}`)
 		},
 		"inputResponses an array": func() (json.RawMessage, *mcpwire.Error, error) { return e.update(form, asking, `[]`) },
 		"no inputResponses":       func() (json.RawMessage, *mcpwire.Error, error) { return e.update(form, asking, ``) },
@@ -293,7 +293,7 @@ func TestModernUpdate(t *testing.T) {
 	}
 
 	// The outstanding key's answer, refused by the A2A route (M4 WP-05 review): never the acknowledgement, which tells
-	// the client its answer was taken (the extension: a key is answered once), so the buyer can answer again. A lifecycle
+	// the client its answer was taken (the extension: a key is answered once), so the caller can answer again. A lifecycle
 	// that did not accept it in time and the gate's own failure 503 with -32603; an anonymous tenant's limit 429 with
 	// Retry-After; another A2A refusal its JSON-RPC error. Each leaves the task waiting, and nothing was taken.
 	h := &Handler{deps: Deps{Tasks: e.tasks}, log: slog.New(slog.DiscardHandler)}
@@ -314,8 +314,8 @@ func TestModernUpdate(t *testing.T) {
 			"https://kontra.sh/ext/example/v1"},
 		{"an anonymous tenant's limit", lifecycle.RateLimited(), 429, -32600, "rate limited"},
 	} {
-		e.hirer.err = tc.err
-		a := serve(t, h, e.buyer, "tasks/update", maps.Clone(answering), true)
+		e.sender.err = tc.err
+		a := serve(t, h, e.caller, "tasks/update", maps.Clone(answering), true)
 		if a.status != tc.status || a.Error == nil || a.Error.Code != tc.code || !strings.Contains(a.Error.Message, tc.msg) {
 			t.Errorf("%s: %d %s, want %d with %d", tc.name, a.status, a.body, tc.status, tc.code)
 		}
@@ -328,13 +328,13 @@ func TestModernUpdate(t *testing.T) {
 	}
 	// Refused because the question stopped being outstanding (another follow-up of the turn was taken first, §7):
 	// acknowledged, as an answer to a key that is not.
-	e.hirer.err = a2a.NewError(a2a.ErrUnsupportedOperation, "a follow-up of this turn was accepted first")
-	if a := serve(t, h, e.buyer, "tasks/update", maps.Clone(answering), true); a.status != 200 || a.Error != nil ||
+	e.sender.err = a2a.NewError(a2a.ErrUnsupportedOperation, "a follow-up of this turn was accepted first")
+	if a := serve(t, h, e.caller, "tasks/update", maps.Clone(answering), true); a.status != 200 || a.Error != nil ||
 		string(a.Result) != `{"resultType":"complete"}` {
 		t.Errorf("a refused follow-up: %d %s", a.status, a.body)
 	}
-	e.hirer.err = nil
-	if got := e.hirer.replies(); len(got) != 0 {
+	e.sender.err = nil
+	if got := e.sender.replies(); len(got) != 0 {
 		t.Fatalf("refused answers were taken: %v", got)
 	}
 
@@ -345,20 +345,20 @@ func TestModernUpdate(t *testing.T) {
 			t.Fatalf("the answer: %s %v %v", res, rpcErr, err)
 		}
 	}
-	if got := e.hirer.replies(); !reflect.DeepEqual(got, []string{asking.String() + ":friday"}) {
+	if got := e.sender.replies(); !reflect.DeepEqual(got, []string{asking.String() + ":friday"}) {
 		t.Fatalf("follow-ups sent: %v, want friday once", got)
 	}
 }
 
-// A modern tasks/get of a hire task (§12.5, §11.12's table, D274): resultType complete, ttlMs and pollIntervalMs (not
+// A modern tasks/get of a send_message task (§12.5, §11.12's table, D274): resultType complete, ttlMs and pollIntervalMs (not
 // 2025-11-25's ttl and pollInterval); a text-only
 // question is input_required with exactly one inputRequests entry, a form elicitation/create keyed by the gate id of
 // the event that asked, for a reader whose request declared form elicitation, and working with the reply-tool text
 // otherwise; an ended task carries its rendered CallToolResult (resultType complete) as result, failed as completed
-// with isError and sh.kontra/failure; canceled is cancelled with no result; another buyer's is -32602.
+// with isError and sh.kontra/failure; canceled is cancelled with no result; another caller's is -32602.
 func TestModernGet(t *testing.T) {
 	e := newModernEnv(t)
-	form := Reader{Principal: e.buyer, Era: mcpwire.EraModern, FormElicitation: true}
+	form := Reader{Principal: e.caller, Era: mcpwire.EraModern, FormElicitation: true}
 	get := func(rd Reader, id uuid.UUID) map[string]any {
 		t.Helper()
 		res, rpcErr, err := e.tasks.Get(context.Background(), rd, id)
@@ -381,7 +381,7 @@ func TestModernGet(t *testing.T) {
 		return o
 	}
 
-	asking := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 4, true)
+	asking := e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Which date?"), nil), 4, true)
 	o := get(form, asking)
 	want := map[string]any{store.GateRequestID(asking, 5): map[string]any{"method": "elicitation/create", "params": map[string]any{
 		"mode": "form", "message": "Which date?", "requestedSchema": map[string]any{"type": "object",
@@ -389,13 +389,13 @@ func TestModernGet(t *testing.T) {
 	if o["status"] != "input_required" || o["statusMessage"] != "Which date?" || !reflect.DeepEqual(o["inputRequests"], want) || o["_meta"] != nil {
 		t.Errorf("a question to a reader that declared form elicitation: %v", o)
 	}
-	o = get(Reader{Principal: e.buyer, Era: mcpwire.EraModern}, asking)
+	o = get(Reader{Principal: e.caller, Era: mcpwire.EraModern}, asking)
 	if o["status"] != "working" || o["inputRequests"] != nil || !strings.Contains(o["statusMessage"].(string), "(answer with the reply tool, taskId "+asking.String()+")") ||
 		!reflect.DeepEqual(o["_meta"], map[string]any{MetaInputRequired: true}) {
 		t.Errorf("a question to a reader without form elicitation: %v", o)
 	}
 
-	done := e.task(e.buyer.BuyerID, store.StateCompleted, taskWith(a2a.TaskStateCompleted,
+	done := e.task(e.caller.CallerID, store.StateCompleted, taskWith(a2a.TaskStateCompleted,
 		&a2a.Message{ID: "m", Role: a2a.MessageRoleAgent, Parts: a2a.ContentParts{a2a.NewTextPart("booked"), a2a.NewDataPart(map[string]any{"day": "friday"})}}, nil), 2, true)
 	o = get(form, done)
 	res, _ := o["result"].(map[string]any)
@@ -405,7 +405,7 @@ func TestModernGet(t *testing.T) {
 		t.Errorf("a completed task: %v", o)
 	}
 
-	failed := e.task(e.buyer.BuyerID, store.StateFailed, taskWith(a2a.TaskStateFailed, nil, map[string]any{store.MetaFailure: "timeout"}), 2, true)
+	failed := e.task(e.caller.CallerID, store.StateFailed, taskWith(a2a.TaskStateFailed, nil, map[string]any{store.MetaFailure: "timeout"}), 2, true)
 	o = get(form, failed)
 	res, _ = o["result"].(map[string]any)
 	if o["status"] != "completed" || o["error"] != nil || res == nil || res["isError"] != true ||
@@ -413,27 +413,27 @@ func TestModernGet(t *testing.T) {
 		t.Errorf("a failed task: %v", o)
 	}
 
-	canceled := e.task(e.buyer.BuyerID, store.StateCanceled, taskWith(a2a.TaskStateCanceled, nil, map[string]any{store.MetaCanceled: "declined"}), 2, true)
+	canceled := e.task(e.caller.CallerID, store.StateCanceled, taskWith(a2a.TaskStateCanceled, nil, map[string]any{store.MetaCanceled: "declined"}), 2, true)
 	if o := get(form, canceled); o["status"] != "cancelled" || o["result"] != nil || !reflect.DeepEqual(o["_meta"], map[string]any{MetaCanceled: "declined"}) {
 		t.Errorf("a canceled task: %v", o)
 	}
 
 	other := Reader{Principal: keyPrincipal(e.team, "default", "kk_other"), Era: mcpwire.EraModern, FormElicitation: true}
 	if _, rpcErr, err := e.tasks.Get(context.Background(), other, asking); err != nil || rpcErr == nil || rpcErr.Code != -32602 {
-		t.Errorf("another buyer's tasks/get: %v %v", rpcErr, err)
+		t.Errorf("another caller's tasks/get: %v %v", rpcErr, err)
 	}
 }
 
 // A modern tasks/cancel (§12.5, §11.12's table): acknowledged at once, resultType complete, kontra.cancel in MCP mode
-// sent detached on a task that is not terminal (a submitted one included), nothing on a terminal one; another buyer's is -32602.
+// sent detached on a task that is not terminal (a submitted one included), nothing on a terminal one; another caller's is -32602.
 func TestModernCancel(t *testing.T) {
 	e := newModernEnv(t)
 	block := make(chan struct{})
 	e.cancel.set(block, nil)
-	rd := Reader{Principal: e.buyer, Era: mcpwire.EraModern}
-	working := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
-	submitted := e.task(e.buyer.BuyerID, store.StateSubmitted, taskWith(a2a.TaskStateSubmitted, nil, nil), 1, true)
-	done := e.task(e.buyer.BuyerID, store.StateCompleted, taskWith(a2a.TaskStateCompleted, agentText("ok"), nil), 1, true)
+	rd := Reader{Principal: e.caller, Era: mcpwire.EraModern}
+	working := e.task(e.caller.CallerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
+	submitted := e.task(e.caller.CallerID, store.StateSubmitted, taskWith(a2a.TaskStateSubmitted, nil, nil), 1, true)
+	done := e.task(e.caller.CallerID, store.StateCompleted, taskWith(a2a.TaskStateCompleted, agentText("ok"), nil), 1, true)
 	for _, id := range []uuid.UUID{working, submitted, done} {
 		began := time.Now()
 		res, rpcErr, err := e.tasks.Cancel(context.Background(), rd, id)
@@ -454,7 +454,7 @@ func TestModernCancel(t *testing.T) {
 	}
 	other := Reader{Principal: keyPrincipal(e.team, "default", "kk_other"), Era: mcpwire.EraModern}
 	if _, rpcErr, err := e.tasks.Cancel(context.Background(), other, working); err != nil || rpcErr == nil || rpcErr.Code != -32602 {
-		t.Errorf("another buyer's tasks/cancel: %v %v", rpcErr, err)
+		t.Errorf("another caller's tasks/cancel: %v %v", rpcErr, err)
 	}
 }
 
@@ -465,8 +465,8 @@ func TestModernCancel(t *testing.T) {
 // exactly the key k.<task>.<n> of its text's n.
 func TestModernGetPairsEachKeyWithItsQuestion(t *testing.T) {
 	e := newModernEnv(t)
-	form := Reader{Principal: e.buyer, Era: mcpwire.EraModern, FormElicitation: true}
-	id := e.task(e.buyer.BuyerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Q 3"), nil), 2, true)
+	form := Reader{Principal: e.caller, Era: mcpwire.EraModern, FormElicitation: true}
+	id := e.task(e.caller.CallerID, store.StateInputRequired, taskWith(a2a.TaskStateInputRequired, agentText("Q 3"), nil), 2, true)
 	ctx := context.Background()
 	step := func(state store.State, snap *a2a.Task) {
 		tx, err := e.pool.Begin(ctx)
@@ -548,12 +548,12 @@ func TestModernGetPairsEachKeyWithItsQuestion(t *testing.T) {
 // A modern tasks/cancel's detached cancel is coalesced per task on the replica (M4 WP-05 review): while one is being
 // sent, and for the settle time after it was accepted, a tasks/cancel of the task sends nothing more (fifty of them make
 // one RequestCancelMCP); one that was not accepted is forgotten, so the next tasks/cancel sends again; after the settle
-// time a new one is sent. Wait returns only once no detached cancel and no modern hire (hold) is in flight.
+// time a new one is sent. Wait returns only once no detached cancel and no modern send_message (hold) is in flight.
 func TestModernCancelCoalesces(t *testing.T) {
 	e := newModernEnv(t)
-	rd := Reader{Principal: e.buyer, Era: mcpwire.EraModern}
-	working := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
-	other := e.task(e.buyer.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
+	rd := Reader{Principal: e.caller, Era: mcpwire.EraModern}
+	working := e.task(e.caller.CallerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
+	other := e.task(e.caller.CallerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
 	e.tasks.settle = 500 * time.Millisecond
 	ctx := context.Background()
 	cancel := func(id uuid.UUID) {
@@ -615,46 +615,46 @@ func TestModernCancelCoalesces(t *testing.T) {
 	cancel(other)
 	calls(5)
 
-	// A modern hire in flight holds Wait as a cancel does.
+	// A modern send_message in flight holds Wait as a cancel does.
 	release := e.tasks.hold()
 	if err := waitFor(100 * time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Wait while a modern hire is answered: %v", err)
+		t.Fatalf("Wait while a modern send_message is answered: %v", err)
 	}
 	release()
 	release()
 	if err := waitFor(time.Second); err != nil {
-		t.Fatalf("Wait after the hire: %v", err)
+		t.Fatalf("Wait after the send_message: %v", err)
 	}
 }
 
-// slowHirer is a Hirer whose Hire takes delay (a slow Admission) and then creates a working hire task of the buyer.
-type slowHirer struct {
+// slowSender is a Caller whose SendMessage takes delay (a slow Admission) and then creates a working send_message task of the caller.
+type slowSender struct {
 	*replyRecorder
 	e     *modernEnv
 	delay time.Duration
 }
 
-func (s *slowHirer) Hire(ctx context.Context, req HireRequest) (HireOutcome, error) {
+func (s *slowSender) SendMessage(ctx context.Context, req MCPSendRequest) (MCPSendOutcome, error) {
 	time.Sleep(s.delay)
-	id := s.e.task(req.Principal.BuyerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
+	id := s.e.task(req.Principal.CallerID, store.StateWorking, taskWith(a2a.TaskStateWorking, nil, nil), 1, true)
 	row, err := store.NewLog(s.e.pool).Load(ctx, id)
-	return HireOutcome{Task: row}, err
+	return MCPSendOutcome{Task: row}, err
 }
 
-// A plain hire's wait counts from the request's arrival (M4 WP-05 review): after an Admission that took most of the
-// budget, a modern plain hire is still answered within PlainBudget (here 2.5 s for a 2 s plain wait after a 1.5 s
+// A plain send_message's wait counts from the request's arrival (M4 WP-05 review): after an Admission that took most of the
+// budget, a modern plain send_message is still answered within PlainBudget (here 2.5 s for a 2 s plain wait after a 1.5 s
 // Admission), before its client's request timeout (here 3 s, the MCP SDKs' 60 s scaled), so its task is not cancelled
-// as the task of a client that left (D178). The legacy plain hire answers within the same budget.
+// as the task of a client that left (D178). The legacy plain send_message answers within the same budget.
 func TestPlainWaitCountsFromTheRequest(t *testing.T) {
 	e := newModernEnv(t)
-	hirer := &slowHirer{replyRecorder: e.hirer, e: e, delay: 1500 * time.Millisecond}
+	sender := &slowSender{replyRecorder: e.sender, e: e, delay: 1500 * time.Millisecond}
 	h := &Handler{deps: Deps{PublicURL: "https://gate.example", Catalog: NewCatalog(CatalogConfig{DB: e.pool, Logger: slog.New(slog.DiscardHandler)}),
-		Hirer: hirer, Tasks: e.tasks, Log: store.NewLog(e.pool), Waker: noWake{}, PlainWait: 2 * time.Second,
+		Sender: sender, Tasks: e.tasks, Log: store.NewLog(e.pool), Waker: noWake{}, PlainWait: 2 * time.Second,
 		PlainBudget: 2500 * time.Millisecond}, log: slog.New(slog.DiscardHandler)}
 	for _, modern := range []bool{true, false} {
-		params := map[string]any{"name": "hire", "arguments": map[string]any{"service": "hello", "message": "hi"}}
+		params := map[string]any{"name": "send_message", "arguments": map[string]any{"service": "hello", "message": "hi"}}
 		rq, w := modernRequest(t, "tools/call", params, nil)
-		rq.p, rq.start, rq.modern = e.buyer, time.Now(), modern
+		rq.p, rq.start, rq.modern = e.caller, time.Now(), modern
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second) // the client's request timeout
 		rq.r = rq.r.WithContext(ctx)
 		h.toolsCall(rq)

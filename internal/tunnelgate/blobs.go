@@ -28,8 +28,8 @@ var blobIdle = 30 * time.Second
 
 // Blobs is the gate's BlobServer (spec/tunnel.md §8.3, spec/relay.md §10.4, D167, D181): a ref is resolved only
 // through the blobs table, and served only to a session that serves the row's task (an attempt of it is on the
-// session) or hires it (the task's buyer is the session's hiring principal's buyer, re-validated now: a revoked
-// hiring API key hires nothing). It answers one JSON line, {"size": n} and exactly n bytes, or {"error":
+// session) or calls it (the task's caller is the session's calling principal's caller, re-validated now: a revoked
+// calling API key calls nothing). It answers one JSON line, {"size": n} and exactly n bytes, or {"error":
 // "not_found" | "forbidden" | "too_large"} (an object over blob.MaxObject, by its row or by the store), and the
 // stream is closed after it.
 type Blobs struct {
@@ -41,10 +41,10 @@ type Blobs struct {
 	Lookup func(ctx context.Context, ref blob.Ref, session uuid.UUID) (row BlobRow, ok bool, err error)
 }
 
-// BlobRow is what a blob stream's check reads: the blobs row and its task's buyer.
+// BlobRow is what a blob stream's check reads: the blobs row and its task's caller.
 type BlobRow struct {
 	blob.Row
-	Buyer  uuid.UUID
+	Caller uuid.UUID
 	Serves bool // an attempt of the task is on the asking session
 }
 
@@ -72,9 +72,9 @@ func (b *Blobs) ServeBlob(ctx context.Context, sess *Session, ref string, w io.W
 		return blob.WriteRefusal(w, blob.ReasonNotFound)
 	}
 	if !row.Serves {
-		p, err := sess.Hiring(ctx)
-		if err != nil || p.BuyerID != row.Buyer {
-			log.Warn("blob stream refused: the ref's task is neither served on nor hired by this session", "ref", r,
+		p, err := sess.Calling(ctx)
+		if err != nil || p.CallerID != row.Caller {
+			log.Warn("blob stream refused: the ref's task is neither served on nor called by this session", "ref", r,
 				obs.KeyTaskID, row.Task)
 			return blob.WriteRefusal(w, blob.ReasonForbidden)
 		}
@@ -166,10 +166,10 @@ func (b *Blobs) lookup(ctx context.Context, ref blob.Ref, session uuid.UUID) (Bl
 	var row BlobRow
 	var refText string
 	err := b.DB.QueryRow(ctx, `
-		select b.ref, b.tenant_id, b.task_id, b.size, t.buyer_id,
+		select b.ref, b.tenant_id, b.task_id, b.size, t.caller_id,
 		       exists (select 1 from kontra.attempts a where a.task_id = b.task_id and a.tunnel_session = $2)
 		  from kontra.blobs b join kontra.tasks t on t.id = b.task_id
-		 where b.ref = $1`, string(ref), session).Scan(&refText, &row.Tenant, &row.Task, &row.Size, &row.Buyer, &row.Serves)
+		 where b.ref = $1`, string(ref), session).Scan(&refText, &row.Tenant, &row.Task, &row.Size, &row.Caller, &row.Serves)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BlobRow{}, false, nil
 	}

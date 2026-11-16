@@ -85,7 +85,7 @@ const (
 //     anonymous_unavailable on a gate without tunnel.anonymous; a key of a live anonymous tenant presenting no
 //     tokens converts on an auth API key with enroll:* of an account (§6.3, with tunnel.enroll_with_api_key: below as
 //     a new key of that account, the session's services it lacks created there; anonymous.go's convert), is resumed
-//     on another auth key (a hire-only one) and is otherwise unknown_key; one presenting tokens, of an ended
+//     on another auth key (a call-only one) and is otherwise unknown_key; one presenting tokens, of an ended
 //     anonymous tenant, or of a live one on a gate without tunnel.anonymous (a hello that does not ask), goes on below
 //     as a new key would, and is moved (anon.MoveKey) if admitted; a live anonymous tenant a key leaves ends at once
 //     (anon.Convert);
@@ -93,9 +93,9 @@ const (
 //     or the other authorities', or that applies to no declared service (a service token for a service the
 //     hello does not declare; a tenant token listing none of them);
 //  6. unknown_key: an unknown key that nothing in the hello enrolls, unless its hello declares no service and
-//     carries an auth API key with the hire scope: such a key is admitted hire-only (spec/tunnel.md §9); and a
-//     known key without any binding (one admitted hire-only, or its rotation) whose hello declares no service and
-//     carries no auth API key with the hire scope: it hires only as such a key, never as node:<key_id>;
+//     carries an auth API key with the call scope: such a key is admitted call-only (spec/tunnel.md §9); and a
+//     known key without any binding (one admitted call-only, or its rotation) whose hello declares no service and
+//     carries no auth API key with the call scope: it calls only as such a key, never as node:<key_id>;
 //  7. kind_mismatch: a declared service the hello enrolls, or the key is bound to, whose kind is not the
 //     declared one;
 //  8. service_denied: a declared service the key was never enrolled for and that no authority in the hello
@@ -216,9 +216,9 @@ type admission struct {
 	old    *Key // rotate_from's row
 	tenant uuid.UUID
 	slug   string
-	// hireOnly: a new key admitted on its auth API key alone, with no service (step 6's second
+	// callOnly: a new key admitted on its auth API key alone, with no service (step 6's second
 	// SPEC-CONFLICT).
-	hireOnly bool
+	callOnly bool
 
 	// Anonymous sessions (spec/tunnel.md §6, D285, D286; anonymous.go). anonKey is the key's row when it belongs
 	// to an anonymous tenant, live or ended, and is neither revoked nor rotated: what the hello makes of it is decided
@@ -365,7 +365,7 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	//
 	// SPEC-CONFLICT (§5, §12; M2 WP-02 review): a declared service whose binding was revoked is "left out"
 	// (§5), and §5 does not say what may enroll it again. The auth API key never does: it rides on every
-	// hello as the hiring principal, so with an enroll: scope it would undo the operator's revocation at the
+	// hello as the calling principal, so with an enroll: scope it would undo the operator's revocation at the
 	// node's next handshake (a restart with the same --serve). Only a one-time token in this hello, a service
 	// token or a tenant token under its own rule, enrolls a revoked binding again: minting one is the
 	// operator's explicit act. The owner decides whether a revoked binding may be enrolled again at all.
@@ -427,42 +427,42 @@ func (a *admission) run(ctx context.Context) (*Decision, error) {
 	//
 	// SPEC-CONFLICT (D206; spec/tunnel.md §5 and D133 against §4 and §9; the M3 plan's conflict on §4–§5, WP-03):
 	// §5 makes an unknown key that nothing in its hello enrolls unknown_key "whatever else the hello carries",
-	// while §4 lets a hello declare no services ("a node that only hires") and §9 gives its streams the principal
+	// while §4 lets a hello declare no services ("a node that only calls") and §9 gives its streams the principal
 	// of the hello's auth API key; a session needs a tunnel_keys row (tunnels.key_id references it). The closest
-	// faithful behaviour: an unknown key whose hello declares no service and carries an auth API key with the hire
-	// scope (and no token, which step 5 refused already) is admitted hire-only, its tunnel_keys row in the API
+	// faithful behaviour: an unknown key whose hello declares no service and carries an auth API key with the call
+	// scope (and no token, which step 5 refused already) is admitted call-only, its tunnel_keys row in the API
 	// key's tenant and no binding, audited with the API key; without such a key it stays unknown_key (D133), so the
 	// lost-welcome probe, which carries no auth, still learns that nothing committed. §5 now says so.
 	//
 	// Such a key is no node of its tenant: no binding was ever made for it. §9 gives a session without auth the
 	// principal node:<key_id> with the key's tenant, which the services' org:<tenant> allow entries admit; for a
-	// hire-only key that would turn one use of a hire-scoped API key into a hiring credential that outlives the API
-	// key's revocation (§12: "every later stream a session opens with it as its hiring principal gets 401"; M3
+	// call-only key that would turn one use of a call-scoped API key into a calling credential that outlives the API
+	// key's revocation (§12: "every later stream a session opens with it as its calling principal gets 401"; M3
 	// WP-03 review). So a known key without any binding (key_services row, revoked or not; a rotation's are the
-	// old key's) is admitted only on a hello that carries an auth API key with the hire scope (any such key, whose
-	// principal the session then hires as) or that enrolls it. A hello of it declaring no service without such a
+	// old key's) is admitted only on a hello that carries an auth API key with the call scope (any such key, whose
+	// principal the session then calls as) or that enrolls it. A hello of it declaring no service without such a
 	// key is unknown_key, as before its first hello, retried by the node until its operator gives a valid
 	// --api-key; one declaring services nothing enrolls stays service_denied (step 8); a revoked or expired API key
 	// is auth_invalid (step 4).
 	//
-	// Hire-only admission does not need tunnel.enroll_with_api_key: that option governs the enroll: scopes, which
-	// bind a key to services (§5's table), and a hire-only admission binds nothing, under the hire scope; with
-	// the option's default (false on self-hosted gates) a node could otherwise never hire through such a gate
-	// without hosting a service. §5's "a key without an enroll: scope only hires" is read as that key's whole
+	// Call-only admission does not need tunnel.enroll_with_api_key: that option governs the enroll: scopes, which
+	// bind a key to services (§5's table), and a call-only admission binds nothing, under the call scope; with
+	// the option's default (false on self-hosted gates) a node could otherwise never call through such a gate
+	// without hosting a service. §5's "a key without an enroll: scope only calls" is read as that key's whole
 	// authority. §5 now names this admission, without the option (D206).
 	if a.key == nil && a.old == nil && !enrolls && a.s.opts.Local && len(h.Services) == 0 {
-		a.hireOnly = true // the local development profile: a node that only calls agents needs no credential either
+		a.callOnly = true // the local development profile: a node that only calls agents needs no credential either
 	} else if a.key == nil && a.old == nil && !enrolls {
-		if len(h.Services) > 0 || a.principal == nil || !a.principal.MayHire() || a.principal.TenantID == nil {
+		if len(h.Services) > 0 || a.principal == nil || !a.principal.MayCall() || a.principal.TenantID == nil {
 			return nil, tunnel.Refuse(tunnel.CodeUnknownKey, "the key %s is not enrolled at this gate, and nothing in this hello enrolls it", h.KID)
 		}
-		a.hireOnly = true
+		a.callOnly = true
 		a.tenant = *a.principal.TenantID
 	}
-	if (a.key != nil || a.old != nil) && len(h.Services) == 0 && len(bindings) == 0 && (a.principal == nil || !a.principal.MayHire()) &&
+	if (a.key != nil || a.old != nil) && len(h.Services) == 0 && len(bindings) == 0 && (a.principal == nil || !a.principal.MayCall()) &&
 		!a.s.opts.Local {
 		return nil, tunnel.Refuse(tunnel.CodeUnknownKey,
-			"the key %s only hires (no service is bound to it): its hello must carry an API key with the hire scope", h.KID)
+			"the key %s only calls (no service is bound to it): its hello must carry an API key with the call scope", h.KID)
 	}
 	if a.slug == "" && a.tenant != uuid.Nil {
 		if err := a.readTenant(ctx); err != nil {
@@ -843,11 +843,11 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 			"session_id": a.req.SessionID,
 			"replica_id": a.req.ReplicaID,
 		}
-		if (apiKeyUse || a.hireOnly) && a.principal != nil {
+		if (apiKeyUse || a.callOnly) && a.principal != nil {
 			f["api_key"] = a.principal.ID
 		}
-		if a.hireOnly {
-			f["hire_only"] = true
+		if a.callOnly {
+			f["call_only"] = true
 		}
 		if a.moveFrom != nil {
 			f["moved_from"] = a.moveFrom.Tenant
@@ -919,11 +919,11 @@ func (a *admission) write(ctx context.Context, toks []*consumed, plans []*planne
 		}
 	}
 	if a.principal != nil {
-		d.HirePrincipal = a.principal.ID
-		hire := *a.principal
-		d.Hire = &hire
+		d.CallerPrincipal = a.principal.ID
+		call := *a.principal
+		d.Call = &call
 	} else {
-		d.HirePrincipal = string(auth.KindNode) + ":" + keyID
+		d.CallerPrincipal = string(auth.KindNode) + ":" + keyID
 	}
 	return d, nil
 }

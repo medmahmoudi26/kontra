@@ -12,7 +12,7 @@
 # the first npx run of each package downloads it and the node starts server-filesystem through npx on first use):
 #   a2a send … "hi"                 Hello World
 #   inspector … --method tools/list read_file
-#   inspector … --tool-name hire    Hello World
+#   inspector … --tool-name call    Hello World
 #   curl … agent-card.json          the card, naming the slug
 # Then it prints the slug and "ready" for the host's checks, and holds the node connected until the host copies a file
 # named stop into /opt/kontra-demo (or sends TERM): it then stops what it started and exits 0.
@@ -86,7 +86,7 @@ expectation() {
   case "$1" in
     "a2a send "*) echo "Hello World" ;;
     *"--method tools/list"*) echo "read_file" ;;
-    *"--tool-name hire"*) echo "Hello World" ;;
+    *"--tool-name call"*) echo "Hello World" ;;
     "curl "*agent-card.json*) echo "$slug" ;;
     *) echo "" ;;
   esac

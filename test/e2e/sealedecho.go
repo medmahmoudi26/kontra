@@ -13,14 +13,14 @@ import (
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
 )
 
-// EchoSeller is the sealed tests' A2A seller (sealedecho in the M3 plan): an a2a-go v2.7.0 agent behind a hosting
+// EchoService is the sealed tests' A2A service (sealedecho in the M3 plan): an a2a-go v2.7.0 agent behind a hosting
 // node that repeats its input in an artifact and in its status message. A first message whose first text part
 // starts with "ask" stops at input-required ("which one of <text>?"), and its follow-up completes ("done: <text>");
 // any other first message completes at once. Every text part comes back as "echo: <text>" in the artifact, and every
 // raw part as the same bytes with its mediaType and filename. A first message whose first text part starts with
 // "fail" is refused with an InvalidParams error quoting that text. Its card offers A2A 1.0 JSON-RPC at /rpc, which
 // sealing needs (D165).
-type EchoSeller struct {
+type EchoService struct {
 	URL string
 
 	srv *http.Server
@@ -34,7 +34,7 @@ type EchoSeller struct {
 // AskPrefix starts a first message that asks one follow-up.
 const echoAskPrefix = "ask"
 
-// echoFailPrefix starts a first message the seller refuses with an error quoting it, as a validation error echoes
+// echoFailPrefix starts a first message the service refuses with an error quoting it, as a validation error echoes
 // its input (M3 review security-1).
 const echoFailPrefix = "fail"
 
@@ -43,9 +43,9 @@ const echoCard = `{"name":"sealedecho","description":"repeats its input","versio
 "capabilities":{"streaming":true},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],
 "skills":[{"id":"echo","name":"echo","description":"repeats its input","tags":["e2e"]}]}`
 
-// StartEchoSeller serves the seller on 127.0.0.1 until the harness closes.
-func (h *Harness) StartEchoSeller() (*EchoSeller, error) {
-	s := &EchoSeller{}
+// StartEchoService serves the service on 127.0.0.1 until the harness closes.
+func (h *Harness) StartEchoService() (*EchoService, error) {
+	s := &EchoService{}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -74,22 +74,22 @@ func (h *Harness) StartEchoSeller() (*EchoSeller, error) {
 	return s, nil
 }
 
-// Turns are the parts of every message the seller executed, in order.
-func (s *EchoSeller) Turns() [][]*a2a.Part {
+// Turns are the parts of every message the service executed, in order.
+func (s *EchoService) Turns() [][]*a2a.Part {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([][]*a2a.Part(nil), s.turns...)
 }
 
-// Requests is the number of POSTs the seller received (every JSON-RPC request that reached it).
-func (s *EchoSeller) Requests() int {
+// Requests is the number of POSTs the service received (every JSON-RPC request that reached it).
+func (s *EchoService) Requests() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sends
 }
 
 // Execute runs one turn.
-func (s *EchoSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *EchoService) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		s.mu.Lock()
 		s.turns = append(s.turns, ec.Message.Parts)
@@ -133,7 +133,7 @@ func (s *EchoSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter
 }
 
 // Cancel cancels.
-func (s *EchoSeller) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *EchoService) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCanceled, nil), nil)
 	}

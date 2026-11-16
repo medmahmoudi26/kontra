@@ -462,8 +462,8 @@ func TestVerifyRefusals(t *testing.T) {
 		})
 	}
 	// kontra.upstream with jwks (D223) verifies, and is read back.
-	withJWKS := signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"jwks":"https://g/agents/s/.well-known/seller-jwks.json","sha256":"x","url":"y","verified":true}}`), card)
-	if h, err := Verify([]byte(card), withJWKS, pub); err != nil || h.Upstream == nil || h.Upstream.JWKS != "https://g/agents/s/.well-known/seller-jwks.json" {
+	withJWKS := signRaw(t, key, []byte(`{"alg":"ES256","kid":"`+kidA+`","kontra.upstream":{"jwks":"https://g/agents/s/.well-known/service-jwks.json","sha256":"x","url":"y","verified":true}}`), card)
+	if h, err := Verify([]byte(card), withJWKS, pub); err != nil || h.Upstream == nil || h.Upstream.JWKS != "https://g/agents/s/.well-known/service-jwks.json" {
 		t.Fatalf("kontra.upstream with jwks: %+v %v", h.Upstream, err)
 	}
 	// A validly signed header with other, non-critical members still verifies; its unprotected header may hold
@@ -522,14 +522,14 @@ func TestSignLeavesSignaturesOut(t *testing.T) {
 }
 
 func TestParseJWKS(t *testing.T) {
-	p256 := `{"kty":"EC","crv":"P-256","x":"` + rfc9449X + `","y":"` + rfc9449Y + `","kid":"seller-1"}`
+	p256 := `{"kty":"EC","crv":"P-256","x":"` + rfc9449X + `","y":"` + rfc9449Y + `","kid":"service-1"}`
 	for _, c := range []struct {
 		name, set string
 		want      string // "" is success
 		kids      []string
 	}{
-		{"skips other types", `{"keys":[{"kty":"RSA","n":"AQAB","e":"AQAB","kid":"r"},{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"},` + p256 + `]}`, "", []string{"seller-1"}},
-		{"skips P-384 and enc keys", `{"keys":[{"kty":"EC","crv":"P-384","x":"a","y":"b"},{"kty":"EC","crv":"P-256","use":"enc","x":"a","y":"b"},{"kty":"EC","crv":"P-256","alg":"ES384","x":"a","y":"b"},` + p256 + `]}`, "", []string{"seller-1"}},
+		{"skips other types", `{"keys":[{"kty":"RSA","n":"AQAB","e":"AQAB","kid":"r"},{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"},` + p256 + `]}`, "", []string{"service-1"}},
+		{"skips P-384 and enc keys", `{"keys":[{"kty":"EC","crv":"P-384","x":"a","y":"b"},{"kty":"EC","crv":"P-256","use":"enc","x":"a","y":"b"},{"kty":"EC","crv":"P-256","alg":"ES384","x":"a","y":"b"},` + p256 + `]}`, "", []string{"service-1"}},
 		{"none at all", `{"keys":[{"kty":"RSA","n":"AQAB","e":"AQAB"}]}`, "no EC P-256 signing key", nil},
 		{"empty", `{"keys":[]}`, "no EC P-256 signing key", nil},
 		{"no keys", `{}`, "no keys member", nil},
@@ -562,9 +562,9 @@ func TestParseJWKS(t *testing.T) {
 }
 
 // KeySetPublic.JWKS (D223): the kept keys only, public members only, sorted by kid, and parsed back to the same keys
-// and thumbprints; a key the seller listed without kid is listed under its thumbprint.
+// and thumbprints; a key the service listed without kid is listed under its thumbprint.
 func TestPublicJWKS(t *testing.T) {
-	p256 := `{"kty":"EC","crv":"P-256","x":"` + rfc9449X + `","y":"` + rfc9449Y + `","kid":"seller-1","d":"private"}`
+	p256 := `{"kty":"EC","crv":"P-256","x":"` + rfc9449X + `","y":"` + rfc9449Y + `","kid":"service-1","d":"private"}`
 	pub := `{"kty":"EC","crv":"P-256","x":"` + rfc9449X + `","y":"` + rfc9449Y + `"}`
 	set, err := ParseJWKS([]byte(`{"keys":[{"kty":"RSA","n":"AQAB","e":"AQAB","kid":"r"},` + p256 + `]}`))
 	if err != nil {
@@ -574,7 +574,7 @@ func TestPublicJWKS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), `"d"`) || strings.Contains(string(b), "RSA") || !strings.Contains(string(b), `"kid":"seller-1"`) {
+	if strings.Contains(string(b), `"d"`) || strings.Contains(string(b), "RSA") || !strings.Contains(string(b), `"kid":"service-1"`) {
 		t.Fatalf("the public set: %s", b)
 	}
 	back, err := ParseJWKS(b)
