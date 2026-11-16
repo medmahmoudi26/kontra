@@ -485,10 +485,10 @@ a2a send http://localhost:7777/agents/acme/hello "hi"
 <h2>7. What this changes in the v4 PRD</h2>
 <div class="tbl"><table>
 <tr><th>Section</th><th>Change</th></tr>
-<tr><td>§3 Roles</td><td>Caller and Service become hats a <b>node</b> wears per request, not identities. Add <b>Service</b> (an A2A agent or MCP server behind a node) and retire Agent as the only hosted thing.</td></tr>
+<tr><td>§3 Roles</td><td>Caller and Callee become hats a <b>node</b> wears per request, not identities. Add <b>Service</b> (an A2A agent or MCP server behind a node) and retire Agent as the only hosted thing.</td></tr>
 <tr><td>§4 Architecture</td><td>Topology diagram above replaces the one-gate-two-sidecars figure.</td></tr>
 <tr><td>§6 Tunnel</td><td>Mechanics unchanged. <code>--to</code> becomes repeatable <code>--serve kind:name=target</code>; add the stdio bridge. Identity key file renamed from <code>tunnel.key</code> to <code>identity.key</code>.</td></tr>
-<tr><td>§8 Sealing</td><td>Key table collapses to: one identity key per node (handshake + hosting recipient), one per-job key per call. Add the MCP sealing scope (<code>arguments</code>, <code>content</code>) and its both-ends-nodes condition.</td></tr>
+<tr><td>§8 Sealing</td><td>Key table collapses to: one identity key per node (handshake + hosting recipient), one per-job key per job. Add the MCP sealing scope (<code>arguments</code>, <code>content</code>) and its both-ends-nodes condition.</td></tr>
 <tr><td>§9 Extensions</td><td>Add the MCP mirrors: escrow state under <code>_meta["kontra.escrow"]</code>; sealed as a declared server capability.</td></tr>
 <tr><td>§10 Data model</td><td><code>agents</code> → <code>services(kind, …)</code>; add <code>mcp_sessions(client_sid, upstream_sid, tunnel_session, service)</code>; <code>tasks.protocol</code> column.</td></tr>
 <tr><td>§11 CLI</td><td><code>kontra tunnel</code> and <code>kontra proxy</code> merge into <code>kontra connect</code>; <code>--console</code> on it; <code>kontra dev</code> unchanged.</td></tr>

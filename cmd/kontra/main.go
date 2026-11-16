@@ -91,7 +91,7 @@ Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that g
 the gate and is given neither --enroll nor --api-key asks for an anonymous session, which a gate that opens them
 (Cloud's public gate) gives under an anon-<…> tenant for a limited time (spec/tunnel.md §6): kontra connect prints its
 URLs and when it ends, and exits 1 saying the anonymous session expired when it does. Sealed services
-(spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a calling job's key under ~/.kontra/jobs,
+(spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, the key of a job this node calls under ~/.kontra/jobs,
 and the pins in ~/.kontra/pins; recipient key ids and service key thumbprints (kid:<kid> for a service signature that
 names its key only, D223) are printed on stderr on a first sight and on every change.
 

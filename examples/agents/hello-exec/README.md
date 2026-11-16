@@ -1,4 +1,4 @@
-# services/hello-exec
+# agents/hello-exec
 
 The README demo service: a2a-cli v0.3.1's exec mode, `a2a server --exec 'echo Hello World'`, served behind the
 gate as a **direct backend** (M1) and, from M2, through `kontra connect` (the tunnel). The service is unmodified
@@ -17,7 +17,7 @@ The gate handles that by falling back, in the same attempt, to `SendMessage` wit
 polling `GetTask` (D15; the gate logs `the upstream refused streaming; polling (D15)`). With `--chunk=$'\n'` each
 output line streams as an artifact chunk instead.
 
-Exec mode cannot ask for input (`input-required`); `input_required_sticky` uses `services/booking` (M2).
+Exec mode cannot ask for input (`input-required`); `input_required_sticky` uses `agents/booking` (M2).
 
 ## Install a2a-cli v0.3.1
 
@@ -158,5 +158,5 @@ What a lost node or service does to a running task (here `SERVICE_CMD='sleep 20;
   a response the node wrote itself ends the task (spec/relay.md §6.4).
 
 So a failed cancel is not always `tunnel_lost`: only a cancel whose session is gone fails the task, and a cancel
-the node could not deliver leaves the task as it was. `services/booking` shows the same with a task waiting at
+the node could not deliver leaves the task as it was. `agents/booking` shows the same with a task waiting at
 `input-required`, where no poll follows.

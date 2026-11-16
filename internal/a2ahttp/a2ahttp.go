@@ -65,7 +65,7 @@ type Service struct {
 	// makes the card routes answer 503 (spec §3).
 	Cards func() (*card.Served, error)
 	// OperatorExtensions are the URIs of the operator's card_extensions entries (spec §13.4) the served card was
-	// built with: a call of the gate's own /mcp activates those the card requires for the caller (§12.2, D300).
+	// built with: a send_message of the gate's own /mcp activates those the card requires for the caller (§12.2, D300).
 	OperatorExtensions []string
 }
 

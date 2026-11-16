@@ -33,7 +33,7 @@ def scalar(text: str, key: str) -> str:
 
 
 def test_values_are_inserted_literally() -> None:
-    out = kc.fill('# fills @POSTGRES@\npostgres: "@POSTGRES@"\nseller: "@SERVICE@"\n', VALUES)
+    out = kc.fill('# fills @POSTGRES@\npostgres: "@POSTGRES@"\nservice: "@SERVICE@"\n', VALUES)
     assert scalar(out, "postgres") == DSN
     assert scalar(out, "service") == VALUES["SERVICE"]
     # a value is never scanned for placeholders again: the DSN's own "@SERVICE@" stays

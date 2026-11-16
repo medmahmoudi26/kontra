@@ -46,7 +46,7 @@ type Ref struct {
 	Name   string
 }
 
-// ErrUnknownService is a ref that names no service the principal may see or send_message: malformed, of the other tenancy's
+// ErrUnknownService is a ref that names no service the principal may see or send messages to: malformed, of the other tenancy's
 // form, unknown, disabled, of an expired tenant, or one whose allow: does not admit the principal; one answer for
 // all of them (§2.1, D50).
 var ErrUnknownService = errors.New("unknown service")
@@ -339,7 +339,7 @@ type toolExecution struct {
 // asks, cancel, tasks to find old ones, artifact for one artifact.
 var tools = []tool{
 	{Name: ToolSearch, Title: "Search services",
-		Description: "Find the agents this gate lists that you may send_message. Returns refs for describe and send_message.",
+		Description: "Find the agents this gate lists that you may send messages to. Returns refs for describe and send_message.",
 		InputSchema: json.RawMessage(schemaSearch),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolDescribe, Title: "Describe a service",
@@ -349,7 +349,7 @@ var tools = []tool{
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolSendMessage, Title: "Send a message to an agent",
 		Description: "Send a message to an A2A agent as a new task and answer its result, or its state after 25 s. " +
-			"Pass idempotencyKey to retry safely: the same key answers the same task. To continue a conversation, send_message again " +
+			"Pass idempotencyKey to retry safely: the same key answers the same task. To continue a conversation, call send_message again " +
 			"with the contextId and service of an earlier result. Follow a running task with status.",
 		InputSchema: json.RawMessage(schemaSendMessage), OutputSchema: json.RawMessage(schemaSendMessageResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
@@ -366,7 +366,7 @@ var tools = []tool{
 		InputSchema: json.RawMessage(schemaStatus), OutputSchema: json.RawMessage(schemaStatusResult),
 		Annotations: toolAnnotations{ReadOnlyHint: true}},
 	{Name: ToolTasks, Title: "List your tasks",
-		Description: "List the tasks you called, newest first, optionally of one service, one contextId, or a state " +
+		Description: "List the tasks you created with send_message, newest first, optionally of one service, one contextId, or a state " +
 			"(an A2A state, active or ended). Pass nextCursor back as cursor for the next page.",
 		InputSchema: json.RawMessage(schemaTasks), OutputSchema: json.RawMessage(schemaTasksResult),
 		Annotations: toolAnnotations{ReadOnlyHint: true}},

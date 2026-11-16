@@ -1,4 +1,4 @@
-# services/booking
+# agents/booking
 
 A small A2A agent that books something for a date and has to ask for the date first: the examples'
 `input-required` service (spec/relay.md §7, `input_required_sticky`). It is written with a2a-go v2.7.0 and imports

@@ -111,7 +111,7 @@ func serverInfo() map[string]any {
 }
 
 // instructions is what /mcp tells a model about itself (initialize, server/discover).
-const instructions = "Find agents with search, read one with describe, and send_message it with send_message (pass an idempotencyKey to " +
+const instructions = "Find agents with search, read one with describe, and send it a message with send_message (pass an idempotencyKey to " +
 	"retry safely). Follow a running task with status {taskId, after: <cursor>, wait: 25} until it ends; answer its question " +
 	"with reply; stop it with cancel. Continue a conversation with send_message and the contextId of a result. List your tasks with " +
 	"tasks; read one artifact in full with artifact. MCP servers are called directly at the URL describe gives."

@@ -223,7 +223,7 @@ func (c *Catalog) unreadable(s *service, err error) {
 	}
 }
 
-// Callable is the service a send_message's ref names when p may send_message it (its allow: admits p, by any entry), nil otherwise:
+// Callable is the service a send_message's ref names when p may send a message to it (its allow: admits p, by any entry), nil otherwise:
 // the unknown-service answer (§12.2).
 func (c *Catalog) Callable(ctx context.Context, p auth.Principal, ref Ref) (*service, error) {
 	s, err := c.lookup(ctx, ref)

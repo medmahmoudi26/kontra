@@ -1,4 +1,4 @@
-# services/a2ui
+# agents/a2ui
 
 A small A2A agent that takes a table booking through an [A2UI](https://a2ui.org) v0.9.1 form: a name, the number of
 guests and a date and time. It is the examples' A2UI service ([`spec/relay.md`](../../../spec/relay.md) §2.6, D326 to

@@ -393,7 +393,7 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 			}
 		}
 	}
-	// A call of /mcp activates the operator's required extensions for its caller (§12.2, D300): Admission is told so as
+	// A send_message of /mcp activates the operator's required extensions for its caller (§12.2, D300): Admission is told so as
 	// it is told of an A2A caller's.
 	for _, u := range sendMessageActivated(ctx) {
 		if !slices.Contains(ar.Extensions, u) {

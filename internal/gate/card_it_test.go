@@ -219,7 +219,7 @@ func TestCardPassthrough(t *testing.T) {
 		t.Errorf("the task failed after %d attempts (%v), want its first", attempts, err)
 	}
 	if n := e.service.count("SendMessage") + e.service.count("SendStreamingMessage"); n != 0 {
-		t.Errorf("the forged service's service was sent %d messages", n)
+		t.Errorf("the forged service was sent %d messages", n)
 	}
 	// The {url} set on a private address: the SSRF dialer refuses it, and the service is unavailable.
 	if status, _, _ := get(t, run.url, "/agents/remote/.well-known/agent-card.json", key); status != http.StatusServiceUnavailable {

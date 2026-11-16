@@ -185,7 +185,7 @@ func (rq *request) reader() Reader {
 }
 
 // ServeHTTP classifies the request's era (§11.12 rules 1–5) and serves it, in the order of spec §2.1 and §11.1: the
-// credential (401; a principal that may not send_message, 403), the one-message rule and strict decoding (400), Origin (403),
+// credential (401; a principal that may not send messages, 403), the one-message rule and strict decoding (400), Origin (403),
 // the era; then initialize,
 // tools/list, tools/call of the tools, the legacy tasks/* (§11.6 over send_message tasks), the client's responses to
 // gate requests, the GET stream of a legacy session and its DELETE; a modern request is the 2026-07-28 surface's.

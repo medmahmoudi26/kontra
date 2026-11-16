@@ -55,7 +55,7 @@ type Sender interface {
 	Reply(ctx context.Context, p auth.Principal, task *store.TaskRow, parts a2a.ContentParts) (int64, error)
 }
 
-// send_message answers the send_message tool (§12.2, §12.3): the service a ref names when the principal may send_message it (else the
+// send_message answers the send_message tool (§12.2, §12.3): the service a ref names when the principal may send a message to it (else the
 // unknown-service answer); an MCP service, one whose sealing is required, or one whose served card requires an
 // extension a send_message cannot activate (the service's own, D294; the Caller activates the operator's for the caller, D300) is
 // a tool execution error naming the route to use, and no task; then the task through the Caller, answered as §12.3

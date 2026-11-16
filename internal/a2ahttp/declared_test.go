@@ -16,7 +16,7 @@ import (
 // capabilities object and each extension entry as the gate wrote them. A case variant that a decoder matching names
 // case-insensitively takes for "extensions" or "required" (the last of the variants wins there) declares nothing here:
 // a service's "Extensions" after the gate's "extensions" can neither make the operator's optional entry required for
-// the A2A route and call's activation (D300) nor hide its required one. card.Rewrite refuses such a card, so none is
+// the A2A route and send_message's activation (D300) nor hide its required one. card.Rewrite refuses such a card, so none is
 // served; this is the reader's half.
 func TestDeclaredReadsExactKeys(t *testing.T) {
 	const op = "https://operator.example/ext/escrow/v1"

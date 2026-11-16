@@ -1110,7 +1110,7 @@ func (s *Services) newTunnelKeeper(e *entry, in card.Input, common []card.Keeper
 	return k
 }
 
-// cardOptions are the keeper options every a2a service's keeper gets: the gate's signer, the service's service
+// cardOptions are the keeper options every a2a service's keeper gets: the gate's signer, the service's
 // keys (a value that cannot be read leaves the row out: its card must not be served unverified), and the touch
 // hook that moves card_fetched_at on every good fetch of the recorded card (D89; never for a card no service key
 // verifies).
@@ -1219,7 +1219,7 @@ func (s *Services) runTunnelCard(ctx context.Context, ref store.ServiceRef, k *c
 			// No session to fetch the card through: the stored card is served (seedTunnel), and a {url} service
 			// key set is fetched here, so a seeded card that waits for it is verified.
 			if err := k.RefreshServiceKeys(ctx); err != nil && ctx.Err() == nil {
-				s.logger.Warn("services: a tunnel service's service keys were not fetched", "service", ref.Tenant+"/"+ref.Name, "error", err)
+				s.logger.Warn("services: a tunnel service's service_keys were not fetched", "service", ref.Tenant+"/"+ref.Name, "error", err)
 			}
 			wait, backoff = s.cardEvery, time.Second
 			continue
@@ -1399,7 +1399,7 @@ func (s *Services) Lookup(_ context.Context, tenant, name string) (*a2ahttp.Serv
 
 // LookupByID is Lookup by the tenant's id: the service as this replica serves it, disabled ones included, or nil when
 // it serves none of that name (a row it has not loaded yet, or refused to build: apply leaves such a row out). The
-// gate's own /mcp reads it to list, call and follow exactly what the A2A route serves (relay.md §12.2, D303).
+// gate's own /mcp reads it to list, send messages to and follow exactly what the A2A route serves (relay.md §12.2, D303).
 func (s *Services) LookupByID(tenantID uuid.UUID, name string) *a2ahttp.Service {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

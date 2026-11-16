@@ -53,7 +53,7 @@ numbered in [`../docs/decisions.md`](../docs/decisions.md) and cited here as **D
 | **Node** | A machine running `kontra connect`. Hosts services over the tunnel, and calls through the gate on its localhost. |
 | **Service** | One A2A agent (`kind: a2a`) or one MCP server (`kind: mcp`) behind the gate, reached through a **backend**: `tunnel` (a node) or `a2a`/`mcp` `{url}` (direct, the operator's own network). |
 | **Tenant** | The owner of services and keys. A team gate has one; Cloud has one per account and one per anonymous session. |
-| **Principal** | Who a request is from, after authentication (§2.3). Every principal has a tenant (possibly none) and a stable `caller_id`. "Caller" and "service" are hats per request, not identities. |
+| **Principal** | Who a request is from, after authentication (§2.3). Every principal has a tenant (possibly none) and a stable `caller_id`. "Caller" and "callee" are hats per request, not identities. |
 | **Gate task** | The task the caller sees. Its id, context id, state, history, artifacts and metadata are the gate's. |
 | **Attempt** | One placement of a gate task on one upstream: `attempts(task_id, n, …)`. A gate task has 1..`1 + task.retries` attempts. Its first dispatch, each follow-up turn and each re-attach are **dispatches** on it (§6.4, §7). |
 | **Upstream task** | The task the service created for an attempt, with the service's own ids. Upstream ids never reach a caller. |
@@ -227,7 +227,7 @@ target is the case for it (D18). An MCP service's `max_sessions_per_principal` d
 budget for callers the gate cannot tell apart would let any of them crowd out, or close, the others' sessions
 (§11.2, D231).
 
-**API key scopes.** `send_message` (the default: call services), `enroll:<service>` and `enroll:*` (enroll node
+**API key scopes.** `call` (the default: call services), `enroll:<service>` and `enroll:*` (enroll node
 keys, [`tunnel.md`](tunnel.md) §5). A key's scopes never grant an operator action.
 
 **API key format.** A key the gate mints is always `kk_<operator prefix>_<random>`. The operator prefix is
@@ -591,7 +591,7 @@ Each row also records its **origin** (`task_events.origin`, migration 0007, D357
 `gate`), `type` (the A2A type that actor sent: the caller's method, `SendMessage` or `SendStreamingMessage`; the
 agent's `Task`, `Message`, `TaskStatusUpdateEvent` or `TaskArtifactUpdateEvent`; the gate's `TaskStatusUpdateEvent`),
 `method` (the A2A method it travelled in: the caller's; the gate's upstream `SendMessage`, `SendStreamingMessage`,
-`GetTask`, `SubscribeToTask` or `CancelTask`; `mcp:call` for the gate's own `/mcp`), `exchange_id` (the traffic
+`GetTask`, `SubscribeToTask` or `CancelTask`; `mcp:send_message` for the gate's own `/mcp`), `exchange_id` (the traffic
 record's exchange that carried it, §13.6, when one was recorded), `converted_to` (the type the gate logged instead,
 §6.3: a `Message` or a `Task` logged as status and artifact events) and, on a caller's first message,
 `context_assigned` (the gate minted its `contextId`, §4). It is written in the event's own transaction by the code that
@@ -1865,8 +1865,8 @@ The gate answers both eras itself (D269):
 
 ### 12.6 Following a `send_message` task with tools
 
-Most MCP hosts give their model tools and nothing else, so a client that sees only tools could call but not follow,
-list, cancel or continue what it called (D332). These tools serve the same `send_message` tasks as the MCP Tasks of §12.2, in
+Most MCP hosts give their model tools and nothing else, so a client that sees only tools could start a task with `send_message` but not
+follow, list, cancel or continue it (D332). These tools serve the same `send_message` tasks as the MCP Tasks of §12.2, in
 both eras, with the same scoping: a `send_message` task of the principal's `caller_id` whose service this replica serves to the
 principal (D303). Another caller's task, a non-`send_message` one, an unknown id and one whose service is no longer served are
 one answer, a `CallToolResult` with `isError` and the text `unknown task`. They read Postgres on any replica and wait
@@ -2022,7 +2022,7 @@ mcpMeta}`, each map at most 16 KiB; a patch over the limit or with a key outside
 §13.1 fails its hook activity non-retryably and is dropped (a metric and an `audit` row). A patch is applied as
 one `metadata` event; `mcpMeta` is
 rendered verbatim into the `_meta` of `CreateTaskResult`, `tasks/get` and `tasks/result` for that task, whatever
-`sh.kontra/` keys the operator writes (the gate never builds them, D51). A node deletes a called job's key once the
+`sh.kontra/` keys the operator writes (the gate never builds them, D51). A node deletes the key of a job it called once the
 task is terminal ([`tunnel.md`](tunnel.md) §2.3).
 
 - **Built in:** no-op activities with the same type names on `kontra-lifecycle`; **`OnTerminal` is the last hook
@@ -2322,7 +2322,7 @@ handles cancel: a2a-cli v0.3.1's exec mode can end `failed` instead of `canceled
 with their milestones (D80). M2 runs the tunnel variants of `replica_kill` (after and before the first upstream
 task id) and `cancel_forwarded`, `input_required_sticky` and `key_scope`, with [`tunnel.md`](tunnel.md) §16's
 `tunnel_kill` and `sidecar_not_a_proxy`, and the helloworld service through the tunnel (D154). M3's are D171's and D189's.
-M4 runs the six `gate_mcp_*` tests (five since D351 withdrew `gate_mcp_call_quote`) and [`tunnel.md`](tunnel.md) §16's `anon_limits`, `anon_lifecycle` and
+M4 runs the six `gate_mcp_*` tests (five since D351 withdrew `gate_mcp_hire_quote`) and [`tunnel.md`](tunnel.md) §16's `anon_limits`, `anon_lifecycle` and
 `login_converts`; the `tck_*` rows run from `make tck`, not `go test` (D279, D282). What ran, and the spec conflict
 met, are D297.
 
@@ -2464,7 +2464,7 @@ pages of at most 100 (`next` is the next page's `before`):
 | `GET /v1/tasks/{id}` | One task, with its snapshot; `404` when unknown. |
 | `GET /v1/tasks/{id}/events` | Server-Sent Events of its log after `Last-Event-ID` (or `after`): `id` the seq, `event` the kind, `data` `{seq, kind, at, stored_apart, payload}`, woken by `NOTIFY kontra_task_events`, with no gap and no duplicate; an ended task's stream closes with `event: end` (`{state, version}`). |
 | `GET /v1/tasks/{id}/files/{ref}` | A part stored apart (§10.4), only for the task whose part it is. |
-| `GET /v1/contexts`, `GET /v1/contexts/{service}/{caller}/{context}` (and their former names `/v1/conversations…`) | Tasks grouped into A2A contexts by service, caller (its caller id) and context id, the scope of a context (§4), newest activity first; one context's tasks oldest first. |
+| `GET /v1/contexts`, `GET /v1/contexts/{service}/{caller}/{context}` (and their former names `/v1/conversations…`) | Tasks grouped into A2A contexts by service, caller (its `caller_id`) and context id, the scope of a context (§4), newest activity first; one context's tasks oldest first. |
 | `GET /v1/tasks/{id}/timeline`, `GET /v1/contexts/{service}/{caller}/{context}/timeline` | A task's or a context's items in time order, then seq: each event with its origin (§5.2), the A2A object the caller received for it (`caller_type`) and its validation against the pinned A2A specification (D359), and the exchanges of either leg that name its tasks and carried no event (§13.6); the context's opening (`assigned`: whether the gate minted its `contextId`) and the callee's own context ids from its attempts. The events stream above carries the same `origin`, `caller_type` and `validation`, live. |
 | `GET /v1/exchanges/{id}` | One exchange: its metadata and, when kept (`traffic.bodies`), its request and response bodies or its stream's frames, each as text (or base64), with its full size, whether it was cut, and its validation. |
 | `GET /v1/services/{name}/cards` | An A2A service's callee card as fetched and its served card, each with the version it is checked against and its validation, and the JSON paths of the served card the gate set or rewrote (§3). |

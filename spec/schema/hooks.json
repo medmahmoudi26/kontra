@@ -110,7 +110,7 @@
             "type": "string",
             "format": "uri"
           },
-          "description": "The extensions the request activated: an A2A caller's A2A-Extensions that the served card declares (AP2's https://github.com/google-agentic-commerce/ap2/v1 among them, relay.md §2.6), or, for a call of the gate's own /mcp, the operator's required card_extensions entries the gate activated for the caller (relay.md §12.2, D300). The gate keys on the URI only; it never reads an extension's data parts for the hook."
+          "description": "The extensions the request activated: an A2A caller's A2A-Extensions that the served card declares (AP2's https://github.com/google-agentic-commerce/ap2/v1 among them, relay.md §2.6), or, for a send_message of the gate's own /mcp, the operator's required card_extensions entries the gate activated for the caller (relay.md §12.2, D300). The gate keys on the URI only; it never reads an extension's data parts for the hook."
         },
         "contextId": {
           "type": "string"

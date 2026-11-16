@@ -25,7 +25,7 @@ there (M4's, D268 onward under the M4 headings, were numbered after M3's review 
 
 | PRD section | Note 1 (tunnel and protocols) | Note 2 (deployment) |
 |---|---|---|
-| §3 Roles | Caller/Service are hats a node wears per request; add **Service** (A2A agent or MCP server behind a node) | — |
+| §3 Roles | Caller/Callee are hats a node wears per request; add **Service** (A2A agent or MCP server behind a node) | — |
 | §4 Architecture | Topology figure replaced | "One binary" → one module, two binaries |
 | §6 Tunnel | `--to` → repeatable `--serve kind:name=target`; stdio bridge; `tunnel.key` → `identity.key` | — |
 | §8 Sealing | Key table collapses to identity key + per-job key; MCP scope (`arguments`, `content`), both-ends-nodes condition | — |
@@ -73,7 +73,7 @@ by a URL elicitation (kontra-cloud#59, D188); that flow is withdrawn with escrow
 
 Since 5 Nov, for an agent whose host shows it only tools: `status` follows a send_message task (its history with `after: 0`,
 then `{after: <cursor>, wait: 25}` in a loop, with MCP progress when the call carries a progress token), `tasks` lists
-what it called, `cancel`, `artifact` and the push tools act on one task, `send_message` takes an `idempotencyKey` (one key, one
+what it created with `send_message`, `cancel`, `artifact` and the push tools act on one task, `send_message` takes an `idempotencyKey` (one key, one
 task) and continues a conversation with the `contextId` its result gives, and `describe` summarizes a service's
 capabilities (§12.6, D332 to D339). Calling a hosted MCP service's tool through `/mcp` is not built: MCP services are
 called at their own URL (D339).

@@ -123,7 +123,7 @@ type Timing struct {
 	// TunnelPing is the tunnel registry's last_ping_at interval and row check (tunnel.LastPingEvery);
 	// TunnelCards a tunnel card's refetch while serving (card.Refresh).
 	TunnelPing, TunnelCards time.Duration
-	// PlainWait is how long /mcp's plain call and reply wait for the task (gatemcp.PlainWait, M4 WP-04).
+	// PlainWait is how long /mcp's plain send_message and reply wait for the task (gatemcp.PlainWait, M4 WP-04).
 	PlainWait time.Duration
 	Executor  relay.ExecutorOptions
 }
@@ -566,7 +566,7 @@ func (r *Replica) assemble() error {
 	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
 		return err
 	}
-	// /mcp's call is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4), with
+	// /mcp's send_message is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4), with
 	// the operator's card_extensions URIs a call activates for the caller (D300), and the service's work queue
 	// re-issuing a keyed send_message's start (§14.5, D338), as the A2A routes have them.
 	sender := &relay.Sender{Handlers: handlers, Log: r.storeLog,

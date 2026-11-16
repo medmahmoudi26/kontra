@@ -88,7 +88,7 @@ func TestGateMCPSendMessageStructured(t *testing.T) {
 	}
 
 	// An operator's refusal code: as it is on /mcp, in the error's data on A2A; no task.
-	const why = "this service's service cannot be paid yet"
+	const why = "this service cannot be paid yet"
 	hook.set(func(h *hookServer) { h.raw = `{"outcome":"deny","refusal":{"code":-32060,"message":"` + why + `"}}` })
 	n := tasks()
 	for name, c := range map[string]func() rpcAnswer{

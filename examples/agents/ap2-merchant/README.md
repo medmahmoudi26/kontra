@@ -1,4 +1,4 @@
-# services/ap2-merchant
+# agents/ap2-merchant
 
 A small A2A 1.0 agent that plays the **Merchant** role of [AP2 v0.2.0](https://github.com/google-agentic-commerce/ap2)
 (the Agent Payments Protocol, released 28 April 2026) for one example item: it answers a merchant-signed checkout,

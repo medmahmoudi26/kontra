@@ -24,7 +24,7 @@ M4. `kontra-gate` relays A2A tasks durably (M1) to agents on a node's localhost 
 MCP servers beside them, over Streamable HTTP or stdio, with end-to-end sealing (M3; [below](#sealed-end-to-end-m3)),
 and since M4:
 
-- serves its own MCP endpoint, `/mcp`: `search`, `describe`, `send_message`, `reply` and the MCP Tasks of what was called, in
+- serves its own MCP endpoint, `/mcp`: `search`, `describe`, `send_message`, `reply` and the MCP Tasks of what `send_message` created, in
   both MCP eras (2025-11-25 and 2026-07-28), so a stock MCP client calls an A2A agent; and, for a client that shows
   its model only tools, `status` (a task's history, and `{after: <cursor>, wait: 25}` to follow it), `tasks`,
   `cancel`, `artifact` and `push_set`/`push_list`/`push_delete`, with `idempotencyKey` on `send_message` for safe retries and
@@ -94,8 +94,8 @@ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp/an
   --method tools/list
 #  → read_file, list_directory, …: the filesystem server on this laptop, as any MCP client sees it
 npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http \
-  --method tools/call --tool-name call --tool-arg service=anon-<…>/hello --tool-arg message=hi
-#  → Hello World, called through the gate's own MCP server (search, describe, call, reply, status, tasks, cancel, …)
+  --method tools/call --tool-name send_message --tool-arg service=anon-<…>/hello --tool-arg message=hi
+#  → Hello World, called through the gate's own MCP server (search, describe, send_message, reply, status, tasks, cancel, …)
 curl -s https://gateway.kontra.run/agents/anon-<…>/hello/.well-known/agent-card.json
 #  → the card, for anyone, with no credential: share the URL
 ```
@@ -400,7 +400,7 @@ migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mc
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)
 compose.dev.yaml   Temporal + Postgres for working on the gate itself
-examples/          services/ (a2a server --exec, helloworld, booking, tck, a2ui, ap2-merchant; temporal-harness, adk, claude-cli to come),
+examples/          agents/ (a2a server --exec, helloworld, booking, tck, a2ui, ap2-merchant; temporal-harness, adk, claude-cli to come),
                    mcp/ (filesystem over stdio, everything), front/ (caddy; agentgateway, ingress to come), sealing/
 scripts/           check_specs.py, the test runners, tck.sh, demo-clean-laptop.sh, team-gate-vps.sh
 test/              e2e/ (two replicas behind a front), pentest/, tck/, demo/ (the clean laptop), vps/

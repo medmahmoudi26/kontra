@@ -110,8 +110,8 @@ func TestREADMEDemoBlock(t *testing.T) {
 		{"a stock MCP client on the node's /mcp/anon-…/fs", func(c string) bool {
 			return regexp.MustCompile(`^npx -y @modelcontextprotocol/inspector@\d+\.\d+\.\d+ --cli http://localhost:7777/mcp/anon-<…>/fs --transport http\s+--method tools/list$`).MatchString(c)
 		}},
-		{"call on /mcp", func(c string) bool {
-			return regexp.MustCompile(`^npx -y @modelcontextprotocol/inspector@\d+\.\d+\.\d+ --cli http://localhost:7777/mcp --transport http\s+--method tools/call --tool-name call --tool-arg service=anon-<…>/hello --tool-arg message=hi$`).MatchString(c)
+		{"send_message on /mcp", func(c string) bool {
+			return regexp.MustCompile(`^npx -y @modelcontextprotocol/inspector@\d+\.\d+\.\d+ --cli http://localhost:7777/mcp --transport http\s+--method tools/call --tool-name send_message --tool-arg service=anon-<…>/hello --tool-arg message=hi$`).MatchString(c)
 		}},
 		{"the public URL without a credential", func(c string) bool {
 			return c == "curl -s https://gateway.kontra.run/agents/anon-<…>/hello/.well-known/agent-card.json"

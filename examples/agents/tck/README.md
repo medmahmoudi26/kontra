@@ -1,4 +1,4 @@
-# services/tck
+# agents/tck
 
 The service the pinned A2A TCK runs against through the gate (`make tck`, [`test/tck`](../../../test/tck/README.md);
 spec/relay.md §16 `tck_*`, D18, D279): a plain a2a-go v2.7.0 agent that does what the TCK's Gherkin scenarios ask

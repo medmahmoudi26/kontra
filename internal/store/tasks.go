@@ -13,7 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// The tasks of the gate's own /mcp (spec/relay.md §12; M4 WP-04). call creates an ordinary A2A gate task through
+// The tasks of the gate's own /mcp (spec/relay.md §12; M4 WP-04). send_message creates an ordinary A2A gate task through
 // the service's work queue and marks it tasks.sent_by_mcp (D272); /mcp's MCP Tasks see only those, of the principal's
 // caller, across services. tasks.elicitation_* is no longer read or written (D351: no URL elicitation on /mcp).
 
@@ -167,7 +167,7 @@ func (l *Log) FindSendMessageKeyed(ctx context.Context, caller uuid.UUID, princi
 }
 
 // FindSendMessageKeyedLocked is FindSendMessageKeyed inside tx, the transaction that creates the task, after taking the
-// transaction-scoped advisory lock of (caller, principal, k.Lock): of two calls with one key arriving together,
+// transaction-scoped advisory lock of (caller, principal, k.Lock): of two send_message calls with one key arriving together,
 // whatever their services and periods, the second waits until the first's transaction ends and then finds its task,
 // so one key is never two tasks.
 func (l *Log) FindSendMessageKeyedLocked(ctx context.Context, tx pgx.Tx, caller uuid.UUID, principal string, k SendMessageKey, since time.Time) (*KeyedSendMessage, error) {

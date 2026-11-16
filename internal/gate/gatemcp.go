@@ -59,7 +59,7 @@ func (r *Replica) servedService(_ context.Context, tenantID uuid.UUID, name stri
 }
 
 // awaitCallCancels waits, at most gatemcp.DetachedWait, for /mcp's detached kontra.cancel Updates and for the modern
-// calls that may still send one (relay.md §12.5, D178): the public listener has stopped, which closed the streams of
+// send_message calls that may still send one (relay.md §12.5, D178): the public listener has stopped, which closed the streams of
 // modern send_message calls still waiting, and each such call's task is being cancelled. A cancel whose Update had not reached
 // Temporal when Run closes the client would be lost, and its task would run unseen; once this returns, each was accepted
 // (by another replica's kontra-lifecycle worker: this one's have stopped) and is in its task's history. A gate of one

@@ -571,7 +571,7 @@ func TestGateMCPSendMessage(t *testing.T) {
 		t.Errorf("another caller's reply: %s", ans.raw)
 	}
 
-	// An MCP service, a ref nobody here may send_message, a malformed one: tool errors, no task.
+	// An MCP service, a ref nobody here may send messages to, a malformed one: tool errors, no task.
 	before := scalar[int64](t, e.pool, `select count(*) from kontra.tasks`)
 	_, ans = c.call("send_message", `{"service":"web","message":"hi"}`)
 	if mr := ans.tool(t); !mr.IsError || !strings.Contains(mr.text(), a.url+"/mcp/web") {

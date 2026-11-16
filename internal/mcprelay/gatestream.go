@@ -8,7 +8,7 @@ import (
 
 // GateStream is the relay's gate-served event stream (gateStream, §11.7) for the gate's own /mcp (internal/gatemcp,
 // M4 WP-04): a tasks/result response stream, whose events carry id: k.<taskId>.<seq>; a session's GET stream, whose
-// events carry no id (relay.md §12.3); and a plain call's answer, kept alive while it waits. Its headers are written
+// events carry no id (relay.md §12.3); and a plain send_message's answer, kept alive while it waits. Its headers are written
 // once, by Start or the first event; the stream is flushed after each write.
 type GateStream struct{ s *gateStream }
 

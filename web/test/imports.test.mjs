@@ -10,7 +10,7 @@ import { JS, code, walk } from "./helpers.mjs";
 
 const REMOVED = [
   "inputschema.js", "prices.js", "session.js", "devicekey.js", "jobkeys.js", "keysync.js", "confirm.js",
-  "call.js", "login.js", "passkey.js", "consent.js", "listing.js", "mcpconfig.js", "age.js",
+  "hire.js", "login.js", "passkey.js", "consent.js", "listing.js", "mcpconfig.js", "age.js",
   "views/apikeys.js", "views/billing.js", "views/catalog.js", "views/disputes.js", "views/devices.js",
   "views/network.js", "views/oauth.js", "views/passkeys.js", "views/recipients.js", "views/service.js",
   "views/signin.js",

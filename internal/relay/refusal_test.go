@@ -41,13 +41,13 @@ func TestDeniedCodes(t *testing.T) {
 		{-32602, a2a.ErrInvalidParams, false, -32602}, // an A2A code is its error
 		{-32004, a2a.ErrUnsupportedOperation, false, -32004},
 	} {
-		err := denied(&hooks.Refusal{Code: c.code, Message: "this service's service cannot be paid yet"})
+		err := denied(&hooks.Refusal{Code: c.code, Message: "this service cannot be paid yet"})
 		var oe *OperatorRefusalError
-		if !errors.Is(err, c.sentinel) || errors.As(err, &oe) != c.operator || err.Error() != "this service's service cannot be paid yet" {
+		if !errors.Is(err, c.sentinel) || errors.As(err, &oe) != c.operator || err.Error() != "this service cannot be paid yet" {
 			t.Errorf("%d: %v (operator %v)", c.code, err, oe)
 			continue
 		}
-		if code, msg := CodeOf(err); code != c.mcp || msg != "this service's service cannot be paid yet" {
+		if code, msg := CodeOf(err); code != c.mcp || msg != "this service cannot be paid yet" {
 			t.Errorf("%d: CodeOf %d %q, want %d", c.code, code, msg, c.mcp)
 		}
 		// The A2A bindings: JSON-RPC and HTTP+JSON, as the gate writes them (sse, held to a2a-go by TestErrorMappingDrift).

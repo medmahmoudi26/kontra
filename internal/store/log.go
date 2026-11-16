@@ -564,7 +564,7 @@ type NewTask struct {
 	// Origin is the `task` row's origin (D357): the caller's first message; nil writes none.
 	Origin *Origin
 	// Provisional leaves the task unexposed (tasks.exposed_at null, D362): a new A2A message the caller awaits the
-	// answer to (not returnImmediately, not a /mcp call), until the callee's first answer shows it is a task. Every
+	// answer to (not returnImmediately, not a /mcp send_message), until the callee's first answer shows it is a task. Every
 	// other task is exposed at creation.
 	Provisional bool
 }

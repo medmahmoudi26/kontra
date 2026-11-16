@@ -654,7 +654,7 @@ differences:
   the service it was initialized for only: a request on it to another path, or on an unsealed session to a service
   whose pin says sealed, is `404`, and the client initializes again (D260).
 
-Sealing and unsealing for called jobs happen in the node, around this forwarding ([`ext-sealed.md`](ext-sealed.md)).
+Sealing and unsealing for the jobs a node calls happen in the node, around this forwarding ([`ext-sealed.md`](ext-sealed.md)).
 
 ## 10. MCP servers on the node: stdio and roots
 

@@ -111,7 +111,7 @@ var errLifecycleUnavailable = errors.New("gatemcp: the task's lifecycle is unava
 
 // load is the reader's send_message task taskID names, nil when it names none of them, and asked, the seq of the task or status
 // event its state comes from, read with it (store.Log.LoadSentByMCPAsked): at input-required, the event that asked the
-// question the row carries, whose gate id k.<taskId>.<asked> names it (§12.4). A principal that may not send_message (spec
+// question the row carries, whose gate id k.<taskId>.<asked> names it (§12.4). A principal that may not send messages (spec
 // §2.3) has none: the handler refuses it before (403), and this holds for every caller of SendMessageTasks. Nor does a reader
 // whose task's service this replica no longer serves to it (disabled, its allow: no longer admitting the reader, a
 // row the registry refused), as the A2A route answers GetTask, CancelTask and a follow-up of it "unknown service"
@@ -341,7 +341,7 @@ func (t *SendMessageTasks) List(ctx context.Context, rd Reader, params json.RawM
 		cursor = s
 	}
 	if !rd.Principal.MayCall() {
-		return json.RawMessage(`{"tasks":[]}`), nil, nil // as load: a principal that may not send_message has no send_message tasks
+		return json.RawMessage(`{"tasks":[]}`), nil, nil // as load: a principal that may not send messages has no send_message tasks
 	}
 	rows, next, err := t.log.ListSentByMCP(ctx, rd.Principal.CallerID, cursor)
 	if errors.Is(err, store.ErrBadCursor) {

@@ -6368,4 +6368,5 @@ since they fetch `seller-jwks.json`; they fail loudly and need the upgrade.
 
 The decisions before this one keep their words: read hire as call (or `send_message` where it names the `/mcp` tool),
 buyer as caller and seller as service. Migrations 0001 to 0008 keep theirs too, byte for byte, since goose checks
-applied files.
+applied files, and so do the run records (`docs/gate-runs-m4.md`, `docs/pentest-m3.md`), which quote commands and
+output as they ran.

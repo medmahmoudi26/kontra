@@ -150,7 +150,7 @@ func TestGateMCPReviewFixes(t *testing.T) {
 		t.Errorf("send_message calls of the service requiring an extension created %d tasks", n-before)
 	}
 	if n := esc.count("SendMessage") + esc.count("SendStreamingMessage"); n != 0 {
-		t.Errorf("the service of the service requiring an extension received %d messages", n)
+		t.Errorf("the service requiring an extension received %d messages", n)
 	}
 
 	// An enroll-only key sharing the send_message key's caller.

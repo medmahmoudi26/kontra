@@ -1,4 +1,4 @@
-# services/helloworld
+# agents/helloworld
 
 The a2a-samples helloworld service, **unmodified**, hosted at a gate through `kontra connect` (the tunnel, M2).
 It is PRD §18's test for every service-facing change ("can the helloworld sample still run unmodified?") and the

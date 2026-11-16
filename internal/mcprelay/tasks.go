@@ -595,7 +595,7 @@ func writeRPCError(w http.ResponseWriter, sid string, id json.RawMessage, e *mcp
 }
 
 // Respond takes a client's JSON-RPC response whose id is a gate request id (§11.5 step 5, §11.7): the answer to
-// the input request at that seq of a task of the caller's caller is logged as an input_response event once, under
+// the input request at that seq of a task of the caller's caller_id is logged as an input_response event once, under
 // the task's version, with the sealed envelope its result carries kept on a sealed service (D174), and
 // kontra.input_response is signalled. The client gets 202 whatever happens (an unknown, foreign or already
 // answered id is dropped); it reports whether the response was logged.

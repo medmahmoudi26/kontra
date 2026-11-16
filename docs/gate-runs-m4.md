@@ -29,7 +29,7 @@ Times are UTC.
 | [`tck_*` green bar with expected failures](#the-tck-tck_) | **Green in CI** on pull request #8, [`tck` run 41243927553](https://github.com/medmahmoudi26/kontra/actions/runs/41243927553): the direct, tunnel and caddy jobs, both bindings each, 0 failed, 0 xpassed, every listed expected failure xfailed and every listed skip skipped ([per variant](#in-ci-on-the-pull-request)). **Green on this host** before, for the same three variants | `3b890f3` (this host), **`4a53750`** (CI; the merge commit's tree) | nothing: the nightly `auth` variant's first run passed ([below](#the-nightly-auth-variant)) |
 | [`anon_limits`](#anon_limits) | **Passed**: `TestAnonLimits` on its own with `-v`, and in the second review's full `make test-e2e` on the same tree; then in CI's `e2e` workflow on pull request #8 (`--- PASS: TestAnonLimits (64.33s)`) | `3b890f3`, **`4a53750`** (CI) | nothing |
 | Demo from a clean laptop against staging ([staging](#the-staging-gate-gatewaykontrarun), [the laptop](#the-clean-laptop-against-staging)) | **Passed** in source mode against the staging gate deployed from `3b890f3`, and **passed in published mode at the merge commit** ([the published run](#the-published-run-at-the-merge-commit)): `go install kontra.sh/kontra/cmd/kontra@latest` installed `v0.0.0-20261031215600-4831e40fc393`, against the staging gate [redeployed from `4831e40`](#redeployed-from-the-merge-commit); commands 1 to 10 and the host checks passed, exit 0 | `3b890f3` (source), **`4831e40`** (published; the laptop and the staging gate) | nothing: **an anonymous tenant's purge was observed on staging** at 2026-11-02 23:43:09Z, 8 s after it fell due ([the purge, observed](#the-purge-observed-2-nov)) |
-| [Team gate up on a clean VPS](#the-team-gate-on-a-clean-vps) | **Failed at `3b890f3`** at `docker compose up -d --build --wait`, on a defect of `compose.yaml` (two services built one image tag, which races on a fresh Ubuntu 24.04's containerd image store). **Passed at `f9f5e61`** with D313's fix: one build on Docker 29.1.3's containerd store, a Let's Encrypt certificate, a call and an MCP `search` through the gate from another machine. Both droplets were torn down and the teardowns checked | `3b890f3` (failed), **`f9f5e61` (passed)** | nothing |
+| [Team gate up on a clean VPS](#the-team-gate-on-a-clean-vps) | **Failed at `3b890f3`** at `docker compose up -d --build --wait`, on a defect of `compose.yaml` (two services built one image tag, which races on a fresh Ubuntu 24.04's containerd image store). **Passed at `f9f5e61`** with D313's fix: one build on Docker 29.1.3's containerd store, a Let's Encrypt certificate, a hire and an MCP `search` through the gate from another machine. Both droplets were torn down and the teardowns checked | `3b890f3` (failed), **`f9f5e61` (passed)** | nothing |
 
 Every gate item has a passing run, and D306's condition on the merge, the published clean-laptop run at the merge
 commit, passed at `4831e40` (22:05:54Z–22:08:42Z) against staging redeployed from it. **M4 is fully gated**: D306's
@@ -181,7 +181,7 @@ became the slug `kontra connect` printed. Every other command ran as written.
 | 5–6 | `a2a server --exec 'echo Hello World' --port 9999 &`; `kontra connect --gate https://gateway.kontra.run --serve a2a:hello=… --serve 'mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem@1.0.0 ~/docs' --public hello &` | the slug `anon-2d1d2dc15fff9177` |
 | 7 | `a2a send -a http://localhost:7777/agents/anon-…/hello/.well-known/agent-card.json "hi"` | `Status: completed`, artifact `Hello World` |
 | 8 | `npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp/anon-…/fs --transport http --method tools/list` | lists `read_file` |
-| 9 | the same client on `http://localhost:7777/mcp`, `tools/call` `send_message` `service=anon-…/hello` `message=hi` | `"Hello World\n"`, `TASK_STATE_COMPLETED` |
+| 9 | the same client on `http://localhost:7777/mcp`, `tools/call` `hire` `service=anon-…/hello` `message=hi` | `"Hello World\n"`, `TASK_STATE_COMPLETED` |
 | 10 | `curl -s https://gateway.kontra.run/agents/anon-…/hello/.well-known/agent-card.json` | the card naming the public URL, signed (kid `Tzgy-…`, `jku` the gate's JWKS), extension `https://kontra.sh/ext/anonymous/v1` with `expiresAt` `2026-10-31T21:28:21Z` |
 
 From the build host, with no credential, while the laptop's node was connected: the public card (200, naming the
@@ -206,7 +206,7 @@ building kontra-demo:3b890f3794e4 (target laptop-src) from git archive 3b890f379
   laptop | kontra-demo: ok 7: "Hello World"
   laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp/anon-2d1d2dc15fff9177/fs --transport http   --method tools/list
   laptop | kontra-demo: ok 8: "read_file"
-  laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http   --method tools/call --tool-name call --tool-arg service=anon-2d1d2dc15fff9177/hello --tool-arg message=hi
+  laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http   --method tools/call --tool-name hire --tool-arg service=anon-2d1d2dc15fff9177/hello --tool-arg message=hi
   laptop |       "text": "Hello World\n"
   laptop |     "state": "TASK_STATE_COMPLETED"
   laptop | kontra-demo: ok 9: "Hello World"
@@ -259,7 +259,7 @@ staging gate [redeployed from the same commit](#redeployed-from-the-merge-commit
 | 5–6 | `a2a server …`; `kontra connect --gate https://gateway.kontra.run … --public hello &` | the slug `anon-0d0d079ae3f6c7a5` |
 | 7 | `a2a send -a http://localhost:7777/agents/anon-…/hello/.well-known/agent-card.json "hi"` | `Status: completed (2026-10-31T22:07:51Z)`, artifact `Hello World` |
 | 8 | the inspector's `tools/list` on `http://localhost:7777/mcp/anon-…/fs` | lists `read_file` |
-| 9 | the inspector's `tools/call` `send_message` on `http://localhost:7777/mcp`, `service=anon-…/hello` `message=hi` | `"Hello World\n"`, `TASK_STATE_COMPLETED` |
+| 9 | the inspector's `tools/call` `hire` on `http://localhost:7777/mcp`, `service=anon-…/hello` `message=hi` | `"Hello World\n"`, `TASK_STATE_COMPLETED` |
 | 10 | `curl -s https://gateway.kontra.run/agents/anon-…/hello/.well-known/agent-card.json` | the card naming the public URL, signed (ES256, kid `Tzgy-…`, `jku` `https://gateway.kontra.run/.well-known/jwks.json`), extension `https://kontra.sh/ext/anonymous/v1` with `expiresAt` `2026-11-01T00:07:49Z` |
 
 From the build host, with no credential, while the laptop's node was connected: the public card (naming the URL); a
@@ -288,7 +288,7 @@ building kontra-demo:4831e40fc393 (target laptop) from git archive 4831e40fc393
   laptop | kontra-demo: ok 7: "Hello World"
   laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp/anon-0d0d079ae3f6c7a5/fs --transport http   --method tools/list
   laptop | kontra-demo: ok 8: "read_file"
-  laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http   --method tools/call --tool-name call --tool-arg service=anon-0d0d079ae3f6c7a5/hello --tool-arg message=hi
+  laptop | $ npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http   --method tools/call --tool-name hire --tool-arg service=anon-0d0d079ae3f6c7a5/hello --tool-arg message=hi
   laptop |       "text": "Hello World\n"
   laptop |     "state": "TASK_STATE_COMPLETED"
   laptop | kontra-demo: ok 9: "Hello World"
@@ -352,7 +352,7 @@ TCK's compatibility report names as failed requirements exactly the listed expec
 (D5), PUSH-CREATE-001 and CORE-LIST-001 to 005 (D20, anonymous callers), CORE-HIST-001 and 002 (a2a-tck#242) and
 CORE-HIST-003 (D7); in http_json the same without CORE-HIST-001 and 002, plus CORE-CANCEL-002 (a2a-tck#231). The JUnit,
 HTML and compatibility reports and every process's log are kept with the run's evidence. Each run's trap dropped its
-database, stopped its processes (gate, service, node, Caddy, Temporal) and removed its directory: no `tck_` database
+database, stopped its processes (gate, seller, node, Caddy, Temporal) and removed its directory: no `tck_` database
 and no process was left.
 
 The TCK checkout first named for the runs had a modified `uv.lock` (rewritten by a newer `uv`), which `scripts/tck.sh`
@@ -391,7 +391,7 @@ http_json 90 passed, 172 skipped, 3 xfailed (3 of 3, 8 of 8); 0 failed, 0 xpasse
 of two replicas behind the Front as a PROXY v2 forwarder, with `tunnel.anonymous` compressed (`ttl` 60 s, the caps
 3/4/4/8/8, `parts_bytes` 1 MiB, `max_tenants` 12; D297), a 4th anonymous tenant from one /24 and from one IPv6 /48 is
 `rate_limited`, one past `max_tenants` is `anonymous_unavailable`, a 5th service is `service_denied`, the 5th concurrent
-task and the 9th concurrent call, stream and calling stream are `429`, parts over the total are refused, the services
+task and the 9th concurrent call, stream and hiring stream are `429`, parts over the total are refused, the services
 are absent from `search`, and at `expires_at` the session closes `revoked` and the URLs answer 404.
 
 | | |
@@ -412,7 +412,7 @@ The plan's run C, gate item "team gate up on a clean VPS": `scripts/team-gate-vp
 `compose.yaml` on a throwaway DigitalOcean droplet. **The first run, at `3b890f3`, failed at step 4 on a defect of
 `compose.yaml`.** D313 fixed it (`2eb8041`), and **the rerun, at `f9f5e61`, passed**: compose built the gate's image
 once on a fresh droplet's containerd image store, the gate got its Let's Encrypt certificate, and a node on another
-machine enrolled; its service was called through the gate with an API key and found through `/mcp`. Both droplets and
+machine enrolled; its service was hired through the gate with an API key and found through `/mcp`. Both droplets and
 both DNS records were deleted by the script's trap, and each teardown was checked by hand.
 
 | | First run | Rerun |
@@ -559,9 +559,9 @@ The same procedure on a second droplet, at the head that has D313.
 | DNS | A `m4-teamgate.kontra.run` → `157.230.110.237`, id **`2d7f37ac23e44fb9f1c5bc07bbbf8d02`**, comment "M4 VPS gate run, delete after"; 1.1.1.1 resolved it before step 4 |
 | `docker compose up -d --build --wait` | **exit 0 in 232 s**, one build (`#17 naming to docker.io/library/kontra-gate:m4 done`); `gate-migrate`, `temporal-schema` and `temporal-namespace` exited 0 (`gate` and `temporal` start only on their successful completion); `postgres` and `gate` healthy, `temporal` up |
 | From the build host | `/healthz` 200; the certificate's issuer `C = US, O = Let's Encrypt, CN = YE2`, subject `CN = m4-teamgate.kontra.run`; ports 22 and 443 open, 80, 5432, 7233, 8443 and 9090 closed |
-| Minted on the VPS | an API key `m4run` (scope `call`, tenant `default`) and a single-use enrollment token for `hello`; neither recorded |
+| Minted on the VPS | an API key `m4run` (scope `hire`, tenant `default`) and a single-use enrollment token for `hello`; neither recorded |
 | The team member | `kontra-demo:f9f5e61b3ae6`, built on this host for this head, as container `kontra-teammate-1793480911` on the default bridge: `kontra` installed from the image's source (`git archive f9f5e61b3ae6`, `go install ./cmd/kontra`), `a2a-cli` v0.3.1 (`go install …@v0.3.1`), `a2a server --exec 'echo Hello World'`, `kontra connect --enroll`: "connected to https://m4-teamgate.kontra.run as k1_vjqsoszafrmkmzlyco6wrfpihp (tenant default, …)", `hello` at `/agents/hello` |
-| Called with the key | `SendMessage` "hi" with `curl` to `https://m4-teamgate.kontra.run/agents/hello`: a task with the artifact `Hello World\n`; `a2a send` with the host's `a2a` (the clean laptop's host check used the same binary, which reports `v0.3.2-0.20261016125318-609d0b5dd28f`): `Status: completed`, artifact `Hello World`; MCP `initialize` and `tools/call` `search` on `/mcp`: `services` `[{ref: hello, kind: a2a, available: true}]` |
+| Hired with the key | `SendMessage` "hi" with `curl` to `https://m4-teamgate.kontra.run/agents/hello`: a task with the artifact `Hello World\n`; `a2a send` with the host's `a2a` (the clean laptop's host check used the same binary, which reports `v0.3.2-0.20261016125318-609d0b5dd28f`): `Status: completed`, artifact `Hello World`; MCP `initialize` and `tools/call` `search` on `/mcp`: `services` `[{ref: hello, kind: a2a, available: true}]` |
 | Recorded | `docker compose ps`: `gate` healthy on `0.0.0.0:443->8443`, `[::]:443->8443` and `127.0.0.1:9090`, `postgres` healthy, `temporal` up; `docker compose images`: `gate` and `gate-migrate` both on `kontra-gate:m4`, image `0652b5e9f172`; `kontra-gate version`: `kontra-gate m4 (go1.26.10, linux/amd64)`; the digests below |
 | Lifetime and cost | 11 min 6 s; at most $0.0357 (billed as one hour at $0.035710/h), about $0.0066 pro rata |
 | Teardown | the script's EXIT trap: the team member's container and the `kontra-demo` image removed, the DNS record deleted by id, then the droplet, `ssh-keygen -R` for its address, its temporary directory removed: "torn down; nothing left"; then `--teardown-only` (exit 0, "nothing of a run is left"); checked (below) |
@@ -614,7 +614,7 @@ port 5432: closed
 port 7233: closed
 port 8443: closed
 port 9090: closed
-minted API key "m4run": principal key:kk_m4run_…, tenant default, …, scopes call; the key is shown once
+minted API key "m4run": principal key:kk_m4run_…, tenant default, …, scopes hire; the key is shown once
 minted an enrollment token for service hello (tenant default): single use, valid until 2026-10-31T21:29:47Z; it is shown once
 an API key kk_… and a token for hello (neither recorded)
 the team member's clean machine: kontra-teammate-1793480911
@@ -680,7 +680,7 @@ Its state was read back read-only at 22:12Z for this record.
 | Image | `docker.io/library/kontra-gate:4831e40`, in both containers, image id `sha256:a6cc1a36e5daf7b4c3d94d3000c41f9e448913f0279160ca1d44cee606bfc0ab` |
 | Migration | `migrate`: `OK up 0003_m4.sql (37ms)`, `database at version 3; this gate needs 3` |
 | The gate | `replica ready to serve`, version `4831e40`, tenancy single, `services` 4; 0 restarts and no `ERROR` log line at 22:12Z |
-| `/mcp` | with the owner's API key: `initialize`'s `serverInfo` names version `4831e40`; `tools/call` `search` lists the four services, `hello`, `hello-tunnel`, `everything` and `fs`; `tools/call` `send_message` of `hello-tunnel` completes through the node (the gate's log: a `gate-mcp` session on `/mcp` at 21:59:40Z, `call created a task` for `hello-tunnel` at 21:59:43Z, its tunnel attempt placed on the node's session) |
+| `/mcp` | with the owner's API key: `initialize`'s `serverInfo` names version `4831e40`; `tools/call` `search` lists the four services, `hello`, `hello-tunnel`, `everything` and `fs`; `tools/call` `hire` of `hello-tunnel` completes through the node (the gate's log: a `gate-mcp` session on `/mcp` at 21:59:40Z, `hire created a task` for `hello-tunnel` at 21:59:43Z, its tunnel attempt placed on the node's session) |
 | Unchanged | both nodes reconnected on their own: `hello-tunnel`'s at 21:59:02Z, the MCP node's (`everything`, `fs`) at 21:59:16Z, and both MCP services opened sessions through it (21:59:20Z, 21:59:24Z); the MCP services and the A2A services `hello` and `hello-tunnel` answer as at M3; `/healthz` 200 at 22:04Z and 22:09Z |
 | Rollback | M3's image `kontra-gate:98a9f25` (revision 4) stays imported |
 

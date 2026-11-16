@@ -352,7 +352,7 @@ func (h *Handler) pinned(rq *request) {
 	}
 	if m := rq.msg; m != nil && m.Method == "" && isGateRequestID(m.ID) {
 		// §11.7: a client response to a gate-minted request id is the gate's: logged once as an input_response
-		// when it answers an input request of a task of the caller's caller, else dropped; 202 either way.
+		// when it answers an input request of a task of the caller's caller_id, else dropped; 202 either way.
 		if h.deps.Tasks != nil {
 			h.deps.Tasks.Respond(rq.ctx(), h.caller(rq), m, rq.body, h.sealed(rq))
 		}
@@ -422,7 +422,7 @@ func (h *Handler) pinned(rq *request) {
 // k.<taskId>.<seq>, a gate task id as the gate writes it (a UUID, lowercase and hyphenated) and a decimal sequence
 // number without sign or leading zero. An upstream's own id that merely starts with "k." is not one: its client's
 // answer is forwarded like every other response (§11.2: upstream ids pass unchanged). Tasks.Respond then also
-// requires an input request of a task of the caller's caller.
+// requires an input request of a task of the caller's caller_id.
 func isGateRequestID(id json.RawMessage) bool {
 	id = bytes.TrimSpace(id)
 	if len(id) == 0 || id[0] != '"' {
