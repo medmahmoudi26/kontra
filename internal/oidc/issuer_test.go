@@ -151,7 +151,7 @@ func TestIssuerRevocationFeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	p, err := iss.Principal(ctx, alice, a2aAud, auth.ViaOIDC)
-	if err != nil || p.ID != "oidc:sub:alice" || p.Via != auth.ViaOIDC || p.BuyerID != BuyerID(as.Issuer(), "alice") || p.TenantID != nil {
+	if err != nil || p.ID != "oidc:sub:alice" || p.Via != auth.ViaOIDC || p.CallerID != CallerID(as.Issuer(), "alice") || p.TenantID != nil {
 		t.Fatalf("a token with a sid: %+v %v", p, err)
 	}
 
@@ -394,8 +394,8 @@ func TestA2A(t *testing.T) {
 	for _, alg := range []string{oidctest.AlgES256, oidctest.AlgRS256, oidctest.AlgEdDSA} {
 		tok := as.MustSign(oidctest.Token{Alg: alg, Subject: "bob", Audience: []string{"https://elsewhere.example", a2aAud}, Session: "s-b", Expiry: exp})
 		p, err := a2a.VerifyA2A(ctx, tok)
-		if err != nil || p.Kind != auth.KindOIDC || p.ID != "oidc:sub:bob" || p.Via != auth.ViaOIDC || p.BuyerID != BuyerID(as.Issuer(), "bob") ||
-			!p.MayHire() || p.Scopes != nil {
+		if err != nil || p.Kind != auth.KindOIDC || p.ID != "oidc:sub:bob" || p.Via != auth.ViaOIDC || p.CallerID != CallerID(as.Issuer(), "bob") ||
+			!p.MayCall() || p.Scopes != nil {
 			t.Errorf("%s: %+v %v", alg, p, err)
 		}
 	}

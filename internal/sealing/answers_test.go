@@ -17,12 +17,12 @@ import (
 	"kontra.sh/kontra/internal/pins"
 )
 
-// The hiring node reads every answer of a sealed job as the local client does, whatever the gate labels it, so that
+// The calling node reads every answer of a sealed job as the local client does, whatever the gate labels it, so that
 // rule 4a holds against an active gate (ext-sealed.md §5, §7 "A gate forging a reply: Yes for service content").
 
-// hiredRequest has the hiring node seal one local send to the sealed echo service (a new task), JSON-RPC or HTTP+JSON,
+// sentByMCPRequest has the calling node seal one local send to the sealed echo service (a new task), JSON-RPC or HTTP+JSON,
 // streaming or not.
-func hiredRequest(t *testing.T, g *fakeGate, binding string, stream bool) (*http.Request, *Job) {
+func sentByMCPRequest(t *testing.T, g *fakeGate, binding string, stream bool) (*http.Request, *Job) {
 	t.Helper()
 	msg := map[string]any{"messageId": uuid.NewString(), "role": "ROLE_USER", "parts": []any{map[string]any{"text": "hello"}}}
 	var (
@@ -51,7 +51,7 @@ func hiredRequest(t *testing.T, g *fakeGate, binding string, stream bool) (*http
 	return req, job
 }
 
-// gateAnswer has the hiring node open a 200 answer of the gate's labelled ct ("" none) and returns what the local
+// gateAnswer has the calling node open a 200 answer of the gate's labelled ct ("" none) and returns what the local
 // client gets.
 func gateAnswer(t *testing.T, g *fakeGate, req *http.Request, job *Job, ct string, body io.Reader) (*http.Response, string) {
 	t.Helper()
@@ -61,7 +61,7 @@ func gateAnswer(t *testing.T, g *fakeGate, req *http.Request, job *Job, ct strin
 	}
 	out, err := g.hr.h.Response(context.Background(), job, &http.Response{StatusCode: 200, Request: req, Header: h, Body: io.NopCloser(body)})
 	if err != nil {
-		t.Fatalf("hiring Response: %v", err)
+		t.Fatalf("calling Response: %v", err)
 	}
 	return out, readAll(t, out)
 }
@@ -88,31 +88,31 @@ func forgedEvent(jsonrpc bool) string {
 // Finding: a 2xx answer of a sealed job labelled anything but JSON (or not at all), or labelled SSE for a unary
 // request, went to the local client unopened, which a2a-go decodes as JSON all the same; a stream's answer without a
 // Content-Type (which a2a-go reads as SSE) did too. Every one is opened now, and a forgery is refused (sealed_rejected).
-func TestHiringOpensEveryAnswer(t *testing.T) {
+func TestCallingOpensEveryAnswer(t *testing.T) {
 	task := uuid.NewString()
 	for _, ct := range []string{"text/plain", "application/octet-stream", "", "text/event-stream", "application/json"} {
 		g := newFakeGate(t)
-		req, job := hiredRequest(t, g, "jsonrpc", false)
+		req, job := sentByMCPRequest(t, g, "jsonrpc", false)
 		if _, got := gateAnswer(t, g, req, job, ct, strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":`+forgedTask(task)+`}`)); !refused(got) {
 			t.Errorf("a unary JSON-RPC answer labelled %q: %s", ct, got)
 		}
 	}
 	for _, ct := range []string{"text/plain", ""} {
 		g := newFakeGate(t)
-		req, job := hiredRequest(t, g, "rest", false)
+		req, job := sentByMCPRequest(t, g, "rest", false)
 		if _, got := gateAnswer(t, g, req, job, ct, strings.NewReader(forgedTask(task))); !refused(got) {
 			t.Errorf("a unary HTTP+JSON answer labelled %q: %s", ct, got)
 		}
 	}
 	for _, ct := range []string{"", "text/plain", "x/y;;;", "application/json"} {
 		g := newFakeGate(t)
-		req, job := hiredRequest(t, g, "jsonrpc", true)
+		req, job := sentByMCPRequest(t, g, "jsonrpc", true)
 		if _, got := gateAnswer(t, g, req, job, ct, strings.NewReader(forgedEvent(true))); !refused(got) {
 			t.Errorf("a JSON-RPC stream labelled %q: %s", ct, got)
 		}
 	}
 	g := newFakeGate(t)
-	req, job := hiredRequest(t, g, "rest", true)
+	req, job := sentByMCPRequest(t, g, "rest", true)
 	if _, got := gateAnswer(t, g, req, job, "application/octet-stream", strings.NewReader(forgedEvent(false))); !refused(got) {
 		t.Errorf("an HTTP+JSON stream labelled application/octet-stream: %s", got)
 	}
@@ -167,9 +167,9 @@ func (r *repeated) Read(p []byte) (int, error) {
 // Finding: an answer over the node's bound (64 MiB) went to the local client unopened. It is refused now: the job's
 // failed status when the node knows its task, else a JSON-RPC error; and an answer that is not JSON at all for a
 // known task is the task's failed status.
-func TestHiringRefusesUnreadableAnswers(t *testing.T) {
+func TestCallingRefusesUnreadableAnswers(t *testing.T) {
 	g := newFakeGate(t)
-	req, job := hiredRequest(t, g, "jsonrpc", false)
+	req, job := sentByMCPRequest(t, g, "jsonrpc", false)
 	big := io.MultiReader(strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"t","status":{"message":{"messageId":"m","parts":[{"text":"FORGED`),
 		&repeated{n: maxBody, b: 'x'}, strings.NewReader(`"}]}}}}}`))
 	resp, got := gateAnswer(t, g, req, job, "application/json", big)
@@ -220,7 +220,7 @@ func TestHiringRefusesUnreadableAnswers(t *testing.T) {
 // beside it ended the job and deleted its key. Each is refused now (sealed_rejected), and the job is kept. (The job
 // has its gate task already, as after the first answer: a new task's provisional key, which no refused answer named a
 // task for, goes with its exchange, M3 review robustness-2.)
-func TestHiringLoneCaseVariants(t *testing.T) {
+func TestCallingLoneCaseVariants(t *testing.T) {
 	task := uuid.NewString()
 	art := `[{"artifactId":"a","parts":[{"text":"FORGED by the gate"}]}]`
 	st := `{"state":"TASK_STATE_COMPLETED","message":{"messageId":"s","role":"ROLE_AGENT","parts":[{"text":"FORGED status"}]}}`
@@ -240,7 +240,7 @@ func TestHiringLoneCaseVariants(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := newFakeGate(t)
-			req, job := hiredRequest(t, g, tc.binding, tc.stream)
+			req, job := sentByMCPRequest(t, g, tc.binding, tc.stream)
 			g.hr.h.mu.Lock()
 			err := g.hr.h.renameJob(job.job, task)
 			g.hr.h.mu.Unlock()
@@ -261,12 +261,12 @@ func TestHiringLoneCaseVariants(t *testing.T) {
 	}
 }
 
-// sealedMCPSession is a hiring node whose MCP session sid the gate initialized for a service whose initialize
+// sealedMCPSession is a calling node whose MCP session sid the gate initialized for a service whose initialize
 // result carries the sealed capability (the pin records it sealed).
-func sealedMCPSession(t *testing.T) (*fixture, *hirer, string) {
+func sealedMCPSession(t *testing.T) (*fixture, *callingNode, string) {
 	t.Helper()
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{})
+	hr := newCallingNode(t, f, pins.Options{})
 	const sid = "gate-session-strict"
 	_, initJob := mcpLocal(t, hr, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}`)
 	mcpAnswer(t, hr, initJob, `{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":"2025-11-25","capabilities":{"experimental":{"sh.kontra/sealed":`+
@@ -274,8 +274,8 @@ func sealedMCPSession(t *testing.T) (*fixture, *hirer, string) {
 	return f, hr, sid
 }
 
-// mcpGateAnswer has the hiring node open a gate's answer to job with status and Content-Type ct ("" none).
-func mcpGateAnswer(t *testing.T, hr *hirer, job *Job, status int, ct string, body io.Reader) (*http.Response, string) {
+// mcpGateAnswer has the calling node open a gate's answer to job with status and Content-Type ct ("" none).
+func mcpGateAnswer(t *testing.T, hr *callingNode, job *Job, status int, ct string, body io.Reader) (*http.Response, string) {
 	t.Helper()
 	h := http.Header{}
 	if ct != "" {
@@ -283,18 +283,18 @@ func mcpGateAnswer(t *testing.T, hr *hirer, job *Job, status int, ct string, bod
 	}
 	out, err := hr.h.Response(context.Background(), job, &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(body)})
 	if err != nil {
-		t.Fatalf("hiring Response: %v", err)
+		t.Fatalf("calling Response: %v", err)
 	}
 	got := readAll(t, out)
-	job.Done() // the exchange's end, as the hiring server's
+	job.Done() // the exchange's end, as the calling server's
 	return out, got
 }
 
-// Finding: on a sealed session the hiring node passed the local client any gate message that failed strict parsing,
+// Finding: on a sealed session the calling node passed the local client any gate message that failed strict parsing,
 // any answer not labelled JSON or SSE and any body over its bound, so an ambiguous unsealed result ("isError" beside
 // "ISERROR") reached a JS client as plaintext content. Each is refused now like an unsealed result: the JSON answer
 // is the node's sealed_rejected error, and an event stream ends before the event.
-func TestHiringMCPRefusesUnreadableAnswers(t *testing.T) {
+func TestCallingMCPRefusesUnreadableAnswers(t *testing.T) {
 	_, hr, sid := sealedMCPSession(t)
 	call := func(id string) *Job {
 		_, job := mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":`+id+`,"method":"tools/call","params":{"name":"echo","arguments":{"message":"x"}}}`)
@@ -353,7 +353,7 @@ func TestHiringMCPRefusesUnreadableAnswers(t *testing.T) {
 // strict parsing on a sealed session. Both are answered here now: the first with relay.md §11.12 rule 3's legacy 400
 // (the client falls back to initialize), the second with a 400 -32600; an initialize still goes, and a service not
 // pinned sealed is not touched.
-func TestHiringMCPSessionlessToSealedService(t *testing.T) {
+func TestCallingMCPSessionlessToSealedService(t *testing.T) {
 	_, hr, sid := sealedMCPSession(t)
 	modern := httptest.NewRequest(http.MethodPost, "/mcp/fs", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo",`+
 		`"arguments":{"message":"SECRET-ARG"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`))
@@ -391,12 +391,12 @@ func TestHiringMCPSessionlessToSealedService(t *testing.T) {
 	}
 }
 
-// The hiring side of the route-first classification: a request to a sealed service that the node cannot read as one
+// The calling side of the route-first classification: a request to a sealed service that the node cannot read as one
 // of A2A 1.0's (an A2A 0.3 message/send, a JSON-RPC request without a method, a body that is not one JSON object, an
 // HTTP+JSON send with a jsonrpc member) is refused locally, and nothing of it goes to the gate in plaintext.
-func TestHiringRefusesWhatItCannotSeal(t *testing.T) {
+func TestCallingRefusesWhatItCannotSeal(t *testing.T) {
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{})
+	hr := newCallingNode(t, f, pins.Options{})
 	for _, tc := range []struct{ path, body string }{
 		{"/agents/echo", `{"jsonrpc":"2.0","id":1,"method":"message/send","params":{"message":{"kind":"message","messageId":"m","role":"user","parts":[{"kind":"text","text":"SECRET"}]}}}`},
 		{"/agents/echo", `{"jsonrpc":"2.0","id":1,"params":{"message":{"messageId":"m","parts":[{"text":"SECRET"}]}}}`},

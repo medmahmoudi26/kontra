@@ -3,7 +3,7 @@
 // reasons a hosting node answers with (§6), and the shapes a sealed part takes in A2A 1.0 and in MCP (parts.go).
 //
 // It is a leaf: it knows bytes, keys and JSON shapes, never a task, a session or a store. The rules each party
-// applies with it (the hiring node's checks, the hosting node's durable job state, the gate's refusals) live in
+// applies with it (the calling node's checks, the hosting node's durable job state, the gate's refusals) live in
 // internal/sealing and internal/relay. The gate imports only the constants and ParsePart: it never decrypts,
 // re-encrypts or alters a sealed part, and holds no identity that opens one.
 //
@@ -82,12 +82,12 @@ const (
 )
 
 // Header is the envelope header (spec/ext-sealed.md §3's table). Its JCS form is what is sealed and compared:
-// optional members are absent, not empty, and part and parts are always present. Every header names the hired
+// optional members are absent, not empty, and part and parts are always present. Every header names the called
 // service as the gate's URL path names it (service: "<name>", or "<tenant>/<name>" on a multi-tenant gate, D221).
 // A2A requests carry iat, contextId, messageId, replyTo and rk (and taskId on a follow-up); replies carry taskId,
 // auth and the reply's ids; MCP carries session (the hex SHA-256 of the gate Mcp-Session-Id), tool and messageId:
 // the client's JSON-RPC id as a string for a tools/call and its result, and for an input request (an upstream
-// elicitation/create or sampling/createMessage, sealed like a reply) and the hiring node's answer to it (sealed
+// elicitation/create or sampling/createMessage, sealed like a reply) and the calling node's answer to it (sealed
 // like a request), the upstream server's JSON-RPC id of that request as a string (D175).
 type Header struct {
 	V          int    `json:"v"`
@@ -121,7 +121,7 @@ type Header struct {
 // Op is an MCP header's role (Header.Op).
 type Op string
 
-// Roles of an MCP header (D239): call and answer are sealed by the hiring node (dir req), result and input by the
+// Roles of an MCP header (D239): call and answer are sealed by the calling node (dir req), result and input by the
 // hosting node (dir res).
 const (
 	OpCall   Op = "call"
@@ -416,7 +416,7 @@ func DecodeRK(s string) ([]byte, error) {
 }
 
 // Reject is a hosting node's refusal reason (spec/ext-sealed.md §6), sent as Kontra-Sealed-Reject with
-// Kontra-Node: sealed_rejected and a -32602 body. The hiring node uses the same reasons for what it drops.
+// Kontra-Node: sealed_rejected and a -32602 body. The calling node uses the same reasons for what it drops.
 type Reject string
 
 // The reasons of §6.

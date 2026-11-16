@@ -88,7 +88,7 @@ func everythingServer(t *testing.T) string {
 	return fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
 }
 
-// The plan's MCP acceptance against server-everything@1.0.0 behind a hosting node, through a real gate, from a hiring
+// The plan's MCP acceptance against server-everything@1.0.0 behind a hosting node, through a real gate, from a calling
 // node (ext-sealed.md §2, §3; D62, D175): a sealed plain tools/call to echo, and a sealed durable task
 // (simulate-research-query on an ambiguous topic) whose one elicitation is answered, both answer the local client in
 // plaintext, while Postgres holds no plaintext of the arguments, the content, the elicitation, the answer or the
@@ -115,8 +115,8 @@ func TestSealedServerEverythingThroughTheGate(t *testing.T) {
 	}
 	host := startNode(t, t.TempDir(), "--gate", a.url, "--name", "host", "--serve", "mcp:everything="+url, "--enroll", token)
 	host.local(t)
-	hirer := startNode(t, t.TempDir(), "--gate", a.url, "--name", "hirer", "--api-key", e.mintKey("buyer"))
-	endpoint := hirer.local(t) + "/mcp/everything"
+	callingNode := startNode(t, t.TempDir(), "--gate", a.url, "--name", "caller", "--api-key", e.mintKey("caller"))
+	endpoint := callingNode.local(t) + "/mcp/everything"
 
 	var sid string
 	eventually(t, 30*time.Second, "an initialize with the sealed capability", func() bool {

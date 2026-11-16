@@ -59,8 +59,8 @@ const (
 	DefaultAnonTasks             = 4
 	DefaultAnonCalls             = 8
 	DefaultAnonStreams           = 8
-	DefaultAnonHiringStreams     = 8
-	MaxAnonHiringStreams         = 32 // the gate's per-session stream cap (tunnel.md §14)
+	DefaultAnonCallingStreams    = 8
+	MaxAnonCallingStreams        = 32 // the gate's per-session stream cap (tunnel.md §14)
 	DefaultAnonPartsBytes        = 64 << 20
 	DefaultAnonPurgeAfter        = 24 * time.Hour
 	DefaultAnonMaxTenants        = 1000

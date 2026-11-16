@@ -22,31 +22,31 @@ import (
 	"kontra.sh/kontra/internal/strictjson"
 )
 
-// The tools (spec §12.2): search, describe, hire and reply, and the tools that follow, list, cancel and continue a
-// hire task for a client that sees only tools (D332..D339). Their input schemas are spec/schema/mcp-tools.json's
+// The tools (spec §12.2): search, describe, send_message and reply, and the tools that follow, list, cancel and continue a
+// send_message task for a client that sees only tools (D332..D339). Their input schemas are spec/schema/mcp-tools.json's
 // $defs; every tool declares annotations.readOnlyHint and annotations.destructiveHint.
 const (
-	ToolSearch     = "search"
-	ToolDescribe   = "describe"
-	ToolHire       = "hire"
-	ToolReply      = "reply"
-	ToolStatus     = "status"
-	ToolTasks      = "tasks"
-	ToolCancel     = "cancel"
-	ToolArtifact   = "artifact"
-	ToolPushSet    = "push_set"
-	ToolPushList   = "push_list"
-	ToolPushDelete = "push_delete"
+	ToolSearch      = "search"
+	ToolDescribe    = "describe"
+	ToolSendMessage = "send_message"
+	ToolReply       = "reply"
+	ToolStatus      = "status"
+	ToolTasks       = "tasks"
+	ToolCancel      = "cancel"
+	ToolArtifact    = "artifact"
+	ToolPushSet     = "push_set"
+	ToolPushList    = "push_list"
+	ToolPushDelete  = "push_delete"
 )
 
-// Ref names a service in search results and in describe's and hire's arguments: <name> on a single-tenant gate,
+// Ref names a service in search results and in describe's and send_message's arguments: <name> on a single-tenant gate,
 // <tenant>/<name> on a multi-tenant one (§12.2, D271).
 type Ref struct {
 	Tenant string // "" on a single-tenant gate
 	Name   string
 }
 
-// ErrUnknownService is a ref that names no service the principal may see or hire: malformed, of the other tenancy's
+// ErrUnknownService is a ref that names no service the principal may see or send messages to: malformed, of the other tenancy's
 // form, unknown, disabled, of an expired tenant, or one whose allow: does not admit the principal; one answer for
 // all of them (§2.1, D50).
 var ErrUnknownService = errors.New("unknown service")
@@ -173,12 +173,12 @@ func cardCapabilities(card json.RawMessage) *Capabilities {
 	return out
 }
 
-// HireArgs are hire's arguments: Message is a string or {parts: [Part]} (mcp-tools.json#/$defs/message).
-type HireArgs struct {
+// SendMessageArgs are send_message's arguments: Message is a string or {parts: [Part]} (mcp-tools.json#/$defs/message).
+type SendMessageArgs struct {
 	Service   string          `json:"service"`
 	Message   json.RawMessage `json:"message"`
 	ContextID string          `json:"contextId,omitempty"`
-	// IdempotencyKey, 1..128 characters of [A-Za-z0-9._:-]: a hire with the same key, of the same buyer and principal,
+	// IdempotencyKey, 1..128 characters of [A-Za-z0-9._:-]: a send_message with the same key, of the same caller and principal,
 	// within 24 h answers the task the first one created (§12.3 Idempotency, D338).
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
@@ -189,25 +189,25 @@ type ReplyArgs struct {
 	Message json.RawMessage `json:"message"`
 }
 
-// HireResult is the structuredContent of every CallToolResult a hire or a reply answers, and of a hire task's
+// SendMessageResult is the structuredContent of every CallToolResult a send_message or a reply answers, and of a send_message task's
 // tasks/result (and a modern tasks/get's result): what a person needs, since a client may show its model and its user
 // nothing else (§12.2; D289, D324, D351). taskId and state (the A2A state) always; text, the text the content's text blocks carry (the agent's
 // answer, its question, or what the gate says of the task), each of its parts bounded as the content's is (§10.4);
 // data, the values of the rendered data parts in order, message first, then each artifact's; files, the file parts'
-// links. The hire and reply tools declare it as their outputSchema (schemaHireResult).
-type HireResult struct {
+// links. The send_message and reply tools declare it as their outputSchema (schemaSendMessageResult).
+type SendMessageResult struct {
 	TaskID string `json:"taskId"`
 	State  string `json:"state"`
-	// ContextID is the task's A2A context: a hire with it continues the conversation as a new task (§4, §7, D336).
+	// ContextID is the task's A2A context: a send_message with it continues the conversation as a new task (§4, §7, D336).
 	ContextID string `json:"contextId,omitempty"`
-	// Service is the task's service ref, what a hire that continues the conversation names (D336).
+	// Service is the task's service ref, what a send_message that continues the conversation names (D336).
 	Service string    `json:"service,omitempty"`
 	Text    string    `json:"text,omitempty"`
 	Data    []any     `json:"data,omitempty"`
 	Files   []FileRef `json:"files,omitempty"`
 }
 
-// FileRef is a rendered file part as a HireResult names it: the URI of its content block (an embedded resource's
+// FileRef is a rendered file part as a SendMessageResult names it: the URI of its content block (an embedded resource's
 // kontra:task/… name, its bytes in the content; a link's URL), its file name and media type when it has them.
 type FileRef struct {
 	URI       string `json:"uri"`
@@ -229,7 +229,7 @@ const (
 		`"cursor":{"type":"string"}}}`
 	schemaDescribe = `{"type":"object","required":["service"],"additionalProperties":false,` +
 		`"properties":{"service":{"type":"string","pattern":"^([a-z0-9-]+/)?[a-z0-9-]+$"}}}`
-	schemaHire = `{"type":"object","required":["service","message"],"additionalProperties":false,` +
+	schemaSendMessage = `{"type":"object","required":["service","message"],"additionalProperties":false,` +
 		`"properties":{"service":{"type":"string","pattern":"^([a-z0-9-]+/)?[a-z0-9-]+$"},"message":` + schemaMessage +
 		`,"contextId":{"type":"string","maxLength":256},` +
 		`"idempotencyKey":{"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9._:-]+$"}}}`
@@ -255,11 +255,11 @@ const (
 		schemaTaskID + `,"configId":{"type":"string","minLength":1}}}`
 )
 
-// schemaHireResult is the outputSchema of hire and reply: mcp-tools.json#/$defs/hireResult, HireResult's shape, strict
+// schemaSendMessageResult is the outputSchema of send_message and reply: mcp-tools.json#/$defs/sendMessageResult, SendMessageResult's shape, strict
 // (a stock client validates structuredContent against it). It uses only keywords JSON Schema draft-07 and 2020-12
 // read alike and names no $schema, since a client's validator may default to either (D324).
-const schemaHireResult = `{"type":"object","description":"A hire task as hire, reply, status and cancel answer it: taskId and ` +
-	`state always; contextId and service, which a hire that continues the conversation names; ` +
+const schemaSendMessageResult = `{"type":"object","description":"A send_message task as send_message, reply, status and cancel answer it: taskId and ` +
+	`state always; contextId and service, which a send_message that continues the conversation names; ` +
 	`text, the agent's answer or question or what the gate says of the task; data and files from the agent's parts.",` +
 	`"required":["taskId","state"],"additionalProperties":false,"properties":{` +
 	`"taskId":{"type":"string","format":"uuid"},` +
@@ -278,16 +278,16 @@ const (
 		`"properties":{"uri":{"type":"string"},"name":{"type":"string"},"mediaType":{"type":"string"}}}}`
 )
 
-// The output schemas of the tools that follow a hire task (D332..D337), strict, as hireResult is (D324).
+// The output schemas of the tools that follow a send_message task (D332..D337), strict, as sendMessageResult is (D324).
 const (
 	// schemaEvent is one row of a task's log as status renders it (mcp-tools.json#/$defs/event).
 	schemaEvent = `{"type":"object","required":["seq","kind","at"],"additionalProperties":false,"properties":{` +
 		`"seq":{"type":"integer","minimum":1},"kind":{"enum":["task","status","artifact","message"]},"state":` + schemaState + `,` +
 		`"role":{"enum":["user","agent"]},"text":{"type":"string"},"data":{"type":"array","minItems":1},"files":` + schemaFiles + `,` +
 		`"artifactId":{"type":"string"},"name":{"type":"string"},"at":{"type":"string","format":"date-time"}}}`
-	// schemaStatusResult is status's structuredContent: the hire result, and the log after the cursor asked
+	// schemaStatusResult is status's structuredContent: the send_message result, and the log after the cursor asked
 	// (mcp-tools.json#/$defs/statusResult).
-	schemaStatusResult = `{"type":"object","description":"A hire task as status answers it: the hire result, and when after was ` +
+	schemaStatusResult = `{"type":"object","description":"A send_message task as status answers it: the send_message result, and when after was ` +
 		`given the task's events after it (more when the answer was cut) and the cursor to ask from next.",` +
 		`"required":["taskId","state","cursor"],"additionalProperties":false,"properties":{` +
 		`"taskId":{"type":"string","format":"uuid"},"state":` + schemaState + `,"contextId":{"type":"string"},"service":{"type":"string"},` +
@@ -335,11 +335,11 @@ type toolExecution struct {
 }
 
 // tools are the tools, in the order tools/list gives them. Their descriptions are short and tell a model the loop
-// (D339): search and describe, hire (idempotencyKey for retries), status with after and wait to follow, reply when it
+// (D339): search and describe, send_message (idempotencyKey for retries), status with after and wait to follow, reply when it
 // asks, cancel, tasks to find old ones, artifact for one artifact.
 var tools = []tool{
 	{Name: ToolSearch, Title: "Search services",
-		Description: "Find the agents this gate lists that you may hire. Returns refs for describe and hire.",
+		Description: "Find the agents this gate lists that you may send messages to. Returns refs for describe and send_message.",
 		InputSchema: json.RawMessage(schemaSearch),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolDescribe, Title: "Describe a service",
@@ -347,52 +347,52 @@ var tools = []tool{
 			"or its tools (MCP), whether it is sealed and available, and the URLs to call it directly.",
 		InputSchema: json.RawMessage(schemaDescribe),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
-	{Name: ToolHire, Title: "Hire an agent",
+	{Name: ToolSendMessage, Title: "Send a message to an agent",
 		Description: "Send a message to an A2A agent as a new task and answer its result, or its state after 25 s. " +
-			"Pass idempotencyKey to retry safely: the same key answers the same task. To continue a conversation, hire again " +
+			"Pass idempotencyKey to retry safely: the same key answers the same task. To continue a conversation, call send_message again " +
 			"with the contextId and service of an earlier result. Follow a running task with status.",
-		InputSchema: json.RawMessage(schemaHire), OutputSchema: json.RawMessage(schemaHireResult),
+		InputSchema: json.RawMessage(schemaSendMessage), OutputSchema: json.RawMessage(schemaSendMessageResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
 	{Name: ToolReply, Title: "Reply to a task",
-		Description: "Answer the question a hired task asks (state input required), and answer its new state. " +
-			"After the task ended, continue the conversation with hire and its contextId instead.",
-		InputSchema: json.RawMessage(schemaReply), OutputSchema: json.RawMessage(schemaHireResult),
+		Description: "Answer the question a send_message task asks (state input required), and answer its new state. " +
+			"After the task ended, continue the conversation with send_message and its contextId instead.",
+		InputSchema: json.RawMessage(schemaReply), OutputSchema: json.RawMessage(schemaSendMessageResult),
 		Annotations: toolAnnotations{OpenWorldHint: true}},
 	{Name: ToolStatus, Title: "Follow a task",
-		Description: "A hired task's state and result. With after (0 for the whole history) it returns the task's events " +
+		Description: "A send_message task's state and result. With after (0 for the whole history) it returns the task's events " +
 			"after that cursor and the result in short (read an artifact in full with artifact); with wait (seconds, up to 25) " +
 			"it first waits for something new. Loop status {taskId, after: cursor, wait: 25} to follow a task until it ends " +
 			"or asks a question.",
 		InputSchema: json.RawMessage(schemaStatus), OutputSchema: json.RawMessage(schemaStatusResult),
 		Annotations: toolAnnotations{ReadOnlyHint: true}},
 	{Name: ToolTasks, Title: "List your tasks",
-		Description: "List the tasks you hired, newest first, optionally of one service, one contextId, or a state " +
+		Description: "List the tasks you created with send_message, newest first, optionally of one service, one contextId, or a state " +
 			"(an A2A state, active or ended). Pass nextCursor back as cursor for the next page.",
 		InputSchema: json.RawMessage(schemaTasks), OutputSchema: json.RawMessage(schemaTasksResult),
 		Annotations: toolAnnotations{ReadOnlyHint: true}},
 	{Name: ToolCancel, Title: "Cancel a task",
-		Description: "Cancel a hired task that has not ended, and answer it once canceled.",
-		InputSchema: json.RawMessage(schemaCancel), OutputSchema: json.RawMessage(schemaHireResult),
+		Description: "Cancel a send_message task that has not ended, and answer it once canceled.",
+		InputSchema: json.RawMessage(schemaCancel), OutputSchema: json.RawMessage(schemaSendMessageResult),
 		Annotations: toolAnnotations{DestructiveHint: true, IdempotentHint: true}},
 	{Name: ToolArtifact, Title: "Read an artifact",
-		Description: "One artifact of a hired task, in full: its text, data and files (fresh links). Artifact ids are in status events.",
+		Description: "One artifact of a send_message task, in full: its text, data and files (fresh links). Artifact ids are in status events.",
 		InputSchema: json.RawMessage(schemaArtifact), OutputSchema: json.RawMessage(schemaArtifactResult),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolPushSet, Title: "Set a push webhook",
-		Description: "Have the gate POST a hired task's updates to an https URL you own (A2A push notifications), with an optional token.",
+		Description: "Have the gate POST a send_message task's updates to an https URL you own (A2A push notifications), with an optional token.",
 		InputSchema: json.RawMessage(schemaPushSet), OutputSchema: json.RawMessage(schemaPushResult),
 		Annotations: toolAnnotations{IdempotentHint: true, OpenWorldHint: true}},
 	{Name: ToolPushList, Title: "List push webhooks",
-		Description: "The push webhooks set on a hired task.",
+		Description: "The push webhooks set on a send_message task.",
 		InputSchema: json.RawMessage(schemaPushList), OutputSchema: json.RawMessage(schemaPushResult),
 		Annotations: toolAnnotations{ReadOnlyHint: true, IdempotentHint: true}},
 	{Name: ToolPushDelete, Title: "Delete a push webhook",
-		Description: "Stop and remove one push webhook of a hired task.",
+		Description: "Stop and remove one push webhook of a send_message task.",
 		InputSchema: json.RawMessage(schemaPushDelete), OutputSchema: json.RawMessage(schemaPushResult),
 		Annotations: toolAnnotations{DestructiveHint: true, IdempotentHint: true}},
 }
 
-// ToolsList is the tools/list result for a request of era: the tools with their input schemas; hire
+// ToolsList is the tools/list result for a request of era: the tools with their input schemas; send_message
 // declares execution.taskSupport "optional" in the legacy list of a 2025-11-25 session only (§12.5). The modern list
 // (2026-07-28 removed Tool.execution: the server decides, D159) is one page with resultType "complete", ttlMs
 // ModernListTTL and cacheScope "private" (§12.5; 2026-07-28 CacheableResult, as §11.12 writes a relayed list).
@@ -401,7 +401,7 @@ func ToolsList(era mcpwire.Era, protocolVersion string) (json.RawMessage, error)
 	copy(list, tools)
 	if era == mcpwire.EraLegacy && protocolVersion == mcpwire.V20251125 {
 		for i := range list {
-			if list[i].Name == ToolHire {
+			if list[i].Name == ToolSendMessage {
 				list[i].Execution = &toolExecution{TaskSupport: "optional"}
 			}
 		}
@@ -413,7 +413,7 @@ func ToolsList(era mcpwire.Era, protocolVersion string) (json.RawMessage, error)
 	return json.Marshal(map[string]any{"tools": list})
 }
 
-// FirstRequest is a hire task's resend key: SHA-256(utf8(service ref) ‖ 0x00 ‖ JCS(arguments)) (§12.3 Retries),
+// FirstRequest is a send_message task's resend key: SHA-256(utf8(service ref) ‖ 0x00 ‖ JCS(arguments)) (§12.3 Retries),
 // which replaces §15's request hash for these tasks.
 func FirstRequest(ref Ref, arguments json.RawMessage) ([32]byte, error) {
 	canon, err := jcs.Transform(arguments)
@@ -494,7 +494,7 @@ func parseSearchArgs(args json.RawMessage) (SearchArgs, error) {
 	return a, nil
 }
 
-// serviceArg reads the service argument (describe, hire), required, against the ref pattern.
+// serviceArg reads the service argument (describe, send_message), required, against the ref pattern.
 func serviceArg(m map[string]json.RawMessage) (string, error) {
 	s, ok, err := stringArg(m, "service", 0)
 	switch {
@@ -518,13 +518,13 @@ func parseDescribeArgs(args json.RawMessage) (DescribeArgs, error) {
 	return DescribeArgs{Service: s}, err
 }
 
-// parseHireArgs reads hire's arguments and builds the message's parts.
-func parseHireArgs(args json.RawMessage) (HireArgs, a2a.ContentParts, error) {
+// parseSendMessageArgs reads send_message's arguments and builds the message's parts.
+func parseSendMessageArgs(args json.RawMessage) (SendMessageArgs, a2a.ContentParts, error) {
 	m, err := members(args, "service", "message", "contextId", "idempotencyKey")
 	if err != nil {
-		return HireArgs{}, nil, err
+		return SendMessageArgs{}, nil, err
 	}
-	var a HireArgs
+	var a SendMessageArgs
 	if a.Service, err = serviceArg(m); err != nil {
 		return a, nil, err
 	}
@@ -915,7 +915,7 @@ func parsePart(raw json.RawMessage) (*a2a.Part, error) {
 
 // roundTrips reports whether a2a-go reads p back from what it writes. The task the gate creates stores the message
 // as a2a-go encodes it, and every later read of the task decodes it: a part that does not survive that would leave a
-// task no reader can load (stuck, counted against an anonymous host's tasks cap, breaking the buyer's tasks/list).
+// task no reader can load (stuck, counted against an anonymous host's tasks cap, breaking the caller's tasks/list).
 // The A2A routes cannot take one (a2a-go's decoding refuses it); a tool argument is built here, so it is checked here.
 func roundTrips(p *a2a.Part) bool {
 	b, err := json.Marshal(p)

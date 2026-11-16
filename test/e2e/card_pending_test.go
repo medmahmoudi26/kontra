@@ -60,7 +60,7 @@ func TestTunnelCardPending(t *testing.T) {
 	p.Restore()
 	req := newMessage("before the first card")
 	sent := time.Now()
-	res, err := h.BuyerA().Client(t, h.Gates[1], "").SendMessage(ctx, req)
+	res, err := h.CallerA().Client(t, h.Gates[1], "").SendMessage(ctx, req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestTunnelCardPending(t *testing.T) {
 	if !ok || task.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("a task placed before the first card: %#v, want completed on a later attempt", res)
 	}
-	// The last attempt ends after the completed event that answered the buyer (Dispatcher.settle; M2 review,
+	// The last attempt ends after the completed event that answered the caller (Dispatcher.settle; M2 review,
 	// robustness-1).
 	as := attemptsOf(t, ctx, h, task.ID, 30*time.Second, "the last attempt of "+string(task.ID)+" ended", func(as []Attempt) bool {
 		return len(as) > 0 && as[len(as)-1].EndedAt != nil

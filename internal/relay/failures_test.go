@@ -70,8 +70,8 @@ func TestGetTaskFailures(t *testing.T) {
 		once   bool // failed at the first GetTask, not after the grace
 	}{
 		{"JSON-RPC error", func(w http.ResponseWriter, id json.RawMessage, _ int64) {
-			rpcResult(w, id, `"error":{"code":-32001,"message":"seller lost the task"}`)
-		}, "upstream_error", "seller lost the task", true},
+			rpcResult(w, id, `"error":{"code":-32001,"message":"service lost the task"}`)
+		}, "upstream_error", "service lost the task", true},
 		{"HTTP 404", func(w http.ResponseWriter, _ json.RawMessage, _ int64) { w.WriteHeader(404) },
 			"upstream_error", "HTTP 404", true},
 		{"body over 8 MiB", func(w http.ResponseWriter, id json.RawMessage, _ int64) {
@@ -100,7 +100,7 @@ func TestGetTaskFailures(t *testing.T) {
 					tc.get(w, id, gets.Add(1))
 				})
 				e.backends.set(b, rpcInfo, nil)
-				id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+				id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 				if resume {
 					e.reattachable(id, wid)
 				}
@@ -151,7 +151,7 @@ func TestGetTaskNeverAnswered(t *testing.T) {
 				<-r.Context().Done() // accepted, never answered
 			})
 			e.backends.set(b, rpcInfo, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 			if resume {
 				e.reattachable(id, wid)
 			}
@@ -197,7 +197,7 @@ func TestAbortBeforeTheUpstreamCall(t *testing.T) {
 				rpcResult(w, id, `"result":{"task":{"id":"up-1","contextId":"up-ctx","status":{"state":"TASK_STATE_COMPLETED"}}}`)
 			})
 			e.backends.set(b, rpcInfo, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 			ref := lifecycle.AttemptRef{TaskID: string(id), N: 1}
 			var abortErr error
 			abort := func() {
@@ -277,11 +277,11 @@ func TestFollowUpStaleSnapshot(t *testing.T) {
 			info := rpcInfo
 			info.Streaming = tc.streaming
 			e.backends.set(b, info, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "book"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "book"})
 			if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchInterrupted {
 				t.Fatalf("turn 1: %+v", res)
 			}
-			fid := e.followUp(id, buyerA, "the blue one")
+			fid := e.followUp(id, callerA, "the blue one")
 			res := e.dispatch(context.Background(), id, 1, fid, false)
 			p := projection(t, e, id)
 			if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted || p.Status.Message.Parts[0].Text() != "booked" {
@@ -319,7 +319,7 @@ func TestReattachFineTimestamps(t *testing.T) {
 		}
 	})
 	e.backends.set(b, rpcInfo, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	ctx, lose := context.WithCancel(context.Background())
 	first := make(chan lifecycle.DispatchResult, 1)
 	go func() { first <- e.dispatch(ctx, id, 1, wid, false) }()
@@ -366,7 +366,7 @@ func TestStoreFailureIsALostContext(t *testing.T) {
 			agent, b, info := newAgent(t, g, agentConfig{streaming: true})
 			info.Streaming = true
 			e.backends.set(b, info, nil)
-			id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+			id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 			done := make(chan lifecycle.DispatchResult, 1)
 			go func() { done <- e.dispatch(context.Background(), id, 1, wid, false) }()
 			waitFor(t, "working", func() bool { return e.row(id).State == store.StateWorking })
@@ -431,7 +431,7 @@ func TestStoreFailureIsALostContext(t *testing.T) {
 // the first upstream task id).
 func TestStaleDispatchFirstIDIsFenced(t *testing.T) {
 	e := newEnv(t, envOptions{})
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	sent, answer := make(chan struct{}), make(chan struct{})
 	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
 		if method != "SendMessage" {
@@ -495,7 +495,7 @@ func (e *env) failFirstIDWrites(n int) {
 // §6.4: retries only before the first upstream task id).
 func TestFirstIDRecordedAgainAfterAStoreFailure(t *testing.T) {
 	e := newEnv(t, envOptions{opts: ExecutorOptions{RecordBackoff: 20 * time.Millisecond}})
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	const done = `{"id":"up-1","contextId":"up-ctx","status":{"state":"TASK_STATE_COMPLETED","message":{"messageId":"m1","role":"ROLE_AGENT","parts":[{"text":"ok"}]}}}`
 	var sends atomic.Int64
 	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
@@ -530,7 +530,7 @@ func TestFirstIDRecordedAgainAfterAStoreFailure(t *testing.T) {
 // store forever.
 func TestFirstIDRecordingStopsAtAbort(t *testing.T) {
 	e := newEnv(t, envOptions{opts: ExecutorOptions{RecordBackoff: 20 * time.Millisecond}})
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
 		rpcResult(w, rid, `"result":{"task":`+upWorking+`}`)
 	})
@@ -555,7 +555,7 @@ func TestFirstIDRecordingStopsAtAbort(t *testing.T) {
 // An upstream task id the store refuses as data (U+0000) fails the task upstream_error at once.
 func TestFirstIDTheStoreRefusesFails(t *testing.T) {
 	e := newEnv(t, envOptions{opts: ExecutorOptions{RecordBackoff: 20 * time.Millisecond}})
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	b, _ := scripted(t, func(method string, rid json.RawMessage, w http.ResponseWriter, _ *http.Request) {
 		rpcResult(w, rid, `"result":{"task":{"id":"up\u0000x","contextId":"c","status":{"state":"TASK_STATE_WORKING"}}}`)
 	})
@@ -599,7 +599,7 @@ func TestDispatchHeartbeatsBeforeTheUpstreamCall(t *testing.T) {
 	})
 	e.backends.set(b, rpcInfo, nil)
 	e.disp.Heartbeater = hb
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
 		t.Fatalf("outcome %+v", res)
 	}
@@ -612,7 +612,7 @@ func TestDispatchHeartbeatsBeforeTheUpstreamCall(t *testing.T) {
 		hb := &beatRecorder{cancelAt: at, cancel: cancel}
 		e.disp.Heartbeater = hb
 		before := calls.Load()
-		id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 		res, err := e.disp.Dispatch(ctx, lifecycle.DispatchInput{TaskID: string(id), N: 1, WorkItemID: wid.String()})
 		cancel()
 		if err != nil || res.Outcome != lifecycle.DispatchContextLost {
@@ -637,7 +637,7 @@ func TestDispatchPreambleIsBounded(t *testing.T) {
 	})
 	e.backends.set(b, rpcInfo, nil)
 	e.disp.PreambleTimeout = 300 * time.Millisecond
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	ctx := context.Background()
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
@@ -684,7 +684,7 @@ func TestStoreReadFailureIsALostContext(t *testing.T) {
 		rpcResult(w, rid, `"result":{"task":{"id":"up-1","contextId":"c","status":{"state":"TASK_STATE_COMPLETED"}}}`)
 	})
 	e.backends.set(b, rpcInfo, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	if _, err := e.handlers.For(context.Background(), e.svc); err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +719,7 @@ func TestDispatchOfAnEndedTaskEndsItsAttempt(t *testing.T) {
 		rpcResult(w, rid, `"result":{"task":`+upWorking+`}`)
 	})
 	e.backends.set(b, rpcInfo, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.firstID(id, 1, "up-1", "up-ctx")
 	if _, err := e.log.WriteTerminal(context.Background(), store.TerminalWrite{TaskID: uid(t, id), State: store.StateFailed, Reason: store.ReasonUpstreamError}); err != nil {
 		t.Fatal(err)

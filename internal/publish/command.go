@@ -43,7 +43,7 @@ var ErrUsage = errors.New("usage")
 const Usage = `usage: kontra publish [--gate <url>] [--control-plane <url>] [--version <n> | --replace] [--dry-run] [--no-browser] <listing.yaml>
 
 kontra publish sends a listing, how one of your A2A agents is sold, to the gate operator's control plane (Kontra
-Cloud): its visibility, sealing and task timeout (spec/schema/listing.json). A listing has no price: a seller that
+Cloud): its visibility, sealing and task timeout (spec/schema/listing.json). A listing has no price: a service that
 charges declares AP2 in its agent card. MCP servers are not
 listed: host one with kontra connect and it is free and private to your tenant. It checks the file first, then signs you in at the gate's authorization server for the
 control plane, in the browser as kontra login does: a publish is a person's act, never an API key's, and the sign-in

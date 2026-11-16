@@ -50,7 +50,7 @@ func hostingFor(t *testing.T) (*sealing.Hosting, *age.X25519Identity) {
 	return h, id
 }
 
-// sealedCall is a sealed tools/call as a hiring node sends it to service, for session (its hash) and the JSON-RPC id
+// sealedCall is a sealed tools/call as a calling node sends it to service, for session (its hash) and the JSON-RPC id
 // id.
 func sealedCall(t *testing.T, node *age.X25519Identity, service, session, tool, id, args string) (string, *age.X25519Identity, []byte) {
 	t.Helper()
@@ -223,7 +223,7 @@ func TestMCPStdioSealing(t *testing.T) {
 	}
 }
 
-// sealedSend is a JSON-RPC SendMessage of a new task whose one part is body sealed to node for service, as a hiring
+// sealedSend is a JSON-RPC SendMessage of a new task whose one part is body sealed to node for service, as a calling
 // node sends it (the gate's copy: no contextId upstream), with the job's key and rk.
 func sealedSend(t *testing.T, node *age.X25519Identity, service, ctx, msgID, body string) (string, *age.X25519Identity, []byte) {
 	t.Helper()

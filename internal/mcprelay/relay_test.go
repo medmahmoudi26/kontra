@@ -54,7 +54,7 @@ func TestSessions(t *testing.T) {
 	tun := mcptest.New()
 	tun.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	n := e.node(r, tun, "tun")
-	key, principal := e.apiKey("buyer")
+	key, principal := e.apiKey("caller")
 
 	for _, tc := range []struct {
 		name string
@@ -128,7 +128,7 @@ func TestSession404s(t *testing.T) {
 	tun := mcptest.New()
 	tun.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	n := e.node(r, tun, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	other, _ := e.apiKey("other")
 
 	c := newClient(t, key)
@@ -190,7 +190,7 @@ func TestTunnelLoss(t *testing.T) {
 	tun := mcptest.New()
 	tun.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	n := e.node(r, tun, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/tun")
 	if rep := c.call(r.url+"/mcp/tun", 1, "echo", "x"); rep.status != 200 {
@@ -225,7 +225,7 @@ func TestRevocationClosesRevoked(t *testing.T) {
 			tun := mcptest.New()
 			tun.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 			n := e.node(r, tun, "tun")
-			key, _ := e.apiKey("buyer")
+			key, _ := e.apiKey("caller")
 			c := newClient(t, key)
 			c.initialize(r.url + "/mcp/tun")
 			var err error
@@ -260,7 +260,7 @@ func TestRevokedBeforeTheRegistryCloses(t *testing.T) {
 	r := e.replica("a", replicaOpts{unsubscribed: true})
 	tun := mcptest.New()
 	n := e.node(r, tun, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/tun")
 	if err := e.store.RevokeBinding(context.Background(), n.key, "tun", "test"); err != nil {
@@ -288,7 +288,7 @@ func TestBatchRefused(t *testing.T) {
 	up, url := upstreamDouble(t)
 	e.service("direct", url, func(s *Service) { s.Tools = Policy{Deny: []string{"add"}} })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/direct")
 	seen := len(up.Requests())
@@ -318,7 +318,7 @@ func TestLegacyRules(t *testing.T) {
 	up, url := upstreamDouble(t)
 	e.service("direct", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	if rep := c.do(http.MethodGet, r.url+"/mcp/direct", "", nil); rep.status != 405 {
 		t.Errorf("GET probe: %d", rep.status)
@@ -388,7 +388,7 @@ func TestGateRequestIDs(t *testing.T) {
 	up, url := upstreamDouble(t)
 	e.service("direct", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/direct")
 	answer := func(id string) string {

@@ -27,7 +27,7 @@ func TestDeniedCodes(t *testing.T) {
 		operator bool
 		mcp      int // what /mcp answers (CodeOf)
 	}{
-		{-32060, a2a.ErrUnauthorized, true, -32060},  // Cloud's seller_not_payable
+		{-32060, a2a.ErrUnauthorized, true, -32060},  // Cloud's service_not_payable
 		{-32061, a2a.ErrUnauthorized, true, -32061},  // payment_method_required
 		{-32062, a2a.ErrUnauthorized, true, -32062},  // monthly_cap_reached
 		{-32063, a2a.ErrUnauthorized, true, -32063},  // listing_unavailable
@@ -41,13 +41,13 @@ func TestDeniedCodes(t *testing.T) {
 		{-32602, a2a.ErrInvalidParams, false, -32602}, // an A2A code is its error
 		{-32004, a2a.ErrUnsupportedOperation, false, -32004},
 	} {
-		err := denied(&hooks.Refusal{Code: c.code, Message: "this service's seller cannot be paid yet"})
+		err := denied(&hooks.Refusal{Code: c.code, Message: "this service cannot be paid yet"})
 		var oe *OperatorRefusalError
-		if !errors.Is(err, c.sentinel) || errors.As(err, &oe) != c.operator || err.Error() != "this service's seller cannot be paid yet" {
+		if !errors.Is(err, c.sentinel) || errors.As(err, &oe) != c.operator || err.Error() != "this service cannot be paid yet" {
 			t.Errorf("%d: %v (operator %v)", c.code, err, oe)
 			continue
 		}
-		if code, msg := CodeOf(err); code != c.mcp || msg != "this service's seller cannot be paid yet" {
+		if code, msg := CodeOf(err); code != c.mcp || msg != "this service cannot be paid yet" {
 			t.Errorf("%d: CodeOf %d %q, want %d", c.code, code, msg, c.mcp)
 		}
 		// The A2A bindings: JSON-RPC and HTTP+JSON, as the gate writes them (sse, held to a2a-go by TestErrorMappingDrift).

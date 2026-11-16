@@ -21,12 +21,12 @@ const cancelBound = 60 * time.Second
 
 // checkCancelThroughNode fails unless agent received exactly one CancelTask, for the upstream task up, as a
 // request the node forwarded: Host is the --serve target's own, and no Forwarded or X-Forwarded-* header
-// (spec/tunnel.md §8.2; the gate never dials the seller of a tunnel service).
+// (spec/tunnel.md §8.2; the gate never dials the service of a tunnel service).
 func checkCancelThroughNode(t *testing.T, agent *slowagent.Agent, up string) {
 	t.Helper()
 	calls := agent.Calls("CancelTask")
 	if len(calls) != 1 || calls[0].TaskID != up {
-		t.Fatalf("the seller's CancelTask requests %+v: want one, for its upstream task %s", calls, up)
+		t.Fatalf("the service's CancelTask requests %+v: want one, for its upstream task %s", calls, up)
 	}
 	u, _ := url.Parse(agent.URL())
 	if calls[0].Host != u.Host {
@@ -43,7 +43,7 @@ func checkCancelThroughNode(t *testing.T, agent *slowagent.Agent, up string) {
 // first chunk; it returns the stream, the task and its attempt.
 func workingTask(t *testing.T, ctx context.Context, h *Harness, svc, text string) (*Stream, a2a.TaskID, Attempt) {
 	t.Helper()
-	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[1], newMessage(text), Call{Service: svc})
+	s, err := h.CallerA().SendStreaming(ctx, h.Gates[1], newMessage(text), Call{Service: svc})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,25 +56,25 @@ func workingTask(t *testing.T, ctx context.Context, h *Harness, svc, text string
 }
 
 // TestCancelForwardedTunnel is cancel_forwarded through the tunnel (spec/relay.md §8, §16; PRD §15): one
-// node hosts `slow` (a long stream), `talky` (a seller that ignores its own cancel and streams a chunk and
-// completed after its canceled status) and `flaky` (a seller behind a TCP proxy the test can cut).
+// node hosts `slow` (a long stream), `talky` (a service that ignores its own cancel and streams a chunk and
+// completed after its canceled status) and `flaky` (a service behind a TCP proxy the test can cut).
 //
 //	(a) A working task, its upstream task streaming, is canceled through the replica that does not hold
 //	    the session. (c) The same with `talky`. (b) An 'ask' task at input-required is canceled over
 //	    HTTP+JSON.
 //
-// Each time the seller receives CancelTask for the attempt's upstream task through the node (its own Host,
+// Each time the service receives CancelTask for the attempt's upstream task through the node (its own Host,
 // no X-Forwarded-*), the task is canceled within 60 s, GetTask on both replicas says canceled, and nothing
 // but metadata is logged after the canceled row (for talky, neither its late chunk nor its completed).
 // Attempt outcomes: canceled for (a) and (c), interrupted or canceled for (b) (§8, D77).
 //
-//	(d) With the node up and the seller unreachable (the proxy cut: the node answers 502 Kontra-Node:
+//	(d) With the node up and the service unreachable (the proxy cut: the node answers 502 Kontra-Node:
 //	    target_unreachable), the cancel of a task at input-required is not delivered: the caller gets
 //	    TaskNotCancelableError, the task stays input-required with no kontra.failure and its attempt open,
-//	    and once the seller is back a follow-up completes it.
+//	    and once the service is back a follow-up completes it.
 //	(e) With the node gone (SIGKILL), the cancel of a task at input-required cancels it at once, nothing reaching
-//	    the seller (§8's row "exists, session gone", D346); when the node comes back within task.reattach_grace,
-//	    the seller receives the cancel through it, best effort, and the task stays canceled.
+//	    the service (§8's row "exists, session gone", D346); when the node comes back within task.reattach_grace,
+//	    the service receives the cancel through it, best effort, and the task stays canceled.
 //
 // The node never listens on a TCP socket: the gate never opened a connection to it (spec/tunnel.md §1).
 func TestCancelForwardedTunnel(t *testing.T) {
@@ -99,7 +99,7 @@ func TestCancelForwardedTunnel(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	buyer := h.BuyerA()
+	caller := h.CallerA()
 
 	// (a) and (c): a working task, canceled through replica B (the session is on A).
 	for _, c := range []struct {
@@ -112,7 +112,7 @@ func TestCancelForwardedTunnel(t *testing.T) {
 			t.Fatalf("%s: the attempt %+v is not on the node's session on A", c.svc, att)
 		}
 		asked := time.Now()
-		canceled, err := buyer.Client(t, h.Gates[1], c.svc).CancelTask(ctx, &a2a.CancelTaskRequest{ID: id})
+		canceled, err := caller.Client(t, h.Gates[1], c.svc).CancelTask(ctx, &a2a.CancelTaskRequest{ID: id})
 		if err != nil || canceled.Status.State != a2a.TaskStateCanceled {
 			t.Fatalf("%s: CancelTask on B: %v %v, want the canceled task", c.svc, canceled, err)
 		}
@@ -135,7 +135,7 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	}
 
 	// (b) An input-required task, canceled over HTTP+JSON through replica B.
-	res, err := buyer.Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel_forwarded tunnel"))
+	res, err := caller.Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel_forwarded tunnel"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestCancelForwardedTunnel(t *testing.T) {
 		t.Fatalf("SendMessage answered %#v, want an input-required task", res)
 	}
 	att := attemptsOf(t, ctx, h, waiting.ID, 10*time.Second, "the ask task's attempt", func(as []Attempt) bool { return len(as) == 1 })[0]
-	rr, err := buyer.REST(ctx, h.Gates[1], "", http.MethodPost, "/tasks/"+string(waiting.ID)+":cancel", map[string]any{})
+	rr, err := caller.REST(ctx, h.Gates[1], "", http.MethodPost, "/tasks/"+string(waiting.ID)+":cancel", map[string]any{})
 	if err != nil || rr.HTTPStatus != http.StatusOK || !strings.Contains(string(rr.Body), "TASK_STATE_CANCELED") {
 		t.Fatalf("POST tasks/{id}:cancel: %v HTTP %d %s, want the canceled task", err, rr.HTTPStatus, rr.Body)
 	}
@@ -157,8 +157,8 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	}
 	checkHistory(t, h, waiting.ID, "e2e_cancel_forwarded_tunnel_input_required", tunnelForbidden(h)...)
 
-	// (d) The node is up and its seller unreachable: the cancel is not delivered and the task continues.
-	res, err = buyer.Client(t, h.Gates[1], "flaky").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel, seller down"))
+	// (d) The node is up and its service unreachable: the cancel is not delivered and the task continues.
+	res, err = caller.Client(t, h.Gates[1], "flaky").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel, service down"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,9 +167,9 @@ func TestCancelForwardedTunnel(t *testing.T) {
 		t.Fatalf("SendMessage to flaky answered %#v, want an input-required task", res)
 	}
 	cut.Cut()
-	r, err := buyer.RPC(ctx, h.Gates[1], "flaky", "CancelTask", &a2a.CancelTaskRequest{ID: down.ID})
+	r, err := caller.RPC(ctx, h.Gates[1], "flaky", "CancelTask", &a2a.CancelTaskRequest{ID: down.ID})
 	if err != nil || r.Error == nil || r.Error.Code != -32002 || !strings.Contains(r.Error.Message, "could not be reached") {
-		t.Fatalf("the cancel with the seller unreachable: %v %s, want TaskNotCancelableError (-32002), the service could not be reached", err, r.Body)
+		t.Fatalf("the cancel with the service unreachable: %v %s, want TaskNotCancelableError (-32002), the service could not be reached", err, r.Body)
 	}
 	if st, failure, err := h.TaskFailure(ctx, down.ID); err != nil || st != "input-required" || failure != "" {
 		t.Fatalf("the task after a cancel not delivered: %s %q %v, want input-required with no kontra.failure", st, failure, err)
@@ -183,7 +183,7 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	cut.Restore()
 	_, done := followUp(t, ctx, h, h.Gates[0], "flaky", down, "still here")
 	if done.Status.State != a2a.TaskStateCompleted {
-		t.Fatalf("the follow-up after the seller came back: %s, want completed", done.Status.State)
+		t.Fatalf("the follow-up after the service came back: %s, want completed", done.Status.State)
 	}
 	checkHistory(t, h, down.ID, "e2e_cancel_tunnel_not_delivered", tunnelForbidden(h)...)
 
@@ -198,7 +198,7 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	t.Logf("kontra connect's TCP sockets: %+v", socks)
 
 	// (e) The node is gone: the cancel of a waiting task cancels it at once.
-	res, err = buyer.Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel, session gone"))
+	res, err = caller.Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel, session gone"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,21 +211,21 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	}
 	waitRowGone(t, ctx, h, sess, 5*time.Second, "the node was SIGKILLed")
 	cancels := slow.Count("CancelTask")
-	got, err := buyer.Client(t, h.Gates[1], "").CancelTask(ctx, &a2a.CancelTaskRequest{ID: gone.ID})
+	got, err := caller.Client(t, h.Gates[1], "").CancelTask(ctx, &a2a.CancelTaskRequest{ID: gone.ID})
 	if err != nil || got.Status.State != a2a.TaskStateCanceled || got.Metadata["kontra.canceled"] != "client" {
 		t.Fatalf("the cancel with the session gone: %+v %v, want the task canceled", got, err)
 	}
 	if errors.Is(err, a2a.ErrTaskNotCancelable) || slow.Count("CancelTask") != cancels {
-		t.Fatal("the cancel with the session gone reached the seller")
+		t.Fatal("the cancel with the session gone reached the service")
 	}
 	if a := endedAttempt(t, ctx, h, gone.ID); a.Outcome != "canceled" {
 		t.Fatalf("the attempt %+v, want ended canceled", a)
 	}
-	// The node comes back: the seller is sent the cancel through it (D346), and the task stays canceled.
+	// The node comes back: the service is sent the cancel through it (D346), and the task stays canceled.
 	if err := n.Restart(ctx, h); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, 40*time.Second, "the seller received the late cancel", func() bool { return slow.Count("CancelTask") == cancels+1 })
+	eventually(t, 40*time.Second, "the service received the late cancel", func() bool { return slow.Count("CancelTask") == cancels+1 })
 	if state, _, err := h.TaskFailure(ctx, gone.ID); err != nil || state != "canceled" {
 		t.Fatalf("the task after the late cancel: %s %v", state, err)
 	}

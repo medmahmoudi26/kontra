@@ -25,70 +25,70 @@ import (
 	"kontra.sh/kontra/internal/strictjson"
 )
 
-// HireTasks is the MCP Tasks surface of hire tasks (spec §12.2, §12.4, §12.5): §11.6 for a legacy reader and
+// SendMessageTasks is the MCP Tasks surface of send_message tasks (spec §12.2, §12.4, §12.5): §11.6 for a legacy reader and
 // §11.12's tasks/get, tasks/update and tasks/cancel for a modern one, over A2A gate tasks (protocol a2a) marked
-// tasks.hired, scoped to the principal's buyer_id (another buyer's or an unhired task is -32602, as an unknown id).
-// It reads only Postgres, on any replica; its follow-ups go through the Hirer, its cancels to TaskLifecycle.
-type HireTasks struct {
+// tasks.sent_by_mcp, scoped to the principal's caller_id (another caller's or a non-send_message task is -32602, as an unknown id).
+// It reads only Postgres, on any replica; its follow-ups go through the Caller, its cancels to TaskLifecycle.
+type SendMessageTasks struct {
 	log       *store.Log
 	waker     store.TaskWaker
-	lc        HireLifecycle
-	hirer     Hirer
+	lc        SendMessageLifecycle
+	sender    Sender
 	render    *blob.Renderer
 	served    Served
 	logger    *slog.Logger
 	keepAlive time.Duration // a gate-served stream's comment interval (§2.2)
 	reread    time.Duration // how often a blocked tasks/result reads the log without a wake
 	settle    time.Duration // how long after its acceptance a detached cancel stands for the task's later ones
-	// ref is a task's service ref on this gate, which a rendered hire result names (D336); set by NewHandler, nil
+	// ref is a task's service ref on this gate, which a rendered send_message result names (D336); set by NewHandler, nil
 	// names none.
 	ref func(*store.TaskRow) string
 
 	// The replica's detached work (cancelDetached, hold): the cancels being sent or accepted less than settle ago, by
-	// task (zero: not accepted yet), and how many cancels and modern hires are in flight, which Wait awaits.
+	// task (zero: not accepted yet), and how many cancels and modern send_message calls are in flight, which Wait awaits.
 	mu      sync.Mutex
 	cancels map[uuid.UUID]time.Time
 	busy    int
 	idle    chan struct{} // closed while busy is 0
 }
 
-// HireLifecycle is what the MCP Tasks of hire tasks ask of TaskLifecycle (*lifecycle.Client): MCP's tasks/cancel on an
+// SendMessageLifecycle is what the MCP Tasks of send_message tasks ask of TaskLifecycle (*lifecycle.Client): MCP's tasks/cancel on an
 // A2A task (§11.6, D57; the cancel's MCP mode), awaited (legacy) or accepted only (the cancels nobody waits for).
-type HireLifecycle interface {
+type SendMessageLifecycle interface {
 	CancelMCP(ctx context.Context, taskID a2a.TaskID) (lifecycle.CancelResult, bool, error)
 	RequestCancelMCP(ctx context.Context, taskID a2a.TaskID) error
 }
 
-// CancelSettle is how long a hire task's detached kontra.cancel, once accepted, stands for every later one this replica
+// CancelSettle is how long a send_message task's detached kontra.cancel, once accepted, stands for every later one this replica
 // would send it (cancelDetached): D57's bound on the cancel writing canceled.
 const CancelSettle = 10 * time.Second
 
-// DetachedWait bounds the replica drain's wait for its detached cancels (HireTasks.Wait): one cancel's acceptance
+// DetachedWait bounds the replica drain's wait for its detached cancels (SendMessageTasks.Wait): one cancel's acceptance
 // (lifecycle.AcceptWait) and a second.
 const DetachedWait = lifecycle.AcceptWait + time.Second
 
-// HireTasksConfig configures HireTasks.
-type HireTasksConfig struct {
+// SendMessageTasksConfig configures SendMessageTasks.
+type SendMessageTasksConfig struct {
 	Log       *store.Log
 	Waker     store.TaskWaker
-	Lifecycle HireLifecycle
-	Hirer     Hirer          // §12.4's accepted answer is the §7 follow-up, as reply sends it
+	Lifecycle SendMessageLifecycle
+	Sender    Sender         // §12.4's accepted answer is the §7 follow-up, as reply sends it
 	Render    *blob.Renderer // kontra-blob: parts as presigned GETs; nil renders none
 	Served    Served         // the replica's registry: a task is the reader's only while its service is served to it (D303)
 	Logger    *slog.Logger
 }
 
-// NewHireTasks checks cfg.
-func NewHireTasks(cfg HireTasksConfig) (*HireTasks, error) {
-	if cfg.Log == nil || cfg.Waker == nil || cfg.Lifecycle == nil || cfg.Hirer == nil {
-		return nil, errors.New("gatemcp: hire tasks need the log, the waker, the lifecycle client and the hirer")
+// NewSendMessageTasks checks cfg.
+func NewSendMessageTasks(cfg SendMessageTasksConfig) (*SendMessageTasks, error) {
+	if cfg.Log == nil || cfg.Waker == nil || cfg.Lifecycle == nil || cfg.Sender == nil {
+		return nil, errors.New("gatemcp: send_message tasks need the log, the waker, the lifecycle client and the caller")
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	idle := make(chan struct{})
 	close(idle)
-	return &HireTasks{log: cfg.Log, waker: cfg.Waker, lc: cfg.Lifecycle, hirer: cfg.Hirer, render: cfg.Render,
+	return &SendMessageTasks{log: cfg.Log, waker: cfg.Waker, lc: cfg.Lifecycle, sender: cfg.Sender, render: cfg.Render,
 		served: cfg.Served, logger: cfg.Logger.With("component", "gate-mcp-tasks"), keepAlive: keepAliveEvery, reread: 5 * time.Second,
 		settle: CancelSettle, cancels: map[uuid.UUID]time.Time{}, idle: idle}, nil
 }
@@ -102,25 +102,25 @@ type Reader struct {
 	SessionHash     *[32]byte // legacy only
 }
 
-// errTaskNotFound is the answer for a task id that is unknown, malformed, unhired or of another buyer (§12.2):
+// errTaskNotFound is the answer for a task id that is unknown, malformed, non-send_message or of another caller (§12.2):
 // -32602, as MCP answers an unknown task.
 var errTaskNotFound = &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "Failed to retrieve task: Task not found"}
 
 // errLifecycleUnavailable is a kontra.cancel that no lifecycle worker accepted in time (§14.1): -32603, HTTP 503.
 var errLifecycleUnavailable = errors.New("gatemcp: the task's lifecycle is unavailable")
 
-// load is the reader's hire task taskID names, nil when it names none of them, and asked, the seq of the task or status
-// event its state comes from, read with it (store.Log.LoadHiredAsked): at input-required, the event that asked the
-// question the row carries, whose gate id k.<taskId>.<asked> names it (§12.4). A principal that may not hire (spec
-// §2.3) has none: the handler refuses it before (403), and this holds for every caller of HireTasks. Nor does a reader
+// load is the reader's send_message task taskID names, nil when it names none of them, and asked, the seq of the task or status
+// event its state comes from, read with it (store.Log.LoadSentByMCPAsked): at input-required, the event that asked the
+// question the row carries, whose gate id k.<taskId>.<asked> names it (§12.4). A principal that may not send messages (spec
+// §2.3) has none: the handler refuses it before (403), and this holds for every caller of SendMessageTasks. Nor does a reader
 // whose task's service this replica no longer serves to it (disabled, its allow: no longer admitting the reader, a
 // row the registry refused), as the A2A route answers GetTask, CancelTask and a follow-up of it "unknown service"
 // (Served, D303).
-func (t *HireTasks) load(ctx context.Context, rd Reader, taskID uuid.UUID) (*store.TaskRow, int64, error) {
-	if taskID == uuid.Nil || !rd.Principal.MayHire() {
+func (t *SendMessageTasks) load(ctx context.Context, rd Reader, taskID uuid.UUID) (*store.TaskRow, int64, error) {
+	if taskID == uuid.Nil || !rd.Principal.MayCall() {
 		return nil, 0, nil
 	}
-	row, asked, err := t.log.LoadHiredAsked(ctx, rd.Principal.BuyerID, taskID)
+	row, asked, err := t.log.LoadSentByMCPAsked(ctx, rd.Principal.CallerID, taskID)
 	switch {
 	case errors.Is(err, a2a.ErrTaskNotFound):
 		return nil, 0, nil
@@ -146,13 +146,13 @@ func taskIDParam(params json.RawMessage) uuid.UUID {
 }
 
 // service is the policy a task's ttl is computed with (§11.6).
-func (t *HireTasks) service(ctx context.Context, row *store.TaskRow) (store.ServiceRef, error) {
+func (t *SendMessageTasks) service(ctx context.Context, row *store.TaskRow) (store.ServiceRef, error) {
 	return t.log.LoadService(ctx, row.TenantID, row.Service)
 }
 
 // Get answers tasks/get: the task in the reader's era's vocabulary (§5.1, §12.4), and sh.kontra/failure or sh.kontra/canceled in _meta for an ended one (§12.2). A modern reader
 // gets the tasks extension's DetailedTask (modernGet).
-func (t *HireTasks) Get(ctx context.Context, rd Reader, taskID uuid.UUID) (json.RawMessage, *mcpwire.Error, error) {
+func (t *SendMessageTasks) Get(ctx context.Context, rd Reader, taskID uuid.UUID) (json.RawMessage, *mcpwire.Error, error) {
 	row, asked, err := t.load(ctx, rd, taskID)
 	if err != nil || row == nil {
 		return nil, errTaskNotFound, err
@@ -169,13 +169,13 @@ func (t *HireTasks) Get(ctx context.Context, rd Reader, taskID uuid.UUID) (json.
 	return res, nil, err
 }
 
-// modernGet is a modern tasks/get of a hire task (§12.5, §11.12's table, D274): resultType "complete" and the Task
+// modernGet is a modern tasks/get of a send_message task (§12.5, §11.12's table, D274): resultType "complete" and the Task
 // as modernView presents it; a question the reader's request may get as a form (a text-only question, form
 // elicitation declared) is input_required with inputRequests holding that one elicitation/create under the gate id
 // k.<taskId>.<asked> of the event that asked it (asked is read with row: the key never pairs one question's text with
 // a later question's event); an ended task, but a canceled one, carries its result, the CallToolResult tasks/result
 // renders (§12.2), with resultType "complete".
-func (t *HireTasks) modernGet(ctx context.Context, row *store.TaskRow, asked int64, svc store.ServiceRef, rd Reader) (json.RawMessage, error) {
+func (t *SendMessageTasks) modernGet(ctx context.Context, row *store.TaskRow, asked int64, svc store.ServiceRef, rd Reader) (json.RawMessage, error) {
 	v := modernView(row, rd)
 	o := modernTaskObject(row, svc, v, resultComplete)
 	switch {
@@ -204,10 +204,10 @@ func (t *HireTasks) modernGet(ctx context.Context, row *store.TaskRow, asked int
 // elicitation: elicitation/create {mode: form, message, requestedSchema {reply: string}} with the related-task _meta,
 // its JSON-RPC id the gate id k.<taskId>.<seq> of the event that asked), then the rendered outcome (Render) with the
 // related-task _meta. A task that has ended when asked is answered in JSON. The stream's events carry no event id, as
-// /mcp's GET stream and a plain hire's carry none: /mcp resumes no stream, and a GET naming a Last-Event-ID is its
+// /mcp's GET stream and a plain send_message's carry none: /mcp resumes no stream, and a GET naming a Last-Event-ID is its
 // plain GET stream, which would never carry this request's answer (§12.3, D303). sid is the session's
 // Mcp-Session-Id.
-func (t *HireTasks) Result(ctx context.Context, w http.ResponseWriter, sid string, rd Reader, m *mcpwire.Message) {
+func (t *SendMessageTasks) Result(ctx context.Context, w http.ResponseWriter, sid string, rd Reader, m *mcpwire.Message) {
 	row, _, err := t.load(ctx, rd, taskIDParam(m.Params))
 	if err != nil {
 		t.logger.Warn("tasks/result: the task could not be read", "error", err)
@@ -229,7 +229,7 @@ func (t *HireTasks) Result(ctx context.Context, w http.ResponseWriter, sid strin
 	defer reread.Stop()
 	for {
 		var asked int64
-		row, asked, err = t.log.LoadHiredAsked(ctx, rd.Principal.BuyerID, id)
+		row, asked, err = t.log.LoadSentByMCPAsked(ctx, rd.Principal.CallerID, id)
 		if err != nil {
 			if !s.Started() && ctx.Err() == nil {
 				writeError(w, http.StatusServiceUnavailable, m.ID, mcpwire.CodeInternal, "the gate could not serve the request", nil)
@@ -297,7 +297,7 @@ func elicitationRequest(gateID string, task uuid.UUID, text string) []byte {
 
 // outcome is an ended task's tasks/result answer to the request id (§12.2): the rendered CallToolResult (never a
 // JSON-RPC error) with the related-task key.
-func (t *HireTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.RawMessage) ([]byte, error) {
+func (t *SendMessageTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.RawMessage) ([]byte, error) {
 	task := row.Snapshot
 	if t.render != nil {
 		r, err := t.render.Task(blob.ForCaller(ctx), task) // a caller's, through a node too (D303)
@@ -318,20 +318,20 @@ func (t *HireTasks) outcome(ctx context.Context, row *store.TaskRow, reqID json.
 	return responseBytes(reqID, "result", b), nil
 }
 
-// rendered is an ended hire task's CallToolResult (render), its hire result naming the task's service (D336).
-func (t *HireTasks) rendered(task *a2a.Task, row *store.TaskRow) callToolResult {
+// rendered is an ended send_message task's CallToolResult (render), its send_message result naming the task's service (D336).
+func (t *SendMessageTasks) rendered(task *a2a.Task, row *store.TaskRow) callToolResult {
 	res := render(task, row.State)
-	if hr, ok := res.StructuredContent.(HireResult); ok && t.ref != nil {
+	if hr, ok := res.StructuredContent.(SendMessageResult); ok && t.ref != nil {
 		hr.Service = t.ref(row)
 		res.StructuredContent = hr
 	}
 	return res
 }
 
-// List answers a legacy tasks/list: the buyer's hire tasks across services, newest first, gate-minted cursors
+// List answers a legacy tasks/list: the caller's send_message tasks across services, newest first, gate-minted cursors
 // (§12.2), but those whose service this replica does not serve to the reader (load's rule, D303): a page may then hold
-// fewer than store.HiredPageSize tasks, and nextCursor still names the next.
-func (t *HireTasks) List(ctx context.Context, rd Reader, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {
+// fewer than store.SentByMCPPageSize tasks, and nextCursor still names the next.
+func (t *SendMessageTasks) List(ctx context.Context, rd Reader, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {
 	cursor := ""
 	if v, ok := mcpwire.Member(params, "cursor"); ok && string(bytes.TrimSpace(v)) != "null" {
 		s, ok := stringOf(params, "cursor")
@@ -340,10 +340,10 @@ func (t *HireTasks) List(ctx context.Context, rd Reader, params json.RawMessage)
 		}
 		cursor = s
 	}
-	if !rd.Principal.MayHire() {
-		return json.RawMessage(`{"tasks":[]}`), nil, nil // as load: a principal that may not hire has no hire tasks
+	if !rd.Principal.MayCall() {
+		return json.RawMessage(`{"tasks":[]}`), nil, nil // as load: a principal that may not send messages has no send_message tasks
 	}
-	rows, next, err := t.log.ListHired(ctx, rd.Principal.BuyerID, cursor)
+	rows, next, err := t.log.ListSentByMCP(ctx, rd.Principal.CallerID, cursor)
 	if errors.Is(err, store.ErrBadCursor) {
 		return nil, &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "Invalid cursor"}, nil
 	}
@@ -385,7 +385,7 @@ func (t *HireTasks) List(ctx context.Context, rd Reader, params json.RawMessage)
 // A modern reader's (§12.5, §11.12's table; M4 WP-05) is acknowledged with an empty result, resultType "complete",
 // without waiting: kontra.cancel in MCP mode is sent, detached, on a task that is not terminal (D57 still writes
 // canceled within 10 s), and nothing on a terminal one (the tasks extension: cancellation is eventually consistent).
-func (t *HireTasks) Cancel(ctx context.Context, rd Reader, taskID uuid.UUID) (json.RawMessage, *mcpwire.Error, error) {
+func (t *SendMessageTasks) Cancel(ctx context.Context, rd Reader, taskID uuid.UUID) (json.RawMessage, *mcpwire.Error, error) {
 	row, _, err := t.load(ctx, rd, taskID)
 	if err != nil || row == nil {
 		return nil, errTaskNotFound, err
@@ -429,7 +429,7 @@ func notCancelable(s store.State) *mcpwire.Error {
 var ackComplete = json.RawMessage(`{"resultType":"complete"}`)
 
 // Update answers a modern tasks/update (§12.4, §12.5, §11.12's table, D274; M4 WP-05): params.inputResponses must be
-// an object (else -32602), and the task a hire task of the reader's buyer (else -32602, as an unknown one). The one
+// an object (else -32602), and the task a send_message task of the reader's caller (else -32602, as an unknown one). The one
 // key that can be answered is the gate id k.<taskId>.<seq> of the question outstanding now, as the reader's own request
 // would see it in tasks/get's inputRequests (follow): its accept {action: "accept", content: {reply: string}} becomes
 // the §7 follow-up, once (the workflow takes one follow-up per turn end, §7, D105). Every other key, decline and
@@ -441,9 +441,9 @@ var ackComplete = json.RawMessage(`{"resultType":"complete"}`)
 // acknowledged, since the extension tells the client never to answer a key twice: the answer would be lost while the
 // task waits on. A follow-up the lifecycle did not accept in time is 503 with -32603, an anonymous tenant's limit 429,
 // another A2A refusal (the anonymous storage limit, a required extension, D294) its JSON-RPC error, and a failure of
-// the gate's own 503 with -32603 (*followUpRefused, answered by writeTaskAnswer as hire and reply are), so the client
+// the gate's own 503 with -32603 (*followUpRefused, answered by writeTaskAnswer as send_message and reply are), so the client
 // answers again.
-func (t *HireTasks) Update(ctx context.Context, rd Reader, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {
+func (t *SendMessageTasks) Update(ctx context.Context, rd Reader, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {
 	resp, ok := mcpwire.Member(params, "inputResponses")
 	if !ok || firstByte(resp) != '{' {
 		return nil, &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "Invalid params: inputResponses is not an object"}, nil
@@ -480,7 +480,7 @@ func (t *HireTasks) Update(ctx context.Context, rd Reader, params json.RawMessag
 	return ackComplete, nil, nil
 }
 
-// followUpRefused is the A2A route's refusal of a §12.4 follow-up (the Hirer's error, as Reply returned it).
+// followUpRefused is the A2A route's refusal of a §12.4 follow-up (the Caller's error, as Reply returned it).
 type followUpRefused struct{ err error }
 
 func (e *followUpRefused) Error() string { return "gatemcp: follow-up refused: " + e.err.Error() }
@@ -497,12 +497,12 @@ func (e *followUpRefused) settled() bool {
 
 // Respond takes a legacy client's response to a gate-written elicitation/create (id k.<taskId>.<seq>, §11.7,
 // §12.4): an accept whose content is {reply: string} becomes the §7 follow-up, once, and only when it answers the
-// question outstanding now (the task, a hire task of the reader's buyer, is at input-required and seq is the event
+// question outstanding now (the task, a send_message task of the reader's caller, is at input-required and seq is the event
 // that asked, a text-only question this reader's session would have been sent as a form); decline and cancel leave
 // the task waiting. A response about an earlier turn, an unknown or foreign task, or one in any other shape is
 // dropped. It reports whether the response was the
 // follow-up.
-func (t *HireTasks) Respond(ctx context.Context, rd Reader, m *mcpwire.Message) bool {
+func (t *SendMessageTasks) Respond(ctx context.Context, rd Reader, m *mcpwire.Message) bool {
 	var s string
 	if json.Unmarshal(m.ID, &s) != nil || m.Error != nil {
 		return false
@@ -519,15 +519,15 @@ func (t *HireTasks) Respond(ctx context.Context, rd Reader, m *mcpwire.Message) 
 	return sent
 }
 
-// follow is §12.4's answer to the question of a hire task of rd's buyer, in either era: result, an ElicitResult,
-// becomes the §7 follow-up (through the Hirer, as reply sends it) only when the task is at input-required, seq, the
+// follow is §12.4's answer to the question of a send_message task of rd's caller, in either era: result, an ElicitResult,
+// becomes the §7 follow-up (through the Caller, as reply sends it) only when the task is at input-required, seq, the
 // event the answer names, is asked, the event row's question comes from (load reads them together), and is still the
 // task's last (the question outstanding now), the question is one rd gets as a form (text only, form elicitation
 // declared: Question), and result is an accept whose content is {reply: string}. It reports whether the follow-up was
-// sent; err is a *followUpRefused carrying the Hirer's refusal of it (another follow-up of that turn taken first, a
+// sent; err is a *followUpRefused carrying the Caller's refusal of it (another follow-up of that turn taken first, a
 // required extension, a limit, a lifecycle that did not accept it in time), logged here, or the gate's failure to
 // read the log.
-func (t *HireTasks) follow(ctx context.Context, rd Reader, row *store.TaskRow, asked, seq int64, result json.RawMessage) (bool, error) {
+func (t *SendMessageTasks) follow(ctx context.Context, rd Reader, row *store.TaskRow, asked, seq int64, result json.RawMessage) (bool, error) {
 	if row.State != store.StateInputRequired || seq != asked {
 		return false, nil
 	}
@@ -541,21 +541,21 @@ func (t *HireTasks) follow(ctx context.Context, rd Reader, row *store.TaskRow, a
 	if !ok {
 		return false, nil
 	}
-	if _, err := t.hirer.Reply(ctx, rd.Principal, row, a2a.ContentParts{a2a.NewTextPart(reply)}); err != nil {
-		t.logger.Info("an answer to a hire task's question was not taken", "task_id", row.ID, "request_seq", seq, "error", err)
+	if _, err := t.sender.Reply(ctx, rd.Principal, row, a2a.ContentParts{a2a.NewTextPart(reply)}); err != nil {
+		t.logger.Info("an answer to a send_message task's question was not taken", "task_id", row.ID, "request_seq", seq, "error", err)
 		return false, &followUpRefused{err: err}
 	}
 	return true, nil
 }
 
-// cancelDetached sends a hire task kontra.cancel in MCP mode without waiting for its result (§11.6, D57: the workflow
-// writes canceled within 10 s, the upstream receiving §8's CancelTask): a modern tasks/cancel, and a modern hire whose
+// cancelDetached sends a send_message task kontra.cancel in MCP mode without waiting for its result (§11.6, D57: the workflow
+// writes canceled within 10 s, the upstream receiving §8's CancelTask): a modern tasks/cancel, and a modern send_message whose
 // client left before its answer (D178). It waits only for the workflow's acceptance (RequestCancelMCP), on a goroutine
 // the replica's drain awaits (Wait). One per task at a time on this replica: while a cancel of the task is being sent,
 // and for CancelSettle after it was accepted, another is not sent (the workflow would join it, §8; each would be an
 // Update in the task's history, counted against Temporal's per-workflow limits, which then refuse the task's own
 // kontra.message). A cancel not accepted in time is forgotten, so a later one is sent again.
-func (t *HireTasks) cancelDetached(id uuid.UUID, why string) {
+func (t *SendMessageTasks) cancelDetached(id uuid.UUID, why string) {
 	t.mu.Lock()
 	now := time.Now()
 	for k, at := range t.cancels {
@@ -565,13 +565,13 @@ func (t *HireTasks) cancelDetached(id uuid.UUID, why string) {
 	}
 	if _, ok := t.cancels[id]; ok {
 		t.mu.Unlock()
-		t.logger.Debug("a hire task's cancel is already sent", "task_id", id, "why", why)
+		t.logger.Debug("a send_message task's cancel is already sent", "task_id", id, "why", why)
 		return
 	}
 	t.cancels[id] = time.Time{}
 	release := t.holdLocked()
 	t.mu.Unlock()
-	t.logger.Info("a hire task is cancelled", "task_id", id, "why", why)
+	t.logger.Info("a send_message task is cancelled", "task_id", id, "why", why)
 	go func() {
 		defer release()
 		ctx, cancel := context.WithTimeout(context.Background(), DetachedWait)
@@ -591,15 +591,15 @@ func (t *HireTasks) cancelDetached(id uuid.UUID, why string) {
 }
 
 // hold counts one piece of the replica's detached work in flight until release is called: a detached cancel, or a
-// modern hire, which may still send one when its client leaves (answerModernHire).
-func (t *HireTasks) hold() (release func()) {
+// modern send_message, which may still send one when its client leaves (answerModernSendMessage).
+func (t *SendMessageTasks) hold() (release func()) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.holdLocked()
 }
 
 // holdLocked is hold with t.mu held.
-func (t *HireTasks) holdLocked() (release func()) {
+func (t *SendMessageTasks) holdLocked() (release func()) {
 	if t.busy == 0 {
 		t.idle = make(chan struct{})
 	}
@@ -616,12 +616,12 @@ func (t *HireTasks) holdLocked() (release func()) {
 	}
 }
 
-// Wait returns once no detached cancel and no modern hire is in flight on this replica, or with ctx's error when ctx
-// ends first. The replica's drain calls it after its listener has stopped (a modern hire whose stream that closed
+// Wait returns once no detached cancel and no modern send_message is in flight on this replica, or with ctx's error when ctx
+// ends first. The replica's drain calls it after its listener has stopped (a modern send_message whose stream that closed
 // cancels its task) and before it closes its Temporal client, bounded by DetachedWait: a cancel whose Update had not
 // reached Temporal when the client closed would be lost, and the task would run unseen (D178); one that has been
 // accepted is in the task's history.
-func (t *HireTasks) Wait(ctx context.Context) error {
+func (t *SendMessageTasks) Wait(ctx context.Context) error {
 	t.mu.Lock()
 	idle := t.idle
 	t.mu.Unlock()
@@ -663,7 +663,7 @@ func writeRPCError(w http.ResponseWriter, sid string, id json.RawMessage, e *mcp
 	writeError(w, http.StatusOK, id, e.Code, e.Message, e.Data)
 }
 
-// tasks serves the legacy tasks/* of a 2025-11-25 session over hire tasks (§12.2, §11.6).
+// tasks serves the legacy tasks/* of a 2025-11-25 session over send_message tasks (§12.2, §11.6).
 func (h *Handler) tasks(rq *request) {
 	m, t, rd := rq.msg, h.deps.Tasks, rq.reader()
 	var (
@@ -690,7 +690,7 @@ func (h *Handler) tasks(rq *request) {
 }
 
 // writeTaskAnswer writes the answer to a tasks/* request of either era: a lifecycle that did not accept the request
-// in time is 503 with -32603; a refused follow-up (tasks/update) as hire and reply answer the Hirer's refusals
+// in time is 503 with -32603; a refused follow-up (tasks/update) as send_message and reply answer the Caller's refusals
 // (refused); the gate's own failure 503 (internal); a JSON-RPC error with status 200; else the result.
 func (h *Handler) writeTaskAnswer(rq *request, res json.RawMessage, rpcErr *mcpwire.Error, err error) {
 	m := rq.msg

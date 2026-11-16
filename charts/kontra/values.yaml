@@ -182,10 +182,10 @@ networkPolicy:
     postgresPort: 5432
     temporalTo: []
     temporalPort: 7233
-    # Sellers the gate dials inside the cluster or on private addresses: NetworkPolicy egress rules
+    # Services the gate dials inside the cluster or on private addresses: NetworkPolicy egress rules
     # ({to: [...], ports: [...]}), used as given.
-    sellers: []
-    # Public sellers, ACME, seller_keys URLs: anywhere but the private ranges, on these ports.
+    services: []
+    # Public services, ACME, service_keys URLs: anywhere but the private ranges, on these ports.
     publicEgress:
       enabled: true
       ports: [443]

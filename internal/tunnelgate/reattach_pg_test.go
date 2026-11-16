@@ -323,7 +323,7 @@ func TestReconnectWaitStatus(t *testing.T) {
 		t.Fatalf("the terminal task's kontra.reconnect: %v", row.Snapshot.Metadata)
 	}
 
-	// A sealed service's task: the status has no message (a hiring node refuses any unsealed part of a sealed job but
+	// A sealed service's task: the status has no message (a calling node refuses any unsealed part of a sealed job but
 	// a terminal gate text, ext-sealed.md rule 4a), the metadata alone says the task waits (D342).
 	e.exec(`update kontra.services set sealed = 'optional' where tenant_id = $1 and name = 'hello'`, e.team)
 	sl := e.placedTask(k, r1, s)

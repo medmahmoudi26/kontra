@@ -25,7 +25,7 @@
 #
 # The service below is hosted by the nodes enrolled for it (`docker compose exec gate kontra-gate enroll -f
 # /etc/kontra/kontra.yaml hello`): `kontra connect --gate https://<the name> --enroll <token> --serve
-# a2a:hello=http://127.0.0.1:9999` on any machine, examples/sellers/hello-exec behind it.
+# a2a:hello=http://127.0.0.1:9999` on any machine, examples/agents/hello-exec behind it.
 listen: ":8443"
 public_url: https://gate.example.com
 signing_key: file:/etc/kontra/signing/kontra.key

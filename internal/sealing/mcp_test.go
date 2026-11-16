@@ -27,7 +27,7 @@ func mcpPre(session, reqID, task string) tunnel.Preamble {
 }
 
 // mcpHeader is an MCP request header of b (a tools/call, or an answer to an input request).
-func (f *fixture) mcpHeader(b buyer, session, tool, msgID string) sealed.Header {
+func (f *fixture) mcpHeader(b caller, session, tool, msgID string) sealed.Header {
 	return sealed.Header{V: 1, Dir: sealed.DirRequest, Service: "fs", IAT: f.now.Unix(), Session: session, Tool: tool,
 		MessageID: msgID, Op: sealed.OpCall, Part: 0, Parts: 1, Kind: sealed.KindData, Kids: []string{f.kid()}, ReplyTo: b.replyTo(),
 		RK: sealed.EncodeRK(b.rk)}
@@ -38,8 +38,8 @@ func envelope(ct []byte) string {
 	return string(b)
 }
 
-// sealedCallBody is a sealed tools/call as a hiring node sends it: arguments {} and the envelope in _meta.
-func (f *fixture) sealedCallBody(b buyer, session, tool, id, args string, task bool) []byte {
+// sealedCallBody is a sealed tools/call as a calling node sends it: arguments {} and the envelope in _meta.
+func (f *fixture) sealedCallBody(b caller, session, tool, id, args string, task bool) []byte {
 	ct := f.seal(f.mcpHeader(b, session, tool, id), args)
 	params := `{"name":"` + tool + `","arguments":{},"_meta":{"sh.kontra/sealed":` + envelope(ct) + `}`
 	if task {
@@ -81,11 +81,11 @@ func fromServer(t *testing.T, x *MCPExchange, body string) string {
 }
 
 // openMCP opens an envelope a hosting node sealed for b, checking auth.
-func openMCP(t *testing.T, b buyer, ct []byte) (sealed.Header, string) {
+func openMCP(t *testing.T, b caller, ct []byte) (sealed.Header, string) {
 	t.Helper()
 	hd, plain, err := sealed.Open([]age.Identity{b.key}, ct)
 	if err != nil {
-		t.Fatalf("does not open with the buyer's key: %v", err)
+		t.Fatalf("does not open with the caller's key: %v", err)
 	}
 	if err := sealed.VerifyAuth(b.rk, hd, plain); err != nil {
 		t.Fatalf("auth: %v", err)
@@ -98,7 +98,7 @@ func openMCP(t *testing.T, b buyer, ct []byte) (sealed.Header, string) {
 // session wrong_message (rule 4), with another tool wrong_message.
 func TestHostingMCPPlainCall(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	s1 := sessionHash("gate-session-1")
 	body := f.sealedCallBody(b, s1, "echo", "1", `{"message":"secret marker"}`, false)
 	x := f.h.MCP(mcpPre(s1, "1", ""))
@@ -148,18 +148,18 @@ func TestHostingMCPPlainCall(t *testing.T) {
 	if _, r := fromClient(t, f.h.MCP(mcpPre(s1, "3", "")), other); r != sealed.RejectWrongMessage {
 		t.Errorf("a messageId that is not the preamble's: %q, want wrong_message", r)
 	}
-	// Another buyer on the same session (a gate forging a call of its own into the job): wrong_job.
-	b2 := newBuyer(t)
+	// Another caller on the same session (a gate forging a call of its own into the job): wrong_job.
+	b2 := newCaller(t)
 	if _, r := fromClient(t, f.h.MCP(mcpPre(s1, "4", "")), f.sealedCallBody(b2, s1, "echo", "4", `{}`, false)); r != sealed.RejectWrongJob {
 		t.Errorf("another replyTo on the job's session: %q, want wrong_job", r)
 	}
 }
 
 // durable runs a sealed durable task's call on the dispatch's exchanges and has the upstream ask one elicitation,
-// which it returns sealed with the buyer's view of its header.
+// which it returns sealed with the caller's view of its header.
 type durable struct {
 	f       *fixture
-	b       buyer
+	b       caller
 	session string
 	task    string // the gate task
 	tool    string
@@ -167,7 +167,7 @@ type durable struct {
 
 func newDurable(t *testing.T) *durable {
 	f := newFixture(t)
-	d := &durable{f: f, b: newBuyer(t), session: sessionHash("client-session"), task: "0193c0de-0000-7000-8000-00000000d001", tool: "trip"}
+	d := &durable{f: f, b: newCaller(t), session: sessionHash("client-session"), task: "0193c0de-0000-7000-8000-00000000d001", tool: "trip"}
 	x := f.h.MCP(mcpPre(d.session, "1", d.task))
 	if _, r := fromClient(t, x, f.sealedCallBody(d.b, d.session, d.tool, "1", `{"city":"secret city"}`, true)); r != "" {
 		t.Fatal(r)
@@ -310,10 +310,10 @@ func TestHostingMCPAnswerRules(t *testing.T) {
 			t.Fatalf("%q", r)
 		}
 	})
-	t.Run("another buyer's answer is wrong_job", func(t *testing.T) {
+	t.Run("another caller's answer is wrong_job", func(t *testing.T) {
 		d := newDurable(t)
 		d.ask(t, "5")
-		other := newBuyer(t)
+		other := newCaller(t)
 		hd := d.f.mcpHeader(other, d.session, d.tool, "5")
 		hd.TaskID, hd.Op = d.task, sealed.OpAnswer
 		_, r := fromClient(t, d.f.h.MCP(mcpPre(d.session, "1", d.task)), d.answer(t, "5", hd, `{}`))
@@ -383,7 +383,7 @@ func TestHostingMCPRequired(t *testing.T) {
 		t.Fatalf("%q", r)
 	}
 	g := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	body := strings.Replace(string(g.sealedCallBody(b, s, "echo", "1", `{}`, false)), `"sh.kontra/sealed"`, `"SH.kontra/sealed"`, 1)
 	if _, r := fromClient(t, g.h.MCP(mcpPre(s, "1", "")), []byte(body)); r != sealed.RejectBadHeader {
 		t.Fatalf("a case variant of the envelope's key: %q", r)

@@ -95,16 +95,16 @@ func TestUUIDv7SortByCreation(t *testing.T) {
 	}
 }
 
-// Derived ids are fixed: these values are stored in tasks.buyer_id and must never change. They were
+// Derived ids are fixed: these values are stored in tasks.caller_id and must never change. They were
 // computed independently with Python's uuid.uuid5 and the recipe in Derive's doc.
 func TestUUIDv5DerivationsAreStable(t *testing.T) {
 	if got := Namespace.String(); got != "a89faf13-3f2e-5f6d-8f26-999810d1be71" {
 		t.Errorf("Namespace = %s", got)
 	}
 	tenant := uuid.MustParse("0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11")
-	team, _ := AnonymousBuyer(uuid.Nil)
-	multi, _ := AnonymousBuyer(tenant)
-	oidc, err := OIDCBuyer("https://login.acme.io", "auth0|42")
+	team, _ := AnonymousCaller(uuid.Nil)
+	multi, _ := AnonymousCaller(tenant)
+	oidc, err := OIDCCaller("https://login.acme.io", "auth0|42")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,14 +129,14 @@ func TestUUIDv5DerivationsAreStable(t *testing.T) {
 		t.Error("Derive is ambiguous across part boundaries")
 	}
 	if team == multi {
-		t.Error("the team gate's anonymous buyer equals a tenant's")
+		t.Error("the team gate's anonymous caller equals a tenant's")
 	}
-	other, _ := AnonymousBuyer(uuid.MustParse("0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d12"))
+	other, _ := AnonymousCaller(uuid.MustParse("0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d12"))
 	if other == multi {
-		t.Error("two tenants share an anonymous buyer")
+		t.Error("two tenants share an anonymous caller")
 	}
-	if _, err := OIDCBuyer("", "x"); err == nil {
-		t.Error("OIDCBuyer accepted an empty issuer")
+	if _, err := OIDCCaller("", "x"); err == nil {
+		t.Error("OIDCCaller accepted an empty issuer")
 	}
 }
 
@@ -165,54 +165,54 @@ func TestNewReplicaID(t *testing.T) {
 	}
 }
 
-// NodeBuyer is UUIDv5(gate namespace ‖ key_id) (spec/relay.md §2.3), fixed forever like the other buyers: the
+// NodeCaller is UUIDv5(gate namespace ‖ key_id) (spec/relay.md §2.3), fixed forever like the other callers: the
 // value was computed independently with Python's uuid.uuid5 and Derive's recipe, kind "node".
-func TestNodeBuyer(t *testing.T) {
+func TestNodeCaller(t *testing.T) {
 	const kid = "k1_abcdefghijklmnopqrstuvwxyz"
-	b, err := NodeBuyer(Namespace, kid)
+	b, err := NodeCaller(Namespace, kid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if b.String() != "7333cc86-7e09-5473-9922-6e39f7551bed" || b.Version() != 5 {
-		t.Fatalf("NodeBuyer = %s (version %d)", b, b.Version())
+		t.Fatalf("NodeCaller = %s (version %d)", b, b.Version())
 	}
 	if b != Derive("node", kid) {
-		t.Fatal("NodeBuyer(Namespace, k) is not Derive(\"node\", k)")
+		t.Fatal("NodeCaller(Namespace, k) is not Derive(\"node\", k)")
 	}
-	other, err := NodeBuyer(Namespace, "k1_bbcdefghijklmnopqrstuvwxyz")
+	other, err := NodeCaller(Namespace, "k1_bbcdefghijklmnopqrstuvwxyz")
 	if err != nil || other == b {
-		t.Fatalf("two keys share a buyer: %s %v", other, err)
+		t.Fatalf("two keys share a caller: %s %v", other, err)
 	}
-	if again, _ := NodeBuyer(Namespace, kid); again != b {
-		t.Fatal("NodeBuyer is not stable")
+	if again, _ := NodeCaller(Namespace, kid); again != b {
+		t.Fatal("NodeCaller is not stable")
 	}
-	// Another namespace is another buyer; a key id of the wrong shape and no namespace are errors.
-	if o, _ := NodeBuyer(uuid.NameSpaceURL, kid); o == b {
+	// Another namespace is another caller; a key id of the wrong shape and no namespace are errors.
+	if o, _ := NodeCaller(uuid.NameSpaceURL, kid); o == b {
 		t.Fatal("the namespace does not enter the id")
 	}
 	for _, bad := range []string{"", "k1_ABCDEFGHIJKLMNOPQRSTUVWXYZ", "k1_abc", "key:kk_x", "k1_abcdefghijklmnopqrstuvwxyz0"} {
-		if _, err := NodeBuyer(Namespace, bad); err == nil {
-			t.Errorf("NodeBuyer(%q) accepted", bad)
+		if _, err := NodeCaller(Namespace, bad); err == nil {
+			t.Errorf("NodeCaller(%q) accepted", bad)
 		}
 	}
-	if _, err := NodeBuyer(uuid.Nil, kid); err == nil {
-		t.Error("NodeBuyer accepted no namespace")
+	if _, err := NodeCaller(uuid.Nil, kid); err == nil {
+		t.Error("NodeCaller accepted no namespace")
 	}
 }
 
-// relay.md §2.3's table of derived buyers (D319) is what an operator computes the ids from: each example it writes is
+// relay.md §2.3's table of derived callers (D319) is what an operator computes the ids from: each example it writes is
 // the id the gate stores. scripts/check_specs.py recomputes the same values with Python's uuid.uuid5.
-func TestDerivedBuyersAsRelayWritesThem(t *testing.T) {
-	node, err := NodeBuyer(Namespace, "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa")
+func TestDerivedCallersAsRelayWritesThem(t *testing.T) {
+	node, err := NodeCaller(Namespace, "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err != nil {
 		t.Fatal(err)
 	}
-	oidc, err := OIDCBuyer("https://api.kontra.sh", "alice")
+	oidc, err := OIDCCaller("https://api.kontra.sh", "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	team, _ := AnonymousBuyer(uuid.Nil)
-	multi, _ := AnonymousBuyer(uuid.MustParse("01900000-0000-7000-8000-000000000001"))
+	team, _ := AnonymousCaller(uuid.Nil)
+	multi, _ := AnonymousCaller(uuid.MustParse("01900000-0000-7000-8000-000000000001"))
 	for name, tc := range map[string]struct {
 		got  uuid.UUID
 		want string

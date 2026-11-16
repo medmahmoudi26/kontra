@@ -236,7 +236,7 @@ func (h *Handlers) Invalidate(svc store.ServiceRef) {
 	h.mu.Unlock()
 }
 
-// User attributes the identity interceptor sets on CallContext.User (Name is the buyer id). They cross the
+// User attributes the identity interceptor sets on CallContext.User (Name is the caller id). They cross the
 // work queue inside the call context, so the dispatching replica's store scopes by the same owner.
 const (
 	AttrPrincipal = "principal"
@@ -251,11 +251,11 @@ func CallerOwner(ctx context.Context) (store.Owner, error) {
 	if !ok || cc.User == nil || cc.User.Name == "" {
 		return store.Owner{}, a2a.ErrUnauthenticated
 	}
-	buyer, err := uuid.Parse(cc.User.Name)
+	caller, err := uuid.Parse(cc.User.Name)
 	if err != nil {
-		return store.Owner{}, fmt.Errorf("relay: caller %q is not a buyer id: %w", cc.User.Name, a2a.ErrUnauthenticated)
+		return store.Owner{}, fmt.Errorf("relay: caller %q is not a caller id: %w", cc.User.Name, a2a.ErrUnauthenticated)
 	}
-	o := store.Owner{BuyerID: buyer}
+	o := store.Owner{CallerID: caller}
 	o.Principal, _ = cc.User.Attributes[AttrPrincipal].(string)
 	o.Via, _ = cc.User.Attributes[AttrVia].(string)
 	if t, _ := cc.User.Attributes[AttrTenant].(string); t != "" {

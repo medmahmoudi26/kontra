@@ -313,16 +313,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !authenticated {
-		buyerTenant := uuid.Nil // a team gate: one fixed buyer for every anonymous caller (spec §2.3)
+		callerTenant := uuid.Nil // a team gate: one fixed caller for every anonymous caller (spec §2.3)
 		if h.deps.Multi {
-			buyerTenant = svc.Ref.TenantID
+			callerTenant = svc.Ref.TenantID
 		}
-		buyer, err := ids.AnonymousBuyer(buyerTenant)
+		caller, err := ids.AnonymousCaller(callerTenant)
 		if err != nil {
-			h.internal(rq, "derive the anonymous buyer", err)
+			h.internal(rq, "derive the anonymous caller", err)
 			return
 		}
-		p = auth.Anonymous(buyer)
+		p = auth.Anonymous(caller)
 	}
 	if !svc.Allow.Admits(p) {
 		h.notServed(rq, route, authenticated)

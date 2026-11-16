@@ -84,7 +84,7 @@ func TestLimitsFrom(t *testing.T) {
 		t.Errorf("defaults %+v, want %+v", got, anon.Defaults)
 	}
 	d := anon.Defaults
-	if d.TTL != 2*time.Hour || d.TenantsPerNetwork != 3 || d.Services != 4 || d.Tasks != 4 || d.Calls != 8 || d.HiringStreams != 8 ||
+	if d.TTL != 2*time.Hour || d.TenantsPerNetwork != 3 || d.Services != 4 || d.Tasks != 4 || d.Calls != 8 || d.CallingStreams != 8 ||
 		d.PartsBytes != 64<<20 || d.PurgeAfter != 24*time.Hour || d.MaxTenants != 1000 {
 		t.Errorf("§6.2's defaults: %+v", d)
 	}

@@ -6,13 +6,13 @@
 // shape (0.2.x and 0.3 fields renamed, unknown fields kept) with exactly these fields set by the gate:
 // supportedInterfaces, securitySchemes, securityRequirements, capabilities.pushNotifications,
 // capabilities.streaming, capabilities.extendedAgentCard, capabilities.extensions (operator entries replace
-// same-URI seller entries) and signatures. A card is never round-tripped through a typed struct: every
+// same-URI service entries) and signatures. A card is never round-tripped through a typed struct: every
 // other member keeps its bytes and its place.
 //
 // The served card carries exactly one signature, the gate's (D13, D166): ES256 over the JCS of the served card
 // without signatures, whose protected header binds the upstream card (kontra.upstream: its JCS hash, the URL it
-// is served at, and whether a configured seller key verified it). The seller's signatures stay on the upstream
-// card. JWSSigner signs; SellerKeys verifies a seller's signatures against the keys the operator configured.
+// is served at, and whether a configured service key verified it). The service's signatures stay on the upstream
+// card. JWSSigner signs; ServiceKeys verifies a service's signatures against the keys the operator configured.
 package card
 
 import (
@@ -55,7 +55,7 @@ type Input struct {
 	OIDCIssuer string
 	// Sealed is the sealed extension's entry for a sealed service (ext-sealed.md §1: uri
 	// https://kontra.sh/ext/sealed/v1, required false, params recipients, envelope and required), nil otherwise.
-	// It replaces a seller entry with the same URI, and a card whose upstream offers no A2A 1.0 interface is not
+	// It replaces a service entry with the same URI, and a card whose upstream offers no A2A 1.0 interface is not
 	// installed (D165: the nodes seal and open the 1.0 shapes only), so the service is unavailable.
 	Sealed         json.RawMessage
 	CardExtensions []json.RawMessage // the operator's card_extensions annotation (spec §13.4)
@@ -232,14 +232,14 @@ var v0Members = []string{"url", "preferredTransport", "additionalInterfaces", "p
 //   - securitySchemes' OpenAPI-style entries become the 1.0 one-of wrappers.
 //
 // A card with both shapes (supportedInterfaces and 0.x members, as a2a-go v2's a2av0 card producers write
-// for a seller that also serves 0.3 clients) keeps its supportedInterfaces and loses its 0.x members: the
+// for a service that also serves 0.3 clients) keeps its supportedInterfaces and loses its 0.x members: the
 // 0.x interface members go, supportsAuthenticatedExtendedCard and security are converted as above where the
 // card has no 1.0 member of their own and dropped otherwise, and so is each skill's security.
 //
-// SPEC-CONFLICT (D88): spec §3 says "a 1.0 card is used as is" and keeps every seller-authored member but the
+// SPEC-CONFLICT (D88): spec §3 says "a 1.0 card is used as is" and keeps every service-authored member but the
 // gate's; read literally, a combined card's url, additionalInterfaces, preferredTransport and
 // protocolVersion "0.3" would be served beside the gate's supportedInterfaces, so a 0.3 client reading the
-// served card would dial the seller's own (often internal) address, past the gate's allow: list and
+// served card would dial the service's own (often internal) address, past the gate's allow: list and
 // authentication, against §3's "supportedInterfaces ... Never an upstream URL" and §2.4's 1.0-only
 // downstream; and its security and supportsAuthenticatedExtendedCard would contradict the gate's own
 // securityRequirements and extendedAgentCard: false (D52). The closest faithful behaviour: those 0.x
@@ -466,7 +466,7 @@ func skillsHaveV0Security(o object) (bool, error) {
 	}
 	var skills []json.RawMessage
 	if err := json.Unmarshal(raw, &skills); err != nil {
-		return false, nil // not an array: kept as the seller wrote it
+		return false, nil // not an array: kept as the service wrote it
 	}
 	for _, s := range skills {
 		if so, err := parseObject(s); err == nil && so.has("security") {
@@ -487,7 +487,7 @@ func v0Skills(raw json.RawMessage) (json.RawMessage, error) {
 	for i, s := range skills {
 		o, err := parseObject(s)
 		if err != nil {
-			continue // not an object: kept as the seller wrote it
+			continue // not an object: kept as the service wrote it
 		}
 		sec, ok := o.get("security")
 		if !ok {
@@ -600,7 +600,7 @@ var (
 // the gate writes, removes or reads there without being it ("Extensions", "Signatures", "SecuritySchemes", an entry's
 // "Required"). The gate sets and removes members by their exact keys, while a decoder that matches names
 // case-insensitively (encoding/json, so a2a-go's card parser and the gate's own §2.4 reader before D311) takes the last
-// of the variants: a seller's "Extensions" after the gate's "extensions" would replace the operator's entries for such
+// of the variants: a service's "Extensions" after the gate's "extensions" would replace the operator's entries for such
 // a reader, on a card the gate signs, and a lone "Signatures" or "SecuritySchemes" would stand in for a member the gate
 // removed. The hosting node refuses such a card already (internal/sealing's cardExtension, D172); the gate serves
 // none.
@@ -615,7 +615,7 @@ func checkGateKeys(norm []byte) error {
 	return nil
 }
 
-// extensions is the seller's capabilities.extensions with every entry whose URI the gate or the operator
+// extensions is the service's capabilities.extensions with every entry whose URI the gate or the operator
 // asserts replaced by theirs (spec §3, §13.4); nil when there is nothing to write.
 func extensions(caps object, in Input) (json.RawMessage, error) {
 	var gate []json.RawMessage
@@ -647,17 +647,17 @@ func extensions(caps object, in Input) (json.RawMessage, error) {
 	if !ok && len(gate) == 0 {
 		return nil, nil
 	}
-	var seller []json.RawMessage
+	var service []json.RawMessage
 	if ok && string(bytes.TrimSpace(raw)) != "null" {
-		if err := json.Unmarshal(raw, &seller); err != nil {
+		if err := json.Unmarshal(raw, &service); err != nil {
 			return nil, fmt.Errorf("%w: capabilities.extensions: %v", ErrBadCard, err)
 		}
 	}
 	if len(gate) == 0 {
 		return raw, nil
 	}
-	out := make([]json.RawMessage, 0, len(seller)+len(gate))
-	for _, e := range seller {
+	out := make([]json.RawMessage, 0, len(service)+len(gate))
+	for _, e := range service {
 		var ext struct {
 			URI string `json:"uri"`
 		}
@@ -682,7 +682,7 @@ func extensions(caps object, in Input) (json.RawMessage, error) {
 // Signer signs a served card (ES256 over RFC 8785 JCS, protected header with kontra.upstream, D13): it returns
 // one AgentCardSignature's JSON. JWSSigner is the gate's.
 type Signer interface {
-	// Sign signs served; jwksURL is kontra.upstream.jwks, the URL of the seller key set the gate verified the upstream
+	// Sign signs served; jwksURL is kontra.upstream.jwks, the URL of the service key set the gate verified the upstream
 	// card with ("" when it verified none, D223).
 	Sign(ctx context.Context, served []byte, upstreamSHA256 [32]byte, upstreamURL, jwksURL string, verified bool) (json.RawMessage, error)
 }
@@ -693,12 +693,12 @@ type Served struct {
 	Upstream     []byte // the upstream card, verbatim
 	ETag         string // hash of Body
 	LastModified time.Time
-	Unavailable  bool     // configured seller keys and no verifying signature, or no fetch for 30 min: card routes answer 503
+	Unavailable  bool     // configured service keys and no verifying signature, or no fetch for 30 min: card routes answer 503
 	Hash         [32]byte // SHA-256 over the JCS of Upstream (kontra.upstream.sha256, services.card_hash)
-	Verified     bool     // a configured seller key verified a signature of Upstream (kontra.upstream.verified)
-	// SellerJWKS is the public JWK Set of the seller keys that verified Upstream, served at kontra.upstream.jwks
-	// ({svc}/.well-known/seller-jwks.json, D223); nil when no configured key verified it.
-	SellerJWKS []byte
+	Verified     bool     // a configured service key verified a signature of Upstream (kontra.upstream.verified)
+	// ServiceJWKS is the public JWK Set of the service keys that verified Upstream, served at kontra.upstream.jwks
+	// ({svc}/.well-known/service-jwks.json, D223); nil when no configured key verified it.
+	ServiceJWKS []byte
 }
 
 // ETag is the strong entity tag of a served body: a quoted hex SHA-256 prefix. Replicas that fetched the
@@ -711,11 +711,11 @@ func ETag(body []byte) string {
 // CacheControl is the card responses' Cache-Control (spec §3).
 const CacheControl = "max-age=60"
 
-// SellerJWKSHandler serves GET {svc}/.well-known/seller-jwks.json (spec/relay.md §2.1, §3; D223): the public JWK Set
-// of the seller keys the gate verified the current upstream card with, the set kontra.upstream.jwks names, with
+// ServiceJWKSHandler serves GET {svc}/.well-known/service-jwks.json (spec/relay.md §2.1, §3; D223): the public JWK Set
+// of the service keys the gate verified the current upstream card with, the set kontra.upstream.jwks names, with
 // Cache-Control max-age=60 and an ETag, as the cards it goes with. A service whose card is unavailable answers 503,
-// as its card routes do; one whose card no configured seller key verified (none configured) has no such set: 404.
-func SellerJWKSHandler(get func(r *http.Request) (*Served, error)) http.Handler {
+// as its card routes do; one whose card no configured service key verified (none configured) has no such set: 404.
+func ServiceJWKSHandler(get func(r *http.Request) (*Served, error)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Content-Length", "0")
@@ -729,12 +729,12 @@ func SellerJWKSHandler(get func(r *http.Request) (*Served, error)) http.Handler 
 			w.Header().Set("Content-Length", "0")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
-		case len(s.SellerJWKS) == 0:
+		case len(s.ServiceJWKS) == 0:
 			w.Header().Set("Content-Length", "0")
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		etag := ETag(s.SellerJWKS)
+		etag := ETag(s.ServiceJWKS)
 		h := w.Header()
 		h.Set("Cache-Control", CacheControl)
 		h.Set("ETag", etag)
@@ -743,11 +743,11 @@ func SellerJWKSHandler(get func(r *http.Request) (*Served, error)) http.Handler 
 			return
 		}
 		h.Set("Content-Type", "application/jwk-set+json")
-		h.Set("Content-Length", strconv.Itoa(len(s.SellerJWKS)))
+		h.Set("Content-Length", strconv.Itoa(len(s.ServiceJWKS)))
 		h.Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusOK)
 		if r.Method == http.MethodGet {
-			_, _ = w.Write(s.SellerJWKS)
+			_, _ = w.Write(s.ServiceJWKS)
 		}
 	})
 }
@@ -756,7 +756,7 @@ func SellerJWKSHandler(get func(r *http.Request) (*Served, error)) http.Handler 
 // without them). upstream selects the verbatim upstream card.
 //
 //   - GET and HEAD only; any other method is an empty 404, as the edge's closed router answers it.
-//   - A service with no servable card (none fetched yet, or none for 30 minutes, or configured seller keys
+//   - A service with no servable card (none fetched yet, or none for 30 minutes, or configured service keys
 //     and no signature that verifies: Served.Unavailable) answers 503 with an empty body (spec §3).
 //   - The served card's ETag is Served.ETag, the upstream card's the same hash over its own bytes; both
 //     carry the served card's Last-Modified (the time its body last changed).

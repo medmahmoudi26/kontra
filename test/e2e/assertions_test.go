@@ -13,8 +13,8 @@ import (
 // fail).
 
 // A card the gate serves names public_url, the Front, on an ephemeral port (32768–60999 on Linux), which
-// may hold 9999 (39999, 49999, 59999): that is not the seller's address, which is host:9999 only.
-func TestNamesSellerIgnoresTheFrontsPort(t *testing.T) {
+// may hold 9999 (39999, 49999, 59999): that is not the service's address, which is host:9999 only.
+func TestNamesServiceIgnoresTheFrontsPort(t *testing.T) {
 	card := func(urls ...string) []byte {
 		var c struct {
 			Name                string               `json:"name"`
@@ -32,13 +32,13 @@ func TestNamesSellerIgnoresTheFrontsPort(t *testing.T) {
 	}
 	for _, port := range []string{"39999", "49999", "59999", "41234"} {
 		front := "http://127.0.0.1:" + port + "/agents/hello"
-		if namesSeller(card(front, front)) {
-			t.Errorf("a card served at public_url %s is taken for one naming the seller", front)
+		if namesService(card(front, front)) {
+			t.Errorf("a card served at public_url %s is taken for one naming the service", front)
 		}
 	}
-	for _, seller := range []string{"http://" + helloAddr, "http://127.0.0.1:9999/", "http://localhost:9999/", "http://[::1]:9999"} {
-		if !namesSeller(card("http://127.0.0.1:41234/agents/hello", seller)) {
-			t.Errorf("a card naming %s is not taken for one naming the seller", seller)
+	for _, service := range []string{"http://" + helloAddr, "http://127.0.0.1:9999/", "http://localhost:9999/", "http://[::1]:9999"} {
+		if !namesService(card("http://127.0.0.1:41234/agents/hello", service)) {
+			t.Errorf("a card naming %s is not taken for one naming the service", service)
 		}
 	}
 }

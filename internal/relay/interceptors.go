@@ -40,8 +40,8 @@ type Canceller interface {
 //  0. Egress rendering (spec §10.4, D167, D181): on the way out, every answer's kontra-blob:<ref> parts become
 //     presigned GETs for the task they belong to (blob.Renderer); first in the chain, so its After runs last,
 //     on every answer, the early ones included.
-//  1. Identity: CallContext.User from the edge's principal (Name = buyer id, attributes: principal, via,
-//     tenant), so the store scopes reads and the identity crosses the work queue. A key without the hire
+//  1. Identity: CallContext.User from the edge's principal (Name = caller id, attributes: principal, via,
+//     tenant), so the store scopes reads and the identity crosses the work queue. A key without the call
 //     scope may call no service (§2.3).
 //  2. Anonymous refusals (spec §2.3): ListTasks and push configs (inline ones included) are
 //     UnsupportedOperationError for the anonymous principal.
@@ -116,7 +116,7 @@ type AnonStorage interface {
 	Message(ctx context.Context, svcTenant uuid.UUID, svcSlug string, n int64) error
 }
 
-// StartReissuer re-issues the start of the task a keyed hire repeats, with its first work item, as the work queue does
+// StartReissuer re-issues the start of the task a keyed send_message repeats, with its first work item, as the work queue does
 // for a resend (spec §14.5, D338): idempotent, and a task whose start was lost gets its workflow. lifecycle.Queue
 // implements it.
 type StartReissuer interface {
@@ -166,14 +166,14 @@ func (i *Interceptors) identity(ctx context.Context, cc *a2asrv.CallContext, _ *
 	if !ok || p.Kind == "" {
 		return ctx, nil, a2a.ErrUnauthenticated
 	}
-	if !p.MayHire() {
-		return ctx, nil, a2a.NewError(a2a.ErrUnauthorized, "this API key may not call services (it has no hire scope)")
+	if !p.MayCall() {
+		return ctx, nil, a2a.NewError(a2a.ErrUnauthorized, "this API key may not call services (it has no call scope)")
 	}
 	attrs := map[string]any{AttrPrincipal: p.ID, AttrVia: string(p.Via)}
 	if p.TenantID != nil {
 		attrs[AttrTenant] = p.TenantID.String()
 	}
-	cc.User = &a2asrv.User{Name: p.BuyerID.String(), Authenticated: p.Authenticated(), Attributes: attrs}
+	cc.User = &a2asrv.User{Name: p.CallerID.String(), Authenticated: p.Authenticated(), Attributes: attrs}
 	return ctx, nil, nil
 }
 
@@ -374,7 +374,7 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 		Operation: hooks.OpTask,
 		TaskID:    string(taskID),
 		Service:   hooks.Service{TenantID: i.Svc.TenantID.String(), Tenant: i.Svc.Tenant, Name: i.Svc.Name, Kind: i.Svc.Kind},
-		Principal: hooks.Principal{Kind: string(p.Kind), ID: p.ID, BuyerID: p.BuyerID.String(), Via: string(p.Via)},
+		Principal: hooks.Principal{Kind: string(p.Kind), ID: p.ID, CallerID: p.CallerID.String(), Via: string(p.Via)},
 		Protocol:  string(store.ProtocolA2A),
 		ContextID: r.Message.ContextID,
 		Message:   &hooks.MessageInfo{MessageID: r.Message.ID, Metadata: r.Message.Metadata, Parts: []hooks.PartInfo{}},
@@ -393,9 +393,9 @@ func (i *Interceptors) admission(ctx context.Context, cc *a2asrv.CallContext, re
 			}
 		}
 	}
-	// A hire of /mcp activates the operator's required extensions for its buyer (§12.2, D300): Admission is told so as
+	// A send_message of /mcp activates the operator's required extensions for its caller (§12.2, D300): Admission is told so as
 	// it is told of an A2A caller's.
-	for _, u := range hireActivated(ctx) {
+	for _, u := range sendMessageActivated(ctx) {
 		if !slices.Contains(ar.Extensions, u) {
 			ar.Extensions = append(ar.Extensions, u)
 		}
@@ -828,7 +828,7 @@ func upstreamText(e *lifecycle.UpstreamError, fallback string) string {
 // kontra-blob:<ref> part of a task, a message, a list of tasks or a streamed event becomes a presigned GET valid
 // 15 minutes, for the task its blobs row names only (blob.Renderer). It is first in the chain, so its After
 // runs last and sees every answer, the interceptors' early ones (a cancel's task, a resend's, the
-// stored task finishedTurn answers) included. A request that arrived on a hiring node's stream keeps the refs
+// stored task finishedTurn answers) included. A request that arrived on a calling node's stream keeps the refs
 // (blob.WithKeepRefs, M3 WP-03).
 type renderAnswers struct {
 	a2asrv.PassthroughCallInterceptor

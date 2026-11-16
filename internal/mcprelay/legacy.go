@@ -106,7 +106,7 @@ func (h *Handler) initialize(rq *request) {
 		return
 	}
 	sess := &Session{
-		Hash: hash, TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name, BuyerID: rq.p.BuyerID,
+		Hash: hash, TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name, CallerID: rq.p.CallerID,
 		Principal: rq.p.ID, Via: string(rq.p.Via), UpstreamSID: resp.Header.Get(mcpwire.HeaderSessionID),
 		ReplicaID: t.replica, ClientCaps: clientCapabilities(rq.msg.Params),
 	}
@@ -206,7 +206,7 @@ func (h *Handler) initializeResult(rq *request, raw []byte, m *mcpwire.Message, 
 		}
 	}
 	if idle := int64(rq.svc.SessionIdle / time.Second); idle > 0 {
-		// §11.2 (D224): the gate states the service's session_idle_s, which closes the session idle, so that a hiring
+		// §11.2 (D224): the gate states the service's session_idle_s, which closes the session idle, so that a calling
 		// node keeps a sealed session's key as long as the gate keeps the session, and no longer. It is merged after the
 		// operator's initialize_meta: the value is the gate's, never an annotation's.
 		if res, err = mcpwire.MergeMeta(res, map[string]json.RawMessage{
@@ -352,7 +352,7 @@ func (h *Handler) pinned(rq *request) {
 	}
 	if m := rq.msg; m != nil && m.Method == "" && isGateRequestID(m.ID) {
 		// §11.7: a client response to a gate-minted request id is the gate's: logged once as an input_response
-		// when it answers an input request of a task of the caller's buyer, else dropped; 202 either way.
+		// when it answers an input request of a task of the caller's caller_id, else dropped; 202 either way.
 		if h.deps.Tasks != nil {
 			h.deps.Tasks.Respond(rq.ctx(), h.caller(rq), m, rq.body, h.sealed(rq))
 		}
@@ -422,7 +422,7 @@ func (h *Handler) pinned(rq *request) {
 // k.<taskId>.<seq>, a gate task id as the gate writes it (a UUID, lowercase and hyphenated) and a decimal sequence
 // number without sign or leading zero. An upstream's own id that merely starts with "k." is not one: its client's
 // answer is forwarded like every other response (§11.2: upstream ids pass unchanged). Tasks.Respond then also
-// requires an input request of a task of the caller's buyer.
+// requires an input request of a task of the caller's caller_id.
 func isGateRequestID(id json.RawMessage) bool {
 	id = bytes.TrimSpace(id)
 	if len(id) == 0 || id[0] != '"' {
@@ -848,7 +848,7 @@ func (h *Handler) toolsCall(rq *request, t target) {
 	hash := rq.sess.Hash
 	meter := &callMeter{
 		start: rq.start, task: task,
-		call: Call{TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name, Tool: name, BuyerID: rq.p.BuyerID,
+		call: Call{TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name, Tool: name, CallerID: rq.p.CallerID,
 			Principal: rq.p.ID, MCPSession: &hash},
 	}
 	h.forward(rq, t, meter)
@@ -905,7 +905,7 @@ func (h *Handler) admitCtx(ctx context.Context, rq *request, op hooks.Operation,
 	ar := hooks.AdmitRequest{
 		Operation: op,
 		Service:   hooks.Service{TenantID: ref.TenantID.String(), Tenant: ref.Tenant, Name: ref.Name, Kind: config.KindMCP},
-		Principal: hooks.Principal{Kind: string(rq.p.Kind), ID: rq.p.ID, BuyerID: rq.p.BuyerID.String(), Via: string(rq.p.Via)},
+		Principal: hooks.Principal{Kind: string(rq.p.Kind), ID: rq.p.ID, CallerID: rq.p.CallerID.String(), Via: string(rq.p.Via)},
 		Protocol:  string(store.ProtocolMCP),
 		Tool:      tool,
 	}

@@ -97,7 +97,7 @@ func TestTunnelLostWelcome(t *testing.T) {
 		code, _ := n.Wait(0)
 		t.Fatalf("N exited (%d):\n%s", code, tail(n.LogPath, 20))
 	}
-	res, err := h.BuyerA().Client(t, h.Gates[1], "").SendMessage(ctx, newMessage("after the lost welcome"))
+	res, err := h.CallerA().Client(t, h.Gates[1], "").SendMessage(ctx, newMessage("after the lost welcome"))
 	if err != nil {
 		t.Fatal(err)
 	}

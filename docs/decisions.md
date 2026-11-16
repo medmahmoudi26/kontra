@@ -6337,3 +6337,36 @@ only when the callee answers with one. Rejected: it duplicates every durable mec
 crash in that window would need two recovery paths. Only `tasks_by_caller` (ListTasks) becomes partial on exposed
 rows; `tasks_by_context` stays whole, since the local console reads a context's message-only interactions through it.
 Supersedes D5 except for `returnImmediately` ([`relay.md`](../spec/relay.md) §4, §6.3, §9, §10.1, §15).
+
+### D363. Caller and callee: hire, buyer and seller are renamed everywhere, contracts included — **decided by the owner, 12 Nov; no aliases, 16 Nov**
+
+kontra is secure tunnels over the agent protocols (A2A, A2UI, AP2), not a hiring marketplace, and payment between
+agents is AP2's job. The gate's words still said otherwise. Decision: the old words go everywhere, the wire contracts
+included, with no alias; an old name fails loudly and names the new one (OpenSpec change `caller-callee-rename`).
+
+| Before | After |
+|---|---|
+| `/mcp` tool `hire`, output schema `hireResult` | `send_message`, `sendMessageResult` (`tools/call` of `hire` is `-32602` `Unknown tool: hire`) |
+| API key scope `hire` | `call` (`kontra-gate enroll --scope hire` is refused, naming `call`) |
+| Hook payload `buyerId` | `callerId` |
+| Config `services.<name>.seller_keys`, `tunnel.anonymous.hiring_streams` | `service_keys`, `calling_streams` (an old key fails to load, naming the new one) |
+| `{svc}/.well-known/seller-jwks.json`, traffic method `seller_jwks` | `{svc}/.well-known/service-jwks.json`, `service_jwks` |
+| Columns `buyer_id` (`api_keys`, `tasks`, `mcp_sessions`, `calls`), `tasks.hired`, `tunnels.hire_principal`, `services.seller_keys` | `caller_id`, `tasks.sent_by_mcp`, `tunnels.caller_principal`, `services.service_keys` (migration 0009, with its indexes) |
+| `internal/hiring`, `examples/sellers/`, principal kinds `buyer` and `hirer` | `internal/calling`, `examples/agents/`, `caller` |
+
+Migration 0009 is catalog renames, plus four data updates: stored `hire` scopes become `call` (and the column default),
+a queued work item's `owner.buyerId` becomes `callerId`, and `a2a_exchanges.method` `seller_jwks` becomes `service_jwks`. The
+audit chain and `task_events.origin` keep what they recorded. Old and new gates cannot share the schema: the deploy
+stops every replica, migrates and starts the new gate, in one window with Kontra Cloud, which reads the gate's tables.
+
+Three things keep the old word on purpose. A node's pins file (`~/.kontra/pins`) written before the rename is read
+with its `seller_keys` as `service_keys` and saved under the new name: otherwise every upgraded node would report a
+service key change that did not happen. Two opaque values stay as they are because changing them changes behaviour:
+the Temporal change id `hire-mcp-cancel` (recorded histories replay by it) and the UUID namespace of `send_message`'s
+idempotency keys (it derives stored ids). Nodes on an older kontra refuse sealed services through an upgraded gate,
+since they fetch `seller-jwks.json`; they fail loudly and need the upgrade.
+
+The decisions before this one keep their words: read hire as call (or `send_message` where it names the `/mcp` tool),
+buyer as caller and seller as service. Migrations 0001 to 0008 keep theirs too, byte for byte, since goose checks
+applied files, and so do the run records (`docs/gate-runs-m4.md`, `docs/pentest-m3.md`), which quote commands and
+output as they ran.

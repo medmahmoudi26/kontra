@@ -23,7 +23,7 @@ import (
 // Admission and the traffic record as any client's would. A task the console starts is recorded in console_tasks;
 // the console replies to, cancels and continues only those (taskView.Actions).
 
-// Extension URIs the console speaks (Kontra Cloud's console: gate/tasks/hire.py), activated when the card declares
+// Extension URIs the console speaks (Kontra Cloud's console: gate/tasks/call.py), activated when the card declares
 // them.
 const (
 	ExtA2UI091          = "https://a2ui.org/a2a-extension/a2ui/v0.9.1"
@@ -239,7 +239,7 @@ func (c *Console) startForm(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- request bodies
 
-// startBody is POST /v1/tasks's (and continue's) body: Kontra Cloud's HireRequest in caller/callee words.
+// startBody is POST /v1/tasks's (and continue's) body: Kontra Cloud's MCPSendRequest in caller/callee words.
 type startBody struct {
 	Service      string          `json:"service"`
 	Text         *string         `json:"text"`

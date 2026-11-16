@@ -14,8 +14,8 @@ import (
 )
 
 // sealed_no_plaintext (ext-sealed.md §9, D62, D171, D174, D175): two sealed services hosted by node A, its tunnel on
-// replica B: sealedecho (an A2A seller that repeats its input in an artifact and in its status message and asks one
-// follow-up) and everything (server-everything@1.0.0 over MCP). Hiring node H, on replica A with an API key, carries
+// replica B: sealedecho (an A2A service that repeats its input in an artifact and in its status message and asks one
+// follow-up) and everything (server-everything@1.0.0 over MCP). Calling node H, on replica A with an API key, carries
 // a random marker M in every input:
 //
 //	(a) A2A through H's local endpoint: a text part and a 300 KiB file part, both carrying M, then the follow-up
@@ -23,7 +23,7 @@ import (
 //	(b) a plain MCP tools/call echo {message: M};
 //	(c) a durable task-augmented simulate-research-query on an ambiguous topic holding M, whose one elicitation is
 //	    answered with M, and its tasks/result;
-//	(d) A2A: a first message holding M that the seller refuses with an error quoting it (M3 review security-1): the
+//	(d) A2A: a first message holding M that the service refuses with an error quoting it (M3 review security-1): the
 //	    task fails, and the error's text stays on the hosting node.
 //
 // The local clients receive M in every answer (the echo, the artifact, the status message, the MCP content, the
@@ -40,35 +40,35 @@ func TestSealedNoPlaintext(t *testing.T) {
 		Peer:   true,
 	})
 	ctx := ctxFor(t, 10*time.Minute)
-	seller, err := h.StartEchoSeller()
+	service, err := h.StartEchoService()
 	if err != nil {
 		t.Fatal(err)
 	}
 	every := h.StartEverything(t, "everything")
 
-	// The hosting node's tunnel on replica B, the hiring node's on A.
+	// The hosting node's tunnel on replica B, the calling node's on A.
 	h.Front.Route(h.Gates[1])
-	host, _ := startNode(t, ctx, h, "host", map[string]string{"sealedecho": seller.URL}, func(o *NodeOptions) {
+	host, _ := startNode(t, ctx, h, "host", map[string]string{"sealedecho": service.URL}, func(o *NodeOptions) {
 		o.MCP = map[string]string{"everything": every.URL}
 	})
 	waitSealedCard(t, ctx, h, "sealedecho")
 	h.Front.Route(h.Gates[0])
-	hirer, err := h.StartNode(ctx, NodeOptions{Name: "hirer", APIKey: h.APIKey})
+	callingNode, err := h.StartNode(ctx, NodeOptions{Name: "caller", APIKey: h.APIKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	local, err := hirer.Local(30 * time.Second)
+	local, err := callingNode.Local(30 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r := sessionReplica(ctx, h, host.Session()); r != h.Gates[1].ReplicaID {
 		t.Fatalf("the hosting node's session is on %q, want replica B", r)
 	}
-	if r := sessionReplica(ctx, h, hirer.Session()); r != h.Gates[0].ReplicaID {
-		t.Fatalf("the hiring node's session is on %q, want replica A", r)
+	if r := sessionReplica(ctx, h, callingNode.Session()); r != h.Gates[0].ReplicaID {
+		t.Fatalf("the calling node's session is on %q, want replica A", r)
 	}
 	m := NewMarker()
-	t.Logf("marker %s; hosting node %s on B, hiring node %s on A", m, host.KeyID, hirer.KeyID)
+	t.Logf("marker %s; hosting node %s on B, calling node %s on A", m, host.KeyID, callingNode.KeyID)
 
 	// (a) A2A: a text part and a 300 KiB file part carrying M, then a follow-up with M.
 	c := localA2A(t, ctx, local, "sealedecho")
@@ -84,9 +84,9 @@ func TestSealedNoPlaintext(t *testing.T) {
 		asked.Artifacts[0].Parts[0].Text() != "echo: "+echoAskPrefix+" "+m || !bytes.Equal(asked.Artifacts[0].Parts[1].Raw(), file) {
 		t.Fatalf("(a) the echo artifact is not the input: %d artifacts", len(asked.Artifacts))
 	}
-	turns := seller.Turns()
+	turns := service.Turns()
 	if len(turns) != 1 || turns[0][0].Text() != echoAskPrefix+" "+m || !bytes.Equal(turns[0][1].Raw(), file) {
-		t.Fatalf("(a) the seller did not receive the plaintext: %d turns", len(turns))
+		t.Fatalf("(a) the service did not receive the plaintext: %d turns", len(turns))
 	}
 	follow := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(m))
 	follow.TaskID, follow.ContextID = asked.ID, asked.ContextID
@@ -105,7 +105,7 @@ func TestSealedNoPlaintext(t *testing.T) {
 	}
 	a2aTask := done.ID
 
-	// (b) A plain MCP call through the hiring node.
+	// (b) A plain MCP call through the calling node.
 	mc := NewMCPClient(local+"/mcp/everything", "")
 	init, err := mc.Initialize(ctx)
 	if err != nil {
@@ -162,7 +162,7 @@ func TestSealedNoPlaintext(t *testing.T) {
 		t.Fatalf("(c) the task's result did not carry the answer back: %s", fb)
 	}
 
-	// (d) A first message the seller refuses with an error quoting M: the task fails; neither the node's answer nor the
+	// (d) A first message the service refuses with an error quoting M: the task fails; neither the node's answer nor the
 	// gate's failure text, log line or Temporal history holds M.
 	bad := sendTask(t, ctx, c, a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(echoFailPrefix+" "+m)))
 	eventually(t, 90*time.Second, "(d) the refused task fails", func() bool {
@@ -236,7 +236,7 @@ func TestSealedNoPlaintext(t *testing.T) {
 	// The scan's positive controls: strings each source does hold are found there.
 	requireScanSees(t, ctx, h, string(a2aTask), "table kontra.tasks", "table kontra.task_events", "history ")
 	requireScanSees(t, ctx, h, "replica ready to serve", "log of gate A", "log of gate B")
-	requireScanSees(t, ctx, h, "tunnel session open", "log of node host", "log of node hirer")
+	requireScanSees(t, ctx, h, "tunnel session open", "log of node host", "log of node caller")
 	requireScanSees(t, ctx, h, "age-encryption.org/v1", "bucket ")
 }
 

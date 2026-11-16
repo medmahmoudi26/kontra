@@ -23,20 +23,20 @@ import (
 	"kontra.sh/kontra/internal/store"
 )
 
-// The hire result's shapes (§12.2, §12.3; D289, D324). A client may show its model and its user a tool result's
-// structuredContent and nothing else (Claude Code 2.1.281 does, M5's gate G3, C59), so every CallToolResult a hire or a
+// The send_message result's shapes (§12.2, §12.3; D289, D324). A client may show its model and its user a tool result's
+// structuredContent and nothing else (Claude Code 2.1.281 does, M5's gate G3, C59), so every CallToolResult a send_message or a
 // reply answers carries in structuredContent what a person needs: taskId and state; the text of the content's text
 // blocks (the agent's answer, its question, or what the gate says); data and file links.
-// Each shape is validated against the outputSchema hire and reply declare, and is the fixture
-// spec/schema/examples/mcp-tools.hireResult.<shape>.json, which make check-specs validates with a full 2020-12
+// Each shape is validated against the outputSchema send_message and reply declare, and is the fixture
+// spec/schema/examples/mcp-tools.sendMessageResult.<shape>.json, which make check-specs validates with a full 2020-12
 // validator.
 
 const shapeTask = "019a0000-0000-7000-8000-000000000001" // taskWith's id
 
-// hireShapes are the CallToolResults hire and reply answer, by shape: what plainAnswer and Render write for a task in
+// sendMessageShapes are the CallToolResults send_message and reply answer, by shape: what plainAnswer and Render write for a task in
 // each state. A task an earlier release quoted keeps kontra.approve.url in its metadata (thread): no answer shows it
 // any more (D351).
-func hireShapes(t *testing.T) map[string]json.RawMessage {
+func sendMessageShapes(t *testing.T) map[string]json.RawMessage {
 	t.Helper()
 	h := &Handler{deps: Deps{PublicURL: "https://gateway.example.com/"}}
 	id := uuid.MustParse(shapeTask)
@@ -46,7 +46,7 @@ func hireShapes(t *testing.T) map[string]json.RawMessage {
 	}
 	plain := func(r *store.TaskRow) json.RawMessage {
 		t.Helper()
-		return h.plainAnswer(context.Background(), r, auth.Principal{Kind: auth.KindKey, ID: "key:kk_buyer", BuyerID: uuid.Nil})
+		return h.plainAnswer(context.Background(), r, auth.Principal{Kind: auth.KindKey, ID: "key:kk_caller", CallerID: uuid.Nil})
 	}
 	file := a2a.NewRawPart([]byte("tck"))
 	file.MediaType, file.Filename = "text/plain", "output.txt"
@@ -78,13 +78,13 @@ type shapeResult struct {
 	Meta       map[string]any  `json:"_meta"`
 }
 
-func decodeShape(t *testing.T, name string, b json.RawMessage) (shapeResult, HireResult) {
+func decodeShape(t *testing.T, name string, b json.RawMessage) (shapeResult, SendMessageResult) {
 	t.Helper()
 	var r shapeResult
 	if err := json.Unmarshal(b, &r); err != nil {
 		t.Fatalf("%s: %s: %v", name, b, err)
 	}
-	var hr HireResult
+	var hr SendMessageResult
 	dec := json.NewDecoder(bytes.NewReader(r.Structured))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&hr); err != nil {
@@ -111,8 +111,8 @@ func texts(r shapeResult, data []any) []string {
 
 // Each shape's structuredContent carries what the text tells a person: the agent's answer or question, and the task
 // (no url, no quote: D351); and the text blocks stay in content for a client that reads only content.
-func TestHireResultShapes(t *testing.T) {
-	shapes := hireShapes(t)
+func TestSendMessageResultShapes(t *testing.T) {
+	shapes := sendMessageShapes(t)
 	type want struct {
 		state, text string
 		isError     bool
@@ -162,9 +162,9 @@ func TestHireResultShapes(t *testing.T) {
 	}
 }
 
-// A plain hire or reply still running after the plain wait answers the hire result of a task still running (§12.2,
+// A plain send_message or reply still running after the plain wait answers the send_message result of a task still running (§12.2,
 // D272, D324): its state and the follow-up text; and the texts that describe
-// that answer, relay.md §16's gate_mcp_hire row and PlainWait's doc, say so, not D272's {taskId, state} (G3's review).
+// that answer, relay.md §16's gate_mcp_send_message row and PlainWait's doc, say so, not D272's {taskId, state} (G3's review).
 func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 	h := &Handler{deps: Deps{PublicURL: "https://gateway.example.com/"}}
 	follow := "The task " + shapeTask + " is still working. Follow it here with status {taskId: \"" + shapeTask +
@@ -179,14 +179,14 @@ func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 	} {
 		row := &store.TaskRow{ID: uuid.MustParse(shapeTask), Service: "hello", ContextID: "ctx", State: store.StateWorking,
 			Snapshot: taskWith(a2a.TaskStateWorking, nil, c.meta)}
-		r, hr := decodeShape(t, c.name, h.plainAnswer(context.Background(), row, auth.Principal{Kind: auth.KindKey, ID: "key:kk_buyer"}))
+		r, hr := decodeShape(t, c.name, h.plainAnswer(context.Background(), row, auth.Principal{Kind: auth.KindKey, ID: "key:kk_caller"}))
 		if r.IsError || hr.TaskID != shapeTask || hr.State != "TASK_STATE_WORKING" || hr.Text != follow ||
 			strings.Contains(string(r.Structured), "url") || hr.Data != nil || hr.Files != nil || !slices.Equal(texts(r, nil), []string{follow}) {
 			t.Errorf("%s: isError %v, structuredContent %s", c.name, r.IsError, r.Structured)
 		}
 	}
 
-	const says = "the hire result of a task still running"
+	const says = "the send_message result of a task still running"
 	read := func(path string) string {
 		t.Helper()
 		b, err := os.ReadFile(path)
@@ -197,34 +197,34 @@ func TestStillRunningIsWhatTheTextsSay(t *testing.T) {
 	}
 	var row string
 	for line := range strings.Lines(read(filepath.Join("..", "..", "spec", "relay.md"))) {
-		if strings.HasPrefix(line, "| `gate_mcp_hire` |") {
+		if strings.HasPrefix(line, "| `gate_mcp_send_message` |") {
 			row = line
 		}
 	}
 	if !strings.Contains(row, "within 25 s and "+says+" (its state and the follow-up text) otherwise") ||
 		strings.Contains(row, "{taskId, state}") {
-		t.Errorf("relay.md §16's gate_mcp_hire row does not say a plain hire still running answers %s:\n%s", says, row)
+		t.Errorf("relay.md §16's gate_mcp_send_message row does not say a plain send_message still running answers %s:\n%s", says, row)
 	}
-	src := read("hire.go")
+	src := read("send_message.go")
 	end := strings.Index(src, "\nconst PlainWait ")
 	start := strings.LastIndex(src[:max(end, 0)], "\n\n")
 	if end < 0 || start < 0 {
-		t.Fatal("hire.go: no PlainWait")
+		t.Fatal("send_message.go: no PlainWait")
 	}
 	doc := strings.Join(strings.Fields(strings.ReplaceAll(src[start:end], "//", "")), " ")
 	if !strings.Contains(doc, says+": its state and the follow-up text") ||
 		strings.Contains(doc, "{taskId, state}") {
-		t.Errorf("PlainWait's doc does not say a plain hire still running answers %s: %s", says, doc)
+		t.Errorf("PlainWait's doc does not say a plain send_message still running answers %s: %s", says, doc)
 	}
 }
 
-// Every shape validates against the outputSchema hire and reply declare, and is the fixture make check-specs validates.
-func TestHireResultSchema(t *testing.T) {
+// Every shape validates against the outputSchema send_message and reply declare, and is the fixture make check-specs validates.
+func TestSendMessageResultSchema(t *testing.T) {
 	var schema map[string]any
-	if err := json.Unmarshal([]byte(schemaHireResult), &schema); err != nil {
+	if err := json.Unmarshal([]byte(schemaSendMessageResult), &schema); err != nil {
 		t.Fatal(err)
 	}
-	shapes := hireShapes(t)
+	shapes := sendMessageShapes(t)
 	names := make([]string, 0, len(shapes))
 	for name := range shapes {
 		names = append(names, name)
@@ -239,7 +239,7 @@ func TestHireResultSchema(t *testing.T) {
 		if err := validate(schema, v, "structuredContent"); err != nil {
 			t.Errorf("%s: %v: %s", name, err, r.Structured)
 		}
-		path := filepath.Join("..", "..", "spec", "schema", "examples", "mcp-tools.hireResult."+name+".json")
+		path := filepath.Join("..", "..", "spec", "schema", "examples", "mcp-tools.sendMessageResult."+name+".json")
 		file, err := os.ReadFile(path)
 		if err != nil {
 			t.Errorf("%s: the fixture: %v (want %s)", name, err, r.Structured)
@@ -271,7 +271,7 @@ func TestHireResultSchema(t *testing.T) {
 	}
 }
 
-// validate checks v against the keywords schemaHireResult uses, and refuses a schema with any other: a keyword it
+// validate checks v against the keywords schemaSendMessageResult uses, and refuses a schema with any other: a keyword it
 // does not know would otherwise pass unchecked.
 func validate(schema map[string]any, v any, at string) error {
 	for k := range schema {

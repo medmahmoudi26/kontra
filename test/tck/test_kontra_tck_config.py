@@ -17,10 +17,10 @@ HERE = Path(__file__).resolve().parent
 # A KONTRA_TEST_PG with several query parameters ('&', which a sed replacement turns into the matched text), and the
 # other characters a sed s||| replacement or a YAML double-quoted scalar treat specially.
 DSN = ('postgres://kontra:p|a\\s"s$1@127.0.0.1:5432/kontra_tck_x'
-       '?sslmode=disable&connect_timeout=5&application_name=@SELLER@')
+       '?sslmode=disable&connect_timeout=5&application_name=@SERVICE@')
 VALUES = {
     "LISTEN": "127.0.0.1:40001", "PUBLIC_URL": "https://127.0.0.1:40002", "POSTGRES": DSN,
-    "TEMPORAL": "127.0.0.1:40003", "SELLER": "http://127.0.0.1:40004",
+    "TEMPORAL": "127.0.0.1:40003", "SERVICE": "http://127.0.0.1:40004",
 }
 
 
@@ -33,11 +33,11 @@ def scalar(text: str, key: str) -> str:
 
 
 def test_values_are_inserted_literally() -> None:
-    out = kc.fill('# fills @POSTGRES@\npostgres: "@POSTGRES@"\nseller: "@SELLER@"\n', VALUES)
+    out = kc.fill('# fills @POSTGRES@\npostgres: "@POSTGRES@"\nservice: "@SERVICE@"\n', VALUES)
     assert scalar(out, "postgres") == DSN
-    assert scalar(out, "seller") == VALUES["SELLER"]
-    # a value is never scanned for placeholders again: the DSN's own "@SELLER@" stays
-    assert "application_name=@SELLER@" in out
+    assert scalar(out, "service") == VALUES["SERVICE"]
+    # a value is never scanned for placeholders again: the DSN's own "@SERVICE@" stays
+    assert "application_name=@SERVICE@" in out
 
 
 @pytest.mark.parametrize("template", sorted(p.name for p in HERE.glob("gate-*.yaml")))
@@ -46,7 +46,7 @@ def test_every_template_fills(template: str) -> None:
     assert scalar(out, "postgres") == DSN
     assert scalar(out, "listen") == VALUES["LISTEN"]
     assert scalar(out, "public_url") == VALUES["PUBLIC_URL"]
-    left = set(kc.PLACEHOLDER.findall(out)) - {"SELLER"}  # the DSN's own
+    left = set(kc.PLACEHOLDER.findall(out)) - {"SERVICE"}  # the DSN's own
     assert not left, f"{template}: {left} left"
 
 

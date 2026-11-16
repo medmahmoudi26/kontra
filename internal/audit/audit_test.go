@@ -31,7 +31,7 @@ func TestCanonical(t *testing.T) {
 		{Fields{"b": 1, "a": "x", "c": nil, "d": true}, `{"a":"x","b":1,"c":null,"d":true}`},
 		{Fields{"t": at, "nilt": (*time.Time)(nil), "pt": &at}, `{"nilt":null,"pt":"2026-10-25T06:08:09.123456Z","t":"2026-10-25T06:08:09.123456Z"}`},
 		{Fields{"id": uuid.MustParse("0192f0b4-0000-7000-8000-000000000001")}, `{"id":"0192f0b4-0000-7000-8000-000000000001"}`},
-		{Fields{"s": []string{"hire", "enroll:*"}, "e": []string{}}, `{"e":[],"s":["hire","enroll:*"]}`},
+		{Fields{"s": []string{"call", "enroll:*"}, "e": []string{}}, `{"e":[],"s":["call","enroll:*"]}`},
 		{Fields{"n": Fields{"z": 1, "y": []any{"a", int64(-2), map[string]any{"k": false}}}}, `{"n":{"y":["a",-2,{"k":false}],"z":1}}`},
 		// Escapes: only '"', '\\' and C0 controls; U+2028, U+2029, '<', '&' and non-ASCII stay literal.
 		{"\"\\\b\f\n\r\t\x01\x1f<>&é  ", `"\"\\\b\f\n\r\t\u0001\u001f<>&é` + "  " + `"`},

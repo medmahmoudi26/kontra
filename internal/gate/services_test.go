@@ -226,8 +226,8 @@ func TestSyncWritesTheBlockAndAuditsChanges(t *testing.T) {
 	if ref, err := store.NewLog(pool).LoadService(ctx, tid, "hello"); err != nil || ref != hello.Ref {
 		t.Fatalf("LoadService = %+v, %v; Lookup = %+v", ref, err, hello.Ref)
 	}
-	member := auth.Principal{Kind: auth.KindKey, ID: "key:kk_a_00000001", BuyerID: uuid.New(), Via: auth.ViaAPIKey,
-		Scopes: []auth.Scope{auth.ScopeHire}, TenantID: &tid, TenantSlug: TeamTenant}
+	member := auth.Principal{Kind: auth.KindKey, ID: "key:kk_a_00000001", CallerID: uuid.New(), Via: auth.ViaAPIKey,
+		Scopes: []auth.Scope{auth.ScopeCall}, TenantID: &tid, TenantSlug: TeamTenant}
 	if !hello.Allow.Admits(member) || hello.Allow.Admits(auth.Anonymous(uuid.New())) {
 		t.Fatal("hello's allow: list is not org:default")
 	}
@@ -296,7 +296,7 @@ func TestSyncWritesTheBlockAndAuditsChanges(t *testing.T) {
 	}
 	changedMu.Unlock()
 
-	// Back in the file: enabled again. A changed URL drops the stored cards (another seller's).
+	// Back in the file: enabled again. A changed URL drops the stored cards (another service's).
 	if _, err := pool.Exec(ctx, `update kontra.services set upstream_card = '\x7b7d', card = '{}', card_fetched_at = now() where name = 'hello'`); err != nil {
 		t.Fatal(err)
 	}
@@ -310,7 +310,7 @@ func TestSyncWritesTheBlockAndAuditsChanges(t *testing.T) {
 		t.Fatalf("audit after re-adding a service and changing a URL: %+v", ev)
 	}
 	if scalar[bool](t, pool, `select upstream_card is not null or card is not null or card_fetched_at is not null from kontra.services where name = 'hello'`) {
-		t.Fatal("a changed backend kept the old seller's card")
+		t.Fatal("a changed backend kept the old service's card")
 	}
 	if tool, _ := s.Lookup(ctx, TeamTenant, "tool"); tool == nil || tool.Disabled {
 		t.Fatalf("Lookup of a re-added service: %+v", tool)
@@ -407,8 +407,8 @@ func TestMultiTenantRegistryFollowsTheRows(t *testing.T) {
 	}
 }
 
-// fakeSeller serves an agent card under a base path, counting fetches; down makes every request fail.
-type fakeSeller struct {
+// fakeService serves an agent card under a base path, counting fetches; down makes every request fail.
+type fakeService struct {
 	mu      sync.Mutex
 	card    []byte
 	fetches int
@@ -416,8 +416,8 @@ type fakeSeller struct {
 	srv     *httptest.Server
 }
 
-func newFakeSeller(t *testing.T, cardJSON string) *fakeSeller {
-	f := &fakeSeller{card: []byte(cardJSON)}
+func newFakeService(t *testing.T, cardJSON string) *fakeService {
+	f := &fakeService{card: []byte(cardJSON)}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -439,17 +439,17 @@ const fakeCard = `{"name":"hello","description":"says hello","version":"1.0.0",
 
 // The card lifecycle (spec §3; the audit's card gap): the keeper fetches relative to the base, the served
 // card is persisted (upstream_card verbatim, card as json, card_fetched_at), every good fetch of the same
-// bytes moves card_fetched_at, and another replica starting while the seller is down serves the stored card
+// bytes moves card_fetched_at, and another replica starting while the service is down serves the stored card
 // at once, with the same ETag. Dispatch gets the backend and the card's Info.
 func TestCardKeepersPersistAndSeed(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
 	ctx := context.Background()
-	seller := newFakeSeller(t, fakeCard)
+	service := newFakeService(t, fakeCard)
 	cfg := parseConfig(t, `services:
   hello:
     kind: a2a
-    backend: { a2a: { url: "`+seller.srv.URL+`/base", allow_private: true } }
+    backend: { a2a: { url: "`+service.srv.URL+`/base", allow_private: true } }
     allow: ["org:default"]
 `)
 	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
@@ -474,7 +474,7 @@ func TestCardKeepersPersistAndSeed(t *testing.T) {
 		t.Fatalf("served card %s", served.Body)
 	}
 	be, info, err := s.Backend(ctx, hello.Ref, &store.Attempt{Backend: store.BackendDirect})
-	if err != nil || be.Origin().String() != seller.srv.URL || info.Path != "/base/rpc" || info.Binding != "JSONRPC" {
+	if err != nil || be.Origin().String() != service.srv.URL || info.Path != "/base/rpc" || info.Binding != "JSONRPC" {
 		t.Fatalf("Backend = %v %+v %v (the card never steers the dialer, D71)", be, info, err)
 	}
 	// A tunnel attempt of a service that is now direct never reaches the direct URL (spec §4).
@@ -516,10 +516,10 @@ func TestCardKeepersPersistAndSeed(t *testing.T) {
 	stop()
 	<-done
 
-	// Another replica starts while the seller is down: the stored card is served at once.
-	seller.mu.Lock()
-	seller.down = true
-	seller.mu.Unlock()
+	// Another replica starts while the service is down: the stored card is served at once.
+	service.mu.Lock()
+	service.down = true
+	service.mu.Unlock()
 	other := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
 	if err := other.Sync(ctx, cfg); err != nil {
 		t.Fatal(err)
@@ -546,12 +546,12 @@ func keeperOf(t *testing.T, s *Services, key string) *card.Keeper {
 	return e.keeper
 }
 
-func helloConfig(t *testing.T, sellerURL, allow, extra string) *config.Config {
+func helloConfig(t *testing.T, serviceURL, allow, extra string) *config.Config {
 	t.Helper()
 	return parseConfig(t, `services:
   hello:
     kind: a2a
-    backend: { a2a: { url: "`+sellerURL+`/base", allow_private: true } }
+    backend: { a2a: { url: "`+serviceURL+`/base", allow_private: true } }
     allow: [`+allow+`]
 `+extra)
 }
@@ -560,14 +560,14 @@ func helloConfig(t *testing.T, sellerURL, allow, extra string) *config.Config {
 // Postgres refuses as json) has no RFC 8785 form, so the gate can neither hash it for kontra.upstream and
 // services.card_hash nor sign the served card (spec §3, D166). It is never installed, unsigned or altered: the
 // service has no card (503 card routes, service_unavailable dispatch) and nothing is recorded. A valid card from
-// the same seller afterwards is served and recorded as usual.
+// the same service afterwards is served and recorded as usual.
 func TestUnsignableCardIsNotServed(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
 	ctx := context.Background()
 	raw := strings.Replace(fakeCard, `"says hello"`, "\"caf\xe9\"", 1)
-	seller := newFakeSeller(t, raw)
-	cfg := helloConfig(t, seller.srv.URL, `"org:default"`, "")
+	service := newFakeService(t, raw)
+	cfg := helloConfig(t, service.srv.URL, `"org:default"`, "")
 	keys, _ := jws.EphemeralKeySet()
 	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Signer: &card.JWSSigner{Keys: keys}})
 	if err := s.Sync(ctx, cfg); err != nil {
@@ -588,9 +588,9 @@ func TestUnsignableCardIsNotServed(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select upstream_card from kontra.services where name = 'hello'`).Scan(&up); err != nil || up != nil {
 		t.Fatalf("an unsignable card was recorded: %q %v", up, err)
 	}
-	seller.mu.Lock()
-	seller.card = []byte(fakeCard)
-	seller.mu.Unlock()
+	service.mu.Lock()
+	service.card = []byte(fakeCard)
+	service.mu.Unlock()
 	if err := k.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -603,9 +603,9 @@ func TestCardPersistRetriedAfterAFailure(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
 	ctx := context.Background()
-	seller := newFakeSeller(t, fakeCard)
+	service := newFakeService(t, fakeCard)
 	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
-	if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, `"org:default"`, "")); err != nil {
+	if err := s.Sync(ctx, helloConfig(t, service.srv.URL, `"org:default"`, "")); err != nil {
 		t.Fatal(err)
 	}
 	for _, sql := range []string{
@@ -650,13 +650,13 @@ func TestCardColumnFollowsTheServedBody(t *testing.T) {
 	dsn := pgtest.Migrated(t)
 	pool := pgtest.Pool(t, dsn)
 	ctx := context.Background()
-	seller := newFakeSeller(t, fakeCard)
+	service := newFakeService(t, fakeCard)
 	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080"})
 	stored := func() string {
 		t.Helper()
 		return scalar[string](t, pool, `select coalesce(card::text, '') from kontra.services where name = 'hello'`)
 	}
-	if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, `"org:default"`, "")); err != nil {
+	if err := s.Sync(ctx, helloConfig(t, service.srv.URL, `"org:default"`, "")); err != nil {
 		t.Fatal(err)
 	}
 	if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {
@@ -665,7 +665,7 @@ func TestCardColumnFollowsTheServedBody(t *testing.T) {
 	if got := stored(); !strings.Contains(got, `"securitySchemes"`) {
 		t.Fatalf("services.card with allow [org:default]: %s", got)
 	}
-	if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, "anonymous", "")); err != nil {
+	if err := s.Sync(ctx, helloConfig(t, service.srv.URL, "anonymous", "")); err != nil {
 		t.Fatal(err)
 	}
 	if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {
@@ -685,8 +685,8 @@ func TestCardColumnFollowsTheServedBody(t *testing.T) {
 // (config/validate.go's SPEC-CONFLICT resolution of D91): sealed on a direct backend, which no node unseals and the
 // gate would relay in plaintext. Such a row is left out (the unknown-service answer, service_unavailable for its
 // tasks) instead of served. Sealed tunnel rows are served since M3 WP-08, which lifts D144's refusal of them.
-// seller_keys are verified since M3 WP-02, which
-// lifts D90 and the seller_keys half of D144: rows with them are served on direct and tunnel services, unless
+// service_keys are verified since M3 WP-02, which
+// lifts D90 and the service_keys half of D144: rows with them are served on direct and tunnel services, unless
 // the keys cannot be read (no key the gate verifies with), which leaves the row out rather than serve its card
 // unverified.
 func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
@@ -705,7 +705,7 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	const mcpDirect = `{"mcp": {"url": "http://127.0.0.1:9/mcp", "allow_private": true}}`
 	for _, row := range []struct {
 		name, kind, backend, sealed string
-		sellerKeys                  any
+		serviceKeys                 any
 	}{
 		{"plain", "a2a", direct, "off", nil},
 		{"sealed-direct", "a2a", direct, "required", nil},
@@ -714,17 +714,17 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 		{"sealed-tunnel", "a2a", `{"tunnel": {}}`, "required", nil},
 		{"optional-tunnel", "a2a", `{"tunnel": {}}`, "optional", nil},
 		{"plain-tunnel", "a2a", `{"tunnel": {}}`, "off", nil},
-		{"keys-direct", "a2a", direct, "off", sellerJWKS},
-		{"keys-url-direct", "a2a", direct, "off", `{"url": "https://seller.example/jwks.json"}`},
+		{"keys-direct", "a2a", direct, "off", serviceJWKS},
+		{"keys-url-direct", "a2a", direct, "off", `{"url": "https://service.example/jwks.json"}`},
 		{"keys-empty", "a2a", direct, "off", `{"keys": []}`},
-		{"keys-http-url", "a2a", direct, "off", `{"url": "http://seller.example/jwks.json"}`},
+		{"keys-http-url", "a2a", direct, "off", `{"url": "http://service.example/jwks.json"}`},
 		{"keys-null", "a2a", direct, "off", `null`},
-		{"keys-tunnel", "a2a", `{"tunnel": {}}`, "off", sellerJWKS},
+		{"keys-tunnel", "a2a", `{"tunnel": {}}`, "off", serviceJWKS},
 		{"keys-mcp-tunnel", "mcp", `{"tunnel": {}}`, "off", `{"keys": []}`},
-		{"keys-sealed-tunnel", "a2a", `{"tunnel": {}}`, "required", sellerJWKS},
+		{"keys-sealed-tunnel", "a2a", `{"tunnel": {}}`, "required", serviceJWKS},
 	} {
-		exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, sealed, seller_keys, source)
-			values ($1, $2, $3, $4::jsonb, '{org:acme}', $5, $6::jsonb, 'db')`, acme, row.name, row.kind, row.backend, row.sealed, row.sellerKeys)
+		exec(`insert into kontra.services (tenant_id, name, kind, backend, allow, sealed, service_keys, source)
+			values ($1, $2, $3, $4::jsonb, '{org:acme}', $5, $6::jsonb, 'db')`, acme, row.name, row.kind, row.backend, row.sealed, row.serviceKeys)
 	}
 	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Multi: true})
 	if err := s.Sync(ctx, parseConfig(t, "tenancy: multi\n")); err != nil {
@@ -778,12 +778,12 @@ func TestRegistryRefusesWhatTheConfigurationRefuses(t *testing.T) {
 	}
 }
 
-// sellerJWKS is an inline seller key set (RFC 7515's example P-256 key).
-const sellerJWKS = `{"keys": [{"kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}]}`
+// serviceJWKS is an inline service key set (RFC 7515's example P-256 key).
+const serviceJWKS = `{"keys": [{"kty": "EC", "crv": "P-256", "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}]}`
 
 // The registry signs every served card and records its upstream card's hash (spec §3, D13, D166): the served
 // card carries exactly the gate's signature, services.card stores it, and services.card_hash is the SHA-256 of
-// the upstream card's JCS. With seller_keys a verified card is served and recorded; when the seller then
+// the upstream card's JCS. With service_keys a verified card is served and recorded; when the service then
 // publishes a card no key verifies, its card routes answer 503, a dispatch fails service_unavailable, and the
 // row keeps the last verified card. A tunnel service whose card does not verify is not "pending" (retried):
 // it fails service_unavailable too.
@@ -792,7 +792,7 @@ func TestCardSignedVerifiedAndHashed(t *testing.T) {
 	pool := pgtest.Pool(t, dsn)
 	ctx := context.Background()
 	gateKeys, _ := jws.EphemeralKeySet()
-	seller, _ := jws.EphemeralKeySet()
+	service, _ := jws.EphemeralKeySet()
 	stranger, _ := jws.EphemeralKeySet()
 	signedBy := func(k *jws.KeySet) string {
 		sig, err := k.Sign([]byte(fakeCard), "", nil)
@@ -802,10 +802,10 @@ func TestCardSignedVerifiedAndHashed(t *testing.T) {
 		sb, _ := json.Marshal(sig)
 		return strings.TrimSuffix(fakeCard, "}") + `,"signatures":[` + string(sb) + `]}`
 	}
-	good, bad := signedBy(seller), signedBy(stranger)
-	fs := newFakeSeller(t, good)
-	jwks, _ := seller.JWKS()
-	cfg := helloConfig(t, fs.srv.URL, `"org:default"`, "    seller_keys: "+string(jwks)+"\n")
+	good, bad := signedBy(service), signedBy(stranger)
+	fs := newFakeService(t, good)
+	jwks, _ := service.JWKS()
+	cfg := helloConfig(t, fs.srv.URL, `"org:default"`, "    service_keys: "+string(jwks)+"\n")
 	s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Signer: &card.JWSSigner{Keys: gateKeys, JWKSURL: "http://localhost:8080/.well-known/jwks.json"}})
 	if err := s.Sync(ctx, cfg); err != nil {
 		t.Fatal(err)
@@ -840,7 +840,7 @@ func TestCardSignedVerifiedAndHashed(t *testing.T) {
 	if !bytes.Equal(hash, want[:]) || stored != string(served.Body) {
 		t.Fatalf("card_hash %x (want %x), card %s", hash, want, stored)
 	}
-	// The seller publishes a card signed by another key.
+	// The service publishes a card signed by another key.
 	fs.mu.Lock()
 	fs.card = []byte(bad)
 	fs.mu.Unlock()
@@ -865,7 +865,7 @@ func TestCardSignedVerifiedAndHashed(t *testing.T) {
 	sess := &fakeSessions{held: map[uuid.UUID]bool{sid: true}}
 	ts := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Tunnels: tun, Sessions: sess,
 		Signer: &card.JWSSigner{Keys: gateKeys}})
-	if err := ts.Sync(ctx, parseConfig(t, "services:\n  remote:\n    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: "+string(jwks)+"\n")); err != nil {
+	if err := ts.Sync(ctx, parseConfig(t, "services:\n  remote:\n    kind: a2a\n    backend: { tunnel: {} }\n    service_keys: "+string(jwks)+"\n")); err != nil {
 		t.Fatal(err)
 	}
 	tk := keeperOf(t, ts, "default/remote")
@@ -1487,9 +1487,9 @@ func TestAnonymousOnlyCardPush(t *testing.T) {
 	ctx := context.Background()
 	for _, local := range []bool{false, true} {
 		pool := pgtest.Pool(t, pgtest.Migrated(t))
-		seller := newFakeSeller(t, fakeCard)
+		service := newFakeService(t, fakeCard)
 		s := NewServices(pool, ServicesOptions{PublicURL: "http://localhost:8080", Local: local})
-		if err := s.Sync(ctx, helloConfig(t, seller.srv.URL, "anonymous", "")); err != nil {
+		if err := s.Sync(ctx, helloConfig(t, service.srv.URL, "anonymous", "")); err != nil {
 			t.Fatal(err)
 		}
 		if err := keeperOf(t, s, "default/hello").Refresh(ctx); err != nil {

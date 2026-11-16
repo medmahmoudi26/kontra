@@ -74,8 +74,8 @@ func TestDeliveryInSeqOrder(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 
 	seqs := []int64{1}
 	seqs = append(seqs, e.status(id, store.StateWorking))    // 2
@@ -126,8 +126,8 @@ func TestDeliveryTailsTheLog(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	d := NewDeliverer(e.log, private, fast())
 	out := runPush(context.Background(), d, id, cid)
 	var seqs []int64
@@ -170,8 +170,8 @@ func TestDeliveryRecoversInOrder(t *testing.T) {
 		}
 		return http.StatusOK
 	})
-	id := e.newTask(buyerA)
-	c1, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/one")))
+	id := e.newTask(callerA)
+	c1, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/one")))
 	d := NewDeliverer(e.log, private, fast())
 	out1 := runPush(context.Background(), d, id, c1)
 	all := []int64{1, e.status(id, store.StateWorking)}
@@ -293,9 +293,9 @@ func TestRetryBackoffAndBudget(t *testing.T) {
 		attemptsAt = append(attemptsAt, clk.Now()) // under the receiver's lock
 		return http.StatusInternalServerError
 	})
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	e.status(id, store.StateWorking)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	before, err := e.log.Load(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
@@ -377,7 +377,7 @@ func TestRedirectIsAFailedDelivery(t *testing.T) {
 		redir.serve(&discard{}, req)
 		http.Redirect(w, req, target.url("/target"), http.StatusFound)
 	})
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	s, err := cs.Save(context.Background(), tid(id), pushConfig(redir.url("/redirect")))
 	if err != nil {
 		t.Fatalf("a redirecting URL is accepted when set: %v", err)
@@ -415,8 +415,8 @@ func TestHungReceiverTimesOut(t *testing.T) {
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
 	r.hold = 3 * time.Second
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	e.status(id, store.StateRejected)
 	o := fast()
 	o.Timeout = 200 * time.Millisecond
@@ -441,8 +441,8 @@ func TestDeletedConfigEndsTheActivity(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	d := NewDeliverer(e.log, private, fast())
 	out := runPush(context.Background(), d, id, cid)
 	time.Sleep(200 * time.Millisecond) // the task row is delivered; the activity idles
@@ -459,7 +459,7 @@ func TestDeletedConfigEndsTheActivity(t *testing.T) {
 	}
 	// A config deleted while its delivery fails stops the retries.
 	failing := newReceiver(t, func(int) int { return http.StatusBadGateway })
-	c2, _ := e.saveInline(cs, id, buyerA, pushConfig(failing.url("/hook")))
+	c2, _ := e.saveInline(cs, id, callerA, pushConfig(failing.url("/hook")))
 	out = runPush(context.Background(), d, id, c2)
 	time.Sleep(200 * time.Millisecond)
 	_ = cs.Delete(context.Background(), tid(id), c2)
@@ -475,8 +475,8 @@ func TestCanceledActivityStops(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, func(int) int { return http.StatusServiceUnavailable })
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	ctx, cancel := context.WithCancel(context.Background())
 	out := runPush(ctx, NewDeliverer(e.log, private, fast()), id, cid)
 	time.Sleep(200 * time.Millisecond)
@@ -493,8 +493,8 @@ func TestResumeFromHeartbeatOrDeliveredSeq(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	for _, s := range []store.State{store.StateWorking, store.StateInputRequired, store.StateWorking, store.StateInputRequired, store.StateWorking} {
 		e.status(id, s) // 2..6
 	}
@@ -564,9 +564,9 @@ func TestRestartKeepsTheSeqBudget(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, func(int) int { return http.StatusInternalServerError })
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	e.status(id, store.StateWorking) // 2
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	e.exec(`update kontra.push_configs set delivered_seq = 1 where task_id = $1`, id)
 	clk := &fakeClock{now: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
 	o := fast()
@@ -596,8 +596,8 @@ func TestRestartKeepsTheSeqBudget(t *testing.T) {
 func TestDeliveredSeqNeverMovesBackwards(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig("http://127.0.0.1:9/hook"))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig("http://127.0.0.1:9/hook"))
 	d := NewDeliverer(e.log, private, fast())
 	ctx := context.Background()
 	for _, s := range []int64{3, 7, 5, 2, 7} {
@@ -645,13 +645,13 @@ func TestRateCapPerHost(t *testing.T) {
 	// between two arrivals are not bounded: one delivery's lag after its slot can shrink the next gap.
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	for range 3 {
 		e.status(id, store.StateWorking)
 	}
 	e.status(id, store.StateCompleted) // 5 rows
-	c1, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/a")))
-	c2, _ := e.saveInline(cs, id, buyerA, &a2a.PushConfig{URL: r.url("/b")})
+	c1, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/a")))
+	c2, _ := e.saveInline(cs, id, callerA, &a2a.PushConfig{URL: r.url("/b")})
 	e.exec(`update kontra.push_configs set delivered_seq = 0 where task_id = $1`, id)
 	o := fast()
 	o.Replicas = func(context.Context) (int, error) { return 2, nil }
@@ -672,9 +672,9 @@ func TestRateCapPerHost(t *testing.T) {
 	}
 	// Another host is not held back by this one's slots.
 	other := newReceiver(t, nil)
-	id2 := e.newTask(buyerA)
+	id2 := e.newTask(callerA)
 	e.status(id2, store.StateCompleted)
-	c3, _ := e.saveInline(cs, id2, buyerA, &a2a.PushConfig{URL: strings.Replace(other.url("/c"), "127.0.0.1", "localhost", 1)})
+	c3, _ := e.saveInline(cs, id2, callerA, &a2a.PushConfig{URL: strings.Replace(other.url("/c"), "127.0.0.1", "localhost", 1)})
 	start := time.Now()
 	waitOut(t, runPush(ctx, d2, id2, c3), 5*time.Second)
 	if time.Since(start) > time.Second {
@@ -695,7 +695,7 @@ func TestCredentialsNeverLogged(t *testing.T) {
 	cs := NewConfigStore(e.pool, sig, strict, log)
 	csPriv := NewConfigStore(e.pool, sig, private, log)
 	ctx := context.Background()
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	secretURL := func(base string) string { return base + "/" + secretPath + "?key=" + secretPath }
 
 	// Refused Saves name the rule, not the URL or the credentials.
@@ -817,8 +817,8 @@ func TestUndeliverableConfigGivesUp(t *testing.T) {
 	d := NewDeliverer(e.log, private, fast())
 	ctx := context.Background()
 
-	id := e.newTask(buyerA)
-	bad, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	bad, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	e.exec(`update kontra.push_configs set config = '{"url": 5}' where task_id = $1 and id = $2`, id, bad)
 	o := waitOut(t, runPush(ctx, d, id, bad), 5*time.Second)
 	if o.err != nil || o.res.Stopped != StoppedFailed {
@@ -829,9 +829,9 @@ func TestUndeliverableConfigGivesUp(t *testing.T) {
 	}
 
 	// A row only in the bucket after seq 2: delivered up to 2, then given up.
-	id2 := e.newTask(buyerA)
+	id2 := e.newTask(callerA)
 	e.status(id2, store.StateWorking)
-	c2, _ := e.saveInline(cs, id2, buyerA, pushConfig(r.url("/hook2")))
+	c2, _ := e.saveInline(cs, id2, callerA, pushConfig(r.url("/hook2")))
 	e.exec(`update kontra.push_configs set delivered_seq = 0 where task_id = $1`, id2)
 	e.exec(`update kontra.tasks set version = 3 where id = $1`, id2)
 	e.exec(`insert into kontra.task_events (task_id, seq, kind, payload_ref) values ($1, 3, 'artifact', 'blobs/x')`, id2)
@@ -840,7 +840,7 @@ func TestUndeliverableConfigGivesUp(t *testing.T) {
 		t.Fatalf("an unfoldable row: %+v %v", o.res, o.err)
 	}
 	// The same row met by the initial fold of a restarted activity.
-	c3, _ := e.saveInline(cs, id2, buyerA, &a2a.PushConfig{URL: r.url("/hook3")})
+	c3, _ := e.saveInline(cs, id2, callerA, &a2a.PushConfig{URL: r.url("/hook3")})
 	e.exec(`update kontra.push_configs set delivered_seq = 3 where task_id = $1 and id = $2`, id2, c3)
 	o = waitOut(t, runPush(ctx, d, id2, c3), 5*time.Second)
 	if o.err != nil || o.res.Stopped != StoppedFailed {
@@ -855,7 +855,7 @@ func TestDeletedConfigEndsDuringBackoff(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	clk := &fakeClock{now: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)}
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	var (
 		cid       string
 		deletedAt time.Time
@@ -869,7 +869,7 @@ func TestDeletedConfigEndsDuringBackoff(t *testing.T) {
 		}
 		return http.StatusServiceUnavailable
 	})
-	cid, _ = e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	cid, _ = e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	o := fast()
 	o.RetryMin, o.RetryMax, o.Budget = 0, 0, 0 // the spec's timing
 	o.Now, o.Sleep = clk.Now, clk.Sleep
@@ -898,8 +898,8 @@ func TestFoldReadsAreBoundedAndBeat(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 	e.status(id, store.StateWorking)
 	const rows = 12
 	for i := range rows {
@@ -950,7 +950,7 @@ func TestPushWebhookFindsItsConfigByRef(t *testing.T) {
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
+	id := e.newTask(callerA)
 	if _, err := cs.Save(context.Background(), tid(id), &a2a.PushConfig{ID: callerConfigID, URL: r.url("/hook")}); err != nil {
 		t.Fatal(err)
 	}

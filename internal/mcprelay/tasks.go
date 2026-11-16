@@ -27,15 +27,15 @@ import (
 )
 
 // Tasks is the client side of gate-owned MCP tasks (spec/relay.md §11.6–§11.8 for legacy readers, §11.12 for
-// modern ones). It reads only Postgres, on any replica; a task of another buyer is answered as an unknown one
-// (-32602). A task may be read from either era by its buyer, and each era presents the same log:
+// modern ones). It reads only Postgres, on any replica; a task of another caller is answered as an unknown one
+// (-32602). A task may be read from either era by its caller, and each era presents the same log:
 //
 //   - legacy: tasks/get (the projection, operator mcpMeta), tasks/result (blocks on LISTEN until terminal,
 //     delivering pending input requests first on its own SSE stream, event ids k.<taskId>.<seq>; then §11.8's
 //     stored outcome with the related-task key), tasks/list (the principal's own, newest first, gate cursors;
 //     refused for anonymous), tasks/cancel (kontra.cancel, D57: canceled within 10 s whatever the upstream
 //     answers). A client response whose id is a gate request id k.<taskId>.<seq> is an input_response, accepted
-//     once and only from the buyer (else 202 and dropped). A GET whose Last-Event-ID is k.<taskId>.<n> is served
+//     once and only from the caller (else 202 and dropped). A GET whose Last-Event-ID is k.<taskId>.<n> is served
 //     from task_events, for the same principal only.
 //   - modern: tasks/get (resultType complete, inputRequests keyed by gate id, a terminal task presented by its
 //     terminal event: a stored CallToolResult is completed even with isError), tasks/update (each outstanding
@@ -72,7 +72,7 @@ type TasksConfig struct {
 	Hooks     lifecycle.HooksSnapshot // the hook configuration a new task's workflow snapshots (D46)
 	Rules     hooks.KeyRules          // §13.2's rules for an Admission decision's metadata and mcpMeta
 	// Caps checks an anonymous tenant's limits where a task is created (spec/tunnel.md §6.2; *anon.Caps): its
-	// concurrent tasks as host and as hirer, and its parts_bytes against the call. Nil checks nothing.
+	// concurrent tasks as host and as caller, and its parts_bytes against the call. Nil checks nothing.
 	Caps   TaskCaps
 	Logger *slog.Logger
 }
@@ -102,7 +102,7 @@ type CreateTask struct {
 	// TaskID is the id Admission was asked with (operation task, §13.1); minted when Nil.
 	TaskID    uuid.UUID
 	Service   store.ServiceRef
-	BuyerID   uuid.UUID
+	CallerID  uuid.UUID
 	Principal string
 	Via       string
 	Era       mcpwire.Era
@@ -159,7 +159,7 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 			return uuid.Nil, err
 		}
 	}
-	owner := store.Owner{BuyerID: req.BuyerID, Principal: req.Principal, Via: req.Via}
+	owner := store.Owner{CallerID: req.CallerID, Principal: req.Principal, Via: req.Via}
 	nt, err := store.NewMCPTask(id, svc, owner, d.Metadata, d.MCPMeta)
 	if err != nil {
 		return uuid.Nil, err
@@ -174,7 +174,7 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 		return uuid.Nil, err
 	}
 	err = pgx.BeginFunc(ctx, t.log.DB(), func(tx pgx.Tx) error {
-		// An anonymous tenant's concurrent tasks, as host and as hirer (spec/tunnel.md §6.2), under its lock.
+		// An anonymous tenant's concurrent tasks, as host and as caller (spec/tunnel.md §6.2), under its lock.
 		if t.caps != nil {
 			if err := t.caps.Task(ctx, tx, svc.TenantID, svc.Tenant, req.Principal); err != nil {
 				return err
@@ -200,19 +200,19 @@ func (t *Tasks) Create(ctx context.Context, req CreateTask) (uuid.UUID, error) {
 }
 
 // Caller is who asks about a task: the route's service and the authenticated principal. Tasks are bound to the
-// principal's buyer (§11.6); a resumed stream to the principal itself (§11.7).
+// principal's caller (§11.6); a resumed stream to the principal itself (§11.7).
 type Caller struct {
 	Service   store.ServiceRef
-	BuyerID   uuid.UUID
+	CallerID  uuid.UUID
 	Principal string
 	Anonymous bool
 }
 
 func (c Caller) scope() store.Scope {
-	return store.Scope{TenantID: c.Service.TenantID, Service: c.Service.Name, BuyerID: c.BuyerID}
+	return store.Scope{TenantID: c.Service.TenantID, Service: c.Service.Name, CallerID: c.CallerID}
 }
 
-// errTaskNotFound is the answer for a task id that is unknown, malformed, of another buyer, or not an MCP task of
+// errTaskNotFound is the answer for a task id that is unknown, malformed, of another caller, or not an MCP task of
 // this service (§4, §11.6): -32602, as MCP answers an unknown task.
 var errTaskNotFound = &mcpwire.Error{Code: mcpwire.CodeInvalidParams, Message: "Failed to retrieve task: Task not found"}
 
@@ -233,7 +233,7 @@ func (t *Tasks) loadID(ctx context.Context, who Caller, s string) (*store.TaskRo
 	if err != nil {
 		return nil, nil
 	}
-	row, err := t.log.LoadScoped(ctx, who.Service, store.Owner{BuyerID: who.BuyerID}, id)
+	row, err := t.log.LoadScoped(ctx, who.Service, store.Owner{CallerID: who.CallerID}, id)
 	switch {
 	case errors.Is(err, a2a.ErrTaskNotFound):
 		return nil, nil
@@ -276,8 +276,8 @@ func (t *Tasks) Serve(ctx context.Context, who Caller, m *mcpwire.Message) (json
 	return nil, &mcpwire.Error{Code: mcpwire.CodeMethodNotFound, Message: "Method not found"}, nil
 }
 
-// list is tasks/list: the buyer's own MCP tasks of this service, newest first, a gate-minted cursor; refused for
-// anonymous principals, whose tasks share one buyer (§2.3, D20).
+// list is tasks/list: the caller's own MCP tasks of this service, newest first, a gate-minted cursor; refused for
+// anonymous principals, whose tasks share one caller (§2.3, D20).
 func (t *Tasks) list(ctx context.Context, who Caller, params json.RawMessage) (json.RawMessage, *mcpwire.Error, error) {
 	if who.Anonymous {
 		return nil, &mcpwire.Error{Code: mcpwire.CodeMethodNotFound, Message: "tasks/list is not offered to anonymous callers"}, nil
@@ -595,7 +595,7 @@ func writeRPCError(w http.ResponseWriter, sid string, id json.RawMessage, e *mcp
 }
 
 // Respond takes a client's JSON-RPC response whose id is a gate request id (§11.5 step 5, §11.7): the answer to
-// the input request at that seq of a task of the caller's buyer is logged as an input_response event once, under
+// the input request at that seq of a task of the caller's caller_id is logged as an input_response event once, under
 // the task's version, with the sealed envelope its result carries kept on a sealed service (D174), and
 // kontra.input_response is signalled. The client gets 202 whatever happens (an unknown, foreign or already
 // answered id is dropped); it reports whether the response was logged.
@@ -706,7 +706,7 @@ func (t *Tasks) Resume(ctx context.Context, w http.ResponseWriter, sid string, w
 
 // caller is the request's Caller.
 func (h *Handler) caller(rq *request) Caller {
-	return Caller{Service: rq.svc.Ref, BuyerID: rq.p.BuyerID, Principal: rq.p.ID, Anonymous: !rq.p.Authenticated()}
+	return Caller{Service: rq.svc.Ref, CallerID: rq.p.CallerID, Principal: rq.p.ID, Anonymous: !rq.p.Authenticated()}
 }
 
 // serveTask answers tasks/* on a durable service's session from Postgres (§11.6): tasks/result through
@@ -769,7 +769,7 @@ func (h *Handler) durableCall(rq *request, name string, tool json.RawMessage) {
 		version = rq.sess.ProtocolVersion
 	}
 	id, err := h.deps.Tasks.Create(rq.ctx(), CreateTask{
-		TaskID: taskID, Service: rq.svc.Ref, BuyerID: rq.p.BuyerID, Principal: rq.p.ID, Via: string(rq.p.Via),
+		TaskID: taskID, Service: rq.svc.Ref, CallerID: rq.p.CallerID, Principal: rq.p.ID, Via: string(rq.p.Via),
 		Era: mcpwire.EraLegacy, Version: version, Request: body, Tool: name, RequestID: m.ID, MCPSession: &hash,
 		ClientCapabilities: rq.sess.ClientCaps, Sealed: h.sealed(rq), Decision: d,
 	})
@@ -821,7 +821,7 @@ func (h *Handler) admitTask(rq *request, tool string) (uuid.UUID, hooks.Decision
 	ar := hooks.AdmitRequest{
 		Operation: hooks.OpTask, TaskID: id.String(),
 		Service:   hooks.Service{TenantID: ref.TenantID.String(), Tenant: ref.Tenant, Name: ref.Name, Kind: config.KindMCP},
-		Principal: hooks.Principal{Kind: string(rq.p.Kind), ID: rq.p.ID, BuyerID: rq.p.BuyerID.String(), Via: string(rq.p.Via)},
+		Principal: hooks.Principal{Kind: string(rq.p.Kind), ID: rq.p.ID, CallerID: rq.p.CallerID.String(), Via: string(rq.p.Via)},
 		Protocol:  string(store.ProtocolMCP),
 		Tool:      tool,
 	}
@@ -1036,7 +1036,7 @@ func modernOutcome(row *store.TaskRow, o store.MCPOutcome, reqID json.RawMessage
 
 // ServeModern answers a modern tasks/get, tasks/update or tasks/cancel (§11.12, "The client side") for the caller,
 // from Postgres on any replica: the result, or the JSON-RPC error to answer with (-32602 for a task that is unknown,
-// of another buyer, or not an MCP task of this service); an error is the gate's own failure. The handler has checked
+// of another caller, or not an MCP task of this service); an error is the gate's own failure. The handler has checked
 // that the request declares the tasks extension.
 func (t *Tasks) ServeModern(ctx context.Context, who Caller, m *mcpwire.Message) (json.RawMessage, *mcpwire.Error, error) {
 	row, err := t.load(ctx, who, m.Params)

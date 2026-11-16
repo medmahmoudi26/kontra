@@ -24,10 +24,10 @@ M4. `kontra-gate` relays A2A tasks durably (M1) to agents on a node's localhost 
 MCP servers beside them, over Streamable HTTP or stdio, with end-to-end sealing (M3; [below](#sealed-end-to-end-m3)),
 and since M4:
 
-- serves its own MCP endpoint, `/mcp`: `search`, `describe`, `hire`, `reply` and the MCP Tasks of what was hired, in
-  both MCP eras (2025-11-25 and 2026-07-28), so a stock MCP client hires an A2A agent; and, for a client that shows
+- serves its own MCP endpoint, `/mcp`: `search`, `describe`, `send_message`, `reply` and the MCP Tasks of what `send_message` created, in
+  both MCP eras (2025-11-25 and 2026-07-28), so a stock MCP client calls an A2A agent; and, for a client that shows
   its model only tools, `status` (a task's history, and `{after: <cursor>, wait: 25}` to follow it), `tasks`,
-  `cancel`, `artifact` and `push_set`/`push_list`/`push_delete`, with `idempotencyKey` on `hire` for safe retries and
+  `cancel`, `artifact` and `push_set`/`push_list`/`push_delete`, with `idempotencyKey` on `send_message` for safe retries and
   `contextId` to continue a conversation ([`spec/relay.md`](spec/relay.md) §12, §12.6);
 - opens anonymous sessions on a gate that offers them: `kontra connect` with no credential gets a tenant of its own
   for two hours (`anon-` and 16 hex digits), and `--public <name>` lets anyone call that service
@@ -46,8 +46,8 @@ The demo below is written for the staging gate, `gateway.kontra.run`: the produc
 no anonymous sessions until Cloud's M5 (D268 and D280 in [`docs/decisions.md`](docs/decisions.md)). The staging gate
 has been up since 31 Oct: M4's gate runs deployed it and ran this block on a clean laptop against it
 ([`docs/gate-runs-m4.md`](docs/gate-runs-m4.md)). It is a staging environment, redeployed as M4 lands.
-[A team gate from source](#a-team-gate-from-source) runs the same node, gate and hire on one machine, with an enrolled
-node instead of an anonymous session. Every built seller and server is listed in [`examples/`](examples/README.md);
+[A team gate from source](#a-team-gate-from-source) runs the same node, gate and call on one machine, with an enrolled
+node instead of an anonymous session. Every built service and server is listed in [`examples/`](examples/README.md);
 stock agents and MCP servers run unmodified.
 
 `docs/` is the design; `spec/` is the protocol specification written from it; code lands against both. Read in
@@ -89,13 +89,13 @@ kontra connect --gate https://gateway.kontra.run --serve a2a:hello=http://127.0.
 #    anonymous session: it ends at … (in 2h0m0s); its URLs then answer 404 (kontra login keeps the services)
 
 a2a send -a http://localhost:7777/agents/anon-<…>/hello/.well-known/agent-card.json "hi"
-#  → Hello World: hosted and hired from the same laptop, through the gate
+#  → Hello World: hosted and called from the same laptop, through the gate
 npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp/anon-<…>/fs --transport http \
   --method tools/list
 #  → read_file, list_directory, …: the filesystem server on this laptop, as any MCP client sees it
 npx -y @modelcontextprotocol/inspector@2.13.0 --cli http://localhost:7777/mcp --transport http \
-  --method tools/call --tool-name hire --tool-arg service=anon-<…>/hello --tool-arg message=hi
-#  → Hello World, hired through the gate's own MCP server (search, describe, hire, reply, status, tasks, cancel, …)
+  --method tools/call --tool-name send_message --tool-arg service=anon-<…>/hello --tool-arg message=hi
+#  → Hello World, called through the gate's own MCP server (search, describe, send_message, reply, status, tasks, cancel, …)
 curl -s https://gateway.kontra.run/agents/anon-<…>/hello/.well-known/agent-card.json
 #  → the card, for anyone, with no credential: share the URL
 ```
@@ -106,7 +106,7 @@ curl -s https://gateway.kontra.run/agents/anon-<…>/hello/.well-known/agent-car
 
 What happened: `kontra connect` had no credential for the gate, so it asked for an anonymous session
 ([`spec/tunnel.md`](spec/tunnel.md) §6): a tenant of its own for two hours, the agent and the filesystem server at the
-gate under that slug, and `localhost:7777` for local clients to hire through the gate with the node's identity. Only
+gate under that slug, and `localhost:7777` for local clients to call through the gate with the node's identity. Only
 `hello` was made public; `fs` answers your node alone. The gate never dials the laptop: everything rides the one
 outbound connection. When the session ends, the URLs answer `404` and `kontra connect` exits; run it again for a new
 slug. `kontra login` keeps the services under an account on a gate with an authorization server (Cloud's, M5); on any
@@ -155,7 +155,7 @@ build first: `docker compose build gate && docker compose run --rm gate-migrate`
 be `anon-` and 16 hex digits.
 
 M4's gate runs brought this team gate up on a fresh DigitalOcean droplet (Ubuntu 24.04, Docker 29.1.3) at `f9f5e61`:
-built-in ACME got its Let's Encrypt certificate, a node on another machine enrolled, and its service was hired through
+built-in ACME got its Let's Encrypt certificate, a node on another machine enrolled, and its service was called through
 the gate ([`docs/gate-runs-m4.md`](docs/gate-runs-m4.md); the first run, at `3b890f3`, found the defect D313 fixed).
 
 PRD §12's pentest list ran against this compose team gate with M3's own surface at `f65760a` (four findings, each
@@ -184,23 +184,23 @@ what the profile does not protect against (anything else on your machine can rea
 ## A team gate from source
 
 For working on the gate: Postgres and Temporal from `compose.dev.yaml`, the gate and the node built from this
-checkout, and the helloworld seller hosted through `kontra connect`. With Docker, Go,
+checkout, and the helloworld service hosted through `kontra connect`. With Docker, Go,
 [uv](https://docs.astral.sh/uv/) and a2a-cli v0.3.1 as `a2a` (its install is in
-[`examples/sellers/hello-exec`](examples/sellers/hello-exec/README.md#install-a2a-cli-v031)):
+[`examples/agents/hello-exec`](examples/agents/hello-exec/README.md#install-a2a-cli-v031)):
 
 ```sh
 docker compose -f compose.dev.yaml up -d --wait           # Postgres and Temporal
 go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
 
-./kontra-gate migrate -f examples/sellers/helloworld/kontra.yaml
-export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/sellers/helloworld/kontra.yaml --api-key demo)"
-./kontra-gate serve -f examples/sellers/helloworld/kontra.yaml &     # loads services: into the database
+./kontra-gate migrate -f examples/agents/helloworld/kontra.yaml
+export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/agents/helloworld/kontra.yaml --api-key demo)"
+./kontra-gate serve -f examples/agents/helloworld/kontra.yaml &     # loads services: into the database
 
-examples/sellers/helloworld/run.sh &                                 # the seller, unmodified, on 127.0.0.1:9999
+examples/agents/helloworld/run.sh &                                 # the service, unmodified, on 127.0.0.1:9999
 
 # once the gate answers (curl localhost:8080/healthz): a one-time token for hello, then the node
 ./kontra connect --gate http://localhost:8080 --serve a2a:hello=http://127.0.0.1:9999 \
-  --enroll "$(./kontra-gate enroll -f examples/sellers/helloworld/kontra.yaml hello)" &
+  --enroll "$(./kontra-gate enroll -f examples/agents/helloworld/kontra.yaml hello)" &
 #  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
 #    a2a hello  http://localhost:8080/agents/hello
 
@@ -208,16 +208,16 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "
 #  → completed, with the artifact "Hello, World! I have received your request (hi)"
 ```
 
-The gate never dials the seller, and the seller imports nothing from Kontra. `--serve a2a:` names the agent's root
+The gate never dials the service, and the service imports nothing from Kontra. `--serve a2a:` names the agent's root
 URL: a target with a path is refused (D123 in [`docs/decisions.md`](docs/decisions.md)). What a lost node or a
-seller that is down does to a task, and how to restart the node, is in the
-[helloworld README](examples/sellers/helloworld/README.md#restarts-order-and-failures).
+service that is down does to a task, and how to restart the node, is in the
+[helloworld README](examples/agents/helloworld/README.md#restarts-order-and-failures).
 
 ## Sealed, end to end (M3)
 
-A service with `sealed: true` is sealed between two nodes. The hiring node, `kontra connect` serving its local
+A service with `sealed: true` is sealed between two nodes. The calling node, `kontra connect` serving its local
 clients on `127.0.0.1:7777`, seals every part a client sends to the keys enrolled for the service; the hosting node
-opens them before the service sees anything, and seals what the service answers to a key only the hiring node
+opens them before the service sees anything, and seals what the service answers to a key only the calling node
 holds. The gate stores and relays ciphertext it cannot open, and neither the client nor the service changes or
 holds a key ([`spec/ext-sealed.md`](spec/ext-sealed.md)). Two `kontra connect` on one machine, each with its own
 `HOME` and so its own identity key, from [`examples/sealing`](examples/sealing/README.md):
@@ -225,26 +225,26 @@ holds a key ([`spec/ext-sealed.md`](spec/ext-sealed.md)). Two `kontra connect` o
 ```sh
 docker compose -f compose.dev.yaml up -d --wait
 go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
-CFG=examples/sellers/hello-exec/kontra-sealed.yaml
+CFG=examples/agents/hello-exec/kontra-sealed.yaml
 ./kontra-gate migrate -f $CFG
 export KONTRA_API_KEY="$(./kontra-gate enroll -f $CFG --api-key demo)"
 ./kontra-gate serve -f $CFG &
 
-examples/sellers/hello-exec/run.sh &                        # the seller on 127.0.0.1:9999
+examples/agents/hello-exec/run.sh &                        # the service on 127.0.0.1:9999
 
 # The hosting node: enrolled for hello, so its key is one of the service's recipients; it only hosts (--listen off).
-HOME=/tmp/seller ./kontra connect --gate http://localhost:8080 --listen off \
+HOME=/tmp/service ./kontra connect --gate http://localhost:8080 --listen off \
   --enroll "$(./kontra-gate enroll -f $CFG hello)" --serve a2a:hello=http://127.0.0.1:9999 &
 
-# The hiring node: it hires with the API key, and seals for its local clients on 127.0.0.1:7777.
-HOME=/tmp/buyer ./kontra connect --gate http://localhost:8080 --api-key "$KONTRA_API_KEY" &
+# The calling node: it calls with the API key, and seals for its local clients on 127.0.0.1:7777.
+HOME=/tmp/caller ./kontra connect --gate http://localhost:8080 --api-key "$KONTRA_API_KEY" &
 
 a2a send -a http://localhost:7777/agents/hello "a secret"
 #  → completed, "Hello World": the client never sees an envelope, and Postgres holds only ciphertext
 ```
 
-The hiring node pins each sealed service it hires in `~/.kontra/pins`: a downgrade to unsealed is always refused,
-and a new recipient or seller key waits for `--accept-change <name>`, the key ids printed on stderr for comparison
+The calling node pins each sealed service it calls in `~/.kontra/pins`: a downgrade to unsealed is always refused,
+and a new recipient or service key waits for `--accept-change <name>`, the key ids printed on stderr for comparison
 out of band. MCP calls are sealed the same way between two `kontra connect`. Without a node, `kontra seal --service
 <service URL> --api-key <key> <file>` prints a sealed A2A message and `kontra seal --open <answer.json>` opens the
 reply: the escape hatch for scripts, not the path. A part over 256 KiB, sealed or not, goes to the gate's
@@ -302,7 +302,7 @@ One binary, four commands (`kontra <command> -h` has every flag):
 
 | Command | What it does | Spec |
 |---|---|---|
-| `kontra connect` | Hosts the agents and MCP servers on this machine at a gate (`--serve`), and lets local clients hire the gate's services on `127.0.0.1:7777`, through one outbound connection | [`spec/tunnel.md`](spec/tunnel.md) |
+| `kontra connect` | Hosts the agents and MCP servers on this machine at a gate (`--serve`), and lets local clients call the gate's services on `127.0.0.1:7777`, through one outbound connection | [`spec/tunnel.md`](spec/tunnel.md) |
 | `kontra login` | Gets an API key for a gate from its operator's sign-in, kept in `~/.kontra/credentials` for that gate only | [`spec/tunnel.md`](spec/tunnel.md) §6.3 |
 | `kontra seal` | Seals a file for a sealed service without a node, and opens a sealed answer | [`spec/ext-sealed.md`](spec/ext-sealed.md) §5.1 |
 | `kontra publish` | Sends a listing, how one of your A2A agents is offered, to the gate operator's control plane (Kontra Cloud) | [`spec/tunnel.md`](spec/tunnel.md) §6.4 |
@@ -344,7 +344,7 @@ Three kinds of secret, each with one place to go. `kontra connect` names the oth
 | Credential | Looks like | Goes to | What it does |
 |---|---|---|---|
 | Enrollment token | `ket_` and 32 letters or digits | `kontra connect --enroll` | Binds the node's identity key to the services it names, at one gate. Single use, valid 15 minutes. On Kontra Cloud only a person signed in to the console mints one (Network: Add a node, or a node's Add a service), never an API key or a CLI; on a self-hosted team gate its operator runs `kontra-gate enroll <service>`. |
-| Gate API key | `kk_…` | `kontra connect --api-key`, `kontra login` (which stores one), `Authorization: Bearer` on the gate's routes | Hires with the `hire` scope. With `enroll:<service>` or `enroll:*`, on a gate that allows it (Kontra Cloud), it also enrolls a node for services that already exist, such as a second node for one; it never creates a service. |
+| Gate API key | `kk_…` | `kontra connect --api-key`, `kontra login` (which stores one), `Authorization: Bearer` on the gate's routes | Calls with the `call` scope. With `enroll:<service>` or `enroll:*`, on a gate that allows it (Kontra Cloud), it also enrolls a node for services that already exist, such as a second node for one; it never creates a service. |
 | Kontra Cloud account key | `kontra_sk_…` | Kontra Cloud's control plane API (`/v1/…`) | Nothing at the gate: neither `--enroll` nor `--api-key` takes it. |
 
 A binding belongs to the node's key (`~/.kontra/identity.key`), not to the token that made it: once a welcome
@@ -386,7 +386,7 @@ HOME=~/.kontra-translate kontra connect --gate https://gateway.kontra.sh --name 
 ```
 
 Its own `HOME` gives it its own `~/.kontra` (identity key, credentials, sealed state), and `--listen off` leaves
-local hiring to the first node. Each node is its own row on Cloud's Network page and is restarted on its own.
+local calling to the first node. Each node is its own row on Cloud's Network page and is restarted on its own.
 
 ## Layout
 
@@ -400,7 +400,7 @@ migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mc
 charts/kontra/     Helm chart for a team gate
 compose.yaml       the team gate on one host; deploy/compose/ holds its configurations (kontra.vps.yaml: ACME)
 compose.dev.yaml   Temporal + Postgres for working on the gate itself
-examples/          sellers/ (a2a server --exec, helloworld, booking, tck, a2ui, ap2-merchant; temporal-harness, adk, claude-cli to come),
+examples/          agents/ (a2a server --exec, helloworld, booking, tck, a2ui, ap2-merchant; temporal-harness, adk, claude-cli to come),
                    mcp/ (filesystem over stdio, everything), front/ (caddy; agentgateway, ingress to come), sealing/
 scripts/           check_specs.py, the test runners, tck.sh, demo-clean-laptop.sh, team-gate-vps.sh
 test/              e2e/ (two replicas behind a front), pentest/, tck/, demo/ (the clean laptop), vps/

@@ -173,7 +173,7 @@ func SealedRef(sealed string) string {
 
 // Owner is the authenticated caller a scoped read or write acts for (spec §2.3).
 type Owner struct {
-	BuyerID   uuid.UUID  `json:"buyerId"`
+	CallerID  uuid.UUID  `json:"callerId"`
 	Principal string     `json:"principal"` // e.g. "key:kk_ab12cd34"
 	Via       string     `json:"via"`       // api_key | oidc | mcp | node | anonymous
 	TenantID  *uuid.UUID `json:"tenantId,omitempty"`
@@ -197,16 +197,16 @@ func validVia(v string) bool {
 }
 
 // Scope is the caller scope of a caller-facing read or write: the service's tenant and name from the
-// route, and the principal's buyer id (PRD §12: never from the request body).
+// route, and the principal's caller id (PRD §12: never from the request body).
 type Scope struct {
 	TenantID uuid.UUID
 	Service  string
-	BuyerID  uuid.UUID
+	CallerID uuid.UUID
 }
 
 // ScopeOf returns the scope of o's reads and writes on svc.
 func ScopeOf(svc ServiceRef, o Owner) Scope {
-	return Scope{TenantID: svc.TenantID, Service: svc.Name, BuyerID: o.BuyerID}
+	return Scope{TenantID: svc.TenantID, Service: svc.Name, CallerID: o.CallerID}
 }
 
 // Event is one task_events row.
@@ -221,7 +221,7 @@ type Event struct {
 }
 
 // TaskRow is one tasks row, read without caller scope by internal callers. Owner.TenantID is never set:
-// tasks records the buyer and the principal, not the principal's tenant.
+// tasks records the caller and the principal, not the principal's tenant.
 type TaskRow struct {
 	ID             uuid.UUID
 	TenantID       uuid.UUID

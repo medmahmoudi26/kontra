@@ -28,14 +28,14 @@ import (
 	"kontra.sh/kontra/internal/upstream"
 )
 
-// echoSeller is an A2A 1.0 agent (JSON-RPC at /, HTTP+JSON at /rest) that echoes its message's text parts in its
+// echoService is an A2A 1.0 agent (JSON-RPC at /, HTTP+JSON at /rest) that echoes its message's text parts in its
 // status message and in an artifact, streamed in chunks on SendStreamingMessage; it records what it received.
-type echoSeller struct {
+type echoService struct {
 	mu   sync.Mutex
 	seen []string
 }
 
-func (e *echoSeller) executor() a2asrv.AgentExecutor {
+func (e *echoService) executor() a2asrv.AgentExecutor {
 	return a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 		return func(yield func(a2a.Event, error) bool) {
 			var texts []string
@@ -62,7 +62,7 @@ func (e *echoSeller) executor() a2asrv.AgentExecutor {
 }
 
 // sealingGate is the gate of the node tests for sealing: it serves the service's signed card (the sealed extension
-// naming recipients) and the gate's key set, and relays the node's hiring requests to the same node's hosting side as
+// naming recipients) and the gate's key set, and relays the node's calling requests to the same node's hosting side as
 // the relay does (a gate task id for a new task, the first message without contextId, the upstream's ids rewritten
 // to the gate's). Everything that crosses it is recorded: what the gate would hold in task_events.
 type sealingGate struct {
@@ -105,7 +105,7 @@ func (g *sealingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// relay forwards one hiring request to the node's hosted echo service through the session's hosting stream.
+// relay forwards one calling request to the node's hosted echo service through the session's hosting stream.
 func (g *sealingGate) relay(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	g.mu.Lock()
@@ -238,12 +238,12 @@ func (o preambleOpener) OpenExchange(ctx context.Context) (net.Conn, error) {
 	return o.s.OpenExchange(ctx, o.pre)
 }
 
-// A sealed SendMessage and SendStreamingMessage through a gate, both bindings, to a node-hosted echo seller hired by
-// the same node: the local client sends and reads plaintext, the seller gets plaintext, and what the gate holds has
+// A sealed SendMessage and SendStreamingMessage through a gate, both bindings, to a node-hosted echo service called by
+// the same node: the local client sends and reads plaintext, the service gets plaintext, and what the gate holds has
 // only envelopes (sealed_no_plaintext's A2A case through a FakeGate); the pin's first sight is printed (D187).
 func TestSealedThroughAFakeGate(t *testing.T) {
-	seller := &echoSeller{}
-	h := a2asrv.NewHandler(seller.executor())
+	service := &echoService{}
+	h := a2asrv.NewHandler(service.executor())
 	mux := http.NewServeMux()
 	mux.Handle("/rest/", http.StripPrefix("/rest", a2asrv.NewRESTHandler(h)))
 	mux.Handle("/", a2asrv.NewJSONRPCHandler(h))
@@ -260,7 +260,7 @@ func TestSealedThroughAFakeGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	sg := &sealingGate{t: t, keys: keys, tasks: map[string][2]string{}}
-	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Hire: sg} })
+	g := newTestGate(t, func(c *tunnelgate.HandlerConfig) { c.NodeStreams = &tunnelgate.NodeStreams{Call: sg} })
 	sg.url = strings.TrimRight(g.url.String(), "/")
 	home := t.TempDir()
 	cfg := testConfig(t, g.url, home, mustServe(t, "a2a:echo=http://"+ln.Addr().String()))
@@ -326,11 +326,11 @@ func TestSealedThroughAFakeGate(t *testing.T) {
 		if strings.Contains(out, sealed.MediaType) {
 			t.Errorf("%s: an envelope reaches the local client: %s", tc.name, out)
 		}
-		seller.mu.Lock()
-		got := seller.seen[len(seller.seen)-1]
-		seller.mu.Unlock()
+		service.mu.Lock()
+		got := service.seen[len(service.seen)-1]
+		service.mu.Unlock()
 		if got != marker {
-			t.Errorf("%s: the seller got %q", tc.name, got)
+			t.Errorf("%s: the service got %q", tc.name, got)
 		}
 		sg.mu.Lock()
 		held := sg.held.String()

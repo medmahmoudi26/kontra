@@ -223,7 +223,7 @@ func procAddr(s string) (string, error) {
 // tcpListen is the kernel's state of a listening socket.
 const tcpListen = "0A"
 
-// checkNoListener fails if the process listens on any TCP socket but a loopback one (kontra connect's hiring
+// checkNoListener fails if the process listens on any TCP socket but a loopback one (kontra connect's calling
 // endpoint, --listen 127.0.0.1, spec/tunnel.md §9): the gate can never have opened a connection to it (§1, §15).
 // It returns the process's other sockets.
 func checkNoListener(t *testing.T, pid int, who string) []tcpSocket {

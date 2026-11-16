@@ -44,7 +44,7 @@ func TestCallerOrigin(t *testing.T) {
 	}
 
 	// No contextId, streamed: the gate assigned the context.
-	cctx, pre := caller(true)
+	cctx, pre := callerCtx(true)
 	d.set(pre, turn{state: a2a.TaskStateInputRequired, outcome: DispatchInterrupted})
 	cctx = store.WithRequestOrigin(cctx, &store.Origin{Actor: store.ActorCaller, Type: "SendStreamingMessage", Method: "SendStreamingMessage", ExchangeID: "ex-1"})
 	if _, err := q.Write(cctx, payloadOf(requestOf("o-1", "hi"))); err != nil {
@@ -57,7 +57,7 @@ func TestCallerOrigin(t *testing.T) {
 	}
 
 	// The caller's own contextId: not assigned.
-	c2, pre2 := caller(true)
+	c2, pre2 := callerCtx(true)
 	req := requestOf("o-2", "hi")
 	req.Message.ContextID = "c1"
 	if _, err := q.Write(store.WithRequestOrigin(c2, &store.Origin{Actor: store.ActorCaller, Type: "SendMessage", Method: "SendMessage"}), payloadOf(req)); err != nil {
@@ -72,7 +72,7 @@ func TestCallerOrigin(t *testing.T) {
 	d.set(pre, turn{state: a2a.TaskStateCompleted, outcome: DispatchTerminal})
 	fu := requestOf("o-3", "more")
 	fu.Message.TaskID = a2a.TaskID(pre)
-	fctx, _ := caller(false)
+	fctx, _ := callerCtx(false)
 	fctx = store.WithRequestOrigin(fctx, &store.Origin{Actor: store.ActorCaller, Type: "SendMessage", Method: "SendMessage", ExchangeID: "ex-3"})
 	if _, err := q.Write(fctx, payloadOf(fu)); err != nil {
 		t.Fatal(err)

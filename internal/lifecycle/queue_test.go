@@ -40,7 +40,7 @@ func callContextOf(o store.Owner) map[string]any {
 				"cookie":         []any{"session=" + secretCookie},
 				"X-Api-Key":      []any{secretKey},
 			},
-			"user": map[string]any{"name": o.BuyerID.String(), "authenticated": true,
+			"user": map[string]any{"name": o.CallerID.String(), "authenticated": true,
 				"attributes": map[string]any{"principal": o.Principal, "via": o.Via}},
 			"protocolVersion": "1.0",
 		},
@@ -56,7 +56,7 @@ func requestOf(msgID, text string) *a2a.SendMessageRequest {
 
 func TestSanitizeKeepsOnlyVersionAndExtensions(t *testing.T) {
 	req := requestOf("m-1", "hello")
-	wp, err := Sanitize(&workqueue.Payload{Type: workqueue.PayloadTypeExecute, ExecuteRequest: req, CallContext: callContextOf(buyer)}, buyer)
+	wp, err := Sanitize(&workqueue.Payload{Type: workqueue.PayloadTypeExecute, ExecuteRequest: req, CallContext: callContextOf(caller)}, caller)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,16 +72,16 @@ func TestSanitizeKeepsOnlyVersionAndExtensions(t *testing.T) {
 		t.Errorf("service params %v", params)
 	}
 	user := cc["user"].(map[string]any)
-	if user["name"] != buyer.BuyerID.String() || cc["protocolVersion"] != "1.0" {
+	if user["name"] != caller.CallerID.String() || cc["protocolVersion"] != "1.0" {
 		t.Errorf("call context lost the identity: %v", cc)
 	}
-	if wp.Request != req || wp.Owner != buyer {
+	if wp.Request != req || wp.Owner != caller {
 		t.Error("the request and the owner are kept as they are")
 	}
-	if _, err := Sanitize(&workqueue.Payload{}, buyer); !errors.Is(err, a2a.ErrInvalidParams) {
+	if _, err := Sanitize(&workqueue.Payload{}, caller); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("a payload without a request: %v", err)
 	}
-	if wp, err := Sanitize(&workqueue.Payload{ExecuteRequest: req}, buyer); err != nil || wp.CallContext != nil {
+	if wp, err := Sanitize(&workqueue.Payload{ExecuteRequest: req}, caller); err != nil || wp.CallContext != nil {
 		t.Errorf("no call context: %v %v", wp.CallContext, err)
 	}
 }
@@ -90,7 +90,7 @@ func TestRebuild(t *testing.T) {
 	id := a2a.TaskID(uuid.Must(uuid.NewV7()).String())
 	req := requestOf("m-1", "hello")
 	wi := &store.WorkItem{ID: uuid.Must(uuid.NewV7()), Kind: store.WorkExecute,
-		Payload: store.WorkPayload{Request: req, CallContext: callContextOf(buyer), Owner: buyer}}
+		Payload: store.WorkPayload{Request: req, CallContext: callContextOf(caller), Owner: caller}}
 	p, err := Rebuild(id, wi)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +150,7 @@ func TestQueueRegisterHandlerKeepsTheFunction(t *testing.T) {
 }
 
 func TestQueueWriteRefusals(t *testing.T) {
-	q := NewQueue(store.ServiceRef{}, nil, nil, QueueOptions{Owner: func(context.Context) (store.Owner, error) { return buyer, nil }})
+	q := NewQueue(store.ServiceRef{}, nil, nil, QueueOptions{Owner: func(context.Context) (store.Owner, error) { return caller, nil }})
 	if _, err := q.Write(context.Background(), &workqueue.Payload{Type: workqueue.PayloadTypeCancel, CancelRequest: &a2a.CancelTaskRequest{}}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
 		t.Errorf("a cancel payload: %v (CancelTask is the interceptor's, D4)", err)
 	}
@@ -237,7 +237,7 @@ func TestClassifyUpdateErrors(t *testing.T) {
 // carries no admission decision, or one that is not allow, is refused before anything is
 // written, never created with an id of Write's own.
 func TestQueueWriteNewTaskNeedsAnAdmission(t *testing.T) {
-	q := NewQueue(store.ServiceRef{}, nil, nil, QueueOptions{Owner: func(context.Context) (store.Owner, error) { return buyer, nil }})
+	q := NewQueue(store.ServiceRef{}, nil, nil, QueueOptions{Owner: func(context.Context) (store.Owner, error) { return caller, nil }})
 	p := &workqueue.Payload{Type: workqueue.PayloadTypeExecute, ExecuteRequest: requestOf("m-1", "hello")}
 	for name, ctx := range map[string]context.Context{
 		"no admission": context.Background(),

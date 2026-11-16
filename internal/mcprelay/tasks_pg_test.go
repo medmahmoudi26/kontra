@@ -505,7 +505,7 @@ func TestDurableTaskDirect(t *testing.T) {
 	t.Cleanup(srv.Close)
 	e.service("research", srv.URL, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	durableFlow(t, e, up, key, r.url+"/mcp/research")
 }
 
@@ -520,7 +520,7 @@ func TestDurableTaskThroughTheTunnel(t *testing.T) {
 	e.service("research", "", nil)
 	r := e.replica("a", replicaOpts{})
 	n := e.node(r, up, "research")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	taskID, c := durableFlow(t, e, up, key, r.url+"/mcp/research")
 	h := HashID(c.sid)
 	session := hex.EncodeToString(h[:])
@@ -560,7 +560,7 @@ func TestDurableTaskRefusals(t *testing.T) {
 	e.service("research", srv.URL, func(s *Service) { s.Tools = Policy{Deny: []string{"secret"}} })
 	adm := &fakeAdmission{}
 	r := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpTask}})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	for tool, code := range map[string]int{"never": -32601, "plain": -32601, "secret": -32602, "nosuch": -32602} {
 		if got := c.taskCall(3, tool, map[string]any{}).errCode(t); got != code {
@@ -618,7 +618,7 @@ func TestDurableTaskCancelIgnoredUpstream(t *testing.T) {
 	})
 	e.service("research", srv.URL, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
 	eventually(t, 15*time.Second, "the dispatch has the upstream task", func() bool {
@@ -707,7 +707,7 @@ func TestDurableTaskCancelHonouredAtInputRequired(t *testing.T) {
 	t.Cleanup(srv.Close)
 	e.service("research", srv.URL, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
 	eventually(t, 15*time.Second, "the input request is logged", func() bool {
@@ -738,7 +738,7 @@ func TestDurableTaskCancelHonouredWorking(t *testing.T) {
 	t.Cleanup(srv.Close)
 	e.service("research", srv.URL, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	for i := range 2 {
 		taskID := created(t, c.taskCall(100+i, "research", map[string]any{}))
@@ -785,7 +785,7 @@ func TestForwardCancelKeepsUpstreamTextOutOfHistory(t *testing.T) {
 	t.Cleanup(srv.Close)
 	e.service("research", srv.URL, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
 	eventually(t, 15*time.Second, "the dispatch has the upstream task", func() bool {
@@ -804,8 +804,8 @@ func TestForwardCancelKeepsUpstreamTextOutOfHistory(t *testing.T) {
 	}
 }
 
-// Another buyer's tasks/get, tasks/result and tasks/cancel are -32602, as for an unknown task; tasks/list lists the
-// buyer's own only, newest first; an anonymous caller's tasks/list is -32601.
+// Another caller's tasks/get, tasks/result and tasks/cancel are -32602, as for an unknown task; tasks/list lists the
+// caller's own only, newest first; an anonymous caller's tasks/list is -32601.
 func TestDurableTaskScope(t *testing.T) {
 	e := newTaskEnv(t)
 	up := mcptest.New()
@@ -831,7 +831,7 @@ func TestDurableTaskScope(t *testing.T) {
 	tb := created(t, b.taskCall(3, "research", map[string]any{}))
 	for _, m := range []string{"tasks/get", "tasks/result", "tasks/cancel"} {
 		if got := b.tasks(m, t1, 4).errCode(t); got != -32602 {
-			t.Errorf("another buyer's %s: %d", m, got)
+			t.Errorf("another caller's %s: %d", m, got)
 		}
 		if got := a.tasks(m, "not-a-uuid", 4).errCode(t); got != -32602 {
 			t.Errorf("%s of a malformed id: %d", m, got)
@@ -849,7 +849,7 @@ func TestDurableTaskScope(t *testing.T) {
 		t.Fatalf("tasks/list: %s", l.body)
 	}
 	if strings.Contains(string(l.body), tb) {
-		t.Fatal("tasks/list shows another buyer's task")
+		t.Fatal("tasks/list shows another caller's task")
 	}
 	anon := newTaskClient(t, "", r.url+"/mcp/research")
 	if got := anon.post(`{"jsonrpc":"2.0","id":6,"method":"tasks/list","params":{}}`).errCode(t); got != -32601 {
@@ -935,7 +935,7 @@ func TestDurableTaskSealedEnvelopes(t *testing.T) {
 	t.Cleanup(srv.Close)
 	e.service("research", srv.URL, func(s *Service) { s.Sealed = true })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
 	res := c.stream(http.MethodPost, fmt.Sprintf(`{"jsonrpc":"2.0","id":9,"method":"tasks/result","params":{"taskId":%q}}`, taskID), nil)
@@ -983,7 +983,7 @@ func TestDispatchFenceAndTerminalRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	nt, err := store.NewMCPTask(id, svc, store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}, nil, nil)
+	nt, err := store.NewMCPTask(id, svc, store.Owner{CallerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1048,7 +1048,7 @@ func TestDurableTaskCancelHangingUpstream(t *testing.T) {
 	t.Cleanup(func() { close(release) }) // before the server's Close: a held request ends first
 	e.service("research", srv.URL, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 
 	t.Run("after the first upstream id", func(t *testing.T) {
@@ -1166,7 +1166,7 @@ func TestDurableTaskServerEverything(t *testing.T) {
 	e := newTaskEnv(t)
 	e.service("everything", url, func(s *Service) { s.Tools = Policy{Deny: []string{"get-env", "gzip-file-as-resource"}} })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/everything")
 	if !strings.Contains(c.seen.String(), `"cancel":{}`) {
 		t.Fatalf("initialize: %s", c.seen.String())
@@ -1242,7 +1242,7 @@ func TestDurableTaskTunnelLostAfterFirstID(t *testing.T) {
 	e.service("research", "", nil)
 	r := e.replica("a", replicaOpts{})
 	n := e.node(r, up, "research")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
 	eventually(t, 15*time.Second, "the dispatch has the upstream task", func() bool {
@@ -1330,7 +1330,7 @@ func TestDispatchReattachesDirect(t *testing.T) {
 	}
 
 	id := uuid.Must(uuid.NewV7())
-	owner := store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
+	owner := store.Owner{CallerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
 	nt, err := store.NewMCPTask(id, svc, owner, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1397,7 +1397,7 @@ func directTask(t *testing.T, e *env, log *store.Log, tool string) (uuid.UUID, u
 		t.Fatal(err)
 	}
 	id := uuid.Must(uuid.NewV7())
-	owner := store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
+	owner := store.Owner{CallerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
 	nt, err := store.NewMCPTask(id, svc, owner, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1455,7 +1455,7 @@ func TestDispatchReattachDoesNotResendAnswers(t *testing.T) {
 		return seq > 0
 	})
 	resp := `{"jsonrpc":"2.0","id":"` + store.GateRequestID(id, seq) + `","result":{"action":"accept","content":{}}}`
-	if _, ok, err := log.AppendInputResponse(ctx, store.Scope{TenantID: e.team, Service: "research", BuyerID: owner.BuyerID}, id, seq, json.RawMessage(resp)); err != nil || !ok {
+	if _, ok, err := log.AppendInputResponse(ctx, store.Scope{TenantID: e.team, Service: "research", CallerID: owner.CallerID}, id, seq, json.RawMessage(resp)); err != nil || !ok {
 		t.Fatalf("the answer: %v %v", ok, err)
 	}
 	eventually(t, 10*time.Second, "the first dispatch wrote the answer upstream", func() bool {
@@ -1542,7 +1542,7 @@ func TestDurableTaskNodeAnswerAfterFirstID(t *testing.T) {
 	e.service("research", "", nil)
 	r := e.replica("a", replicaOpts{})
 	e.node(r, h, "research")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
 	eventually(t, 15*time.Second, "the dispatch has the upstream task", func() bool {
@@ -1597,7 +1597,7 @@ func TestDurableTaskSealedAnswerRefusedByTheNode(t *testing.T) {
 	e.service("research", "", func(s *Service) { s.Sealed = true })
 	r := e.replica("a", replicaOpts{})
 	e.node(r, h, "research")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 	taskID := created(t, c.taskCall(7, "research", map[string]any{}))
 	res := c.stream(http.MethodPost, fmt.Sprintf(`{"jsonrpc":"2.0","id":9,"method":"tasks/result","params":{"taskId":%q}}`, taskID), nil)
@@ -1651,7 +1651,7 @@ func TestRequiredTasks(t *testing.T) {
 	}
 	adm := &fakeAdmission{}
 	r := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpTask, hooks.OpCall}})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newTaskClient(t, key, r.url+"/mcp/research")
 
 	lr := c.post(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)

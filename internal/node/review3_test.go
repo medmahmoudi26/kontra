@@ -77,7 +77,7 @@ func r3OpenInput(t *testing.T, key *age.X25519Identity, data string) sealed.Head
 
 // r3-hosting-1 (D232): a sealed plain call on a stdio service whose server asks the client (sampling/createMessage)
 // with a prompt built from the sealed arguments. The bridge routes the request to the session's GET stream; it
-// reaches the gate sealed to the buyer's job, and the gate's plaintext answer to it is refused and never reaches the
+// reaches the gate sealed to the caller's job, and the gate's plaintext answer to it is refused and never reaches the
 // child.
 func TestReview3StdioPlainCallInputOnGET(t *testing.T) {
 	bin := stdioServer(t)
@@ -86,7 +86,7 @@ func TestReview3StdioPlainCallInputOnGET(t *testing.T) {
 	hosting, node := hostingFor(t)
 	pp.p.seal = hosting
 	sid := r3Init(t, pp, "fs")
-	session := r3Hash("the buyer's gate session")
+	session := r3Hash("the caller's gate session")
 	gresp, gbr := pp.streamed(t, mcpSealedPreamble("fs", session, ""), r3GET(sid, ""))
 	if gresp.StatusCode != 200 {
 		t.Fatalf("GET: %d", gresp.StatusCode)
@@ -103,7 +103,7 @@ func TestReview3StdioPlainCallInputOnGET(t *testing.T) {
 	if hd := r3OpenInput(t, key, data); hd.Tool != "ask" || hd.MessageID != "sample-2" || hd.TaskID != "" {
 		t.Fatalf("the input request's header: %+v", hd)
 	}
-	// The gate answers the buyer's input request itself, in plaintext, on the buyer's own session exchange.
+	// The gate answers the caller's input request itself, in plaintext, on the caller's own session exchange.
 	ans := `{"jsonrpc":"2.0","id":"sample-2","result":{"role":"assistant","content":{"type":"text","text":"GATE-WROTE-THIS"},"model":"m"}}`
 	resp, body, _ := pp.raw(t, mcpSealedPreamble("fs", session, ""), mcpPost(ans, sid, mcpwire.V20251125))
 	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectBadHeader) {
@@ -144,7 +144,7 @@ func TestReview3URLInputOnResumedGET(t *testing.T) {
 	hosting, node := hostingFor(t)
 	pp.p.seal = hosting
 	sid := r3Init(t, pp, "web")
-	session := r3Hash("the buyer's gate session")
+	session := r3Hash("the caller's gate session")
 	call, key, _ := sealedCall(t, node, "web", session, "ask", "1", `{"text":"SECRET-SEALED-ARG"}`)
 	st := pp.open(t, mcpSealedPreamble("web", session, "1"))
 	if _, err := io.WriteString(st, mcpPost(call, sid, mcpwire.V20251125)); err != nil {
@@ -218,10 +218,10 @@ func statefulUp(t *testing.T, got, block chan struct{}) (*mcptest.Server, *url.U
 	return up, target
 }
 
-// r3-hosting-3 (D233): a URL MCP server that answers a call once it is done (JSON). The gate sends the buyer's sealed
+// r3-hosting-3 (D233): a URL MCP server that answers a call once it is done (JSON). The gate sends the caller's sealed
 // call, waits until the server has it, and ends the tunnel stream before the answer: the call was handed whole and is
-// recorded. The gate's own sealed call on the buyer's session is then wrong_job (it cannot bind the session's job to
-// its key and read the buyer's session state), and the buyer's call resent is replayed (it does not run again).
+// recorded. The gate's own sealed call on the caller's session is then wrong_job (it cannot bind the session's job to
+// its key and read the caller's session state), and the caller's call resent is replayed (it does not run again).
 func TestReview3MCPCutBeforeAnswerIsRecorded(t *testing.T) {
 	for _, mode := range []string{"bind", "replay"} {
 		t.Run(mode, func(t *testing.T) {
@@ -231,8 +231,8 @@ func TestReview3MCPCutBeforeAnswerIsRecorded(t *testing.T) {
 			hosting, node := hostingFor(t)
 			pp.p.seal = hosting
 			sid := r3Init(t, pp, "web")
-			h := r3Hash("the buyer's gate session")
-			call, _, _ := sealedCall(t, node, "web", h, "login", "1", `{"secret":"BUYER-SECRET-LOGIN"}`)
+			h := r3Hash("the caller's gate session")
+			call, _, _ := sealedCall(t, node, "web", h, "login", "1", `{"secret":"CALLER-SECRET-LOGIN"}`)
 			st := pp.open(t, mcpSealedPreamble("web", h, "1"))
 			if _, err := io.WriteString(st, mcpPost(call, sid, mcpwire.V20251125)); err != nil {
 				t.Fatal(err)
@@ -251,16 +251,16 @@ func TestReview3MCPCutBeforeAnswerIsRecorded(t *testing.T) {
 				gcall, _, _ := sealedCall(t, node, "web", h, "whoami", "900", `{}`)
 				resp, body, _ := pp.raw(t, mcpSealedPreamble("web", h, "900"), mcpPost(gcall, sid, mcpwire.V20251125))
 				if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectWrongJob) {
-					t.Fatalf("the gate's own sealed call on the buyer's session: %d %q %s", resp.StatusCode,
+					t.Fatalf("the gate's own sealed call on the caller's session: %d %q %s", resp.StatusCode,
 						resp.Header.Get(tunnel.HeaderSealedReject), body)
 				}
 			case "replay":
 				resp, body, _ := pp.raw(t, mcpSealedPreamble("web", h, "1"), mcpPost(call, sid, mcpwire.V20251125))
 				if resp.StatusCode != http.StatusBadRequest || resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectReplayed) {
-					t.Fatalf("the buyer's call resent: %d %q %s", resp.StatusCode, resp.Header.Get(tunnel.HeaderSealedReject), body)
+					t.Fatalf("the caller's call resent: %d %q %s", resp.StatusCode, resp.Header.Get(tunnel.HeaderSealedReject), body)
 				}
 				if n := up.Calls("login"); n != 1 {
-					t.Fatalf("the server ran the buyer's call %d times", n)
+					t.Fatalf("the server ran the caller's call %d times", n)
 				}
 			}
 		})
@@ -276,7 +276,7 @@ func r3modern(method, name, body string) string {
 
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
 
-// r3-hosting-2 (D234): the buyer's sealed tools/call, re-sent by the gate as a 2026-07-28 request (no session; the
+// r3-hosting-2 (D234): the caller's sealed tools/call, re-sent by the gate as a 2026-07-28 request (no session; the
 // modern _meta keys beside the envelope, which binds only sh.kontra/sealed), is refused by the node itself: the
 // dual-era server's multi round-trip answer (inputRequests, requestState) and modern CreateTaskResult would carry
 // what the arguments built outside what the node seals. Nothing reaches the server.
@@ -306,15 +306,15 @@ func TestReview3SealedCallAsModernIsRefused(t *testing.T) {
 			pp := newMCPProxyPair(t, MCPOptions{}, Serve{Kind: tunnel.KindMCP, Name: "web", Target: target})
 			hosting, node := hostingFor(t)
 			pp.p.seal = hosting
-			h := r3Hash("the buyer's gate session")
-			call, _, _ := sealedCall(t, node, "web", h, "ask", "1", `{"secret":"BUYER-SECRET-ARG"}`)
+			h := r3Hash("the caller's gate session")
+			call, _, _ := sealedCall(t, node, "web", h, "ask", "1", `{"secret":"CALLER-SECRET-ARG"}`)
 			caps := `{}`
 			if tasks {
 				caps = `{"extensions":{"io.modelcontextprotocol/tasks":{}}}`
 			}
 			call = strings.Replace(call, `"_meta":{`, `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":`+caps+`,`, 1)
 			resp, body, _ := pp.raw(t, mcpSealedPreamble("web", h, "1"), r3modern("tools/call", "ask", call))
-			if strings.Contains(body, "BUYER-SECRET-ARG") || resp.StatusCode != http.StatusBadRequest ||
+			if strings.Contains(body, "CALLER-SECRET-ARG") || resp.StatusCode != http.StatusBadRequest ||
 				resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectBadHeader) {
 				t.Fatalf("a sealed call as a 2026-07-28 request: %d %q %s", resp.StatusCode, resp.Header.Get(tunnel.HeaderSealedReject), body)
 			}
@@ -382,8 +382,8 @@ func hostingShared(t *testing.T, serves ...Serve) (*sealing.Hosting, *age.X25519
 	return h, id
 }
 
-// r3-hosting-5 (D236): two MCP services of one node on one URL server (a read-only and a full tier, say). The buyer's
-// sealed login on web sets up its upstream session; an unsealed call on web2 with the buyer's Mcp-Session-Id is
+// r3-hosting-5 (D236): two MCP services of one node on one URL server (a read-only and a full tier, say). The caller's
+// sealed login on web sets up its upstream session; an unsealed call on web2 with the caller's Mcp-Session-Id is
 // refused as one on web is (D226), since the two services share one sealed state.
 func TestReview3TwoServicesOneUpstreamMCP(t *testing.T) {
 	_, target := statefulUp(t, nil, nil)
@@ -392,18 +392,18 @@ func TestReview3TwoServicesOneUpstreamMCP(t *testing.T) {
 	hosting, node := hostingShared(t, serves...)
 	pp.p.seal = hosting
 	sid := r3Init(t, pp, "web")
-	h := r3Hash("the buyer's gate session")
-	call, _, _ := sealedCall(t, node, "web", h, "login", "1", `{"secret":"BUYER-SECRET-LOGIN"}`)
+	h := r3Hash("the caller's gate session")
+	call, _, _ := sealedCall(t, node, "web", h, "login", "1", `{"secret":"CALLER-SECRET-LOGIN"}`)
 	resp, body, _ := pp.raw(t, mcpSealedPreamble("web", h, "1"), mcpPost(call, sid, mcpwire.V20251125))
-	if resp.StatusCode != 200 || strings.Contains(body, "BUYER") {
-		t.Fatalf("the buyer's sealed login: %d %s", resp.StatusCode, body)
+	if resp.StatusCode != 200 || strings.Contains(body, "CALLER") {
+		t.Fatalf("the caller's sealed login: %d %s", resp.StatusCode, body)
 	}
 	whoami := `{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"whoami","arguments":{}}}`
 	for _, svc := range []string{"web", "web2"} {
 		resp, body, _ = pp.raw(t, mcpPreamble(svc), mcpPost(whoami, sid, mcpwire.V20251125))
-		if strings.Contains(body, "BUYER-SECRET-LOGIN") || resp.StatusCode != http.StatusBadRequest ||
+		if strings.Contains(body, "CALLER-SECRET-LOGIN") || resp.StatusCode != http.StatusBadRequest ||
 			resp.Header.Get(tunnel.HeaderSealedReject) != string(sealed.RejectBadHeader) {
-			t.Fatalf("an unsealed call on %s with the buyer's Mcp-Session-Id: %d %q %s", svc, resp.StatusCode,
+			t.Fatalf("an unsealed call on %s with the caller's Mcp-Session-Id: %d %q %s", svc, resp.StatusCode,
 				resp.Header.Get(tunnel.HeaderSealedReject), body)
 		}
 	}
@@ -461,10 +461,10 @@ func TestReview3MCPNon2xxTextErrorIsScrubbed(t *testing.T) {
 	hosting, node := hostingFor(t)
 	pp.p.seal = hosting
 	sid := r3Init(t, pp, "web")
-	h := r3Hash("the buyer's gate session")
-	call, _, _ := sealedCall(t, node, "web", h, "echo", "1", `{"secret":"BUYER-SECRET-ARG"}`)
+	h := r3Hash("the caller's gate session")
+	call, _, _ := sealedCall(t, node, "web", h, "echo", "1", `{"secret":"CALLER-SECRET-ARG"}`)
 	resp, body, _ := pp.raw(t, mcpSealedPreamble("web", h, "1"), mcpPost(call, sid, mcpwire.V20251125))
-	if strings.Contains(body, "BUYER-SECRET-ARG") || resp.StatusCode != http.StatusBadRequest ||
+	if strings.Contains(body, "CALLER-SECRET-ARG") || resp.StatusCode != http.StatusBadRequest ||
 		!strings.Contains(resp.Header.Get("Content-Type"), "application/json") || !strings.Contains(body, `"id":1`) {
 		t.Fatalf("a sealed call answered 400 text/plain: %d %q %s", resp.StatusCode, resp.Header.Get("Content-Type"), body)
 	}

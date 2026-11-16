@@ -28,17 +28,17 @@ func workPayload(task *a2a.Task, text string, o Owner) WorkPayload {
 func TestWorkItems(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	task := e.newTask(e.svc, buyerA, "", "q")
-	other := e.newTask(e.svc, buyerA, "", "q")
+	task := e.newTask(e.svc, callerA, "", "q")
+	other := e.newTask(e.svc, callerA, "", "q")
 	id := uid(t, task.ID)
 
 	// Inserted in the transaction that pre-creates a task, as the work queue does.
 	wid := uuid.Must(uuid.NewV7())
 	newID := uuid.Must(uuid.NewV7())
 	newSnap := &a2a.Task{ID: a2a.TaskID(newID.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}
-	want := workPayload(newSnap, "x\x00y", buyerA)
+	want := workPayload(newSnap, "x\x00y", callerA)
 	err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		if _, err := e.log.CreateTask(ctx, tx, NewTask{ID: newID, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA,
+		if _, err := e.log.CreateTask(ctx, tx, NewTask{ID: newID, Service: e.svc, Protocol: ProtocolA2A, Owner: callerA,
 			ContextID: "c", State: StateSubmitted, Snapshot: newSnap}); err != nil {
 			return err
 		}
@@ -78,7 +78,7 @@ func TestWorkItems(t *testing.T) {
 	if _, err := e.log.ApplyMetadata(ctx, id, map[string]any{"k": "v"}); err != nil { // version 2
 		t.Fatal(err)
 	}
-	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w1, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "turn", buyerA), TaskVersion: 9}); err != nil {
+	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w1, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "turn", callerA), TaskVersion: 9}); err != nil {
 		t.Fatal(err)
 	}
 	if wi, err := e.log.LoadWorkItem(ctx, w1, id); err != nil || wi.TaskVersion != 2 {
@@ -108,7 +108,7 @@ func TestWorkItems(t *testing.T) {
 	}
 
 	w2 := uuid.Must(uuid.NewV7())
-	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w2, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "refused", buyerA)}); err != nil {
+	if err := e.log.InsertWorkItem(ctx, nil, WorkItem{ID: w2, TaskID: id, Kind: WorkExecute, Payload: workPayload(task, "refused", callerA)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.log.DeleteWorkItem(ctx, w2, uid(t, other.ID)); err != nil {
@@ -143,7 +143,7 @@ func TestWorkItems(t *testing.T) {
 func TestAttempts(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	task := e.newTask(e.svc, buyerA, "c1", "q")
+	task := e.newTask(e.svc, callerA, "c1", "q")
 	id := uid(t, task.ID)
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
@@ -209,7 +209,7 @@ func TestAttempts(t *testing.T) {
 		t.Errorf("latest attempt %d", l.N)
 	}
 	// A retry before it ends the previous attempt (with the given outcome, once) and is idempotent.
-	retried := e.newTask(e.svc, buyerA, "c9", "q9")
+	retried := e.newTask(e.svc, callerA, "c9", "q9")
 	rid := uid(t, retried.ID)
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: rid, N: 1, Backend: BackendDirect}); err != nil {
 		t.Fatal(err)
@@ -230,26 +230,26 @@ func TestAttempts(t *testing.T) {
 	}
 
 	// The upstream context of a gate context is reused only within the caller's own scope (spec §4, D53).
-	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendDirect, nil); err != nil || p == nil || p.UpstreamContextID != "up-ctx-1" {
+	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, callerA, "c1", BackendDirect, nil); err != nil || p == nil || p.UpstreamContextID != "up-ctx-1" {
 		t.Fatalf("A's previous attempt: %+v %v", p, err)
 	}
-	later := e.newTask(e.svc, buyerA, "c1", "q2")
+	later := e.newTask(e.svc, callerA, "c1", "q2")
 	_ = e.log.BeginAttempt(ctx, Attempt{TaskID: uid(t, later.ID), N: 1, Backend: BackendDirect})
 	if lf, err := e.log.BeginDispatch(ctx, uid(t, later.ID), 1, "r1"); err == nil {
 		_ = e.log.SetFirstUpstreamID(ctx, lf, "up-3", "up-ctx-3")
 	}
-	if p, _ := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendDirect, nil); p.UpstreamContextID != "up-ctx-3" {
+	if p, _ := e.log.PreviousContextAttempt(ctx, e.svc, callerA, "c1", BackendDirect, nil); p.UpstreamContextID != "up-ctx-3" {
 		t.Errorf("A's latest upstream context %q", p.UpstreamContextID)
 	}
 	for name, p := range map[string]func() (*Attempt, error){
-		"buyer B, same string": func() (*Attempt, error) {
-			return e.log.PreviousContextAttempt(ctx, e.svc, buyerB, "c1", BackendDirect, nil)
+		"caller B, same string": func() (*Attempt, error) {
+			return e.log.PreviousContextAttempt(ctx, e.svc, callerB, "c1", BackendDirect, nil)
 		},
 		"another context": func() (*Attempt, error) {
-			return e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c2", BackendDirect, nil)
+			return e.log.PreviousContextAttempt(ctx, e.svc, callerA, "c2", BackendDirect, nil)
 		},
 		"another backend": func() (*Attempt, error) {
-			return e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "c1", BackendTunnel, nil)
+			return e.log.PreviousContextAttempt(ctx, e.svc, callerA, "c1", BackendTunnel, nil)
 		},
 	} {
 		if a, err := p(); a != nil || err != nil {
@@ -260,7 +260,7 @@ func TestAttempts(t *testing.T) {
 	// A tunnel attempt's upstream context is reused only on the same tunnel session (spec §4; M2 plan audit:
 	// node 1's upstream contextId never reaches node 2).
 	s1, s2 := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
-	onTunnel := e.newTask(e.svc, buyerA, "t1", "q-t")
+	onTunnel := e.newTask(e.svc, callerA, "t1", "q-t")
 	tid := uid(t, onTunnel.ID)
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: tid, N: 1, Backend: BackendTunnel, TunnelSession: &s1, KeyID: "k1_x", ReplicaID: "r1"}); err != nil {
 		t.Fatal(err)
@@ -272,15 +272,15 @@ func TestAttempts(t *testing.T) {
 	if err := e.log.SetFirstUpstreamID(ctx, tf, "up-t", "up-ctx-t"); err != nil {
 		t.Fatal(err)
 	}
-	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "t1", BackendTunnel, &s1); err != nil || p == nil || p.UpstreamContextID != "up-ctx-t" {
+	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, callerA, "t1", BackendTunnel, &s1); err != nil || p == nil || p.UpstreamContextID != "up-ctx-t" {
 		t.Fatalf("the same session: %+v %v", p, err)
 	}
 	for name, sess := range map[string]*uuid.UUID{"another session": &s2, "no session": nil} {
-		if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "t1", BackendTunnel, sess); p != nil || err != nil {
+		if p, err := e.log.PreviousContextAttempt(ctx, e.svc, callerA, "t1", BackendTunnel, sess); p != nil || err != nil {
 			t.Errorf("%s: %+v %v", name, p, err)
 		}
 	}
-	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, buyerA, "t1", BackendDirect, &s1); p != nil || err != nil {
+	if p, err := e.log.PreviousContextAttempt(ctx, e.svc, callerA, "t1", BackendDirect, &s1); p != nil || err != nil {
 		t.Errorf("a direct attempt found a tunnel one: %+v %v", p, err)
 	}
 }
@@ -290,7 +290,7 @@ func TestAttempts(t *testing.T) {
 func TestTunnelAttempts(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	id := uid(t, e.newTask(e.svc, buyerA, "", "q").ID)
+	id := uid(t, e.newTask(e.svc, callerA, "", "q").ID)
 	if err := e.log.BeginAttempt(ctx, Attempt{TaskID: id, N: 1, Backend: BackendTunnel}); err == nil {
 		t.Fatal("an open tunnel attempt without a session was written")
 	}
@@ -333,7 +333,7 @@ func TestTunnelAttempts(t *testing.T) {
 func TestWriteTerminalAndApplyMetadata(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	task := e.newTask(e.svc, buyerA, "", "q")
+	task := e.newTask(e.svc, callerA, "", "q")
 	id := uid(t, task.ID)
 	if _, err := e.log.WriteTerminal(ctx, TerminalWrite{TaskID: id, State: StateFailed, Reason: "made_up"}); err == nil {
 		t.Error("an unknown failure reason was written")
@@ -383,9 +383,9 @@ func TestWriteTerminalAndApplyMetadata(t *testing.T) {
 	}
 
 	// canceled: client, on an input-required task.
-	t2 := e.newTask(e.svc, buyerA, "", "q")
+	t2 := e.newTask(e.svc, callerA, "", "q")
 	s := e.store(nil)
-	mustApply(t, asOwner(ctx, buyerA), s, t2.ID, status(t2, a2a.TaskStateInputRequired, "which one?"))
+	mustApply(t, asOwner(ctx, callerA), s, t2.ID, status(t2, a2a.TaskStateInputRequired, "which one?"))
 	if _, err := e.log.WriteTerminal(ctx, TerminalWrite{TaskID: uid(t, t2.ID), State: StateCanceled, Canceled: CanceledClient}); err != nil {
 		t.Fatal(err)
 	}
@@ -408,28 +408,28 @@ func TestFindResend(t *testing.T) {
 	}
 	id := uuid.Must(uuid.NewV7())
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{m}}
-	if _, err := e.log.CreateTask(ctx, nil, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "c",
+	if _, err := e.log.CreateTask(ctx, nil, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: callerA, ContextID: "c",
 		State: StateSubmitted, Snapshot: snap, FirstMessageID: "msg-1", FirstRequest: h}); err != nil {
 		t.Fatal(err)
 	}
 	since := time.Now().Add(-24 * time.Hour)
-	found, err := e.log.FindResend(ctx, e.svc, buyerA, "msg-1", h, since)
+	found, err := e.log.FindResend(ctx, e.svc, callerA, "msg-1", h, since)
 	if err != nil || found == nil || found.ID != id || found.FirstMessageID != "msg-1" {
 		t.Fatalf("resend: %+v %v", found, err)
 	}
 	withPush := &a2a.SendMessageRequest{Message: m, Config: &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: "https://h.example/x"}}}
 	h2, _ := RequestHash(withPush)
-	sameKeyOtherPrincipal := buyerA
+	sameKeyOtherPrincipal := callerA
 	sameKeyOtherPrincipal.Principal = "key:kk_a_00000002"
 	for name, f := range map[string]func() (*TaskRow, error){
-		"another request": func() (*TaskRow, error) { return e.log.FindResend(ctx, e.svc, buyerA, "msg-1", h2, since) },
-		"another buyer":   func() (*TaskRow, error) { return e.log.FindResend(ctx, e.svc, buyerB, "msg-1", h, since) },
+		"another request": func() (*TaskRow, error) { return e.log.FindResend(ctx, e.svc, callerA, "msg-1", h2, since) },
+		"another caller":  func() (*TaskRow, error) { return e.log.FindResend(ctx, e.svc, callerB, "msg-1", h, since) },
 		"another principal": func() (*TaskRow, error) {
 			return e.log.FindResend(ctx, e.svc, sameKeyOtherPrincipal, "msg-1", h, since)
 		},
-		"another messageId": func() (*TaskRow, error) { return e.log.FindResend(ctx, e.svc, buyerA, "msg-2", h, since) },
+		"another messageId": func() (*TaskRow, error) { return e.log.FindResend(ctx, e.svc, callerA, "msg-2", h, since) },
 		"too old": func() (*TaskRow, error) {
-			return e.log.FindResend(ctx, e.svc, buyerA, "msg-1", h, time.Now().Add(time.Hour))
+			return e.log.FindResend(ctx, e.svc, callerA, "msg-1", h, time.Now().Add(time.Hour))
 		},
 	} {
 		if r, err := f(); r != nil || err != nil {
@@ -438,7 +438,7 @@ func TestFindResend(t *testing.T) {
 	}
 	// A messageId no text column can hold is the caller's error, before any query (spec §4).
 	for name, mid := range map[string]string{"a NUL": "m\x00", "invalid UTF-8": "m\xff"} {
-		if r, err := e.log.FindResend(ctx, e.svc, buyerA, mid, h, since); r != nil || !errors.Is(err, a2a.ErrInvalidParams) {
+		if r, err := e.log.FindResend(ctx, e.svc, callerA, mid, h, since); r != nil || !errors.Is(err, a2a.ErrInvalidParams) {
 			t.Errorf("messageId with %s: %+v %v, want InvalidParams", name, r, err)
 		}
 	}
@@ -461,12 +461,12 @@ func TestFindResendLockedSerializesIdenticalRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx1.Rollback(ctx) }()
-	if r, err := e.log.FindResendLocked(ctx, tx1, e.svc, buyerA, "msg-dup", h, since); r != nil || err != nil {
+	if r, err := e.log.FindResendLocked(ctx, tx1, e.svc, callerA, "msg-dup", h, since); r != nil || err != nil {
 		t.Fatalf("the first request: %+v %v", r, err)
 	}
 	id := uuid.Must(uuid.NewV7())
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{m}}
-	if _, err := e.log.CreateTask(ctx, tx1, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "c",
+	if _, err := e.log.CreateTask(ctx, tx1, NewTask{ID: id, Service: e.svc, Protocol: ProtocolA2A, Owner: callerA, ContextID: "c",
 		State: StateSubmitted, Snapshot: snap, FirstMessageID: "msg-dup", FirstRequest: h}); err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestFindResendLockedSerializesIdenticalRequests(t *testing.T) {
 			return
 		}
 		defer func() { _ = tx2.Rollback(ctx) }()
-		r, err := e.log.FindResendLocked(ctx, tx2, e.svc, buyerA, "msg-dup", h, since)
+		r, err := e.log.FindResendLocked(ctx, tx2, e.svc, callerA, "msg-dup", h, since)
 		second <- found{r, err}
 	}()
 	select {
@@ -516,7 +516,7 @@ func TestLoadService(t *testing.T) {
 	if ref != want {
 		t.Errorf("LoadService %+v, want %+v", ref, want)
 	}
-	task := e.newTask(e.svc, buyerA, "", "q")
+	task := e.newTask(e.svc, callerA, "", "q")
 	row, _ := e.log.Load(ctx, uid(t, task.ID))
 	if back, err := e.log.LoadService(ctx, row.TenantID, row.Service); err != nil || back != want {
 		t.Errorf("LoadService from a task row: %+v %v", back, err)
@@ -531,7 +531,7 @@ func TestLoadService(t *testing.T) {
 func TestFailOrphanEndsALeftoverQuotedRow(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	task := e.newTask(e.svc, buyerA, "", "q")
+	task := e.newTask(e.svc, callerA, "", "q")
 	id := uid(t, task.ID)
 	e.exec(`update kontra.tasks set state = 'quoted', quote_expires_at = now() + interval '1 hour',
 		submitted_at = null, deadline = null, created_at = now() - interval '1 hour' where id = $1`, id)

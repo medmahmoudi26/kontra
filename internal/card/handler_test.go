@@ -11,7 +11,7 @@ import (
 func served(t *testing.T) *Served {
 	t.Helper()
 	body := []byte(`{"name":"hello","capabilities":{"streaming":true}}`)
-	return &Served{Body: body, Upstream: []byte(`{"name":"hello","url":"http://seller"}`), ETag: ETag(body),
+	return &Served{Body: body, Upstream: []byte(`{"name":"hello","url":"http://service"}`), ETag: ETag(body),
 		LastModified: time.Date(2026, 10, 25, 9, 30, 15, 500_000_000, time.UTC)}
 }
 

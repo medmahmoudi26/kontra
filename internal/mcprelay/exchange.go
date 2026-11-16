@@ -112,7 +112,7 @@ func (h *Handler) send(ctx context.Context, t target, rq *request, method string
 		req.Header = hdr.Clone()
 		a := peer.Assertion{
 			Replica: h.deps.ReplicaID, TenantID: rq.svc.Ref.TenantID, Service: rq.svc.Ref.Name, TunnelSession: t.session,
-			Principal: rq.p.ID, BuyerID: rq.p.BuyerID, Via: string(rq.p.Via),
+			Principal: rq.p.ID, CallerID: rq.p.CallerID, Via: string(rq.p.Via),
 			MCPSession: x.Session, MCPRequestID: x.RequestID, UpstreamSID: upstreamSID,
 		}
 		resp, err := h.deps.Peer.Forward(ctx, t.peerAddr, a, req)
@@ -503,17 +503,17 @@ const keepAliveEvery = 15 * time.Second
 // dispatch, nor to a second response to one request, both of which let metering read another is_error than the
 // client reads. The closest faithful behaviour: the relay reads, meters and relays what a client reads, the events a
 // client dispatches as messages (type absent or "message", event.message). An event of another type is no MCP
-// message to any client; it is neither read nor relayed, so a seller cannot meter an answer in it that its client
+// message to any client; it is neither read nor relayed, so a service cannot meter an answer in it that its client
 // never sees, nor carry Kontra's keys past the scrub in it. A second response to the client's request ends the
 // stream before it, as a refused message does, and the call stays metered as its first response says (a client takes
 // the first response for an id, and reports a later one as unknown).
 //
 // A POST's stream is relayed without its event ids, so that no client resumes it with a GET: the calls row is written
 // from what the POST's stream carried, and a response the client read on a GET instead would be one the gate never
-// metered (a buyer that drops every call's stream after its first event and resumes would have every successful call
+// metered (a caller that drops every call's stream after its first event and resumes would have every successful call
 // metered an error, D196). A GET's stream carries no response for the same reason (MCP: a server sends none there
 // unless the client resumes a POST's stream, which the gate does not offer): the stream ends before one, so that a
-// seller cannot have the client take a response on it while the POST's stream is metered another (D265).
+// service cannot have the client take a response on it while the POST's stream is metered another (D265).
 func (h *Handler) relaySSE(rq *request, resp *http.Response, o *relayOpts) int64 {
 	type item struct {
 		ev  *event
@@ -818,7 +818,7 @@ func (h *Handler) deleteUpstreamNow(ctx context.Context, t target, s Session) {
 	defer cancel()
 	// The session's own principal, which a peer hop's assertion names to the holding replica.
 	rq := &request{r: (&http.Request{}).WithContext(ctx), svc: &Service{}, sess: &s,
-		p: auth.Principal{ID: s.Principal, BuyerID: s.BuyerID, Via: auth.Via(s.Via)}}
+		p: auth.Principal{ID: s.Principal, CallerID: s.CallerID, Via: auth.Via(s.Via)}}
 	rq.svc.Ref.TenantID, rq.svc.Ref.Name = s.TenantID, s.Service
 	hdr := http.Header{}
 	if s.ProtocolVersion != "" {

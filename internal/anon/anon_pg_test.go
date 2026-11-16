@@ -455,7 +455,7 @@ func (e *pgEnv) insertTask(tenant uuid.UUID, service, state, principal string) u
 	if state == "completed" || state == "failed" || state == "canceled" || state == "rejected" {
 		term = time.Now()
 	}
-	e.exec(`insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version,
+	e.exec(`insert into kontra.tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state, version,
 		snapshot, status_at, terminal_at) values ($1, $2, $3, 'a2a', $4, $5, 'node', 'ctx', $6, 1, '{}', now(), $7)`,
 		id, tenant, service, uuid.New(), principal, state, term)
 	return id
@@ -475,9 +475,9 @@ func TestPurgeLeavesTheTombstone(t *testing.T) {
 	task := e.insertTask(tn.ID, "a", "completed", "anonymous")
 	e.exec(`insert into kontra.task_events (task_id, seq, kind, payload) values ($1, 1, 'task', '{"x":1}')`, task)
 	e.exec(`insert into kontra.blobs (ref, tenant_id, task_id, size) values ($1, $2, $3, 10)`, strings.Repeat("a", 26), tn.ID, task)
-	e.exec(`insert into kontra.calls (id, tenant_id, service, tool, buyer_id, principal, bytes_in, bytes_out, duration_ms)
+	e.exec(`insert into kontra.calls (id, tenant_id, service, tool, caller_id, principal, bytes_in, bytes_out, duration_ms)
 		values ($1, $2, 'm', 'echo', $3, 'anonymous', 1, 1, 1)`, uuid.New(), tn.ID, uuid.New())
-	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version)
+	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via, protocol_version)
 		values (sha256('s1'), $1, 'm', $2, 'anonymous', 'anonymous', '2025-11-25'),
 		       (sha256('s2'), $1, null, $2, 'node:x', 'node', '2025-11-25')`, tn.ID, uuid.New())
 	e.exec(`insert into kontra.tunnels (session_id, key_id, tenant_id, replica_id, services, cli_version)
@@ -592,7 +592,7 @@ func (e *pgEnv) contend(n int, lockSQL string, lockArgs []any, fn func(i int) er
 }
 
 // T §6.2 (D277): concurrent tasks are at most tasks as host (the tenant's services' non-terminal tasks, whoever
-// called) and as hirer (the non-terminal tasks whose principal is a key of the tenant): the 5th is ErrTooManyTasks
+// called) and as caller (the non-terminal tasks whose principal is a key of the tenant): the 5th is ErrTooManyTasks
 // (429), a terminal task does not count, a team tenant is not counted, and two creators at 3 never both pass.
 func TestCapsTask(t *testing.T) {
 	e := newPGEnv(t)
@@ -601,7 +601,7 @@ func TestCapsTask(t *testing.T) {
 	tn := e.mustOpen(Defaults, OpenRequest{Key: k, Network: netOf("203.0.113.9"), Services: svcs("a")})
 	team := uuid.Must(uuid.NewV7())
 	e.exec(`insert into kontra.tenants (id, slug, kind) values ($1, 'default', 'team')`, team)
-	e.exec(`insert into kontra.services (tenant_id, name, kind, backend, source) values ($1, 'seller', 'a2a', '{"tunnel": {}}', 'config')`, team)
+	e.exec(`insert into kontra.services (tenant_id, name, kind, backend, source) values ($1, 'service', 'a2a', '{"tunnel": {}}', 'config')`, team)
 	caps := NewCaps(e.pool, Defaults, e.replica, nil)
 	check := func(tenant uuid.UUID, slug, principal string) error {
 		return pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error { return caps.Task(ctx, tx, tenant, slug, principal) })
@@ -621,20 +621,20 @@ func TestCapsTask(t *testing.T) {
 	}
 	// A team service is not counted, nor a team key.
 	for range 6 {
-		e.insertTask(team, "seller", "working", "key:kk_team_x")
+		e.insertTask(team, "service", "working", "key:kk_team_x")
 	}
 	if err := check(team, "default", "key:kk_team_x"); err != nil {
 		t.Fatalf("a team tenant: %v", err)
 	}
-	// As hirer: the anonymous key's tasks at a team service.
+	// As caller: the anonymous key's tasks at a team service.
 	for range 4 {
 		if err := check(team, "default", node); err != nil {
 			t.Fatal(err)
 		}
-		e.insertTask(team, "seller", "input-required", node)
+		e.insertTask(team, "service", "input-required", node)
 	}
 	if err := check(team, "default", node); !errors.Is(err, ErrTooManyTasks) {
-		t.Fatalf("the 5th as hirer: %v", err)
+		t.Fatalf("the 5th as caller: %v", err)
 	}
 	// Room again as host once tasks end: two concurrent creators at 3 never both pass.
 	e.exec(`update kontra.tasks set state = 'completed', terminal_at = now() where tenant_id = $1 and state = 'working'
@@ -644,7 +644,7 @@ func TestCapsTask(t *testing.T) {
 			if err := caps.Task(ctx, tx, tn.ID, tn.Slug, "anonymous"); err != nil {
 				return err
 			}
-			_, err := tx.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state,
+			_, err := tx.Exec(ctx, `insert into kontra.tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state,
 				version, snapshot, status_at) values ($1, $2, 'a', 'a2a', $3, 'anonymous', 'anonymous', 'ctx', 'working', 1, '{}', now())`,
 				uuid.Must(uuid.NewV7()), tn.ID, uuid.New())
 			return err

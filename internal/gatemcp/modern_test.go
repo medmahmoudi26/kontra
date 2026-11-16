@@ -95,7 +95,7 @@ func TestModernToolsList(t *testing.T) {
 	}
 }
 
-// A hire task as a modern reader sees it (§12.4, §12.5, D274, §11.12's table): submitted is working, and an earlier
+// A send_message task as a modern reader sees it (§12.4, §12.5, D274, §11.12's table): submitted is working, and an earlier
 // release's approve URL in its metadata shows nowhere (D351); a text-only question is input_required for a reader
 // whose request declared form elicitation, else working with the reply-tool text; failed and rejected are completed (their result a CallToolResult with isError, the
 // tasks extension's "failed" being for JSON-RPC errors only) with sh.kontra/failure; canceled is cancelled.
@@ -211,8 +211,8 @@ func modernRaw(t *testing.T, method string, body []byte, params map[string]any, 
 	}
 	w := httptest.NewRecorder()
 	tid := uuid.Must(uuid.NewV7())
-	p := auth.Principal{Kind: auth.KindKey, ID: "key:kk_test", TenantID: &tid, BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey,
-		Scopes: []auth.Scope{auth.ScopeHire}}
+	p := auth.Principal{Kind: auth.KindKey, ID: "key:kk_test", TenantID: &tid, CallerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey,
+		Scopes: []auth.Scope{auth.ScopeCall}}
 	return &request{w: w, r: r, p: p, body: body, msg: m, modern: true}, w
 }
 
@@ -264,7 +264,7 @@ func TestModernRequests(t *testing.T) {
 		{"no protocolVersion", "tools/list", map[string]any{"_meta": map[string]any{mcpwire.MetaClientCapabilities: map[string]any{}}}, nil, 400, -32602},
 		{"no clientCapabilities", "tools/list", map[string]any{"_meta": map[string]any{mcpwire.MetaProtocolVersion: "2026-07-28"}}, nil, 400, -32602},
 		{"Mcp-Method differs", "tools/list", nil, map[string]string{mcpwire.HeaderMethod: "tools/call"}, 400, -32020},
-		{"Mcp-Name differs", "tools/call", map[string]any{"name": "hire", "arguments": map[string]any{}}, map[string]string{mcpwire.HeaderName: "search"}, 400, -32020},
+		{"Mcp-Name differs", "tools/call", map[string]any{"name": "send_message", "arguments": map[string]any{}}, map[string]string{mcpwire.HeaderName: "search"}, 400, -32020},
 		{"Mcp-Name missing", "tasks/get", map[string]any{"taskId": task, "_meta": ext}, map[string]string{mcpwire.HeaderName: ""}, 400, -32020},
 		{"tasks/result", "tasks/result", map[string]any{"taskId": task, "_meta": ext}, nil, 404, -32601},
 		{"tasks/list", "tasks/list", map[string]any{"_meta": ext}, nil, 404, -32601},
@@ -277,6 +277,7 @@ func TestModernRequests(t *testing.T) {
 		{"listen for tasks with it", "subscriptions/listen", map[string]any{"notifications": map[string]any{"taskIds": []string{task}}, "_meta": ext}, nil, 404, -32601},
 		{"listen for tools", "subscriptions/listen", map[string]any{"notifications": map[string]any{"toolsListChanged": true}}, nil, 404, -32601},
 		{"an unknown tool", "tools/call", map[string]any{"name": "rm", "arguments": map[string]any{}}, nil, 200, -32602},
+		{"the tool's name before D363", "tools/call", map[string]any{"name": "hire", "arguments": map[string]any{"service": "hello", "message": "hi"}}, nil, 200, -32602},
 	} {
 		rq, w := modernRequest(t, tc.method, tc.params, tc.hdr)
 		h.modern(rq)

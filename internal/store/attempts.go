@@ -377,7 +377,7 @@ func (l *Log) LatestAttempt(ctx context.Context, taskID uuid.UUID) (*Attempt, er
 // SPEC-CONFLICT (D92): spec §4 reuses a recorded upstream context id only on the same tunnel session or the same
 // direct backend, and maps referenceTaskIds only within the same backend, but its attempts row (§4,
 // migrations/0001_init.sql) records no direct backend's identity, only backend = 'direct'. After a SIGHUP
-// or NOTIFY moves a service to another URL, seller A's context and task ids would be sent to seller B. The
+// or NOTIFY moves a service to another URL, service A's context and task ids would be sent to service B. The
 // closest faithful behaviour without a schema change: an attempt counts as on the current backend only if
 // it started after the service row last changed (services.updated_at, which every change of its backend
 // moves, and also a change of its other fields or of its card); otherwise the task carries none (§4's
@@ -398,8 +398,8 @@ func SameBackend(backendParam, sessionParam string) string {
 
 // PreviousContextAttempt returns the attempt that last recorded an upstream context id among the
 // caller's tasks in the same gate context, service and backend, for the upstream context id reuse of spec
-// §4 (nil when there is none). Contexts are scoped by (tenant, service, buyer, context id), so another
-// buyer's identical context string is never found (D53). The backend is the attempt being dispatched's
+// §4 (nil when there is none). Contexts are scoped by (tenant, service, caller, context id), so another
+// caller's identical context string is never found (D53). The backend is the attempt being dispatched's
 // (SameBackend): a tunnel attempt counts only on the same session, a direct one only while the service's
 // backend is the one it was placed on (SameDirectBackend). An attempt answered with a Message has a context id and no
 // task id (SetUpstreamContext, D362): it counts from when it ended.
@@ -407,10 +407,10 @@ func (l *Log) PreviousContextAttempt(ctx context.Context, svc ServiceRef, o Owne
 	a, err := scanAttempt(l.db.QueryRow(ctx, `select `+attemptCols+` from kontra.attempts a
 		join kontra.tasks t on t.id = a.task_id
 		join kontra.services s on s.tenant_id = t.tenant_id and s.name = t.service
-		where t.tenant_id = $1 and t.service = $2 and t.buyer_id = $3 and t.context_id = $4
+		where t.tenant_id = $1 and t.service = $2 and t.caller_id = $3 and t.context_id = $4
 		  and a.upstream_context_id is not null and `+SameBackend("$5", "$6")+`
 		order by coalesce(a.first_upstream_id_at, a.ended_at, a.started_at) desc, a.task_id desc, a.n desc limit 1`,
-		svc.TenantID, svc.Name, o.BuyerID, contextID, string(backend), session))
+		svc.TenantID, svc.Name, o.CallerID, contextID, string(backend), session))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}

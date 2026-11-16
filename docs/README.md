@@ -6,7 +6,7 @@ the two architecture notes correct it after the prototypes of 21–24 October 20
 | Document | Date | What it settles |
 |---|---|---|
 | [`prd-v4.md`](prd-v4.md) | 21 Oct | Kontra as a durable A2A gateway on a2a-go v2 and Temporal. Relay semantics (ids, attempts, stickiness, retries, cancel), sealing envelope, the three extensions, data model, security model, OSS vs Cloud, milestones M0–M5, acceptance tests, kill list for v3. |
-| [`architecture/01-tunnel-and-protocols.html`](architecture/01-tunnel-and-protocols.html) | 24 Oct | **One node type**: no buyer sidecar and no seller sidecar, one `kontra connect` that hosts and hires. **Membership is which gate you dial.** One identity key per node, enrolled per gate, plus per-job keys. **MCP servers tunnel next to A2A agents**: `/mcp/{name}`, session affinity for plain calls, the same `TaskLifecycle` for task-augmented calls (MCP Tasks, 2025-11-25). Per-tool allow lists. No Kontra wire protocol; standard bindings only. `services:` replaces `agents:`. |
+| [`architecture/01-tunnel-and-protocols.html`](architecture/01-tunnel-and-protocols.html) | 24 Oct | **One node type**: no caller sidecar and no service sidecar, one `kontra connect` that hosts and calls. **Membership is which gate you dial.** One identity key per node, enrolled per gate, plus per-job keys. **MCP servers tunnel next to A2A agents**: `/mcp/{name}`, session affinity for plain calls, the same `TaskLifecycle` for task-augmented calls (MCP Tasks, 2025-11-25). Per-tool allow lists. No Kontra wire protocol; standard bindings only. `services:` replaces `agents:`. |
 | [`architecture/02-deployment-topology.html`](architecture/02-deployment-topology.html) | 24 Oct | **Only the CLI runs on a user's machine.** Gates are clusters: `gateway.kontra.sh` (Cloud) or a team's own (Helm or a three-container compose). `kontra dev` is deleted; anonymous ephemeral sessions on the public gate are how people try it. One Go module, two binaries: `kontra` and `kontra-gate`. |
 
 ## Specifications (M0, 25 Oct; amended by each milestone)
@@ -25,7 +25,7 @@ there (M4's, D268 onward under the M4 headings, were numbered after M3's review 
 
 | PRD section | Note 1 (tunnel and protocols) | Note 2 (deployment) |
 |---|---|---|
-| §3 Roles | Buyer/Seller are hats a node wears per request; add **Service** (A2A agent or MCP server behind a node) | — |
+| §3 Roles | Caller/Callee are hats a node wears per request; add **Service** (A2A agent or MCP server behind a node) | — |
 | §4 Architecture | Topology figure replaced | "One binary" → one module, two binaries |
 | §6 Tunnel | `--to` → repeatable `--serve kind:name=target`; stdio bridge; `tunnel.key` → `identity.key` | — |
 | §8 Sealing | Key table collapses to identity key + per-job key; MCP scope (`arguments`, `content`), both-ends-nodes condition | — |
@@ -49,7 +49,7 @@ run against it on 27 Oct and, after the M3 review rounds, again on 29 Oct (`make
 
 M4's two gate runs are kits in this repository, run by hand (D282, D298): `scripts/demo-clean-laptop.sh` runs the
 README's demo block, as written, in a fresh container against the staging gate, and `scripts/team-gate-vps.sh` brings
-the ACME variant up on a throwaway DigitalOcean droplet, hires through it from another machine and destroys it (DNS
+the ACME variant up on a throwaway DigitalOcean droplet, calls through it from another machine and destroys it (DNS
 before the droplet; a listing that fails is never "nothing left"). Each prints its teardown before it starts; `test/demo`
 and `test/vps` test both (`make test-kits` with Docker rehearses each against a local gate). The runs themselves are M4's
 WP-09, recorded in [`gate-runs-m4.md`](gate-runs-m4.md) (31 Oct) with each gate item's verdict and commit: the staging
@@ -59,21 +59,21 @@ failed there on a defect of `compose.yaml` (two services build one image tag) an
 merge commit, the published laptop run at `4831e40`, and an anonymous tenant's purge observed on staging (2 Nov): M4 is
 fully gated.
 
-## Hiring from another agent (decided 25 Oct; amended 9 Nov)
+## Calling from another agent (decided 25 Oct; amended 9 Nov)
 
 The gate serves its own MCP endpoint, `https://gateway.kontra.sh/mcp`, as a first-party remote MCP
-server: `search`, `describe`, `hire` (task-augmented), `reply`, plus MCP Tasks. `hire` creates an ordinary gate task
+server: `search`, `describe`, `send_message` (task-augmented), `reply`, plus MCP Tasks. `send_message` creates an ordinary gate task
 once Admission allows it, and answers it in the tool result's text and `structuredContent` (D324). Thread SSE and the
 client's `tasks/get` / `tasks/result` read the same `task_events`, so the task can be followed and answered from
 either side. Built in M4 as [`relay.md`](../spec/relay.md) §12 in both MCP eras (D269 to D274, D289, D293 to D295).
 
-Until 9 Nov a paid `hire` waited in a `quoted` state for a person to accept its quote on the operator's page, reached
-by a URL elicitation (kontra-cloud#59, D188); that flow is withdrawn with escrow (D351), and the hire result has no
+Until 9 Nov a paid `send_message` waited in a `quoted` state for a person to accept its quote on the operator's page, reached
+by a URL elicitation (kontra-cloud#59, D188); that flow is withdrawn with escrow (D351), and the send_message result has no
 `url` or `quote`.
 
-Since 5 Nov, for an agent whose host shows it only tools: `status` follows a hired task (its history with `after: 0`,
+Since 5 Nov, for an agent whose host shows it only tools: `status` follows a send_message task (its history with `after: 0`,
 then `{after: <cursor>, wait: 25}` in a loop, with MCP progress when the call carries a progress token), `tasks` lists
-what it hired, `cancel`, `artifact` and the push tools act on one task, `hire` takes an `idempotencyKey` (one key, one
+what it created with `send_message`, `cancel`, `artifact` and the push tools act on one task, `send_message` takes an `idempotencyKey` (one key, one
 task) and continues a conversation with the `contextId` its result gives, and `describe` summarizes a service's
 capabilities (§12.6, D332 to D339). Calling a hosted MCP service's tool through `/mcp` is not built: MCP services are
 called at their own URL (D339).
@@ -86,7 +86,7 @@ the agent declares `https://github.com/google-agentic-commerce/ap2/v1` in its ca
 (Merchant, Shopping Agent) and works with parties of its choice for the others (Credential Provider, Merchant Payment
 Processor, Trusted Surface). Checkout and Payment Mandates travel as data parts, SD-JWT verifiable credentials; the
 gate relays them untouched, sealed or not, and keys on the URI only ([`relay.md`](../spec/relay.md) §2.6). AP2 is
-hired over A2A, not through `/mcp` `hire` (D328). `examples/sellers/ap2-merchant` is a merchant to start from.
+called over A2A, not through `/mcp` `send_message` (D328). `examples/agents/ap2-merchant` is a merchant to start from.
 
 Before that, a listing had a price: `free`, or `per_task` with a quote held in escrow and released after a review
 window (decided 25 Oct in the Cloud repository's console issue). The metered MCP shapes were withdrawn on 7 Nov

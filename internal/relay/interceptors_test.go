@@ -100,7 +100,7 @@ func TestNewTaskThroughTheHandler(t *testing.T) {
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi"))
 	msg.Metadata = map[string]any{"kontra.approve.url": "https://evil", "kontra.sealed.replyTo": "k1_x", "kontra.op.dispute": true, "note": "kept"}
 	msg.Parts[0].Metadata = map[string]any{"kontra.failure": "spoof", "p": 1}
-	res, err := e.handler().SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg, Metadata: map[string]any{"kontra.x": 1, "r": 2}})
+	res, err := e.handler().SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg, Metadata: map[string]any{"kontra.x": 1, "r": 2}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestNewTaskThroughTheHandler(t *testing.T) {
 	e.queue.wait(t)
 	adm.mu.Lock()
 	if len(adm.got) != 1 || adm.got[0].TaskID != string(task.ID) || adm.got[0].Operation != hooks.OpTask ||
-		adm.got[0].Principal.ID != buyerA.Principal || len(adm.got[0].Message.Parts) != 1 || adm.got[0].Message.Parts[0].Size != 2 {
+		adm.got[0].Principal.ID != callerA.Principal || len(adm.got[0].Message.Parts) != 1 || adm.got[0].Message.Parts[0].Size != 2 {
 		t.Errorf("admission %+v (task %s)", adm.got, task.ID)
 	}
 	adm.mu.Unlock()
@@ -127,7 +127,7 @@ func TestNewTaskThroughTheHandler(t *testing.T) {
 			t.Errorf("part metadata %v", pm)
 		}
 	}
-	if row.Owner.BuyerID != buyerA.BuyerID || row.Owner.Principal != buyerA.Principal {
+	if row.Owner.CallerID != callerA.CallerID || row.Owner.Principal != callerA.Principal {
 		t.Errorf("owner %+v", row.Owner)
 	}
 }
@@ -157,29 +157,29 @@ func TestFollowUpTable(t *testing.T) {
 		{a2a.TaskStateCanceled, a2a.ErrUnsupportedOperation},
 		{a2a.TaskStateRejected, a2a.ErrUnsupportedOperation},
 	} {
-		id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+		id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 		if tc.state != "" {
 			e.setState(id, tc.state)
 		}
 		before := len(e.queue.written())
-		if err := follow(id, "", buyerA); !errors.Is(err, tc.want) {
+		if err := follow(id, "", callerA); !errors.Is(err, tc.want) {
 			t.Errorf("%s: %v, want %v", tc.state, err, tc.want)
 		}
 		if len(e.queue.written()) != before {
 			t.Errorf("%s: the refused follow-up reached the work queue", tc.state)
 		}
 	}
-	// Disagreeing ids, a malformed id, another buyer's task.
-	id, _ := e.newTask(taskSpec{owner: buyerA, contextID: "c-1", text: "q"})
+	// Disagreeing ids, a malformed id, another caller's task.
+	id, _ := e.newTask(taskSpec{owner: callerA, contextID: "c-1", text: "q"})
 	e.setState(id, a2a.TaskStateInputRequired)
-	if err := follow(id, "c-2", buyerA); !errors.Is(err, a2a.ErrInvalidParams) {
+	if err := follow(id, "c-2", callerA); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("taskId/contextId disagree: %v", err)
 	}
-	if err := follow("not-a-task", "", buyerA); !errors.Is(err, a2a.ErrTaskNotFound) {
+	if err := follow("not-a-task", "", callerA); !errors.Is(err, a2a.ErrTaskNotFound) {
 		t.Errorf("malformed id: %v", err)
 	}
-	if err := follow(id, "", buyerB); !errors.Is(err, a2a.ErrTaskNotFound) {
-		t.Errorf("another buyer's task: %v", err)
+	if err := follow(id, "", callerB); !errors.Is(err, a2a.ErrTaskNotFound) {
+		t.Errorf("another caller's task: %v", err)
 	}
 }
 
@@ -191,7 +191,7 @@ func TestFollowUpThroughTheHandler(t *testing.T) {
 	info.Streaming = true
 	e.backends.set(b, info, nil)
 	h := e.handler()
-	res, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
+	res, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestFollowUpThroughTheHandler(t *testing.T) {
 	}
 	m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("blue"))
 	m.TaskID = task.ID
-	res, err = h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m})
+	res, err = h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: m})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,18 +219,18 @@ func TestFollowUpThroughTheHandler(t *testing.T) {
 	}
 	m2 := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("again"))
 	m2.TaskID = task.ID
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m2}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: m2}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
 		t.Errorf("a message to a completed task: %v", err)
 	}
 }
 
-// The anonymous principal shares one buyer: ListTasks is refused, UnsupportedOperation, and push configs with A2A's
+// The anonymous principal shares one caller: ListTasks is refused, UnsupportedOperation, and push configs with A2A's
 // PushNotificationNotSupportedError, as an anonymous-only service's card says (spec §2.3, §3).
 func TestAnonymousRefusals(t *testing.T) {
 	e := newEnv(t, envOptions{push: a2apush.NewInMemoryStore()})
 	h := e.handler()
 	anon := auth.WithPrincipal(context.Background(), auth.Anonymous(uuid.Must(uuid.NewV7())))
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	if _, err := h.ListTasks(anon, &a2a.ListTasksRequest{}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
 		t.Errorf("ListTasks: %v", err)
 	}
@@ -252,8 +252,8 @@ func TestAnonymousRefusals(t *testing.T) {
 		t.Errorf("inline push config: %v", err)
 	}
 	// An authenticated caller lists its own tasks.
-	if res, err := h.ListTasks(asCaller(buyerA), &a2a.ListTasksRequest{}); err != nil || len(res.Tasks) != 1 {
-		t.Errorf("buyer A's ListTasks: %+v %v", res, err)
+	if res, err := h.ListTasks(asCaller(callerA), &a2a.ListTasksRequest{}); err != nil || len(res.Tasks) != 1 {
+		t.Errorf("caller A's ListTasks: %+v %v", res, err)
 	}
 }
 
@@ -262,11 +262,11 @@ func TestAnonymousRefusals(t *testing.T) {
 func TestLocalProfileAnonymousCaller(t *testing.T) {
 	e := newEnv(t, envOptions{push: a2apush.NewInMemoryStore(), local: true, policy: ssrf.Policy{AllowLoopback: true}})
 	h := e.handler()
-	buyer := uuid.Must(uuid.NewV7())
-	anon := auth.WithPrincipal(context.Background(), auth.Anonymous(buyer))
-	owner := store.Owner{BuyerID: buyer, Principal: "anonymous", Via: store.ViaAnonymous}
+	caller := uuid.Must(uuid.NewV7())
+	anon := auth.WithPrincipal(context.Background(), auth.Anonymous(caller))
+	owner := store.Owner{CallerID: caller, Principal: "anonymous", Via: store.ViaAnonymous}
 	id, _ := e.newTask(taskSpec{owner: owner, text: "q"})
-	e.newTask(taskSpec{owner: buyerA, text: "not the shared caller's"})
+	e.newTask(taskSpec{owner: callerA, text: "not the shared caller's"})
 	res, err := h.ListTasks(anon, &a2a.ListTasksRequest{})
 	if err != nil || len(res.Tasks) != 1 || res.Tasks[0].ID != id {
 		t.Fatalf("ListTasks: %+v %v", res, err)
@@ -287,15 +287,15 @@ func TestInlinePushURLRefused(t *testing.T) {
 	for _, u := range []string{"https://10.0.0.1/hook", "https://169.254.169.254/latest", "http://hooks.example/x", "https://[::ffff:10.0.0.1]/h", "not a url"} {
 		req := &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q")),
 			Config: &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: u}}}
-		if _, err := h.SendMessage(asCaller(buyerA), req); !errors.Is(err, a2a.ErrInvalidParams) {
+		if _, err := h.SendMessage(asCaller(callerA), req); !errors.Is(err, a2a.ErrInvalidParams) {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
 	if n, w := e.countRows("tasks"), e.countRows("work_items"); n != 0 || w != 0 || len(e.queue.written()) != 0 {
 		t.Errorf("a refused push config stored %d tasks, %d work items", n, w)
 	}
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
-	if _, err := h.CreateTaskPushConfig(asCaller(buyerA), &a2a.PushConfig{TaskID: id, URL: "https://10.0.0.1/hook"}); !errors.Is(err, a2a.ErrInvalidParams) {
+	id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
+	if _, err := h.CreateTaskPushConfig(asCaller(callerA), &a2a.PushConfig{TaskID: id, URL: "https://10.0.0.1/hook"}); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("CreateTaskPushConfig to 10.0.0.1: %v", err)
 	}
 }
@@ -305,25 +305,25 @@ func TestCallerLimits(t *testing.T) {
 	e := newEnv(t, envOptions{})
 	h := e.handler()
 	big := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(strings.Repeat("x", 256<<10+1)))
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: big}); !errors.Is(err, a2a.ErrInvalidParams) ||
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: big}); !errors.Is(err, a2a.ErrInvalidParams) ||
 		!strings.Contains(err.Error(), "part too large: configure blobs") {
 		t.Errorf("a part over 256 KiB: %v", err)
 	}
 	long := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q"))
 	long.ContextID = strings.Repeat("c", 257)
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: long}); !errors.Is(err, a2a.ErrInvalidParams) {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: long}); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("a contextId over 256 characters: %v", err)
 	}
 	if e.countRows("tasks") != 0 {
 		t.Error("a refused request created a task")
 	}
-	if _, err := h.GetExtendedAgentCard(asCaller(buyerA), &a2a.GetExtendedAgentCardRequest{}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
+	if _, err := h.GetExtendedAgentCard(asCaller(callerA), &a2a.GetExtendedAgentCardRequest{}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
 		t.Errorf("GetExtendedAgentCard: %v", err)
 	}
-	enrollOnly := principal(buyerA)
+	enrollOnly := principal(callerA)
 	enrollOnly.Scopes = []auth.Scope{auth.ScopeEnrollAll}
 	if _, err := h.GetTask(auth.WithPrincipal(context.Background(), enrollOnly), &a2a.GetTaskRequest{ID: "x"}); !errors.Is(err, a2a.ErrUnauthorized) {
-		t.Errorf("a key without hire: %v", err)
+		t.Errorf("a key without call: %v", err)
 	}
 	if _, err := h.GetTask(context.Background(), &a2a.GetTaskRequest{ID: "x"}); !errors.Is(err, a2a.ErrUnauthenticated) {
 		t.Errorf("no principal: %v", err)
@@ -336,7 +336,7 @@ func TestAdmissionRefusals(t *testing.T) {
 	e := newEnv(t, envOptions{admit: adm, rules: hooks.KeyRules{OperatorPrefixes: []string{"kontra.acme."}}})
 	h := e.handler()
 	send := func() error {
-		_, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q"))})
+		_, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("q"))})
 		return err
 	}
 	if err := send(); !errors.Is(err, a2a.ErrInvalidParams) || !strings.Contains(err.Error(), "over budget") {
@@ -401,32 +401,32 @@ func TestCancelInterceptor(t *testing.T) {
 		return h.CancelTask(asCaller(o), &a2a.CancelTaskRequest{ID: id})
 	}
 	// Terminal: TaskNotCancelable, without asking the workflow.
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.setState(id, a2a.TaskStateCompleted)
-	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrTaskNotCancelable) || fc.calls != 0 {
+	if _, err := cancel(id, callerA); !errors.Is(err, a2a.ErrTaskNotCancelable) || fc.calls != 0 {
 		t.Errorf("terminal: %v (calls %d)", err, fc.calls)
 	}
 	// Canceled: the stored canceled task.
-	id, _ = e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, _ = e.newTask(taskSpec{owner: callerA, text: "q"})
 	fc.res, fc.ok, fc.err = lifecycle.CancelResult{Outcome: lifecycle.CancelCanceled}, true, nil
 	fc.apply = func(id a2a.TaskID) {
 		if _, err := e.log.WriteTerminal(context.Background(), store.TerminalWrite{TaskID: uid(t, id), State: store.StateCanceled, Canceled: store.CanceledClient}); err != nil {
 			t.Error(err)
 		}
 	}
-	if task, err := cancel(id, buyerA); err != nil || task.Status.State != a2a.TaskStateCanceled {
+	if task, err := cancel(id, callerA); err != nil || task.Status.State != a2a.TaskStateCanceled {
 		t.Errorf("canceled: %+v %v", task, err)
 	}
 	fc.apply = nil
 	// The upstream refuses: its error, and the task continues.
-	id, _ = e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, _ = e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.setState(id, a2a.TaskStateWorking)
 	fc.res = lifecycle.CancelResult{Outcome: lifecycle.CancelNotCancelable, UpstreamError: &lifecycle.UpstreamError{Code: -32002, Message: "too late"}}
-	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrTaskNotCancelable) || !strings.Contains(err.Error(), "too late") {
+	if _, err := cancel(id, callerA); !errors.Is(err, a2a.ErrTaskNotCancelable) || !strings.Contains(err.Error(), "too late") {
 		t.Errorf("not cancelable: %v", err)
 	}
 	fc.res = lifecycle.CancelResult{Outcome: lifecycle.CancelUnsupported, UpstreamError: &lifecycle.UpstreamError{Code: -32004, Message: "no cancel here"}}
-	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrUnsupportedOperation) || !strings.Contains(err.Error(), "no cancel here") {
+	if _, err := cancel(id, callerA); !errors.Is(err, a2a.ErrUnsupportedOperation) || !strings.Contains(err.Error(), "no cancel here") {
 		t.Errorf("unsupported: %v", err)
 	}
 	if e.row(id).State != store.StateWorking {
@@ -434,32 +434,32 @@ func TestCancelInterceptor(t *testing.T) {
 	}
 	// The upstream answered with its task still running: that answer, with gate ids, is the stored task.
 	fc.res = lifecycle.CancelResult{Outcome: lifecycle.CancelContinues}
-	if task, err := cancel(id, buyerA); err != nil || task.Status.State != a2a.TaskStateWorking || task.ID != id {
+	if task, err := cancel(id, callerA); err != nil || task.Status.State != a2a.TaskStateWorking || task.ID != id {
 		t.Errorf("continues: %+v %v", task, err)
 	}
 	// Past 60 s: the stored task as it is.
 	fc.res, fc.ok = lifecycle.CancelResult{}, false
-	if task, err := cancel(id, buyerA); err != nil || task.Status.State != a2a.TaskStateWorking {
+	if task, err := cancel(id, callerA); err != nil || task.Status.State != a2a.TaskStateWorking {
 		t.Errorf("not completed in time: %+v %v", task, err)
 	}
 	// Not accepted: -32603; refused by the validator as terminal: TaskNotCancelable.
 	fc.ok, fc.err = true, errors.New("update not accepted within 10s")
-	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrInternalError) || errors.Is(err, lifecycle.ErrUnavailable) {
+	if _, err := cancel(id, callerA); !errors.Is(err, a2a.ErrInternalError) || errors.Is(err, lifecycle.ErrUnavailable) {
 		t.Errorf("not accepted: %v", err)
 	}
 	// The lifecycle's own "not accepted in time" keeps its sentinel, so HTTP+JSON answers 503 (spec §14.1).
 	fc.err = fmt.Errorf("update: %w", lifecycle.ErrUnavailable)
-	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrInternalError) || !errors.Is(err, lifecycle.ErrUnavailable) ||
+	if _, err := cancel(id, callerA); !errors.Is(err, a2a.ErrInternalError) || !errors.Is(err, lifecycle.ErrUnavailable) ||
 		err.Error() != "the cancel was not accepted in time" {
 		t.Errorf("not accepted, unavailable: %v", err)
 	}
 	fc.err = fmt.Errorf("refused: %w", a2a.ErrTaskNotCancelable)
-	if _, err := cancel(id, buyerA); !errors.Is(err, a2a.ErrTaskNotCancelable) {
+	if _, err := cancel(id, callerA); !errors.Is(err, a2a.ErrTaskNotCancelable) {
 		t.Errorf("refused: %v", err)
 	}
-	// Another buyer's task does not exist for them.
-	if _, err := cancel(id, buyerB); !errors.Is(err, a2a.ErrTaskNotFound) {
-		t.Errorf("another buyer: %v", err)
+	// Another caller's task does not exist for them.
+	if _, err := cancel(id, callerB); !errors.Is(err, a2a.ErrTaskNotFound) {
+		t.Errorf("another caller: %v", err)
 	}
 }
 
@@ -471,7 +471,7 @@ func TestFinishedTurnAnswersTheTask(t *testing.T) {
 	e.backends.set(b, info, nil)
 	e.queue.sync = true
 	h := e.handler()
-	res, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
+	res, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
 	if err != nil {
 		t.Fatalf("new task: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestFinishedTurnAnswersTheTask(t *testing.T) {
 	// A turn that ends terminal needs no help, and a follow-up that ends input-required again is answered.
 	m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("blue"))
 	m.TaskID = task.ID
-	res, err = h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m})
+	res, err = h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: m})
 	if err != nil || res.(*a2a.Task).Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("follow-up: %+v %v", res, err)
 	}
@@ -527,7 +527,7 @@ func (r *pushResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.A
 func TestFollowUpInlinePushConfigNotResolvedAgain(t *testing.T) {
 	res := &pushResolver{addrs: map[string][]string{"hooks.example": {"93.184.215.14"}}, servfail: map[string]bool{"flaky.example": true}}
 	e := newEnv(t, envOptions{policy: ssrf.Policy{Resolver: res}})
-	id, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.setState(id, a2a.TaskStateInputRequired)
 	// The config set with the task, as the work queue's inline save stored it.
 	e.exec(`insert into kontra.push_configs (task_id, id, config) values ($1, 'c1', $2)`, uid(t, id),
@@ -537,7 +537,7 @@ func TestFollowUpInlinePushConfigNotResolvedAgain(t *testing.T) {
 		m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("more"))
 		m.TaskID = taskID
 		req := &a2asrv.Request{Payload: &a2a.SendMessageRequest{Message: m, Config: &a2a.SendMessageConfig{PushConfig: cfg}}}
-		_, _, err := e.intc.pushURLs(asCaller(buyerA), nil, req)
+		_, _, err := e.intc.pushURLs(asCaller(callerA), nil, req)
 		return err
 	}
 	if err := check(id, &a2a.PushConfig{URL: "https://hooks.example/cb", Token: "tok"}); err != nil {
@@ -559,7 +559,7 @@ func TestFollowUpInlinePushConfigNotResolvedAgain(t *testing.T) {
 		}
 	}
 	// CreateTaskPushNotificationConfig is a config being set: checked.
-	if _, _, err := e.intc.pushURLs(asCaller(buyerA), nil, &a2asrv.Request{Payload: &a2a.PushConfig{TaskID: id, URL: "https://hooks.example/cb"}}); !errors.Is(err, a2a.ErrInvalidParams) {
+	if _, _, err := e.intc.pushURLs(asCaller(callerA), nil, &a2asrv.Request{Payload: &a2a.PushConfig{TaskID: id, URL: "https://hooks.example/cb"}}); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Errorf("CreateTaskPushNotificationConfig to a private name: %v", err)
 	}
 }

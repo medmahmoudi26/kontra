@@ -70,7 +70,7 @@ func TestReview3NoHopRowsDoNotCountAgainstTheCap(t *testing.T) {
 	up := mcptest.New()
 	up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 	e.node(a, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	ua, ub := a.url+"/mcp/tun", b.url+"/mcp/tun"
 	c := newClient(t, key)
 	for i := 0; i < 4; i++ {
@@ -100,7 +100,7 @@ func TestReview3DeleteClosesTheRowDeleted(t *testing.T) {
 		up := mcptest.New()
 		up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 		e.node(a, up, "tun")
-		key, _ := e.apiKey("buyer")
+		key, _ := e.apiKey("caller")
 		c := newClient(t, key)
 		c.initialize(a.url + "/mcp/tun")
 		rep := c.do(http.MethodDelete, b.url+"/mcp/tun", "", nil)
@@ -120,7 +120,7 @@ func TestReview3DeleteClosesTheRowDeleted(t *testing.T) {
 		up := mcptest.New()
 		up.Tools = []json.RawMessage{mcptest.Tool("echo", "")}
 		e.node(b, up, "tun")
-		key, _ := e.apiKey("buyer")
+		key, _ := e.apiKey("caller")
 		c := newClient(t, key)
 		c.initialize(a.url + "/mcp/tun")
 		if _, err := e.pool.Exec(t.Context(), `update kontra.gate_replicas set last_seen_at = now() - interval '1 hour' where replica_id = $1`, b.id); err != nil {

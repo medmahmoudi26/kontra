@@ -2,7 +2,7 @@
 //
 //	kontra-gate serve -f kontra.yaml [--listen addr] [--metrics-listen addr] [--peer-listen addr] [--log-level level]
 //	kontra-gate migrate [-f kontra.yaml | --postgres URL] [up|down|status]
-//	kontra-gate enroll -f kontra.yaml --api-key <name> [--scope hire] [--prefix <p>]   (M1)
+//	kontra-gate enroll -f kontra.yaml --api-key <name> [--scope call] [--prefix <p>]   (M1)
 //	kontra-gate enroll -f kontra.yaml <service>                                       (M2)
 //	kontra-gate enroll -f kontra.yaml --revoke <key_id> [--service <name>]            (M2)
 //	kontra-gate health [--url https://127.0.0.1:8443/healthz] [--server-name name | -f kontra.yaml]
@@ -338,7 +338,7 @@ func enroll(ctx context.Context, args []string, stdout, stderr io.Writer) error 
 	revoke := fs.String("revoke", "", "revoke a node key (k1_…)")
 	service := fs.String("service", "", "with --revoke: revoke only the key's binding to this service")
 	var scopes multiFlag
-	fs.Var(&scopes, "scope", "API key scope: hire (default), enroll:<service> or enroll:* (repeatable)")
+	fs.Var(&scopes, "scope", "API key scope: call (default), enroll:<service> or enroll:* (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return usageError{"enroll: " + err.Error()}
 	}
@@ -577,8 +577,8 @@ func enrollAPIKey(ctx context.Context, file, name, prefix string, scopeArgs []st
 	for i, s := range minted.Scopes {
 		shown[i] = string(s)
 	}
-	fmt.Fprintf(stderr, "minted API key %q: principal %s, tenant %s, buyer %s, scopes %s; the key is shown once\n",
-		name, minted.Principal(), tenant.TeamSlug, minted.BuyerID, strings.Join(shown, ","))
+	fmt.Fprintf(stderr, "minted API key %q: principal %s, tenant %s, caller %s, scopes %s; the key is shown once\n",
+		name, minted.Principal(), tenant.TeamSlug, minted.CallerID, strings.Join(shown, ","))
 	return nil
 }
 

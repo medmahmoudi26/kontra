@@ -91,7 +91,7 @@ var ErrNoSignIn = errors.New("this gate has no sign-in: ask its operator for an 
 const usage = `usage: kontra login [--gate <url>] [--no-browser]
 
 kontra login gets an API key for a gate from the gate's sign-in (its operator's authorization server) and keeps it in
-~/.kontra/credentials (0600) for that gate only; kontra connect then hires as it, and an anonymous session's next
+~/.kontra/credentials (0600) for that gate only; kontra connect then calls as it, and an anonymous session's next
 handshake with it moves its services to the account (spec/tunnel.md §6.3).
   --gate URL     the gate's public URL (default https://gateway.kontra.sh); https:// except on localhost
   --no-browser   print the sign-in URL instead of opening it in a browser (open it on this machine: the sign-in
@@ -191,7 +191,7 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	fmt.Fprintf(o.Out, "kontra login: signed in at %s; the API key is kept in %s for that gate only.\n"+
-		"Restart kontra connect: its next handshake hires as the account, and an anonymous session's services move to the "+
+		"Restart kontra connect: its next handshake calls as the account, and an anonymous session's services move to the "+
 		"account at new URLs (spec/tunnel.md §6.3).\n", s.Origin, creds.Path())
 	return nil
 }

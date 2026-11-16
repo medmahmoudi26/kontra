@@ -16,7 +16,7 @@ import (
 	"kontra.sh/kontra/internal/jcs"
 )
 
-// A2UI's marks and messages, as the A2UI v0.9.1 extension specification writes them (examples/sellers/a2ui).
+// A2UI's marks and messages, as the A2UI v0.9.1 extension specification writes them (examples/agents/a2ui).
 const (
 	a2uiExt  = "https://a2ui.org/a2a-extension/a2ui/v0.9.1"
 	a2uiMime = "application/a2ui+json"

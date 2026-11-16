@@ -245,7 +245,7 @@ func (a *LifecycleActivities) prepareTunnel(ctx context.Context, row *store.Task
 		return PrepareResult{}, nonRetryable(ErrTypeServiceUnavailable, fmt.Errorf("service %s: this gate places no tunnel attempts", row.Service))
 	}
 	req := SessionRequest{TenantID: row.TenantID, Service: row.Service, TaskID: id, N: in.N,
-		BuyerID: row.Owner.BuyerID, ContextID: row.ContextID}
+		CallerID: row.Owner.CallerID, ContextID: row.ContextID}
 	if in.AvoidSession != "" {
 		if s, err := uuid.Parse(in.AvoidSession); err == nil {
 			req.Avoid = &s
@@ -514,7 +514,7 @@ func (a *LifecycleActivities) TaskRef(ctx context.Context, taskID string) (hooks
 	}
 	ref := hooks.TaskRef{
 		TaskID: row.ID.String(), TenantID: row.TenantID.String(), Service: row.Service, Kind: svc.Kind,
-		Protocol: string(row.Protocol), BuyerID: row.Owner.BuyerID.String(), Principal: row.Owner.Principal,
+		Protocol: string(row.Protocol), CallerID: row.Owner.CallerID.String(), Principal: row.Owner.Principal,
 		Via: row.Owner.Via, ContextID: row.ContextID, State: string(row.State),
 	}
 	if row.Snapshot != nil {
@@ -548,7 +548,7 @@ func (a *LifecycleActivities) operatorKeys(md map[string]any) map[string]any {
 	return out
 }
 
-// ReconnectText is the gate's waiting status text (D341): one sentence the buyer reads in band.
+// ReconnectText is the gate's waiting status text (D341): one sentence the caller reads in band.
 func ReconnectText(wait time.Duration) string {
 	return "The agent's node disconnected. Waiting up to " + HumanDuration(wait) + " for it to reconnect."
 }

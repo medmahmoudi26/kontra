@@ -792,13 +792,13 @@ func ForResource(gate string, mint func(ctx context.Context, subject, resource s
 }
 
 // DBMinter mints the access token as a kk_ API key of the account tenant on the database of the gate at origin gate,
-// with the scopes Cloud's authorization server gives a kontra login key (hire and enroll:*, spec/tunnel.md §6.3), and
+// with the scopes Cloud's authorization server gives a kontra login key (call and enroll:*, spec/tunnel.md §6.3), and
 // only for that gate's origin as the resource (ForResource).
 func DBMinter(pool *pgxpool.Pool, tenantID uuid.UUID, gate string) func(ctx context.Context, subject, resource string) (string, error) {
 	keys := auth.NewAPIKeys(pool, nil)
 	return ForResource(gate, func(ctx context.Context, subject, _ string) (string, error) {
 		m, err := keys.Mint(ctx, auth.MintRequest{TenantID: tenantID, Name: "kontra login " + subject, Prefix: "login",
-			Scopes: []auth.Scope{auth.ScopeHire, auth.ScopeEnrollAll}, Actor: "oidctest"})
+			Scopes: []auth.Scope{auth.ScopeCall, auth.ScopeEnrollAll}, Actor: "oidctest"})
 		if err != nil {
 			return "", err
 		}

@@ -28,14 +28,14 @@ import (
 
 // NodeStreams serves the streams a node opens (spec/tunnel.md §9, §8.3), replacing M2's refuseNodeStream:
 //
-//   - op http (hiring): one HTTP/1.1 request read from the stream is served by Hire, the gate's own public
-//     router, with the session in the request's context (HiringSession) so that authentication takes the
+//   - op http (calling): one HTTP/1.1 request read from the stream is served by Call, the gate's own public
+//     router, with the session in the request's context (CallingSession) so that authentication takes the
 //     session's principal: the API key from the handshake's auth when present, else node:<key_id> with the key's
-//     tenant and buyer ids.NodeBuyer (spec/relay.md §2.3). Its edge limits are the session's. A request the
+//     tenant and caller ids.NodeCaller (spec/relay.md §2.3). Its edge limits are the session's. A request the
 //     session's revoked API key made is 401 (spec/tunnel.md §12, auth_revoked); paths outside /agents/…, /mcp/…,
-//     /mcp and /.well-known/… never reach Hire (the node refuses them first, and the gate again).
+//     /mcp and /.well-known/… never reach Call (the node refuses them first, and the gate again).
 //   - op blob: Blobs resolves ref through the blobs table, checks that its task is one this session serves or
-//     one whose buyer is this session's hiring principal's, and writes one JSON line, {"size": n} then exactly n
+//     one whose caller is this session's calling principal's, and writes one JSON line, {"size": n} then exactly n
 //     bytes, or {"error": "not_found" | "forbidden" | "too_large"} (an object over 64 MiB), then closes the stream
 //     (spec/tunnel.md §8.3, D181).
 //
@@ -43,37 +43,37 @@ import (
 // for an anonymous session) the gate answers 429 on it, and still closes the session of a node that keeps more
 // than Limit refused streams open, since a refusal frees nothing while the node holds its half.
 //
-// Answers to a hiring request keep kontra-blob:<ref> (blob.WithKeepRefs, spec/relay.md §10.4 "to nodes"): the
-// hiring node fetches them on blob streams, authorized by its hiring principal's buyer.
+// Answers to a calling request keep kontra-blob:<ref> (blob.WithKeepRefs, spec/relay.md §10.4 "to nodes"): the
+// calling node fetches them on blob streams, authorized by its calling principal's caller.
 //
 // Work package: M3 WP-03.
 type NodeStreams struct {
-	// Hire serves hiring requests: the gate's public router behind the hiring edge (HiringRoutes builds the
-	// gate's). Nil answers every hiring request 404.
-	Hire http.Handler
+	// Call serves calling requests: the gate's public router behind the calling edge (CallingRoutes builds the
+	// gate's). Nil answers every calling request 404.
+	Call http.Handler
 	// Blobs serves blob streams; nil answers every ref not_found (a gate without a bucket).
 	Blobs BlobServer
 	// Limit is the in-flight cap of node-opened streams per session: tunnel.GateMaxInflight when zero.
-	// Anonymous sessions take tunnel.anonymous's hiring_streams instead (HandlerConfig.AnonymousHiringStreams).
+	// Anonymous sessions take tunnel.anonymous's calling_streams instead (HandlerConfig.AnonymousCallingStreams).
 	Limit int
-	// Keys re-validates a session's hiring API key on every request (*auth.APIKeys); nil refuses every API key
+	// Keys re-validates a session's calling API key on every request (*auth.APIKeys); nil refuses every API key
 	// principal (401).
-	Keys HireKeys
+	Keys SendMessageKeys
 	// HeaderTimeout bounds the wait for a stream's preamble and its request's header; StreamHeaderTimeout
 	// when zero.
 	HeaderTimeout time.Duration
 	Logger        *slog.Logger
 }
 
-// HireKeys re-validates the hiring API key of a session (*auth.APIKeys).
-type HireKeys interface {
+// SendMessageKeys re-validates the calling API key of a session (*auth.APIKeys).
+type SendMessageKeys interface {
 	// Hold keeps the key under the revocation cache's watch for the session's life.
 	Hold(p auth.Principal) (release func())
 	// Revalidate answers whether the key still authenticates, and as what.
 	Revalidate(ctx context.Context, p auth.Principal) (auth.Principal, error)
 }
 
-var _ HireKeys = (*auth.APIKeys)(nil)
+var _ SendMessageKeys = (*auth.APIKeys)(nil)
 
 // BlobServer writes one object for a blob stream.
 type BlobServer interface {
@@ -117,7 +117,7 @@ func (n *NodeStreams) Serve(ctx context.Context, sess *Session, st net.Conn) err
 		return fmt.Errorf("tunnelgate: node-opened stream: %w", err)
 	}
 	_ = st.SetReadDeadline(time.Time{})
-	c := &hiringConn{Conn: st, r: br, remote: sess.hireAddr()}
+	c := &callingConn{Conn: st, r: br, remote: sess.callAddr()}
 	switch pre.Op {
 	case tunnel.OpHTTP:
 		n.serveHTTP(ctx, sess, c)
@@ -140,8 +140,8 @@ func (n *NodeStreams) serveBlob(ctx context.Context, sess *Session, ref string, 
 
 // serveHTTP serves the stream's one HTTP/1.1 exchange with an http.Server of its own: no keep-alive (one
 // exchange per stream), a header read timeout, never a write timeout (SSE; each write has its own deadline,
-// hiringConn).
-func (n *NodeStreams) serveHTTP(ctx context.Context, sess *Session, c *hiringConn) {
+// callingConn).
+func (n *NodeStreams) serveHTTP(ctx context.Context, sess *Session, c *callingConn) {
 	srv := &http.Server{
 		Handler:                      n.handler(sess),
 		ReadHeaderTimeout:            n.headerTimeout(),
@@ -157,51 +157,51 @@ func (n *NodeStreams) serveHTTP(ctx context.Context, sess *Session, c *hiringCon
 	_ = srv.Serve(l)
 }
 
-// HiringPath reports whether a hiring request's path may reach the router (spec/tunnel.md §9): /agents/…, /mcp/…,
+// CallingPath reports whether a calling request's path may reach the router (spec/tunnel.md §9): /agents/…, /mcp/…,
 // /mcp and /.well-known/…. Anything else is 404 on the node, and again on the gate.
-func HiringPath(p string) bool {
+func CallingPath(p string) bool {
 	return strings.HasPrefix(p, "/agents/") || strings.HasPrefix(p, "/mcp/") || p == "/mcp" || strings.HasPrefix(p, "/.well-known/")
 }
 
-// handler is the hiring request's handler: the path check, then Hire with the session's principal source.
+// handler is the calling request's handler: the path check, then Call with the session's principal source.
 func (n *NodeStreams) handler(sess *Session) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if n.Hire == nil || !HiringPath(r.URL.Path) {
+		if n.Call == nil || !CallingPath(r.URL.Path) {
 			w.Header().Set("Content-Length", "0")
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		// The session decides who this is (auth.HireSource); a credential the node forwarded is never read.
+		// The session decides who this is (auth.CallSource); a credential the node forwarded is never read.
 		r.Header.Del("Authorization")
-		ctx := WithHiringSession(r.Context(), sess)
-		ctx = auth.WithHireSource(ctx, hireSource{n: n, s: sess})
+		ctx := WithCallingSession(r.Context(), sess)
+		ctx = auth.WithCallSource(ctx, callSource{n: n, s: sess})
 		ctx = blob.WithKeepRefs(ctx)
-		n.Hire.ServeHTTP(w, r.WithContext(ctx))
+		n.Call.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
-// hireSource is a session's auth.HireSource.
-type hireSource struct {
+// callSource is a session's auth.CallSource.
+type callSource struct {
 	n *NodeStreams
 	s *Session
 }
 
-func (h hireSource) HirePrincipal(ctx context.Context) (auth.Principal, error) {
+func (h callSource) CallerPrincipal(ctx context.Context) (auth.Principal, error) {
 	return h.n.principal(ctx, h.s)
 }
 
-// principal is the session's hiring principal now (spec/relay.md §2.3, spec/tunnel.md §9, §12): the handshake's
+// principal is the session's calling principal now (spec/relay.md §2.3, spec/tunnel.md §9, §12): the handshake's
 // API key re-validated (a revoked or expired one is ErrUnauthenticated, and the node is told auth_revoked once),
 // else node:<key_id> while the key may still open streams.
 func (n *NodeStreams) principal(ctx context.Context, s *Session) (auth.Principal, error) {
 	if !s.open() {
 		return auth.Principal{}, auth.ErrUnauthenticated
 	}
-	if s.hire != nil {
-		if s.hireRevoked.Load() || n.Keys == nil {
+	if s.call != nil {
+		if s.callRevoked.Load() || n.Keys == nil {
 			return auth.Principal{}, auth.ErrUnauthenticated
 		}
-		p, err := n.Keys.Revalidate(ctx, *s.hire)
+		p, err := n.Keys.Revalidate(ctx, *s.call)
 		if errors.Is(err, auth.ErrUnauthenticated) {
 			s.authRevoked(n.logger())
 		}
@@ -210,25 +210,25 @@ func (n *NodeStreams) principal(ctx context.Context, s *Session) (auth.Principal
 	if err := s.keyUsable(ctx); err != nil {
 		return auth.Principal{}, auth.ErrUnauthenticated
 	}
-	buyer, err := ids.NodeBuyer(ids.Namespace, s.KeyID)
+	caller, err := ids.NodeCaller(ids.Namespace, s.KeyID)
 	if err != nil {
 		return auth.Principal{}, err
 	}
 	tenant := s.TenantID
 	return auth.Principal{Kind: auth.KindNode, ID: string(auth.KindNode) + ":" + s.KeyID, TenantID: &tenant, TenantSlug: s.Tenant,
-		BuyerID: buyer, Via: auth.ViaNode}, nil
+		CallerID: caller, Via: auth.ViaNode}, nil
 }
 
-// Hiring is the session's hiring principal now (NodeStreams.principal), for a BlobServer's check of a task the
-// session hires; ErrUnauthenticated when it may not hire any more. A session no Handler served has none.
-func (s *Session) Hiring(ctx context.Context) (auth.Principal, error) {
-	if s.hiring == nil {
+// Calling is the session's calling principal now (NodeStreams.principal), for a BlobServer's check of a task the
+// session calls; ErrUnauthenticated when it may not call any more. A session no Handler served has none.
+func (s *Session) Calling(ctx context.Context) (auth.Principal, error) {
+	if s.calling == nil {
 		return auth.Principal{}, auth.ErrUnauthenticated
 	}
-	return s.hiring.principal(ctx, s)
+	return s.calling.principal(ctx, s)
 }
 
-// keyUsable checks the session's own key on a hiring request (spec/relay.md §2.3: revocation on every request):
+// keyUsable checks the session's own key on a calling request (spec/relay.md §2.3: revocation on every request):
 // the revocation view when fresh, else the key's row.
 func (s *Session) keyUsable(ctx context.Context) error {
 	rev := s.revocations()
@@ -253,14 +253,14 @@ func (s *Session) keyUsable(ctx context.Context) error {
 	return nil
 }
 
-// authRevoked records that the session's hiring API key no longer authenticates: every later stream it opens is
+// authRevoked records that the session's calling API key no longer authenticates: every later stream it opens is
 // 401, and the node is told {"t": "auth_revoked"} once on the control stream (§12, §13). Hosting goes on.
 func (s *Session) authRevoked(logger *slog.Logger) {
-	if s.hire == nil || !s.hireRevoked.CompareAndSwap(false, true) {
+	if s.call == nil || !s.callRevoked.CompareAndSwap(false, true) {
 		return
 	}
-	log := logger.With(obs.KeyTunnelSession, s.ID, "key_id", s.KeyID, obs.KeyPrincipal, s.HirePrincipal)
-	log.Info("tunnel session: its hiring API key was revoked; hiring streams now get 401, hosting goes on (§12)")
+	log := logger.With(obs.KeyTunnelSession, s.ID, "key_id", s.KeyID, obs.KeyPrincipal, s.CallerPrincipal)
+	log.Info("tunnel session: its calling API key was revoked; calling streams now get 401, hosting goes on (§12)")
 	tell := func() {
 		if err := s.WriteControl(tunnel.Control{T: tunnel.CtlAuthRevoked}); err != nil {
 			log.Debug("tunnel session: {t: auth_revoked} not delivered", "error", err)
@@ -273,8 +273,8 @@ func (s *Session) authRevoked(logger *slog.Logger) {
 	go tell()
 }
 
-// HireRevoked reports whether the session's hiring API key was found revoked.
-func (s *Session) HireRevoked() bool { return s.hireRevoked.Load() }
+// CallRevoked reports whether the session's calling API key was found revoked.
+func (s *Session) CallRevoked() bool { return s.callRevoked.Load() }
 
 // NodeStreamsAccepted is the number of node-opened streams the gate accepted on the session; NodeInFlight the
 // number whose halves have not both ended.
@@ -283,10 +283,10 @@ func (s *Session) NodeStreamsAccepted() int64 { return s.nodeAccepted.Load() }
 // NodeInFlight is the number of node-opened streams in flight (§14: from Accept until both halves end).
 func (s *Session) NodeInFlight() int64 { return s.nodeInFlight.Load() }
 
-// hireAddr is the client address a hiring request gets: one per session, an address no network can hold
+// callAddr is the client address a calling request gets: one per session, an address no network can hold
 // (fd00::/8 with the session's hash in the network bits), so that the edge's per-address limits count the session
 // as one client (spec/tunnel.md §9: its edge limits are the session's).
-func (s *Session) hireAddr() net.Addr {
+func (s *Session) callAddr() net.Addr {
 	h := sha256.Sum256(s.ID[:])
 	var a [16]byte
 	a[0] = 0xfd
@@ -302,7 +302,7 @@ func (s *Session) hireAddr() net.Addr {
 // its half, resets it, or StreamCloseTimeout (5 min) passes; yamux v0.1.2 has no reset. So a stream counts from
 // Accept until it has ended on both sides: once served (or refused), the gate closes its half and reads and
 // discards what the node sends until the node's half ends. Over the cap (sessionCap: ns.Limit, 32, or an anonymous
-// session's hiring_streams, 8) the gate answers 429
+// session's calling_streams, 8) the gate answers 429
 // (an http stream; a blob stream is closed unanswered), and a node that keeps more than the cap of refused streams
 // open loses its session: what a node can pin is then at most twice the cap's windows and the backlog's.
 func acceptNodeStreams(ctx context.Context, s *Session, mux *yamux.Session, ns *NodeStreams, sessionCap int, log *slog.Logger) {
@@ -357,7 +357,7 @@ func acceptNodeStreams(ctx context.Context, s *Session, mux *yamux.Session, ns *
 // (no blob.ErrBadAnswer). kontra connect keeps its node-opened streams under the cap itself (internal/node,
 // session.open: a stream waits for a slot), so a node that behaves meets this only when the gate still counts a
 // stream the node has seen end; its hosting exchange is then answered 503 Kontra-Node: full, which the relay
-// retries, and a hiring answer 502. D209 adds no "busy" reason to §8.3.
+// retries, and a calling answer 502. D209 adds no "busy" reason to §8.3.
 func (n *NodeStreams) refuse(st *yamux.Stream) {
 	_ = st.SetReadDeadline(time.Now().Add(n.headerTimeout()))
 	pre, err := tunnel.ReadPreamble(bufio.NewReaderSize(st, tunnel.MaxPreamble))
@@ -400,23 +400,23 @@ func writeRaw(c net.Conn, status int, msg string) {
 	_ = c.SetWriteDeadline(time.Time{})
 }
 
-// hiringConn is a node-opened stream whose preamble was read through r: the request is read from r, every write
+// callingConn is a node-opened stream whose preamble was read through r: the request is read from r, every write
 // has its own deadline (tunnel.ConnectionWriteTimeout: a node that stops reading an answer, an SSE stream
-// included, frees the handler within it, D155), and its remote address is the session's (Session.hireAddr).
-type hiringConn struct {
+// included, frees the handler within it, D155), and its remote address is the session's (Session.callAddr).
+type callingConn struct {
 	net.Conn
 	r      *bufio.Reader
 	remote net.Addr
 }
 
-func (c *hiringConn) Read(p []byte) (int, error) { return c.r.Read(p) }
+func (c *callingConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
-func (c *hiringConn) Write(p []byte) (int, error) {
+func (c *callingConn) Write(p []byte) (int, error) {
 	_ = c.Conn.SetWriteDeadline(time.Now().Add(tunnel.ConnectionWriteTimeout))
 	return c.Conn.Write(p)
 }
 
-func (c *hiringConn) RemoteAddr() net.Addr { return c.remote }
+func (c *callingConn) RemoteAddr() net.Addr { return c.remote }
 
 // oneConnListener hands its one connection to http.Server.Serve, then blocks until that connection is closed
 // (the exchange ended), so that Serve returns when the stream's exchange is over.
@@ -465,15 +465,15 @@ func (c *notifyConn) Close() error {
 	return nil
 }
 
-type hiringKey struct{}
+type callingKey struct{}
 
-// WithHiringSession marks a request as one a node opened on sess (spec/tunnel.md §9).
-func WithHiringSession(ctx context.Context, sess *Session) context.Context {
-	return context.WithValue(ctx, hiringKey{}, sess)
+// WithCallingSession marks a request as one a node opened on sess (spec/tunnel.md §9).
+func WithCallingSession(ctx context.Context, sess *Session) context.Context {
+	return context.WithValue(ctx, callingKey{}, sess)
 }
 
-// HiringSession returns the session a request arrived on, ok false for a request from the network.
-func HiringSession(ctx context.Context) (*Session, bool) {
-	s, ok := ctx.Value(hiringKey{}).(*Session)
+// CallingSession returns the session a request arrived on, ok false for a request from the network.
+func CallingSession(ctx context.Context) (*Session, bool) {
+	s, ok := ctx.Value(callingKey{}).(*Session)
 	return s, ok && s != nil
 }

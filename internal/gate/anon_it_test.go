@@ -52,11 +52,11 @@ func restSendBody(text string) string {
 	return string(b)
 }
 
-// seedAnonymousService writes an anonymous tenant and an a2a service of it on the seller (allow: anonymous), as the
+// seedAnonymousService writes an anonymous tenant and an a2a service of it on the service (allow: anonymous), as the
 // admission of an anonymous hello with --public would, then NOTIFY kontra_services, and waits until the gate serves it.
 func (e *gateEnv) seedAnonymousService(base, slug, name string) uuid.UUID {
 	e.t.Helper()
-	return e.seedAnonymousServiceAt(base, slug, name, e.seller.srv.URL+"/base")
+	return e.seedAnonymousServiceAt(base, slug, name, e.service.srv.URL+"/base")
 }
 
 // seedAnonymousServiceAt is seedAnonymousService with the service's backend at upstream.
@@ -179,7 +179,7 @@ func TestAnonymousTenantLimitsThroughTheGate(t *testing.T) {
 		t.Fatalf("%d tasks after the refusals, want 2", n)
 	}
 	// A task ends: room for one more.
-	e.seller.release("slow-0")
+	e.service.release("slow-0")
 	eventually(t, 20*time.Second, "the first task completed", func() bool {
 		return scalar[int64](t, e.pool, `select count(*) from kontra.tasks where tenant_id = $1 and state = 'completed'`, tenantA) == 1
 	})
@@ -196,13 +196,13 @@ func TestAnonymousTenantLimitsThroughTheGate(t *testing.T) {
 	if n := tasks(tenantB); n != 0 {
 		t.Fatalf("%d tasks after the storage refusal", n)
 	}
-	// Upstream bytes past it: the seller answers with the message's 10 KiB again, which passes the tenant's 16 KiB.
+	// Upstream bytes past it: the service answers with the message's 10 KiB again, which passes the tenant's 16 KiB.
 	big := strings.Repeat("y", 10<<10)
 	st, _, body = anonPost(t, urlB, sendBody("SendMessage", big, true))
 	if st != 200 || !strings.Contains(string(body), `"result"`) {
 		t.Fatalf("a message within parts_bytes: %d %s", st, body)
 	}
-	e.seller.release(big)
+	e.service.release(big)
 	eventually(t, 30*time.Second, "the task failed upstream_error", func() bool {
 		return scalar[int64](t, e.pool, `select count(*) from kontra.tasks t join kontra.attempts a on a.task_id = t.id
 			where t.tenant_id = $1 and t.state = 'failed' and a.outcome = 'upstream_error'`, tenantB) == 1
@@ -228,7 +228,7 @@ func TestAnonymousTenantLimitsThroughTheGate(t *testing.T) {
 	if n := scalar[int64](t, e.pool, `select count(*) from kontra.services where tenant_id = $1 and disabled_at is null`, tenantA); n != 0 {
 		t.Fatal("the expired tenant's service is enabled")
 	}
-	e.seller.releaseAll()
+	e.service.releaseAll()
 }
 
 // spec/tunnel.md §6, §6.2 (review round 2, D309): a multi-tenant gate whose tunnel.anonymous was turned off while an
@@ -242,7 +242,7 @@ func TestAnonymousLimitsHoldWithTheSettingOff(t *testing.T) {
 	run := e.start("a", path, fastTiming)
 	slug := "anon-00000000000000c3"
 	tenant := e.seedAnonymousService(run.url, slug, "slow")
-	t.Cleanup(e.seller.releaseAll)
+	t.Cleanup(e.service.releaseAll)
 	url := run.url + "/agents/" + slug + "/slow"
 	for i := range 2 {
 		st, _, body := anonPost(t, url, sendBody("SendMessage", fmt.Sprintf("slow-%d", i), true))
@@ -267,10 +267,10 @@ func TestAnonymousLimitsHoldWithTheSettingOff(t *testing.T) {
 	}
 }
 
-// bigSeller is an a2a-go v2.7.0 agent that answers every message with one artifact of two parts of size bytes each.
-type bigSeller struct{ size int }
+// bigService is an a2a-go v2.7.0 agent that answers every message with one artifact of two parts of size bytes each.
+type bigService struct{ size int }
 
-func (b bigSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (b bigService) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		if ec.StoredTask == nil && !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
@@ -283,14 +283,14 @@ func (b bigSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.S
 	}
 }
 
-func (bigSeller) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (bigService) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCanceled, nil), nil)
 	}
 }
 
-// newBigSeller serves bigSeller behind /base and returns that URL.
-func newBigSeller(t *testing.T, size int) string {
+// newBigService serves bigService behind /base and returns that URL.
+func newBigService(t *testing.T, size int) string {
 	t.Helper()
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
@@ -303,7 +303,7 @@ func newBigSeller(t *testing.T, size int) string {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, card)
 	})
-	mux.Handle("/base/rpc", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(bigSeller{size: size})))
+	mux.Handle("/base/rpc", a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(bigService{size: size})))
 	return srv.URL + "/base"
 }
 
@@ -324,7 +324,7 @@ tunnel: { anonymous: { parts_bytes: 512KiB, purge_after: 1s } }
 	timing.AnonExpire, timing.AnonPurge = 200*time.Millisecond, 200*time.Millisecond
 	run := e.start("a", path, timing)
 	slug := "anon-00000000000000c3"
-	tenantID := e.seedAnonymousServiceAt(run.url, slug, "big", newBigSeller(t, 300<<10))
+	tenantID := e.seedAnonymousServiceAt(run.url, slug, "big", newBigService(t, 300<<10))
 
 	st, _, body := anonPost(t, run.url+"/agents/"+slug+"/big", sendBody("SendMessage", "two big parts", true))
 	if st != 200 || !strings.Contains(string(body), `"result"`) {

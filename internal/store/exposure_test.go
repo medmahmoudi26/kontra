@@ -38,11 +38,11 @@ func fromOrigin(ctx context.Context, ev a2a.Event, origin *Origin) context.Conte
 func (e *env) exposed(task *a2a.Task) bool {
 	e.t.Helper()
 	id := uuid.MustParse(string(task.ID))
-	row, err := e.log.LoadScopedAll(context.Background(), e.svc, buyerA, id)
+	row, err := e.log.LoadScopedAll(context.Background(), e.svc, callerA, id)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	_, scopedErr := e.log.LoadScoped(context.Background(), e.svc, buyerA, id)
+	_, scopedErr := e.log.LoadScoped(context.Background(), e.svc, callerA, id)
 	if (row.ExposedAt != nil) != (scopedErr == nil) {
 		e.t.Fatalf("LoadScoped %v disagrees with exposed_at %v", scopedErr, row.ExposedAt)
 	}
@@ -59,15 +59,15 @@ func (e *env) exposed(task *a2a.Task) bool {
 func TestExposure(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
+	ctx := asOwner(context.Background(), callerA)
 	callee := func(typ string) *Origin { return &Origin{Actor: ActorCallee, Type: typ, Method: "SendMessage"} }
 
-	if task := e.newTask(e.svc, buyerA, "", "plain"); !e.exposed(task) {
+	if task := e.newTask(e.svc, callerA, "", "plain"); !e.exposed(task) {
 		t.Error("a task created without Provisional is not exposed")
 	}
 
 	t.Run("message answer", func(t *testing.T) {
-		task := e.provisional(buyerA, "hi")
+		task := e.provisional(callerA, "hi")
 		working := status(task, a2a.TaskStateWorking, "")
 		mustApply(t, fromOrigin(ctx, working, GateOrigin()), s, task.ID, working) // the gate's own working status
 		if e.exposed(task) {
@@ -78,7 +78,7 @@ func TestExposure(t *testing.T) {
 		if e.exposed(task) {
 			t.Fatal("a callee's Message exposed the record")
 		}
-		row, err := e.log.LoadScopedAll(ctx, e.svc, buyerA, uuid.MustParse(string(task.ID)))
+		row, err := e.log.LoadScopedAll(ctx, e.svc, callerA, uuid.MustParse(string(task.ID)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,21 +98,21 @@ func TestExposure(t *testing.T) {
 	})
 
 	t.Run("task answer", func(t *testing.T) {
-		task := e.provisional(buyerA, "hi")
+		task := e.provisional(callerA, "hi")
 		ev := status(task, a2a.TaskStateWorking, "")
 		mustApply(t, fromOrigin(ctx, ev, callee(TypeTask)), s, task.ID, ev)
 		if !e.exposed(task) {
 			t.Fatal("the callee's Task did not expose the record")
 		}
 		mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateCompleted, "done"))
-		row, _ := e.log.LoadScopedAll(ctx, e.svc, buyerA, uuid.MustParse(string(task.ID)))
+		row, _ := e.log.LoadScopedAll(ctx, e.svc, callerA, uuid.MustParse(string(task.ID)))
 		if _, ok := MessageAnswer(row); ok {
 			t.Fatal("an exposed task is answered with a Message")
 		}
 	})
 
 	t.Run("artifact answer", func(t *testing.T) {
-		task := e.provisional(buyerA, "hi")
+		task := e.provisional(callerA, "hi")
 		ev := &a2a.TaskArtifactUpdateEvent{TaskID: task.ID, ContextID: task.ContextID,
 			Artifact: &a2a.Artifact{ID: "a", Parts: a2a.ContentParts{a2a.NewTextPart("x")}}}
 		mustApply(t, fromOrigin(ctx, ev, callee(TypeArtifactUpdate)), s, task.ID, ev)
@@ -122,7 +122,7 @@ func TestExposure(t *testing.T) {
 	})
 
 	t.Run("origin not named", func(t *testing.T) {
-		task := e.provisional(buyerA, "hi")
+		task := e.provisional(callerA, "hi")
 		mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateWorking, ""))
 		if !e.exposed(task) {
 			t.Fatal("an event of unknown origin left the record hidden: it is shown rather than hidden")
@@ -131,7 +131,7 @@ func TestExposure(t *testing.T) {
 
 	for _, st := range []a2a.TaskState{a2a.TaskStateFailed, a2a.TaskStateCanceled, a2a.TaskStateInputRequired} {
 		t.Run("gate "+string(st), func(t *testing.T) {
-			task := e.provisional(buyerA, "hi")
+			task := e.provisional(callerA, "hi")
 			ev := status(task, st, "the gate says so")
 			mustApply(t, fromOrigin(ctx, ev, GateOrigin()), s, task.ID, ev)
 			if !e.exposed(task) {

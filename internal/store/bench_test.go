@@ -50,7 +50,7 @@ func BenchmarkAppend(b *testing.B) {
 			b.SetParallelism(4) // 4 × GOMAXPROCS writers: 8 on the 2-CPU host
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
-				task := e.newTask(e.svc, buyerA, "", "bench")
+				task := e.newTask(e.svc, callerA, "", "bench")
 				id := uid(b, task.ID)
 				ev := status(task, a2a.TaskStateWorking, "")
 				payload, _ := json.Marshal(a2a.StreamResponse{Event: ev})

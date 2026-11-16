@@ -30,8 +30,8 @@ func TestVersionConflict(t *testing.T) {
 	n := listen(t, e.dsn)
 	poolB := pgtest.Pool(t, e.dsn)
 	stores := []*Store{e.store(nil), New(poolB, e.svc, ctxOwner, nil, NewLog(poolB))}
-	task := e.newTask(e.svc, buyerA, "", "hi")
-	ctx := asOwner(context.Background(), buyerA)
+	task := e.newTask(e.svc, callerA, "", "hi")
+	ctx := asOwner(context.Background(), callerA)
 
 	const rounds = 25
 	for r := range rounds {
@@ -106,8 +106,8 @@ func TestVersionConflict(t *testing.T) {
 func TestPrevVersionZeroAndTerminalRule(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "hi")
+	ctx := asOwner(context.Background(), callerA)
+	task := e.newTask(e.svc, callerA, "", "hi")
 	id := uid(t, task.ID)
 
 	st, _ := s.Get(ctx, task.ID)
@@ -184,9 +184,9 @@ func (c *countingTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx
 }
 func (c *countingTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
-// cross_buyer, the store half (spec §2.3, §4, §16): another buyer's task, an unknown id and a malformed
+// cross_caller, the store half (spec §2.3, §4, §16): another caller's task, an unknown id and a malformed
 // id are all TaskNotFound; the malformed one issues no query.
-func TestCrossBuyer(t *testing.T) {
+func TestCrossCaller(t *testing.T) {
 	e := newEnv(t)
 	cfg, err := pgxpool.ParseConfig(e.dsn)
 	if err != nil {
@@ -200,10 +200,10 @@ func TestCrossBuyer(t *testing.T) {
 	}
 	t.Cleanup(traced.Close)
 	s := New(traced, e.svc, ctxOwner, nil, NewLog(traced))
-	a := asOwner(context.Background(), buyerA)
-	b := asOwner(context.Background(), buyerB)
-	task := e.newTask(e.svc, buyerA, "shared-ctx", "mine")
-	e.newTask(e.svc, buyerB, "shared-ctx", "theirs")
+	a := asOwner(context.Background(), callerA)
+	b := asOwner(context.Background(), callerB)
+	task := e.newTask(e.svc, callerA, "shared-ctx", "mine")
+	e.newTask(e.svc, callerB, "shared-ctx", "theirs")
 
 	stA, err := s.Get(a, task.ID)
 	if err != nil {
@@ -217,7 +217,7 @@ func TestCrossBuyer(t *testing.T) {
 	if _, err := s.Update(b, &taskstore.UpdateRequest{Task: next, Event: ev, PrevVersion: stA.Version}); !isNotFound(err) {
 		t.Errorf("B Update of A's task: %v", err)
 	}
-	if _, err := e.log.LoadScoped(b, e.svc, buyerB, uid(t, task.ID)); !isNotFound(err) {
+	if _, err := e.log.LoadScoped(b, e.svc, callerB, uid(t, task.ID)); !isNotFound(err) {
 		t.Errorf("B LoadScoped of A's task: %v", err)
 	}
 	list, err := s.List(b, &a2a.ListTasksRequest{ContextID: "shared-ctx"})
@@ -262,8 +262,8 @@ func TestCrossBuyer(t *testing.T) {
 func TestWriteDetachedFromCancel(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	task := e.newTask(e.svc, buyerA, "", "hi")
-	ctx, cancel := context.WithCancel(asOwner(context.Background(), buyerA))
+	task := e.newTask(e.svc, callerA, "", "hi")
+	ctx, cancel := context.WithCancel(asOwner(context.Background(), callerA))
 	st, _ := s.Get(ctx, task.ID)
 	cancel()
 	ev := status(task, a2a.TaskStateWorking, "")
@@ -328,8 +328,8 @@ func TestWriteDetachedFromCancel(t *testing.T) {
 func TestNULAndVerbatimPayload(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "a\x00b")
+	ctx := asOwner(context.Background(), callerA)
+	task := e.newTask(e.svc, callerA, "", "a\x00b")
 	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateWorking, "\x00"))
 	mustApply(t, ctx, s, task.ID, artifact(task, "a1", false, "x\x00y"))
 
@@ -391,7 +391,7 @@ func TestDeadlineTerminalAndStatusTime(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
 	s := e.store(nil)
-	octx := asOwner(ctx, buyerA)
+	octx := asOwner(ctx, callerA)
 	var dbNow time.Time
 	if err := e.pool.QueryRow(ctx, `select now()`).Scan(&dbNow); err != nil {
 		t.Fatal(err)
@@ -406,7 +406,7 @@ func TestDeadlineTerminalAndStatusTime(t *testing.T) {
 		}
 	}
 	ts := time.Date(2026, 10, 25, 12, 0, 0, 123456999, time.UTC)
-	task, created := e.newTaskAt(e.svc, buyerA, "", "hi", &ts)
+	task, created := e.newTaskAt(e.svc, callerA, "", "hi", &ts)
 	near("created deadline", created.Deadline, dbNow.Add(time.Hour))
 	row, _ := e.log.Load(ctx, uid(t, task.ID))
 	if !row.Deadline.Equal(*created.Deadline) || row.SubmittedAt == nil {
@@ -462,7 +462,7 @@ func TestDeadlineTerminalAndStatusTime(t *testing.T) {
 	quick := e.service("quick", 120, 3600)
 	qid := uuid.Must(uuid.NewV7())
 	qtask := &a2a.Task{ID: a2a.TaskID(qid.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}
-	qa, err := e.log.CreateTask(ctx, nil, NewTask{ID: qid, Service: quick, Protocol: ProtocolA2A, Owner: buyerA,
+	qa, err := e.log.CreateTask(ctx, nil, NewTask{ID: qid, Service: quick, Protocol: ProtocolA2A, Owner: callerA,
 		ContextID: "c", State: StateSubmitted, Snapshot: qtask})
 	if err != nil {
 		t.Fatal(err)
@@ -485,7 +485,7 @@ func TestDeadlineTerminalAndStatusTime(t *testing.T) {
 func TestCreate(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
+	ctx := asOwner(context.Background(), callerA)
 	id := a2a.TaskID(uuid.Must(uuid.NewV7()).String())
 	task := &a2a.Task{ID: id, ContextID: "c1", Status: a2a.TaskStatus{State: a2a.TaskStateWorking}}
 	v, err := s.Create(ctx, task)
@@ -496,13 +496,13 @@ func TestCreate(t *testing.T) {
 		t.Errorf("duplicate Create: %v", err)
 	}
 	st, err := s.Get(ctx, id)
-	if err != nil || st.Version != 1 || st.Task.Status.State != a2a.TaskStateWorking || st.User != buyerA.Principal {
+	if err != nil || st.Version != 1 || st.Task.Status.State != a2a.TaskStateWorking || st.User != callerA.Principal {
 		t.Fatalf("Get after Create: %+v %v", st, err)
 	}
 	if _, kinds := e.seqs(id); len(kinds) != 1 || kinds[0] != KindTask {
 		t.Errorf("creation rows %v", kinds)
 	}
-	if _, err := s.Get(asOwner(context.Background(), buyerB), id); !isNotFound(err) {
+	if _, err := s.Get(asOwner(context.Background(), callerB), id); !isNotFound(err) {
 		t.Errorf("B Get of a created task: %v", err)
 	}
 	long := strings.Repeat("c", 257)
@@ -515,7 +515,7 @@ func TestCreate(t *testing.T) {
 	wide := strings.Repeat("é", 200)
 	wideID := uuid.Must(uuid.NewV7())
 	wideTask := &a2a.Task{ID: a2a.TaskID(wideID.String()), ContextID: wide, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}
-	if _, err := e.log.CreateTask(context.Background(), nil, NewTask{ID: wideID, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA,
+	if _, err := e.log.CreateTask(context.Background(), nil, NewTask{ID: wideID, Service: e.svc, Protocol: ProtocolA2A, Owner: callerA,
 		ContextID: wide, State: StateSubmitted, Snapshot: wideTask, FirstMessageID: wide, FirstRequest: [32]byte{1}}); err != nil {
 		t.Fatalf("a 200-character non-ASCII contextId and messageId: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestCreate(t *testing.T) {
 		"a 257-character messageId": func(n *NewTask) { n.FirstMessageID = wider },
 	} {
 		nid := uuid.Must(uuid.NewV7())
-		n := NewTask{ID: nid, Service: e.svc, Protocol: ProtocolA2A, Owner: buyerA, ContextID: "c", State: StateSubmitted,
+		n := NewTask{ID: nid, Service: e.svc, Protocol: ProtocolA2A, Owner: callerA, ContextID: "c", State: StateSubmitted,
 			Snapshot:       &a2a.Task{ID: a2a.TaskID(nid.String()), ContextID: "c", Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}},
 			FirstMessageID: "m", FirstRequest: [32]byte{1}}
 		nt(&n)
@@ -581,9 +581,9 @@ func TestFailureGuard(t *testing.T) {
 	e := newEnv(t)
 	g := &fakeGuard{registered: map[a2a.TaskID]bool{}, recorded: map[a2a.Event]bool{}}
 	s := e.store(g)
-	ctx := asOwner(context.Background(), buyerA)
+	ctx := asOwner(context.Background(), callerA)
 
-	task := e.newTask(e.svc, buyerA, "", "hi")
+	task := e.newTask(e.svc, callerA, "", "hi")
 	g.registered[task.ID] = true
 	mustApply(t, ctx, s, task.ID, status(task, a2a.TaskStateWorking, ""))
 	synth := a2a.NewStatusUpdateEvent(info(task), a2a.TaskStateFailed, nil) // a2a-go's SetTaskFailed
@@ -606,16 +606,16 @@ func TestFailureGuard(t *testing.T) {
 	}
 
 	// A recorded event passes even without a message (pointer identity first).
-	t2 := e.newTask(e.svc, buyerA, "", "hi")
+	t2 := e.newTask(e.svc, callerA, "", "hi")
 	g.registered[t2.ID] = true
 	bare := a2a.NewStatusUpdateEvent(info(t2), a2a.TaskStateFailed, nil)
 	g.recorded[bare] = true
 	mustApply(t, ctx, s, t2.ID, bare)
 	// With no dispatch registered, nothing is refused.
-	t3 := e.newTask(e.svc, buyerA, "", "hi")
+	t3 := e.newTask(e.svc, callerA, "", "hi")
 	mustApply(t, ctx, s, t3.ID, a2a.NewStatusUpdateEvent(info(t3), a2a.TaskStateFailed, nil))
 	// Other states are never the guard's business.
-	t4 := e.newTask(e.svc, buyerA, "", "hi")
+	t4 := e.newTask(e.svc, callerA, "", "hi")
 	g.registered[t4.ID] = true
 	mustApply(t, ctx, s, t4.ID, a2a.NewStatusUpdateEvent(info(t4), a2a.TaskStateCompleted, nil))
 }
@@ -625,8 +625,8 @@ func TestFailureGuard(t *testing.T) {
 func TestFence(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
-	task := e.newTask(e.svc, buyerA, "", "hi")
+	ctx := asOwner(context.Background(), callerA)
+	task := e.newTask(e.svc, callerA, "", "hi")
 	id := uid(t, task.ID)
 	if _, err := e.log.BeginDispatch(ctx, id, 1, "r1"); !errors.Is(err, ErrAttemptNotFound) {
 		t.Fatalf("dispatch before the attempt: %v", err)
@@ -684,7 +684,7 @@ func TestFence(t *testing.T) {
 	}
 	mustApply(t, WithFence(ctx, f3), s, task.ID, status(task, a2a.TaskStateCompleted, "ok"))
 	// A fence naming another task is refused before any query.
-	other := e.newTask(e.svc, buyerA, "", "x")
+	other := e.newTask(e.svc, callerA, "", "x")
 	if _, err := apply(WithFence(ctx, f3), s, other.ID, status(other, a2a.TaskStateWorking, "")); !errors.Is(err, ErrFenced) {
 		t.Fatalf("a fence of another task: %v", err)
 	}

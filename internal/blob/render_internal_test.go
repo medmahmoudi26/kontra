@@ -128,7 +128,7 @@ func TestRendererOnlyTheTasksOwnRefs(t *testing.T) {
 	if got, _ := r.StreamResponse(ctx, other, raw); string(got) != string(raw) {
 		t.Error("a stream response was rendered for another task")
 	}
-	// A request that arrived on a hiring stream keeps refs (WP-03).
+	// A request that arrived on a calling stream keeps refs (WP-03).
 	if got, _ := r.Task(WithKeepRefs(ctx), in); got != in {
 		t.Error("WithKeepRefs rendered")
 	}

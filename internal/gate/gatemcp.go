@@ -15,29 +15,29 @@ import (
 
 // assembleGateMCP builds the gate's own /mcp (spec/relay.md §12; M4 WP-04) and mounts it: the catalog over the
 // services table and the MCP relay's tools cache (describe's background drain through the relay's own sessions), the
-// hirer over the A2A services' handlers (a hire task is an ordinary A2A task, created by the service's interceptors
-// and work queue; assemble builds the hirer), the MCP Tasks of hire tasks (the lifecycle client's MCP-mode cancel),
+// caller over the A2A services' handlers (a send_message task is an ordinary A2A task, created by the service's interceptors
+// and work queue; assemble builds the caller), the MCP Tasks of send_message tasks (the lifecycle client's MCP-mode cancel),
 // the URL elicitations, /mcp's legacy sessions (mcp_sessions rows with service NULL), and the A2A push configs its push
 // tools set (D337). It runs after
 // assembleMCP, whose handler and tools cache it uses.
-func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator, hirer *relay.Hirer, pushes gatemcp.PushConfigs) error {
+func (r *Replica) assembleGateMCP(routes *edge.Router, authn *auth.Authenticator, sender *relay.Sender, pushes gatemcp.PushConfigs) error {
 	cfg := r.cfg
 	multi := cfg.Tenancy == config.TenancyMulti
 	catalog := gatemcp.NewCatalog(gatemcp.CatalogConfig{
 		DB: r.pool, Multi: multi, PublicURL: cfg.PublicURL, MCP: r.services, Tools: r.tools, Warm: r.mcp,
 		Served: r.servedService, Logger: r.log,
 	})
-	tasks, err := gatemcp.NewHireTasks(gatemcp.HireTasksConfig{
-		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Hirer: hirer, Render: r.render,
+	tasks, err := gatemcp.NewSendMessageTasks(gatemcp.SendMessageTasksConfig{
+		Log: r.storeLog, Waker: r.listener, Lifecycle: r.lifecycle, Sender: sender, Render: r.render,
 		Served: r.servedService, Logger: r.log,
 	})
 	if err != nil {
 		return err
 	}
-	r.hireTasks = tasks
+	r.callTasks = tasks
 	h, err := gatemcp.NewHandler(gatemcp.Deps{
 		PublicURL: cfg.PublicURL, Multi: multi, Auth: authn, Sessions: mcprelay.NewSessions(r.pool), Catalog: catalog,
-		Hirer: hirer, Tasks: tasks, Log: r.storeLog,
+		Sender: sender, Tasks: tasks, Log: r.storeLog,
 		Waker: r.listener, Render: r.render, Served: r.servedService, AllowedOrigins: cfg.MCP.AllowedOrigins, Logger: r.log,
 		PlainWait: r.opts.plainWait, Push: pushes,
 	})
@@ -58,20 +58,20 @@ func (r *Replica) servedService(_ context.Context, tenantID uuid.UUID, name stri
 	return gatemcp.ServedService{Kind: s.Ref.Kind, Allow: s.Allow}, true
 }
 
-// awaitHireCancels waits, at most gatemcp.DetachedWait, for /mcp's detached kontra.cancel Updates and for the modern
-// hires that may still send one (relay.md §12.5, D178): the public listener has stopped, which closed the streams of
-// modern hires still waiting, and each such hire's task is being cancelled. A cancel whose Update had not reached
+// awaitCallCancels waits, at most gatemcp.DetachedWait, for /mcp's detached kontra.cancel Updates and for the modern
+// send_message calls that may still send one (relay.md §12.5, D178): the public listener has stopped, which closed the streams of
+// modern send_message calls still waiting, and each such call's task is being cancelled. A cancel whose Update had not reached
 // Temporal when Run closes the client would be lost, and its task would run unseen; once this returns, each was accepted
 // (by another replica's kontra-lifecycle worker: this one's have stopped) and is in its task's history. A gate of one
 // replica has no worker left to accept it: the drain waits out the bound, and the Update, admitted by Temporal, waits
 // for the next worker.
-func (r *Replica) awaitHireCancels(ctx context.Context) {
-	if r.hireTasks == nil {
+func (r *Replica) awaitCallCancels(ctx context.Context) {
+	if r.callTasks == nil {
 		return
 	}
 	wctx, cancel := context.WithTimeout(ctx, gatemcp.DetachedWait)
 	defer cancel()
-	if err := r.hireTasks.Wait(wctx); err != nil {
-		r.log.Warn("/mcp's cancels of hire tasks were still unaccepted when the drain closed Temporal", "error", err)
+	if err := r.callTasks.Wait(wctx); err != nil {
+		r.log.Warn("/mcp's cancels of send_message tasks were still unaccepted when the drain closed Temporal", "error", err)
 	}
 }

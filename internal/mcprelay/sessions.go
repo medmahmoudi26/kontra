@@ -44,7 +44,7 @@ type Session struct {
 	Hash            [32]byte // sha256 of the gate-minted client id; the client id itself is never stored
 	TenantID        uuid.UUID
 	Service         string
-	BuyerID         uuid.UUID
+	CallerID        uuid.UUID
 	Principal       string
 	Via             string
 	UpstreamSID     string
@@ -135,10 +135,10 @@ func insertSession(ctx context.Context, db execer, clientID string, row Session)
 	if row.UpstreamSID != "" {
 		upstreamSID = &row.UpstreamSID
 	}
-	_, err := db.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal,
+	_, err := db.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal,
 			via, upstream_sid, tunnel_session, replica_id, protocol_version, client_capabilities)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
-		h[:], row.TenantID, row.Service, row.BuyerID, row.Principal, row.Via, upstreamSID, row.TunnelSession, replica,
+		h[:], row.TenantID, row.Service, row.CallerID, row.Principal, row.Via, upstreamSID, row.TunnelSession, replica,
 		row.ProtocolVersion, string(caps))
 	if err != nil {
 		return fmt.Errorf("mcprelay: open session: %w", err)
@@ -146,11 +146,11 @@ func insertSession(ctx context.Context, db execer, clientID string, row Session)
 	return nil
 }
 
-const sessionColumns = `client_sid_hash, tenant_id, service, buyer_id, principal, via, coalesce(upstream_sid, ''),
+const sessionColumns = `client_sid_hash, tenant_id, service, caller_id, principal, via, coalesce(upstream_sid, ''),
 	tunnel_session, coalesce(replica_id, ''), protocol_version, client_capabilities::text, created_at, last_seen_at`
 
 // sweptColumns is sessionColumns of the row an update of mcp_sessions m returns.
-const sweptColumns = `m.client_sid_hash, m.tenant_id, m.service, m.buyer_id, m.principal, m.via, coalesce(m.upstream_sid, ''),
+const sweptColumns = `m.client_sid_hash, m.tenant_id, m.service, m.caller_id, m.principal, m.via, coalesce(m.upstream_sid, ''),
 	m.tunnel_session, coalesce(m.replica_id, ''), m.protocol_version, m.client_capabilities::text, m.created_at, m.last_seen_at`
 
 func scanSession(row pgx.Row) (*Session, error) {
@@ -161,7 +161,7 @@ func scanSession(row pgx.Row) (*Session, error) {
 		tenant  *uuid.UUID
 		service *string
 	)
-	if err := row.Scan(&hash, &tenant, &service, &x.BuyerID, &x.Principal, &x.Via, &x.UpstreamSID, &x.TunnelSession,
+	if err := row.Scan(&hash, &tenant, &service, &x.CallerID, &x.Principal, &x.Via, &x.UpstreamSID, &x.TunnelSession,
 		&x.ReplicaID, &x.ProtocolVersion, &caps, &x.CreatedAt, &x.LastSeenAt); err != nil {
 		return nil, err
 	}
@@ -377,7 +377,7 @@ func (s *Sessions) capped(ctx context.Context, tenant uuid.UUID, service, princi
 }
 
 // capLock is the transaction-scoped advisory lock under which one principal's sessions of one service are counted
-// against max_sessions_per_principal (D231), derived like push's per-buyer lock.
+// against max_sessions_per_principal (D231), derived like push's per-caller lock.
 func capLock(tenant uuid.UUID, service, principal string) int64 {
 	b := append([]byte("kontra.mcp_sessions\x00"), tenant[:]...)
 	b = append(append(append(b, service...), 0), principal...)
@@ -408,7 +408,7 @@ func (s *Sessions) PeerAddr(ctx context.Context, replicaID string) (addr string,
 // principal) is enforced by migration 0002's partial unique index (mcp_sessions_virtual: protocol_version
 // 2026-07-28, closed_at null, nulls not distinct): the insert is on conflict do nothing, then the open row is read,
 // so two first requests in flight at once, on one replica or two, share one session. row gives the tenant,
-// service, buyer, principal, via and the client's capabilities; its other fields are ignored.
+// service, caller, principal, via and the client's capabilities; its other fields are ignored.
 func (s *Sessions) Virtual(ctx context.Context, row Session) (*Session, error) {
 	_, h, err := MintID()
 	if err != nil {
@@ -419,11 +419,11 @@ func (s *Sessions) Virtual(ctx context.Context, row Session) (*Session, error) {
 		caps = []byte("{}")
 	}
 	for range 3 {
-		if _, err := s.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal,
+		if _, err := s.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal,
 				via, protocol_version, client_capabilities)
 			values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
 			on conflict (tenant_id, service, principal) where protocol_version = '2026-07-28' and closed_at is null do nothing`,
-			h[:], row.TenantID, row.Service, row.BuyerID, row.Principal, row.Via, mcpwire.V20260728, string(caps)); err != nil {
+			h[:], row.TenantID, row.Service, row.CallerID, row.Principal, row.Via, mcpwire.V20260728, string(caps)); err != nil {
 			return nil, fmt.Errorf("mcprelay: open a virtual session: %w", err)
 		}
 		x, err := s.OpenVirtual(ctx, row.TenantID, row.Service, row.Principal, time.Time{})

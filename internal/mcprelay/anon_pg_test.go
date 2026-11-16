@@ -117,7 +117,7 @@ func TestPlainCallsAreCapped(t *testing.T) {
 	e.service("svc", url, nil)
 	calls := newFakeCalls(100, 100)
 	r := e.replica("a", replicaOpts{withDeps: func(_ *replica, deps *Deps, _ *pg.Listener, _ *slog.Logger) { deps.Calls = calls }})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	c.initialize(r.url + "/mcp/svc")
 	modern := newModern(t, key, r.url+"/mcp/svc", false)
@@ -179,7 +179,7 @@ const (
 )
 
 // backUpstream is dualEra's upstream behind a handler that answers a notification or a client's response as mode
-// says, as a seller's own server may; ended receives the body of each such exchange held open (backEndless,
+// says, as a service's own server may; ended receives the body of each such exchange held open (backEndless,
 // backSilent) once the upstream saw it end (the gate closed it). idlessInits counts the initializes without an id it
 // received, whatever mode is.
 type backUpstream struct {
@@ -283,7 +283,7 @@ func TestEveryRelayedRequestIsCapped(t *testing.T) {
 	e.service("svc", up.url, nil)
 	calls := newFakeCalls(100, 100)
 	r := e.replica("a", replicaOpts{withDeps: func(_ *replica, deps *Deps, _ *pg.Listener, _ *slog.Logger) { deps.Calls = calls }})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	svcURL := r.url + "/mcp/svc"
 	c.initialize(svcURL)
@@ -437,7 +437,7 @@ func TestIdleStreamsLeaveCallsTheirSlots(t *testing.T) {
 	e.service("svc", url, nil)
 	calls := newFakeCalls(anon.Defaults.Calls, anon.Defaults.Streams)
 	r := e.replica("a", replicaOpts{withDeps: func(_ *replica, deps *Deps, _ *pg.Listener, _ *slog.Logger) { deps.Calls = calls }})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	svcURL := r.url + "/mcp/svc"
 	var clients []*client
 	for i := range anon.Defaults.Streams {

@@ -1,6 +1,6 @@
 // Package gatemcp is the gate's own MCP server at {public_url}/mcp (spec/relay.md §12): the tools search, describe,
-// hire and reply, the tools that follow, list, cancel and read a hire task for a client that sees only tools (status,
-// tasks, cancel, artifact, push_set, push_list, push_delete; D332..D339), and the MCP Tasks of the tasks hire creates,
+// send_message and reply, the tools that follow, list, cancel and read a send_message task for a client that sees only tools (status,
+// tasks, cancel, artifact, push_set, push_list, push_delete; D332..D339), and the MCP Tasks of the tasks send_message creates,
 // in both MCP eras (§12.5, D24, D269).
 //
 // It is not a tunnelled service and has no upstream. §11.1's transport rules apply (one message per POST, strict
@@ -10,21 +10,21 @@
 //     whose tenant is the principal's (internal/mcprelay's Sessions). Nothing is pinned and nothing hops: any replica
 //     serves any request of a session. The session's GET stream carries keep-alives and nothing else (D351: no URL
 //     elicitation completes on it); it has no event ids and is not resumed.
-//   - Modern (2026-07-28): the gate answers server/discover itself, advertising the tasks extension; a hire whose
+//   - Modern (2026-07-28): the gate answers server/discover itself, advertising the tasks extension; a send_message whose
 //     request declares it becomes a task answered as §11.12 step 4, and tasks/get, tasks/update and tasks/cancel
-//     serve hire tasks. No virtual session is opened and Admission's session operation is not consulted (D269).
+//     serve send_message tasks. No virtual session is opened and Admission's session operation is not consulted (D269).
 //
 // /mcp has no anonymous principal: a request without a credential is 401, with §12.1's challenge when the MCP
 // OAuth resource server is configured (internal/oidc, D270, D276), which also makes a JWT for /mcp's canonical URI a
 // principal (oidc:sub:<sub>, via mcp). Through a node, the session's principal applies (spec/tunnel.md §9).
 //
-// hire creates an ordinary A2A gate task (protocol a2a, dispatched as §6) through the A2A service's own handler
-// and work queue (Hirer, internal/relay), marked tasks.hired (D272); Admission (operation task) allows or denies it
+// send_message creates an ordinary A2A gate task (protocol a2a, dispatched as §6) through the A2A service's own handler
+// and work queue (Caller, internal/relay), marked tasks.sent_by_mcp (D272); Admission (operation task) allows or denies it
 // first (D351). The gate never sends a URL-mode elicitation/create.
 //
-// /mcp writes no calls rows: a hire is accounted as the A2A task it creates (D289).
+// /mcp writes no calls rows: a send_message is accounted as the A2A task it creates (D289).
 //
-// Work packages: M4 WP-04 (the legacy era, the four tools, MCP Tasks over hire tasks), M4 WP-05 (the
+// Work packages: M4 WP-04 (the legacy era, the four tools, MCP Tasks over send_message tasks), M4 WP-05 (the
 // 2026-07-28 era), M4 WP-06 (the OAuth resource server in front of it).
 package gatemcp
 
@@ -66,19 +66,19 @@ type Deps struct {
 	Multi          bool                // tenancy: multi: refs are <tenant>/<name> (§12.2, D271)
 	Auth           *auth.Authenticator // API keys, node principals, and the MCP OAuth resource server's JWTs (§12.1)
 	Sessions       *mcprelay.Sessions  // legacy sessions: mcp_sessions rows with service NULL
-	Catalog        *Catalog            // search, describe, and the service a hire names
-	Hirer          Hirer               // creates and follows up hire tasks (*relay.Hirer)
-	Tasks          *HireTasks          // the MCP Tasks of hire tasks, both eras
-	Log            *store.Log          // the task log hire tasks are read from
+	Catalog        *Catalog            // search, describe, and the service a send_message names
+	Sender         Sender              // creates and follows up send_message tasks (*relay.Caller)
+	Tasks          *SendMessageTasks   // the MCP Tasks of send_message tasks, both eras
+	Log            *store.Log          // the task log send_message tasks are read from
 	Waker          store.TaskWaker     // the replica's LISTEN connection: plain waits, tasks/result, GET streams
 	Render         *blob.Renderer      // kontra-blob: parts as presigned GETs in what /mcp answers; nil renders none
 	Served         Served              // the replica's registry: reply's task is the reader's only while served to it (D303)
 	Push           PushConfigs         // the A2A push configs (§10.1) the push tools set; nil: they answer that push is off
 	AllowedOrigins []string            // mcp.allowed_origins (§11.1)
 	Logger         *slog.Logger
-	// PlainWait is how long a plain hire and a reply wait (PlainWait when zero; tests shorten it).
+	// PlainWait is how long a plain send_message and a reply wait (PlainWait when zero; tests shorten it).
 	PlainWait time.Duration
-	// PlainBudget bounds a plain hire's or reply's whole request, from its arrival to its answer (PlainBudget when
+	// PlainBudget bounds a plain send_message's or reply's whole request, from its arrival to its answer (PlainBudget when
 	// zero; tests shorten it).
 	PlainBudget time.Duration
 	now         func() time.Time
@@ -101,8 +101,8 @@ func NewHandler(deps Deps) (*Handler, error) {
 	switch {
 	case deps.Auth == nil:
 		return nil, errors.New("gatemcp: no authenticator")
-	case deps.Sessions == nil || deps.Catalog == nil || deps.Hirer == nil || deps.Tasks == nil:
-		return nil, errors.New("gatemcp: the sessions, the catalog, the hirer and the tasks are required")
+	case deps.Sessions == nil || deps.Catalog == nil || deps.Sender == nil || deps.Tasks == nil:
+		return nil, errors.New("gatemcp: the sessions, the catalog, the caller and the tasks are required")
 	case deps.Log == nil || deps.Waker == nil:
 		return nil, errors.New("gatemcp: the log and the waker are required")
 	}
@@ -156,7 +156,7 @@ func (rq *request) id() json.RawMessage {
 }
 
 // version is the legacy protocol version the request's session negotiated (initialize): it decides what the session
-// has (tasks/*, hire's execution, task-augmented calls; D293). A request whose MCP-Protocol-Version names another
+// has (tasks/*, send_message's execution, task-augmented calls; D293). A request whose MCP-Protocol-Version names another
 // version is refused before (session). A modern request's is 2026-07-28, which CheckModern held equal to its _meta.
 func (rq *request) version() string {
 	if rq.modern {
@@ -185,9 +185,9 @@ func (rq *request) reader() Reader {
 }
 
 // ServeHTTP classifies the request's era (§11.12 rules 1–5) and serves it, in the order of spec §2.1 and §11.1: the
-// credential (401; a principal that may not hire, 403), the one-message rule and strict decoding (400), Origin (403),
+// credential (401; a principal that may not send messages, 403), the one-message rule and strict decoding (400), Origin (403),
 // the era; then initialize,
-// tools/list, tools/call of the tools, the legacy tasks/* (§11.6 over hire tasks), the client's responses to
+// tools/list, tools/call of the tools, the legacy tasks/* (§11.6 over send_message tasks), the client's responses to
 // gate requests, the GET stream of a legacy session and its DELETE; a modern request is the 2026-07-28 surface's.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rq := &request{w: w, r: r, start: h.now()}
@@ -216,13 +216,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		h.internal(rq, "authenticate", err)
 		return
-	case !p.MayHire():
+	case !p.MayCall():
 		// Spec §2.3: an API key with only enroll: scopes enrolls nodes and nothing else. The A2A routes refuse it every
-		// request (their allow: check and the identity interceptor); /mcp, whose every tool and task surface is hiring,
-		// refuses it whole, before a session exists, so no task of the buyer it shares with a hire key is read or
+		// request (their allow: check and the identity interceptor); /mcp, whose every tool and task surface is calling,
+		// refuses it whole, before a session exists, so no task of the caller it shares with a send_message key is read or
 		// cancelled through it (D293).
 		if post {
-			writeError(w, http.StatusForbidden, nil, mcpwire.CodeInvalidRequest, MsgMayNotHire, nil)
+			writeError(w, http.StatusForbidden, nil, mcpwire.CodeInvalidRequest, MsgMayNotCall, nil)
 		} else {
 			writeEmpty(w, http.StatusForbidden)
 		}
@@ -296,7 +296,7 @@ func (h *Handler) refuseParse(rq *request, m *mcpwire.Message, err error) {
 // newest; capabilities tools, and on 2025-11-25 tasks (list, cancel, requests.tools.call, §12.5); an mcp_sessions row
 // whose service is NULL and whose tenant is the principal's, keeping the client's capabilities (its elicitation
 // modes decide -32042 and §12.4's form); the gate's Mcp-Session-Id. No Admission is asked: /mcp is not a service,
-// and each hire is admitted as a task (§12.5).
+// and each send_message is admitted as a task (§12.5).
 func (h *Handler) initialize(rq *request) {
 	m := rq.msg
 	asked, _ := stringOf(m.Params, "protocolVersion")
@@ -314,7 +314,7 @@ func (h *Handler) initialize(rq *request) {
 		return
 	}
 	err = h.deps.Sessions.OpenGate(rq.ctx(), clientID, mcprelay.Session{
-		TenantID: tenantOf(rq.p), BuyerID: rq.p.BuyerID, Principal: rq.p.ID, Via: string(rq.p.Via),
+		TenantID: tenantOf(rq.p), CallerID: rq.p.CallerID, Principal: rq.p.ID, Via: string(rq.p.Via),
 		ProtocolVersion: v, ClientCaps: clientCaps,
 	})
 	if err != nil {
@@ -424,8 +424,8 @@ func (h *Handler) session(rq *request) {
 }
 
 // toolsCall serves tools/call of the tools (§12.2); any other name is -32602 "Unknown tool: <name>" (§11.3's answer).
-// A task-augmented call (params.task, 2025-11-25 sessions) is hire's only: the other tools are -32601, as for a
-// tool whose execution.taskSupport is absent (§11.5 step 0). A modern request has no per-request opt-in: a hire
+// A task-augmented call (params.task, 2025-11-25 sessions) is send_message's only: the other tools are -32601, as for a
+// tool whose execution.taskSupport is absent (§11.5 step 0). A modern request has no per-request opt-in: a send_message
 // whose request declares the tasks extension may become a task, the gate deciding (§11.12, D159, D269), and every
 // other tool call, and a modern params.task (a 2025-11-25 field), is a plain call.
 func (h *Handler) toolsCall(rq *request) {
@@ -435,16 +435,16 @@ func (h *Handler) toolsCall(rq *request) {
 	_, augmented := mcpwire.Member(m.Params, "task")
 	augmented = augmented && rq.version() == mcpwire.V20251125
 	if rq.modern {
-		augmented = name == ToolHire && mcpwire.DeclaresTasks(m.Params)
+		augmented = name == ToolSendMessage && mcpwire.DeclaresTasks(m.Params)
 	}
 	switch name {
-	case ToolSearch, ToolDescribe, ToolHire, ToolReply, ToolStatus, ToolTasks, ToolCancel, ToolArtifact,
+	case ToolSearch, ToolDescribe, ToolSendMessage, ToolReply, ToolStatus, ToolTasks, ToolCancel, ToolArtifact,
 		ToolPushSet, ToolPushList, ToolPushDelete:
 	default:
 		writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeInvalidParams, "Unknown tool: "+name, nil)
 		return
 	}
-	if augmented && name != ToolHire {
+	if augmented && name != ToolSendMessage {
 		writeError(rq.w, http.StatusOK, m.ID, mcpwire.CodeMethodNotFound, "Tool "+name+" does not support task-augmented execution", nil)
 		return
 	}
@@ -453,8 +453,8 @@ func (h *Handler) toolsCall(rq *request) {
 		h.search(rq, args)
 	case ToolDescribe:
 		h.describeTool(rq, args)
-	case ToolHire:
-		h.hire(rq, args, augmented)
+	case ToolSendMessage:
+		h.send(rq, args, augmented)
 	case ToolReply:
 		h.reply(rq, args)
 	case ToolStatus:
@@ -539,9 +539,9 @@ func (h *Handler) internal(rq *request, what string, err error) {
 	writeError(rq.w, http.StatusServiceUnavailable, rq.id(), mcpwire.CodeInternal, "the gate could not serve the request", nil)
 }
 
-// MsgMayNotHire is the 403 answer to a principal that may not call services (an API key without the hire scope),
+// MsgMayNotCall is the 403 answer to a principal that may not call services (an API key without the call scope),
 // the A2A identity interceptor's words.
-const MsgMayNotHire = "this API key may not call services (it has no hire scope)"
+const MsgMayNotCall = "this API key may not call services (it has no call scope)"
 
 // Messages and codes of the gate's own answers.
 const (

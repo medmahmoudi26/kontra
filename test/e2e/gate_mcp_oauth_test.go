@@ -25,8 +25,8 @@ import (
 //     scope="mcp", while open, whose allow: admits anonymous, serves it;
 //   - each of the three RFC 9728 documents has resource = the route's canonical URI and authorization_servers =
 //     [issuer], nope's included;
-//   - a token whose aud is {public_url}/mcp opens a session on /mcp; the session and its hire task are via mcp with the
-//     principal oidc:sub:<sub> (buyer UUIDv5(issuer ‖ sub)); the same token is 401 with error="invalid_token" on /mcp/fs
+//   - a token whose aud is {public_url}/mcp opens a session on /mcp; the session and its send_message task are via mcp with the
+//     principal oidc:sub:<sub> (caller UUIDv5(issuer ‖ sub)); the same token is 401 with error="invalid_token" on /mcp/fs
 //     and 401 on /agents/slow;
 //   - a token whose aud is /mcp/fs works there only (401 on /mcp);
 //   - an expired token, another issuer's, an HMAC and a none one, and a bad signature are 401;
@@ -91,7 +91,7 @@ func TestGateMCPOAuth(t *testing.T) {
 		}
 	}
 
-	// A token for /mcp: a session on each replica (each fetches the key set once), via mcp; its hire task too.
+	// A token for /mcp: a session on each replica (each fetches the key set once), via mcp; its send_message task too.
 	mcpTok := as.MustSign(oidctest.Token{Audience: []string{oidc.CanonicalURI(pub, "")}})
 	var lastFetch time.Time
 	for i, g := range h.Gates {
@@ -101,11 +101,11 @@ func TestGateMCPOAuth(t *testing.T) {
 			t.Fatalf("after the token's first use on %s the key set was fetched %d times, want %d", g.Name, n, i+1)
 		}
 		if i == 0 {
-			r := Tool(t, s.Tool("hire", `{"service":"slow","message":"hi"}`))
-			buyer, _ := kids.OIDCBuyer(as.Issuer(), "user-1")
-			if r.IsError || r.TaskID() == "" || !scalar[bool](t, h, `select via = 'mcp' and principal = 'oidc:sub:user-1' and buyer_id = $2 and hired
-				from kontra.tasks where id::text = $1`, r.TaskID(), buyer) {
-				t.Errorf("the token's hire task is not via mcp, oidc:sub:user-1: %+v", r)
+			r := Tool(t, s.Tool("send_message", `{"service":"slow","message":"hi"}`))
+			caller, _ := kids.OIDCCaller(as.Issuer(), "user-1")
+			if r.IsError || r.TaskID() == "" || !scalar[bool](t, h, `select via = 'mcp' and principal = 'oidc:sub:user-1' and caller_id = $2 and sent_by_mcp
+				from kontra.tasks where id::text = $1`, r.TaskID(), caller) {
+				t.Errorf("the token's send_message task is not via mcp, oidc:sub:user-1: %+v", r)
 			}
 		}
 	}

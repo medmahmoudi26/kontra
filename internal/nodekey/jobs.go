@@ -19,7 +19,7 @@ const JobsDirName = "jobs"
 // jobKeySuffix is a job key file's extension.
 const jobKeySuffix = ".key"
 
-// JobKeys are a hiring node's per-job keys for one gate: ~/.kontra/jobs/<gate host>/<job id>.key, 0600, in
+// JobKeys are a calling node's per-job keys for one gate: ~/.kontra/jobs/<gate host>/<job id>.key, 0600, in
 // the identity file's format (spec/tunnel.md §2.3, spec/ext-sealed.md §4). A job is an A2A task, an MCP task,
 // or an MCP session for its plain calls. The public half travels as replyTo inside the sealed request header
 // and as metadata["kontra.sealed.replyTo"]; the private half never leaves the node.

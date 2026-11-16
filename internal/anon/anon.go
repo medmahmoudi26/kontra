@@ -17,8 +17,8 @@
 // tenant row as a tombstone (tenants.deleted_at), so a slug is never reused.
 //
 // The runtime limits (§6.2) are checked where the work is created: Caps.Task when a task is created (as host and as
-// hirer, under a per-tenant lock), Caps.Call around an MCP request and Caps.Stream around an MCP stream relayed to the
-// tenant's services (gate-wide, in anon_calls, each counted apart), the hiring-stream cap
+// caller, under a per-tenant lock), Caps.Call around an MCP request and Caps.Stream around an MCP stream relayed to the
+// tenant's services (gate-wide, in anon_calls, each counted apart), the calling-stream cap
 // in internal/tunnelgate, the parts total with relay §6.6's byte accounting (Caps.Message before a task row,
 // Caps.Budget at each dispatch).
 //
@@ -60,10 +60,10 @@ type Limits struct {
 	TTL               time.Duration
 	TenantsPerNetwork int
 	Services          int
-	Tasks             int // as host and as hirer, each
+	Tasks             int // as host and as caller, each
 	Calls             int // concurrent MCP requests relayed to the tenant's services (D304)
 	Streams           int // GET and subscriptions/listen streams open to them, counted apart (D308)
-	HiringStreams     int
+	CallingStreams    int
 	PartsBytes        int64
 	PurgeAfter        time.Duration
 	MaxTenants        int // live anonymous tenants, gate-wide
@@ -72,7 +72,7 @@ type Limits struct {
 // Defaults are §6.2's.
 var Defaults = Limits{
 	TTL: config.DefaultAnonTTL, TenantsPerNetwork: config.DefaultAnonTenantsPerNetwork, Services: config.DefaultAnonServices,
-	Tasks: config.DefaultAnonTasks, Calls: config.DefaultAnonCalls, Streams: config.DefaultAnonStreams, HiringStreams: config.DefaultAnonHiringStreams,
+	Tasks: config.DefaultAnonTasks, Calls: config.DefaultAnonCalls, Streams: config.DefaultAnonStreams, CallingStreams: config.DefaultAnonCallingStreams,
 	PartsBytes: config.DefaultAnonPartsBytes, PurgeAfter: config.DefaultAnonPurgeAfter, MaxTenants: config.DefaultAnonMaxTenants,
 }
 
@@ -81,7 +81,7 @@ var Defaults = Limits{
 func LimitsFrom(a config.AnonymousSessions) Limits {
 	l := Limits{
 		TTL: a.TTL.D(), TenantsPerNetwork: a.TenantsPerNetwork, Services: a.Services, Tasks: a.Tasks, Calls: a.Calls,
-		Streams: a.Streams, HiringStreams: a.HiringStreams, PartsBytes: a.PartsBytes.Int64(), PurgeAfter: a.PurgeAfter.D(), MaxTenants: a.MaxTenants,
+		Streams: a.Streams, CallingStreams: a.CallingStreams, PartsBytes: a.PartsBytes.Int64(), PurgeAfter: a.PurgeAfter.D(), MaxTenants: a.MaxTenants,
 	}
 	return l.withDefaults()
 }
@@ -107,7 +107,7 @@ func (l Limits) withDefaults() Limits {
 	set(&l.Tasks, d.Tasks)
 	set(&l.Calls, d.Calls)
 	set(&l.Streams, d.Streams)
-	set(&l.HiringStreams, d.HiringStreams)
+	set(&l.CallingStreams, d.CallingStreams)
 	set(&l.MaxTenants, d.MaxTenants)
 	return l
 }
@@ -892,8 +892,8 @@ type Role int
 
 // Roles.
 const (
-	AsHost  Role = iota + 1 // the task's service is the tenant's
-	AsHirer                 // the task's principal is a key of the tenant
+	AsHost   Role = iota + 1 // the task's service is the tenant's
+	AsCaller                 // the task's principal is a key of the tenant
 )
 
 // Caps checks the runtime limits of anonymous tenants (§6.2). A nil *Caps checks nothing (a gate without
@@ -922,7 +922,7 @@ func (c *Caps) Limits() Limits { return c.lim }
 
 // Task checks, in tx (the transaction that creates the task, before its row) and under a lock on each anonymous
 // tenant involved, that the tenant has fewer than Tasks non-terminal tasks in each role it has here: as host when the
-// service's tenant (svcTenant, its slug svcSlug) is anonymous, as hirer when principal is node:<key_id> of a key of an
+// service's tenant (svcTenant, its slug svcSlug) is anonymous, as caller when principal is node:<key_id> of a key of an
 // anonymous tenant. ErrTooManyTasks otherwise. Two creators of one tenant serialize on its row (FOR NO KEY UPDATE, so
 // the inserts of its services, which take KEY SHARE, never wait on it), so they never both pass at Tasks-1.
 func (c *Caps) Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug, principal string) error {
@@ -938,21 +938,21 @@ func (c *Caps) Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug
 		checks = append(checks, check{svcTenant, AsHost})
 	}
 	if keyID, ok := strings.CutPrefix(principal, "node:"); ok {
-		var hirer uuid.UUID
+		var callingNode uuid.UUID
 		err := tx.QueryRow(ctx, `select k.tenant_id from kontra.tunnel_keys k join kontra.tenants t on t.id = k.tenant_id
-			where k.key_id = $1 and t.kind = 'anonymous'`, keyID).Scan(&hirer)
+			where k.key_id = $1 and t.kind = 'anonymous'`, keyID).Scan(&callingNode)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 		case err != nil:
 			return err
 		default:
-			checks = append(checks, check{hirer, AsHirer})
+			checks = append(checks, check{callingNode, AsCaller})
 		}
 	}
 	if len(checks) == 0 {
 		return nil
 	}
-	// Locks in id order: a creator hiring one anonymous tenant's service from another's key never deadlocks with one
+	// Locks in id order: a creator calling one anonymous tenant's service from another's key never deadlocks with one
 	// going the other way.
 	tenants := make([]uuid.UUID, 0, len(checks))
 	for _, ch := range checks {
@@ -980,8 +980,8 @@ func (c *Caps) Task(ctx context.Context, tx pgx.Tx, svcTenant uuid.UUID, svcSlug
 		}
 		if n >= c.lim.Tasks {
 			role := "host"
-			if ch.role == AsHirer {
-				role = "hirer"
+			if ch.role == AsCaller {
+				role = "caller"
 			}
 			return fmt.Errorf("%w (%d as %s, tasks %d)", ErrTooManyTasks, n, role, c.lim.Tasks)
 		}
@@ -1143,7 +1143,7 @@ const EventConverted = "tunnel.anonymous_converted"
 
 // Conversion authorities (ConvertRequest.Via).
 const (
-	ViaAPIKey = "api_key"          // §6.3: the hello's auth, an API key with enroll:* (or one admitted hire-only)
+	ViaAPIKey = "api_key"          // §6.3: the hello's auth, an API key with enroll:* (or one admitted call-only)
 	ViaTokens = "enrollment_token" // D286: the hello's enroll tokens
 )
 

@@ -163,8 +163,8 @@ kontra connect --serve a2a:hello=http://localhost:9999   <span class="c"># --gat
 <span class="c">#  → anonymous session · https://gateway.kontra.sh/agents/anon-7f3a/hello · expires in 2 h
 #  → console http://localhost:7778</span>
 a2a send http://localhost:7777/agents/anon-7f3a/hello "hi"
-<span class="c">#  → Hello World · visible in History on :7778, hosted and hired from the same laptop</span></code></pre>
-<p>Anonymous, ephemeral, rate-limited sessions on the public gate, the way ngrok hands out unauthenticated tunnels. <code>kontra login</code> (the existing magic-link flow) turns <code>anon-7f3a</code> into your name, makes it persistent and unlocks listings. The free tier is a tenant with tight caps, not a different binary. This also makes the first-user story a single machine: host and hire through one gate from one laptop, then invite a second machine.</p>
+<span class="c">#  → Hello World · visible in History on :7778, hosted and called from the same laptop</span></code></pre>
+<p>Anonymous, ephemeral, rate-limited sessions on the public gate, the way ngrok hands out unauthenticated tunnels. <code>kontra login</code> (the existing magic-link flow) turns <code>anon-7f3a</code> into your name, makes it persistent and unlocks listings. The free tier is a tenant with tight caps, not a different binary. This also makes the first-user story a single machine: host and call through one gate from one laptop, then invite a second machine.</p>
 <div class="note">Anonymous sessions need their own abuse controls, named in §12 of the PRD: 2 h TTL, per-IP session caps, no listings, no sealing recipients published beyond the session, the standard body and rate limits.</div>
 
 <h3>Agent in Docker</h3>

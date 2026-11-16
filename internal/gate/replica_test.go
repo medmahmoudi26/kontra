@@ -108,7 +108,7 @@ func TestReaperClosesOnlyTheHoldersSessions(t *testing.T) {
 			u := uuid.New()
 			tun = &u
 		}
-		if _, err := pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via,
+		if _, err := pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via,
 			tunnel_session, replica_id, protocol_version) values ($1, $2, $3, $4, 'key:kk_t_x', 'api_key', $5, $6, '2025-11-25')`,
 			h[:], team, service, uuid.New(), tun, replica); err != nil {
 			t.Fatal(err)

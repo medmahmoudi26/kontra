@@ -25,7 +25,7 @@ import (
 // M4 (WP-07): the operator's authorization server for the MCP resource server (spec/relay.md §12.1, D276, D296)
 // and kontra login (spec/tunnel.md §6.3, D278): internal/oidc/oidctest over HTTPS on 127.0.0.1, with a throwaway
 // CA that the replicas and kontra login trust through SSL_CERT_FILE (a file under the run's directory). Its token
-// endpoint issues, by default, a kk_ API key of an account tenant of the gate's database with the scopes hire and
+// endpoint issues, by default, a kk_ API key of an account tenant of the gate's database with the scopes call and
 // enroll:* (oidctest.DBMinter, once the test names the tenant and the gate with MintFor), and only for that gate's
 // origin as the resource, invalid_target for any other (spec/tunnel.md §6.3 step 4, D305); with MintJWT it issues an
 // ES256 JWT for the authorization's resource instead (an access token that is not an API key).
@@ -69,7 +69,7 @@ func (as *AuthServer) issue(ctx context.Context, subject, resource string) (stri
 	return mint(ctx, subject, resource)
 }
 
-// MintFor makes the token endpoint issue kk_ keys of the tenant tenantID (hire, enroll:*), minted in pool, for the
+// MintFor makes the token endpoint issue kk_ keys of the tenant tenantID (call, enroll:*), minted in pool, for the
 // gate at origin gate only.
 func (as *AuthServer) MintFor(pool *pgxpool.Pool, tenantID uuid.UUID, gate string) {
 	as.mu.Lock()

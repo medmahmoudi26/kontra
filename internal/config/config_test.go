@@ -37,7 +37,7 @@ services:
     backend: { tunnel: {} }
 `
 
-// mcpDirect is minimal with a direct MCP service: an MCP service has no card, so seller_keys on it verify nothing
+// mcpDirect is minimal with a direct MCP service: an MCP service has no card, so service_keys on it verify nothing
 // and load with a note.
 const mcpDirect = `
 public_url: http://localhost:8080
@@ -118,7 +118,7 @@ func TestDefaultsApplied(t *testing.T) {
 		{"services.hello.tools", s.Tools, (*Tools)(nil)},
 		{"services.hello.tasks (a2a)", s.Tasks, ""},
 		{"services.hello.sealed", s.Sealed.Mode, SealedOff},
-		{"services.hello.seller_keys", s.SellerKeys.IsZero(), true},
+		{"services.hello.service_keys", s.ServiceKeys.IsZero(), true},
 		{"services.hello.session_idle_s", s.SessionIdle.D(), 3600 * time.Second},
 		{"services.hello.max_sessions_per_principal", s.SessionsPerPrincipal(), 4},
 		{"services.hello.task.timeout", s.Task.Timeout.D(), time.Hour},
@@ -231,8 +231,8 @@ func TestSealedShapes(t *testing.T) {
 
 // sealed: on a direct backend is refused (D91: no node unseals for it, so it would fail open). Sealing is built
 // since M3 WP-08, which lifts D144's refusal on tunnel services: sealed: true and {required: false} load on tunnel
-// a2a and mcp services, with seller_keys or without, and with no warning. Seller card signatures are verified (M3
-// WP-02 lifts D90 and the seller_keys half of D144): seller_keys loads on direct and tunnel a2a services, with no
+// a2a and mcp services, with service_keys or without, and with no warning. Service card signatures are verified (M3
+// WP-02 lifts D90 and the service_keys half of D144): service_keys loads on direct and tunnel a2a services, with no
 // warning, and on MCP services with a note (no card to verify).
 func TestFailOpenKeysRefused(t *testing.T) {
 	for _, tc := range []struct{ name, yaml, want string }{
@@ -253,7 +253,7 @@ func TestFailOpenKeysRefused(t *testing.T) {
 		{"sealed on a tunnel service", tunnelled + "    sealed: true\n", "hello", SealedRequired},
 		{"optional sealing on a tunnel service", tunnelled + "    sealed: { required: false }\n", "hello", SealedOptional},
 		{"sealed on a tunnel mcp service", minimal + "  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    sealed: true\n", "fs", SealedRequired},
-		{"sealed with seller_keys on a tunnel service", tunnelled + "    sealed: true\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello", SealedRequired},
+		{"sealed with service_keys on a tunnel service", tunnelled + "    sealed: true\n    service_keys: { url: \"https://service.example.com/jwks.json\" }\n", "hello", SealedRequired},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := parse(t, tc.yaml)
@@ -267,31 +267,31 @@ func TestFailOpenKeysRefused(t *testing.T) {
 			}
 		})
 	}
-	const inline = "    seller_keys: { keys: [ { kty: EC, crv: P-256, x: \"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\", y: \"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\" } ] }\n"
+	const inline = "    service_keys: { keys: [ { kty: EC, crv: P-256, x: \"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\", y: \"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\" } ] }\n"
 	for _, tc := range []struct{ name, yaml, svc string }{
-		{"seller_keys {url} on a direct a2a backend", minimal + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello"},
-		{"inline seller_keys on a direct a2a backend", minimal + inline, "hello"},
-		{"seller_keys {url} on a tunnel service", tunnelled + "    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n", "hello"},
-		{"inline seller_keys on a tunnel service", tunnelled + inline, "hello"},
+		{"service_keys {url} on a direct a2a backend", minimal + "    service_keys: { url: \"https://service.example.com/jwks.json\" }\n", "hello"},
+		{"inline service_keys on a direct a2a backend", minimal + inline, "hello"},
+		{"service_keys {url} on a tunnel service", tunnelled + "    service_keys: { url: \"https://service.example.com/jwks.json\" }\n", "hello"},
+		{"inline service_keys on a tunnel service", tunnelled + inline, "hello"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := parse(t, tc.yaml)
-			if c.Services[tc.svc].SellerKeys.IsZero() || len(c.Warnings) != 0 {
-				t.Errorf("seller_keys %s, warnings %q", c.Services[tc.svc].SellerKeys, c.Warnings)
+			if c.Services[tc.svc].ServiceKeys.IsZero() || len(c.Warnings) != 0 {
+				t.Errorf("service_keys %s, warnings %q", c.Services[tc.svc].ServiceKeys, c.Warnings)
 			}
 		})
 	}
-	c := parse(t, minimal+"  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://seller.example.com/jwks.json\" }\n")
+	c := parse(t, minimal+"  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n    service_keys: { url: \"https://service.example.com/jwks.json\" }\n")
 	if !slices.ContainsFunc(c.Warnings, func(w string) bool {
-		return strings.HasPrefix(w, "services.fs.seller_keys: an MCP service has no card")
+		return strings.HasPrefix(w, "services.fs.service_keys: an MCP service has no card")
 	}) {
-		t.Errorf("seller_keys on a tunnel mcp service: warnings %q", c.Warnings)
+		t.Errorf("service_keys on a tunnel mcp service: warnings %q", c.Warnings)
 	}
 	// An inline set the gate cannot verify with is refused at load, not left to fail every fetch.
-	if err := parseErr(t, minimal+"    seller_keys: { keys: [ { kty: RSA, n: abc, e: AQAB } ] }\n"); !strings.Contains(err.Error(), "no EC P-256 signing key") {
+	if err := parseErr(t, minimal+"    service_keys: { keys: [ { kty: RSA, n: abc, e: AQAB } ] }\n"); !strings.Contains(err.Error(), "no EC P-256 signing key") {
 		t.Errorf("an RSA-only set: %v", err)
 	}
-	if err := parseErr(t, minimal+"    seller_keys: { keys: [ { kty: EC, crv: P-256, x: AAAA, y: AAAA } ] }\n"); !strings.Contains(err.Error(), "services.hello.seller_keys") {
+	if err := parseErr(t, minimal+"    service_keys: { keys: [ { kty: EC, crv: P-256, x: AAAA, y: AAAA } ] }\n"); !strings.Contains(err.Error(), "services.hello.service_keys") {
 		t.Errorf("a malformed key: %v", err)
 	}
 }
@@ -301,7 +301,7 @@ func TestFailOpenKeysRefused(t *testing.T) {
 // at start) or for a gate without A2A services.
 func TestSigningKey(t *testing.T) {
 	const public = "public_url: https://agents.acme.io\npostgres: postgres://k@db/k\ntls: { terminated_by_proxy: true }\n"
-	const a2aSvc = "services:\n  hello:\n    kind: a2a\n    backend: { tunnel: {} }\n  book:\n    kind: a2a\n    backend: { a2a: { url: \"https://seller.example.com\" } }\n"
+	const a2aSvc = "services:\n  hello:\n    kind: a2a\n    backend: { tunnel: {} }\n  book:\n    kind: a2a\n    backend: { a2a: { url: \"https://service.example.com\" } }\n"
 	const mcpSvc = "services:\n  fs:\n    kind: mcp\n    backend: { tunnel: {} }\n"
 	err := parseErr(t, public+a2aSvc)
 	var ve *ValidationError
@@ -411,12 +411,14 @@ func TestLoadErrors(t *testing.T) {
 		{"sessions per principal on a2a", svc("    kind: a2a\n    backend: { tunnel: {} }\n    max_sessions_per_principal: 3\n"), "max_sessions_per_principal: mcp services only"},
 		{"zero sessions per principal", svc("    kind: mcp\n    backend: { tunnel: {} }\n    max_sessions_per_principal: 0\n"), "max_sessions_per_principal 0: want 1 to 10000"},
 		{"too many sessions per principal", svc("    kind: mcp\n    backend: { tunnel: {} }\n    max_sessions_per_principal: 10001\n"), "max_sessions_per_principal 10001: want 1 to 10000"},
-		{"seller_keys both", svc("    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: { url: https://x.example.com/jwks, keys: [{kty: EC}] }\n"), "keys and url are exclusive"},
-		{"seller_keys http url", svc("    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: { url: http://x.example.com/jwks }\n"), "want https://"},
+		{"service_keys both", svc("    kind: a2a\n    backend: { tunnel: {} }\n    service_keys: { url: https://x.example.com/jwks, keys: [{kty: EC}] }\n"), "keys and url are exclusive"},
+		{"service_keys http url", svc("    kind: a2a\n    backend: { tunnel: {} }\n    service_keys: { url: http://x.example.com/jwks }\n"), "want https://"},
 		{"annotations not a map", svc("    kind: a2a\n    backend: { tunnel: {} }\n    annotations: [1]\n"), "annotations: want a mapping"},
 		{"unknown service key", svc("    kind: a2a\n    backend: { tunnel: {} }\n    alow: [org:default]\n"), "field alow not found"},
 		{"unknown top-level key", head + "listn: :1\n", "field listn not found"},
 		{"agents: from the PRD", head + "agents: {}\n", "agents: is now services:"},
+		{"seller_keys from before D363", svc("    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: { url: https://x.example.com/jwks }\n"), "seller_keys was renamed service_keys"},
+		{"hiring_streams from before D363", head + "tunnel:\n  anonymous: { hiring_streams: 4 }\n", "hiring_streams was renamed calling_streams"},
 		{"duplicate service", head + "services:\n  s: { kind: a2a, backend: { tunnel: {} } }\n  s: { kind: a2a, backend: { tunnel: {} } }\n", "already defined"},
 		{"two documents", minimal + "---\nlisten: :1\n", "want one YAML document"},
 		{"empty", "", "empty configuration"},
@@ -483,7 +485,7 @@ func TestLoadErrors(t *testing.T) {
 		// tunnel.anonymous (tunnel.md §6, §6.2; D277, D287).
 		{"anonymous on a single-tenant gate (D277)", head + "tunnel: { anonymous: true }\n", "tunnel.anonymous: needs tenancy: multi"},
 		{"anonymous limits on a single-tenant gate (D277)", head + "tunnel: { anonymous: { ttl: 1h } }\n", "D277"},
-		{"anonymous hiring_streams over 32", head + "tenancy: multi\ntunnel: { anonymous: { hiring_streams: 33 } }\n", "hiring_streams 33: at most 32"},
+		{"anonymous calling_streams over 32", head + "tenancy: multi\ntunnel: { anonymous: { calling_streams: 33 } }\n", "calling_streams 33: at most 32"},
 		{"anonymous zero services", head + "tenancy: multi\ntunnel: { anonymous: { services: 0 } }\n", "tunnel.anonymous.services"},
 		{"anonymous negative tasks", head + "tenancy: multi\ntunnel: { anonymous: { tasks: -1 } }\n", "tunnel.anonymous.tasks"},
 		{"anonymous zero max_tenants", head + "tenancy: multi\ntunnel: { anonymous: { max_tenants: 0 } }\n", "tunnel.anonymous.max_tenants"},
@@ -668,13 +670,13 @@ func TestLoadErrorsHideURLCredentials(t *testing.T) {
 	const head = "postgres: postgres://kontra@localhost/kontra\npublic_url: http://localhost:8080\n"
 	svc := func(body string) string { return head + "services:\n  s:\n" + body }
 	for name, y := range map[string]string{
-		"backend url":              svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@seller.example/a2a\" } }\n"),
-		"backend url, bad port":    svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@seller.example:99999/a2a\" } }\n"),
-		"backend url, unparseable": svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@seller.example:x/a2a\" } }\n"),
-		"backend url, no scheme":   svc("    kind: a2a\n    backend: { a2a: { url: \"bob:" + pw + "@seller.example/a2a\" } }\n"),
-		"backend url, http":        svc("    kind: a2a\n    backend: { a2a: { url: \"http://bob:" + pw + "@seller.example/a2a\" } }\n"),
+		"backend url":              svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@service.example/a2a\" } }\n"),
+		"backend url, bad port":    svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@service.example:99999/a2a\" } }\n"),
+		"backend url, unparseable": svc("    kind: a2a\n    backend: { a2a: { url: \"https://bob:" + pw + "@service.example:x/a2a\" } }\n"),
+		"backend url, no scheme":   svc("    kind: a2a\n    backend: { a2a: { url: \"bob:" + pw + "@service.example/a2a\" } }\n"),
+		"backend url, http":        svc("    kind: a2a\n    backend: { a2a: { url: \"http://bob:" + pw + "@service.example/a2a\" } }\n"),
 		"mcp backend url":          svc("    kind: mcp\n    backend: { mcp: { url: \"https://bob:" + pw + "@mcp.example/mcp\" } }\n"),
-		"seller_keys url":          svc("    kind: a2a\n    backend: { tunnel: {} }\n    seller_keys: { url: \"https://u:" + pw + "@x.example/jwks\" }\n"),
+		"service_keys url":         svc("    kind: a2a\n    backend: { tunnel: {} }\n    service_keys: { url: \"https://u:" + pw + "@x.example/jwks\" }\n"),
 		"oidc issuer":              head + "auth: { oidc: { issuer: \"https://u:" + pw + "@login.example\", audience: kontra } }\n",
 		"oidc issuer, unparseable": head + "auth: { oidc: { issuer: \"https://u:" + pw + "@login.example:p\", audience: kontra } }\n",
 		"mcp_oauth issuer":         head + "auth: { mcp_oauth: { issuer: \"https://u:" + pw + "@login.example\" } }\n",
@@ -757,10 +759,10 @@ postgres: postgres://k@db/k
 		{"https backend with a path is a base URL (D71)", minimal + `
   multi:
     kind: a2a
-    backend: { a2a: { url: "https://seller.example.com/agents/one" } }
+    backend: { a2a: { url: "https://service.example.com/agents/one" } }
     allow: ["key:kk_acme_*", "key:kk_acme_9f2c41aa", "key:*", "org:default", "oidc:sub:auth0|42", "node:k1_abcdefghijklmnopqrstuvwxyz", anonymous]
 `, func(t *testing.T, c *Config) {
-			if got := c.Services["multi"].Backend.Direct().URL; got != "https://seller.example.com/agents/one" {
+			if got := c.Services["multi"].Backend.Direct().URL; got != "https://service.example.com/agents/one" {
 				t.Errorf("url = %q", got)
 			}
 		}},
@@ -880,28 +882,28 @@ func TestRemoteLifecycleAccepted(t *testing.T) {
 	}
 }
 
-// The seller_keys mapping decodes (the skeleton's json.RawMessage could not), as JSON.
-func TestSellerKeysDecodeAsJSON(t *testing.T) {
+// The service_keys mapping decodes (the skeleton's json.RawMessage could not), as JSON.
+func TestServiceKeysDecodeAsJSON(t *testing.T) {
 	c := parse(t, mcpDirect+`
-    seller_keys:
+    service_keys:
       keys:
         - { kty: EC, crv: P-256, x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU", y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0", kid: "k1", use: sig }
       extra: 3
 `)
-	got := c.Services["hello"].SellerKeys
+	got := c.Services["hello"].ServiceKeys
 	var v struct {
 		Keys  []map[string]string `json:"keys"`
 		Extra int                 `json:"extra"`
 	}
 	if err := json.Unmarshal(got, &v); err != nil {
-		t.Fatalf("seller_keys %s: %v", got, err)
+		t.Fatalf("service_keys %s: %v", got, err)
 	}
 	if len(v.Keys) != 1 || v.Keys[0]["kid"] != "k1" || v.Keys[0]["crv"] != "P-256" || v.Extra != 3 {
-		t.Errorf("seller_keys = %s", got)
+		t.Errorf("service_keys = %s", got)
 	}
-	c = parse(t, mcpDirect+"    seller_keys: { url: \"https://seller.example.com/.well-known/jwks.json\" }\n")
-	if string(c.Services["hello"].SellerKeys) != `{"url":"https://seller.example.com/.well-known/jwks.json"}` {
-		t.Errorf("seller_keys {url} = %s", c.Services["hello"].SellerKeys)
+	c = parse(t, mcpDirect+"    service_keys: { url: \"https://service.example.com/.well-known/jwks.json\" }\n")
+	if string(c.Services["hello"].ServiceKeys) != `{"url":"https://service.example.com/.well-known/jwks.json"}` {
+		t.Errorf("service_keys {url} = %s", c.Services["hello"].ServiceKeys)
 	}
 	c = parse(t, minimal+"    annotations: { search: { label: \"beta\" }, card_extensions: [ { uri: \"https://x.example.com/ext\", required: false } ], n: 1.5, z: null }\n")
 	want := `{"card_extensions":[{"required":false,"uri":"https://x.example.com/ext"}],"n":1.5,"search":{"label":"beta"},"z":null}`
@@ -979,7 +981,7 @@ func TestUnbuiltWarnings(t *testing.T) {
   files:
     kind: mcp
     backend: { mcp: { url: "https://mcp.example.com/mcp" } }
-    seller_keys: { url: "https://seller.example.com/jwks.json" }
+    service_keys: { url: "https://service.example.com/jwks.json" }
 blobs: s3://kontra-parts
 signing_key: file:./kontra.key
 auth: { api_keys: true, oidc: { issuer: "https://login.example.com", audience: kontra }, mcp_oauth: { issuer: "https://login.example.com" } }
@@ -989,7 +991,7 @@ peer: { listen: "127.0.0.1:8444", secret_env: KONTRA_PEER_SECRET }
 `)
 	// tunnel.anonymous (M4 WP-03), auth.mcp_oauth (M4 WP-06) and auth.oidc (M5, D314) are built: they load with no
 	// warning.
-	want := []string{"services.files.seller_keys"}
+	want := []string{"services.files.service_keys"}
 	for _, w := range want {
 		if !slices.ContainsFunc(c.Warnings, func(s string) bool { return strings.HasPrefix(s, w) }) {
 			t.Errorf("no warning starting %q in %q", w, c.Warnings)
@@ -1063,9 +1065,9 @@ tls: { cert: certs/fullchain.pem, key: /etc/kontra/privkey.pem }
 	}
 }
 
-// The hello-exec seller's configuration loads as its README describes.
+// The hello-exec service's configuration loads as its README describes.
 func TestHelloExecLoads(t *testing.T) {
-	c, err := Load("../../examples/sellers/hello-exec/kontra.yaml")
+	c, err := Load("../../examples/agents/hello-exec/kontra.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1083,12 +1085,12 @@ func TestHelloExecLoads(t *testing.T) {
 
 // The examples' tunnel gates (M2) load as their READMEs describe: one tunnel service each, for the team's
 // tenant, on a plaintext localhost gate whose tunnel channel binding is therefore none, with no warning (no
-// sealed or seller_keys, which a tunnel service refuses in M2).
+// sealed or service_keys, which a tunnel service refuses in M2).
 func TestTunnelExamplesLoad(t *testing.T) {
 	for path, name := range map[string]string{
-		"../../examples/sellers/hello-exec/kontra-tunnel.yaml": "hello",
-		"../../examples/sellers/helloworld/kontra.yaml":        "hello",
-		"../../examples/sellers/booking/kontra.yaml":           "booking",
+		"../../examples/agents/hello-exec/kontra-tunnel.yaml": "hello",
+		"../../examples/agents/helloworld/kontra.yaml":        "hello",
+		"../../examples/agents/booking/kontra.yaml":           "booking",
 	} {
 		c, err := Load(path)
 		if err != nil {
@@ -1102,7 +1104,7 @@ func TestTunnelExamplesLoad(t *testing.T) {
 			t.Fatalf("%s: services.%s = %+v, want an a2a tunnel service", path, name, s)
 		}
 		if !slices.Equal(s.Allow, []string{"org:default"}) || s.Task.Timeout.D() != 10*time.Minute || s.Task.RetryCount() != 2 ||
-			s.Sealed.Mode != SealedOff || len(s.SellerKeys) != 0 {
+			s.Sealed.Mode != SealedOff || len(s.ServiceKeys) != 0 {
 			t.Errorf("%s: services.%s = %+v", path, name, s)
 		}
 		if c.PublicURL != "http://localhost:8080" || c.Listen != "127.0.0.1:8080" || !c.Auth.APIKeys ||
@@ -1117,8 +1119,8 @@ func TestTunnelExamplesLoad(t *testing.T) {
 // sealed: required and no warning.
 func TestSealedExamplesLoad(t *testing.T) {
 	for path, name := range map[string]string{
-		"../../examples/sellers/hello-exec/kontra-sealed.yaml": "hello",
-		"../../examples/sellers/booking/kontra-sealed.yaml":    "booking",
+		"../../examples/agents/hello-exec/kontra-sealed.yaml": "hello",
+		"../../examples/agents/booking/kontra-sealed.yaml":    "booking",
 	} {
 		c, err := Load(path)
 		if err != nil {
@@ -1311,7 +1313,7 @@ func TestMCPExamplesLoad(t *testing.T) {
 // the limits object, each absent key taking its default; the staging gate's fixture loads with its own.
 func TestTunnelAnonymous(t *testing.T) {
 	defaults := AnonymousSessions{Enabled: true, TTL: Duration(2 * time.Hour), TenantsPerNetwork: 3, Services: 4, Tasks: 4,
-		Calls: 8, Streams: 8, HiringStreams: 8, PartsBytes: 64 << 20, PurgeAfter: Duration(24 * time.Hour), MaxTenants: 1000}
+		Calls: 8, Streams: 8, CallingStreams: 8, PartsBytes: 64 << 20, PurgeAfter: Duration(24 * time.Hour), MaxTenants: 1000}
 	multi := minimal + "tenancy: multi\n"
 	for _, y := range []string{"tunnel: { anonymous: true }\n", "tunnel: { anonymous: {} }\n", "tunnel:\n  anonymous:\n"} {
 		c, err := Parse([]byte(multi+y), "")
@@ -1334,15 +1336,15 @@ func TestTunnelAnonymous(t *testing.T) {
 	}
 	// The object form as the e2e harness compresses it: what it names wins, the rest is defaulted.
 	c := parse(t, multi+`tunnel:
-  anonymous: { ttl: 20s, purge_after: 10s, tenants_per_network: 3, services: 4, tasks: 4, hiring_streams: 8, parts_bytes: 1MiB, calls: 2 }
+  anonymous: { ttl: 20s, purge_after: 10s, tenants_per_network: 3, services: 4, tasks: 4, calling_streams: 8, parts_bytes: 1MiB, calls: 2 }
   enroll_with_api_key: true
 `)
 	want := AnonymousSessions{Enabled: true, TTL: Duration(20 * time.Second), TenantsPerNetwork: 3, Services: 4, Tasks: 4, Calls: 2,
-		Streams: 8, HiringStreams: 8, PartsBytes: 1 << 20, PurgeAfter: Duration(10 * time.Second), MaxTenants: 1000}
+		Streams: 8, CallingStreams: 8, PartsBytes: 1 << 20, PurgeAfter: Duration(10 * time.Second), MaxTenants: 1000}
 	if c.Tunnel.Anonymous != want || !c.Tunnel.EnrollWithAPIKey {
 		t.Errorf("the compressed limits = %+v, want %+v", c.Tunnel.Anonymous, want)
 	}
-	if c := parse(t, multi+"tunnel: { anonymous: { hiring_streams: 32, max_tenants: 1, parts_bytes: \"512 KiB\" } }\n"); c.Tunnel.Anonymous.HiringStreams != 32 ||
+	if c := parse(t, multi+"tunnel: { anonymous: { calling_streams: 32, max_tenants: 1, parts_bytes: \"512 KiB\" } }\n"); c.Tunnel.Anonymous.CallingStreams != 32 ||
 		c.Tunnel.Anonymous.MaxTenants != 1 || c.Tunnel.Anonymous.PartsBytes != 512<<10 || c.Tunnel.Anonymous.TTL.D() != 2*time.Hour {
 		t.Errorf("the bounds = %+v", c.Tunnel.Anonymous)
 	}
@@ -1364,11 +1366,11 @@ func TestTunnelAnonymous(t *testing.T) {
 		t.Errorf("enabled: true = %+v", c.Tunnel.Anonymous)
 	}
 	for y, want := range map[string]string{
-		"tunnel: { anonymous: { enabled: no } }\n":                        "tunnel.anonymous.enabled",
-		"tunnel: { anonymous: { enabled: 0 } }\n":                         "tunnel.anonymous.enabled",
-		"tunnel: { anonymous: { enabled: false, enabled: true } }\n":      "repeated",
-		"tunnel: { anonymous: { enabled: false, hiring_streams: 33 } }\n": "hiring_streams 33: at most 32",
-		"tunnel: { anonymous: { enabled: false, streams: 0 } }\n":         "tunnel.anonymous.streams",
+		"tunnel: { anonymous: { enabled: no } }\n":                         "tunnel.anonymous.enabled",
+		"tunnel: { anonymous: { enabled: 0 } }\n":                          "tunnel.anonymous.enabled",
+		"tunnel: { anonymous: { enabled: false, enabled: true } }\n":       "repeated",
+		"tunnel: { anonymous: { enabled: false, calling_streams: 33 } }\n": "calling_streams 33: at most 32",
+		"tunnel: { anonymous: { enabled: false, streams: 0 } }\n":          "tunnel.anonymous.streams",
 	} {
 		if err := parseErr(t, multi+y); !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: %v, want %q", y, err, want)

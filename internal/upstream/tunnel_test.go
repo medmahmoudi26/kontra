@@ -294,7 +294,7 @@ func TestClassifyTunnel(t *testing.T) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		case "rpcerr":
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"jsonrpc":"2.0","id":"1","error":{"code":-32602,"message":"the seller says no"}}`)
+			io.WriteString(w, `{"jsonrpc":"2.0","id":"1","error":{"code":-32602,"message":"the service says no"}}`)
 		case "cut":
 			// A chunked body the stream ends in the middle of.
 			w.Header().Set("Content-Type", "application/json")
@@ -334,7 +334,7 @@ func TestClassifyTunnel(t *testing.T) {
 		{"not_hosted", ClassTunnelLost, "not_hosted"},
 		{"sealed_rejected", ClassSealedRejected, "sealed"},
 		{"own503", Unreachable, "503"},
-		{"rpcerr", Protocol, "the seller says no"},
+		{"rpcerr", Protocol, "the service says no"},
 		{"cut", ClassTunnelLost, "lost"},
 	} {
 		mode.Store(tc.mode)

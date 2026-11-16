@@ -13,13 +13,13 @@
 // doing (spec §8), and is recorded with the task it names and the Host it arrived with, so a test can tell
 // a cancel forwarded through `kontra connect` (the target's Host, no X-Forwarded-*) from any other. With
 // FirstEventDelay a task's first turn yields nothing for that long, so its upstream task id stays unknown
-// to the gate meanwhile (the tunnel tests' before-the-first-upstream-id variants, spec §6.4). With TalksAfterCancel the agent is a seller that ignores its own cancel: the stream that
+// to the gate meanwhile (the tunnel tests' before-the-first-upstream-id variants, spec §6.4). With TalksAfterCancel the agent is a service that ignores its own cancel: the stream that
 // carried the canceled status goes on with one more chunk and a completed status, which a2a-go itself
 // never sends (its processor ends an execution at the canceled event and drops what it yields after).
 //
-// With Legacy025 the agent is the a2a-samples helloworld seller at protocol 0.2.5 (card_compat): it serves
-// that seller's card at /.well-known/agent.json, speaks the 0.x JSON-RPC binding at its root, and answers
-// every message with a "Hello World" Message, as that seller does.
+// With Legacy025 the agent is the a2a-samples helloworld service at protocol 0.2.5 (card_compat): it serves
+// that service's card at /.well-known/agent.json, speaks the 0.x JSON-RPC binding at its root, and answers
+// every message with a "Hello World" Message, as that service does.
 package slowagent
 
 import (
@@ -48,7 +48,7 @@ type Config struct {
 	Interval  time.Duration // between chunks
 	Streaming bool          // the card says capabilities.streaming
 	Binding   string        // "JSONRPC" (default) or "HTTP+JSON"
-	// Legacy025 makes the agent the a2a-samples helloworld seller at protocol 0.2.5 (card_compat); Chunks,
+	// Legacy025 makes the agent the a2a-samples helloworld service at protocol 0.2.5 (card_compat); Chunks,
 	// Interval and Binding are then ignored.
 	Legacy025 bool
 	// TalksAfterCancel (JSON-RPC binding): a SendStreamingMessage stream that ends with the canceled status
@@ -59,7 +59,7 @@ type Config struct {
 	// passes, the gate has no upstream task id (spec §6.4's before-the-first-id rows).
 	FirstEventDelay time.Duration
 	// CardHook, when set, is what the agent serves as its 1.0 card instead of Card(): it is given Card()'s bytes
-	// (card_passthrough signs them as a seller would).
+	// (card_passthrough signs them as a service would).
 	CardHook func(card []byte) []byte
 }
 
@@ -70,10 +70,10 @@ const ChunkMarker = "slowagent-chunk"
 // AskPrefix starts a first message that stops at input-required.
 const AskPrefix = "ask"
 
-// HelloWorld is what the Legacy025 seller answers.
+// HelloWorld is what the Legacy025 service answers.
 const HelloWorld = "Hello World"
 
-// Legacy025Card is the a2a-samples helloworld seller's card at 08dde55c070f (protocol 0.2.5), as that seller
+// Legacy025Card is the a2a-samples helloworld service's card at 08dde55c070f (protocol 0.2.5), as that service
 // serves it, with its url left as %s.
 const Legacy025Card = `{"capabilities":{"streaming":true},"defaultInputModes":["text"],"defaultOutputModes":["text"],"description":"Just a hello world agent","name":"Hello World Agent","protocolVersion":"0.2.5","skills":[{"description":"just returns hello world","examples":["hi","hello world"],"id":"hello_world","name":"Returns hello world","tags":["hello world"]}],"supportsAuthenticatedExtendedCard":true,"url":"%s","version":"1.0.0"}`
 

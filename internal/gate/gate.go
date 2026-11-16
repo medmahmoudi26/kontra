@@ -123,7 +123,7 @@ type Timing struct {
 	// TunnelPing is the tunnel registry's last_ping_at interval and row check (tunnel.LastPingEvery);
 	// TunnelCards a tunnel card's refetch while serving (card.Refresh).
 	TunnelPing, TunnelCards time.Duration
-	// PlainWait is how long /mcp's plain hire and reply wait for the task (gatemcp.PlainWait, M4 WP-04).
+	// PlainWait is how long /mcp's plain send_message and reply wait for the task (gatemcp.PlainWait, M4 WP-04).
 	PlainWait time.Duration
 	Executor  relay.ExecutorOptions
 }
@@ -223,9 +223,9 @@ type Replica struct {
 	admission    hooks.Admission
 	admissionOps []hooks.Operation
 
-	// hireTasks are the MCP Tasks of /mcp's hire tasks (spec §12; M4 WP-04, WP-05): the drain awaits their detached
-	// cancels (gatemcp.HireTasks.Wait) before the Temporal client closes.
-	hireTasks *gatemcp.HireTasks
+	// callTasks are the MCP Tasks of /mcp's send_message tasks (spec §12; M4 WP-04, WP-05): the drain awaits their detached
+	// cancels (gatemcp.SendMessageTasks.Wait) before the Temporal client closes.
+	callTasks *gatemcp.SendMessageTasks
 
 	// Anonymous sessions (spec/tunnel.md §6; tunnel.anonymous): their limits' checks and the sweeper that ends and
 	// purges their tenants, on every multi-tenant gate with or without the setting (anonTenantLimits); anonKick asks the
@@ -384,7 +384,7 @@ func (r *Replica) assemble() error {
 	})
 	r.nodeKeys.Subscribe(r.tunnels.Revoked)
 	// An API key revocation (NOTIFY kontra_revoke 'apikey:<id>', or the re-read that finds it) reaches the
-	// sessions hiring with that key: 401 on their later streams, {"t": "auth_revoked"} (tunnel.md §12).
+	// sessions calling with that key: 401 on their later streams, {"t": "auth_revoked"} (tunnel.md §12).
 	r.revoked.Subscribe(r.tunnels.APIKeyRevoked)
 	r.listener.OnChannel(pg.ChannelTunnel, r.tunnels.Notify)
 	// A node's session that registers wakes the tasks waiting for that node to reconnect (relay.md §6.4, D344): the
@@ -437,8 +437,8 @@ func (r *Replica) assemble() error {
 	var handlers *relay.Handlers
 	r.services = NewServices(r.pool, ServicesOptions{
 		PublicURL: cfg.PublicURL, Multi: cfg.Tenancy == config.TenancyMulti, Local: cfg.Local(), Logger: log, Signer: signer,
-		// seller_keys {url} sets: the SSRF dialer with its address checks always on (spec §3, §10.3).
-		SellerKeysClient: ssrf.NewClient(ssrf.Policy{Resolver: pushResolver(log)}),
+		// service_keys {url} sets: the SSRF dialer with its address checks always on (spec §3, §10.3).
+		ServiceKeysClient: ssrf.NewClient(ssrf.Policy{Resolver: pushResolver(log)}),
 		OnChange: func(ref store.ServiceRef) {
 			if handlers != nil {
 				handlers.Invalidate(ref)
@@ -566,10 +566,10 @@ func (r *Replica) assemble() error {
 	if err := r.assembleMCP(routes, authn, snapshot, rules); err != nil {
 		return err
 	}
-	// /mcp's hire is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4), with
-	// the operator's card_extensions URIs a hire activates for the buyer (D300), and the service's work queue
-	// re-issuing a keyed hire's start (§14.5, D338), as the A2A routes have them.
-	hirer := &relay.Hirer{Handlers: handlers, Log: r.storeLog,
+	// /mcp's send_message is an A2A request (D293): the A2A routes' reading of a served card's required extensions (§2.4), with
+	// the operator's card_extensions URIs a call activates for the caller (D300), and the service's work queue
+	// re-issuing a keyed send_message's start (§14.5, D338), as the A2A routes have them.
+	sender := &relay.Sender{Handlers: handlers, Log: r.storeLog,
 		Extensions: func(svc store.ServiceRef) relay.CardExtensions {
 			served, _ := r.services.Lookup(context.Background(), svc.Tenant, svc.Name)
 			if served == nil {
@@ -586,7 +586,7 @@ func (r *Replica) assemble() error {
 			return ok && s.Kind == config.KindA2A && s.Allow.Admits(p)
 		},
 	}
-	if err := r.assembleGateMCP(routes, authn, hirer, pushStore); err != nil {
+	if err := r.assembleGateMCP(routes, authn, sender, pushStore); err != nil {
 		return err
 	}
 	routes.Handle("GET /healthz", edge.Healthz(r.Ready))
@@ -609,21 +609,21 @@ func (r *Replica) assemble() error {
 	if r.traffic != nil {
 		ecfg.OnRefuse = a2aRoutes.RecordRefusal // the edge's own 413, 429 and 408 on A2A paths (relay.md §13.6)
 	}
-	// The streams nodes open (tunnel.md §9, §8.3; D34): hiring requests are served by the same routes as the
+	// The streams nodes open (tunnel.md §9, §8.3; D34): calling requests are served by the same routes as the
 	// network's, behind an edge of their own whose per-address counts are per session (the session is the
 	// client, NodeStreams gives each its own address; never X-Forwarded-For) and whose in-flight cap is the
-	// session's stream cap; their principal is the session's (auth.HireSource); blob streams are served from
-	// the bucket for the tasks the session serves or hires.
+	// session's stream cap; their principal is the session's (auth.CallSource); blob streams are served from
+	// the bucket for the tasks the session serves or calls.
 	//
 	// SPEC-CONFLICT (D207; tunnel.md §9 "its edge limits are the session's (§6.2 for anonymous sessions; otherwise
 	// the API key's)"; relay.md §2.2): the edge counts in flight per presented credential and rates per client
-	// address, and a hiring request carries neither (the gate holds no API key secret after the handshake, and the
+	// address, and a calling request carries neither (the gate holds no API key secret after the handshake, and the
 	// session has no address of its own). The closest faithful behaviour: the edge's limits apply with the session
 	// as the client: limits.body and the body timeout as on the network, rps_per_ip per session, and in flight the
 	// session's stream cap (§14: 32, inflight_per_key's default), not shared with the same key's requests from the
 	// network. §9 now says so.
 	nodeStreams := &tunnelgate.NodeStreams{
-		Hire:   edge.Middleware(edge.MiddlewareConfig{Limits: ecfg.Limits, ClientIP: edge.ClientIP{From: config.ClientIPRemote}}, routes),
+		Call:   edge.Middleware(edge.MiddlewareConfig{Limits: ecfg.Limits, ClientIP: edge.ClientIP{From: config.ClientIPRemote}}, routes),
 		Blobs:  &tunnelgate.Blobs{DB: r.pool, Store: r.blobs, Logger: log},
 		Logger: log.With("component", "tunnel"),
 	}
@@ -637,8 +637,8 @@ func (r *Replica) assemble() error {
 		Admitter: r.enroll, Registry: r.tunnels, Draining: r.draining.Load, Logger: log, NodeStreams: nodeStreams,
 	}
 	if anonLimits != nil {
-		// An anonymous session's hiring streams (§6.2, §14) and its end, which ends its tenant at once (RunSweeps).
-		hcfg.AnonymousHiringStreams = anonLimits.HiringStreams
+		// An anonymous session's calling streams (§6.2, §14) and its end, which ends its tenant at once (RunSweeps).
+		hcfg.AnonymousCallingStreams = anonLimits.CallingStreams
 		hcfg.OnAnonymousExpiry = r.kickAnonExpiry
 	}
 	th, err := tunnelgate.NewHandler(hcfg)
@@ -967,7 +967,7 @@ func (r *Replica) drain(ctx context.Context, cause error) {
 	if err := r.metrics.Shutdown(sctx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		r.log.Warn("metrics listener shutdown", "error", err)
 	}
-	r.awaitHireCancels(ctx)
+	r.awaitCallCancels(ctx)
 	if r.keys != nil {
 		r.keys.Wait()
 	}

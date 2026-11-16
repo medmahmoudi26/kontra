@@ -175,11 +175,11 @@ func jsonOf(t *testing.T, v any) string {
 	return string(b)
 }
 
-// The unit half of relay_resume (spec §9, §16): a buyer reads a new task's stream up to K and drops it;
+// The unit half of relay_resume (spec §9, §16): a caller reads a new task's stream up to K and drops it;
 // a resubscribe with Last-Event-ID: K on another replica sends the snapshot as of K (equal to
-// Log.SnapshotAt and to the buyer's own fold) without an id, then every carried row after K exactly once,
+// Log.SnapshotAt and to the caller's own fold) without an id, then every carried row after K exactly once,
 // in order, through the live tail, and ends right after the terminal row. Then the edge cases: K =
-// terminal-1, K = terminal, K not a seq, another buyer, a malformed id.
+// terminal-1, K = terminal, K not a seq, another caller, a malformed id.
 func TestRelayResumeOverPostgres(t *testing.T) {
 	e := newPGEnv(t)
 	task := e.newTask("count to twenty")
@@ -214,7 +214,7 @@ func TestRelayResumeOverPostgres(t *testing.T) {
 			fold = next
 		}
 	}
-	s1.cancel() // the buyer drops at K
+	s1.cancel() // the caller drops at K
 	if got1[0] != 1 || got1[len(got1)-1] != k {
 		t.Fatalf("stream 1 ids %v", got1)
 	}
@@ -234,7 +234,7 @@ func TestRelayResumeOverPostgres(t *testing.T) {
 	}
 	leadTask := decode(t, HTTPJSON, lead.data, "").(*a2a.Task)
 	if jsonOf(t, leadTask) != jsonOf(t, snapK) || jsonOf(t, leadTask) != jsonOf(t, fold) {
-		t.Fatalf("snapshot as of %d:\n stream  %s\n log     %s\n buyer   %s", k, jsonOf(t, leadTask), jsonOf(t, snapK), jsonOf(t, fold))
+		t.Fatalf("snapshot as of %d:\n stream  %s\n log     %s\n caller   %s", k, jsonOf(t, leadTask), jsonOf(t, snapK), jsonOf(t, fold))
 	}
 	go func() {
 		for i := 5; i < 12; i++ {
@@ -292,7 +292,7 @@ func TestRelayResumeOverPostgres(t *testing.T) {
 		{"K = terminal", ownerA, task.ID, &terminalSeq, "UNSUPPORTED_OPERATION"},
 		{"K not a seq", ownerA, task.ID, &nonSeq, "INVALID_PARAMS"},
 		{"no K on a terminal task", ownerA, task.ID, nil, "UNSUPPORTED_OPERATION"},
-		{"another buyer", ownerB, task.ID, &before, "TASK_NOT_FOUND"},
+		{"another caller", ownerB, task.ID, &before, "TASK_NOT_FOUND"},
 		{"a malformed id", ownerA, "../" + task.ID, &before, "TASK_NOT_FOUND"},
 	} {
 		rec := httptest.NewRecorder()

@@ -29,7 +29,7 @@ func TestSealedUnsealedPart(t *testing.T) {
 		MCP:    map[string]MCPService{"smcp": {Sealed: "true"}},
 	})
 	ctx := ctxFor(t, 10*time.Minute)
-	seller, err := h.StartEchoSeller()
+	service, err := h.StartEchoService()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,19 +37,19 @@ func TestSealedUnsealedPart(t *testing.T) {
 	up.Tools = []json.RawMessage{dualEraTool("echo", "")}
 	dbl := h.Double(up)
 	fake, _ := startFakeNode(t, ctx, h, "host", map[string]FakeService{
-		"strict": {Kind: tunnel.KindA2A, Target: seller.URL},
-		"loose":  {Kind: tunnel.KindA2A, Target: seller.URL},
+		"strict": {Kind: tunnel.KindA2A, Target: service.URL},
+		"loose":  {Kind: tunnel.KindA2A, Target: service.URL},
 		"smcp":   {Kind: tunnel.KindMCP, Target: dbl},
 	})
 	waitSealedCard(t, ctx, h, "strict")
 	waitSealedCard(t, ctx, h, "loose")
 	g := h.Gates[0]
-	streams, sellerReqs := preamblesFor(fake, "strict"), seller.Requests()
+	streams, serviceReqs := preamblesFor(fake, "strict"), service.Requests()
 	items := scalar[int](t, h, `select count(*) from kontra.work_items`)
 
 	// A stock a2a-go client, JSON-RPC and HTTP+JSON: InvalidRequest.
 	for _, binding := range []Binding{JSONRPC, HTTPJSON} {
-		c := h.BuyerA().client(t, g, "strict", binding)
+		c := h.CallerA().client(t, g, "strict", binding)
 		_, err := c.SendMessage(ctx, newMessage("plain to strict over "+binding.String()))
 		if !errors.Is(err, a2a.ErrInvalidRequest) {
 			t.Fatalf("an unsealed part over %s: %v, want InvalidRequest", binding, err)
@@ -62,11 +62,11 @@ func TestSealedUnsealedPart(t *testing.T) {
 	}
 	refused := func(svc, what string, part map[string]any) {
 		t.Helper()
-		if r, err := h.BuyerA().RPC(ctx, g, svc, "SendMessage", msg(part)); err != nil || r.HTTPStatus != http.StatusOK ||
+		if r, err := h.CallerA().RPC(ctx, g, svc, "SendMessage", msg(part)); err != nil || r.HTTPStatus != http.StatusOK ||
 			r.Error == nil || r.Error.Code != -32600 {
 			t.Fatalf("%s: %s as raw JSON-RPC: %v %+v", svc, what, err, r)
 		}
-		if r, err := h.BuyerA().REST(ctx, g, svc, http.MethodPost, "/message:send", msg(part)); err != nil ||
+		if r, err := h.CallerA().REST(ctx, g, svc, http.MethodPost, "/message:send", msg(part)); err != nil ||
 			r.HTTPStatus != http.StatusBadRequest {
 			t.Fatalf("%s: %s over HTTP+JSON: %v %+v", svc, what, err, r)
 		}
@@ -107,7 +107,7 @@ func TestSealedUnsealedPart(t *testing.T) {
 	}
 
 	// The optional service runs the same unsealed message, marked kontra.sealed = false.
-	res, err := h.BuyerA().Client(t, g, "loose").SendMessage(ctx, newMessage("plain to loose"))
+	res, err := h.CallerA().Client(t, g, "loose").SendMessage(ctx, newMessage("plain to loose"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,8 +115,8 @@ func TestSealedUnsealedPart(t *testing.T) {
 	if !ok || task.Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("the optional service: %#v", res)
 	}
-	if seller.Requests() == sellerReqs {
-		t.Fatal("the optional service's task did not reach the seller")
+	if service.Requests() == serviceReqs {
+		t.Fatal("the optional service's task did not reach the service")
 	}
 	marked := false
 	for _, ev := range texts(t, h, `select payload::text from kontra.task_events where task_id = $1`, string(task.ID)) {

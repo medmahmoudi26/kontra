@@ -35,7 +35,7 @@ type Service struct {
 type Principal struct {
 	Kind     string `json:"kind"`
 	ID       string `json:"id"`
-	BuyerID  string `json:"buyerId"`
+	CallerID string `json:"callerId"`
 	TenantID string `json:"tenantId,omitempty"`
 	Via      string `json:"via"`
 }
@@ -154,7 +154,7 @@ type TaskRef struct {
 	Service   string         `json:"service"`
 	Kind      string         `json:"kind"`
 	Protocol  string         `json:"protocol"`
-	BuyerID   string         `json:"buyerId"`
+	CallerID  string         `json:"callerId"`
 	Principal string         `json:"principal"`
 	Via       string         `json:"via"`
 	ContextID string         `json:"contextId"`

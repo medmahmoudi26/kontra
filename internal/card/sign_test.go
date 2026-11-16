@@ -19,10 +19,10 @@ import (
 	"kontra.sh/kontra/internal/strictjson"
 )
 
-// sellerSigned returns card with a signatures member holding one signature by the seller's key.
-func sellerSigned(t *testing.T, seller *jws.KeySet, card string) string {
+// serviceSigned returns card with a signatures member holding one signature by the service's key.
+func serviceSigned(t *testing.T, service *jws.KeySet, card string) string {
 	t.Helper()
-	sig, err := seller.Sign([]byte(card), "https://seller.example/.well-known/jwks.json", nil)
+	sig, err := service.Sign([]byte(card), "https://service.example/.well-known/jwks.json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,17 +78,17 @@ func jwksServer(t *testing.T, keys *jws.KeySet) *httptest.Server {
 
 // The served card is signed by the gate (spec §3, D13, D166): exactly one signature, which a2a-go's own verifier
 // accepts once it resolves the jku to the gate's JWKS; its protected header binds the upstream card (the hex
-// SHA-256 of its JCS, the URL it is served at) and says whether a seller signature verified. Seller fields are
+// SHA-256 of its JCS, the URL it is served at) and says whether a service signature verified. Service fields are
 // byte-identical under JCS, and signing is deterministic: the same card, the same bytes, the same ETag.
 func TestKeeperSignsTheServedCard(t *testing.T) {
 	gate, err := jws.EphemeralKeySet()
 	if err != nil {
 		t.Fatal(err)
 	}
-	seller, _ := jws.EphemeralKeySet()
+	service, _ := jws.EphemeralKeySet()
 	srv := jwksServer(t, gate)
 	jku := srv.URL + jws.JWKSPath
-	upstreamCard := sellerSigned(t, seller, string(read(t, "v1-vendor.json")))
+	upstreamCard := serviceSigned(t, service, string(read(t, "v1-vendor.json")))
 	cs := newCardServer(t, upstreamCard)
 	in := Input{PublicURL: "https://gate.example", ServicePath: "/agents/hello"}
 	k := NewKeeper(backend(t, cs), in, WithSigner(&JWSSigner{Keys: gate, JWKSURL: jku}))
@@ -100,7 +100,7 @@ func TestKeeperSignsTheServedCard(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(s.Upstream, []byte(upstreamCard)) {
-		t.Fatal("the upstream card is not kept byte for byte, seller signature included")
+		t.Fatal("the upstream card is not kept byte for byte, service signature included")
 	}
 	sigs := signatures(t, s.Body)
 	if len(sigs) != 1 {
@@ -132,7 +132,7 @@ func TestKeeperSignsTheServedCard(t *testing.T) {
 	if hdr := protectedHeader(t, sigs[0]); hdr["crit"] != nil {
 		t.Error("kontra.upstream must never be critical")
 	}
-	// Seller fields are byte-identical under JCS: the served card without the gate's fields equals the upstream
+	// Service fields are byte-identical under JCS: the served card without the gate's fields equals the upstream
 	// card without them (v1-vendor.json is a 1.0 card).
 	strip := func(b []byte) []byte {
 		m, err := strictjson.Members(b)
@@ -150,7 +150,7 @@ func TestKeeperSignsTheServedCard(t *testing.T) {
 		return out
 	}
 	if !bytes.Equal(strip(s.Body), strip([]byte(upstreamCard))) {
-		t.Errorf("seller fields differ under JCS:\nserved   %s\nupstream %s", strip(s.Body), strip([]byte(upstreamCard)))
+		t.Errorf("service fields differ under JCS:\nserved   %s\nupstream %s", strip(s.Body), strip([]byte(upstreamCard)))
 	}
 	// Deterministic: a refresh of the same bytes serves the same body and ETag, and so does another keeper (another
 	// replica) with the same key.

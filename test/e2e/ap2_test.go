@@ -22,7 +22,7 @@ import (
 	"kontra.sh/kontra/internal/sealed"
 )
 
-// AP2 v0.2.0 as the example merchant speaks it (examples/sellers/ap2-merchant/main.go; its README). The gate knows
+// AP2 v0.2.0 as the example merchant speaks it (examples/agents/ap2-merchant/main.go; its README). The gate knows
 // none of these names: the test does, as a shopper would.
 const (
 	ap2Ext                = "https://github.com/google-agentic-commerce/ap2/v1"
@@ -207,13 +207,13 @@ func (x addHeaders) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 // TestAP2Passthrough is ap2_passthrough (spec/relay.md §2.4, §2.6, §12.2; D294, D326, D328, D351).
-// Single tenant. The example AP2 merchant (examples/sellers/ap2-merchant: a2a-go v2.7.0, run
+// Single tenant. The example AP2 merchant (examples/agents/ap2-merchant: a2a-go v2.7.0, run
 // unmodified, its card requiring AP2 v0.2.0 with params.roles [merchant]) is hosted by a node whose tunnel is on
 // replica B, as the service ap2 and as the sealed service ap2sealed; the operator's Admission is the e2e double, which
 // allows. The test is the shopper: it knows AP2's data-part keys, the gate does not. Asserted:
 //
 //   - both replicas serve the merchant's AP2 card entry, required and params included, equal under JCS to the
-//     merchant's own; so does the hiring node's local card of ap2sealed;
+//     merchant's own; so does the calling node's local card of ap2sealed;
 //   - a SendMessage that does not activate AP2 is -32008 and writes no task row;
 //   - JSON-RPC SendMessage with A2A-Extensions naming AP2 (plain): the response echoes the URI, Admission's request
 //     lists it in extensions, and the merchant answers input-required with an ap2.checkout part (it refuses a message
@@ -224,11 +224,11 @@ func (x addHeaders) RoundTrip(r *http.Request) (*http.Response, error) {
 //     equal under JCS to what was sent; the task completes with an ap2.CheckoutReceipt part equal under JCS to the
 //     merchant's;
 //   - the same round trip over HTTP+JSON, streamed, with the activation echoed on the stream;
-//   - sealed (through a hiring node on replica A): -32008 without the activation; with it, the checkout, the mandate
+//   - sealed (through a calling node on replica A): -32008 without the activation; with it, the checkout, the mandate
 //     and the receipt cross intact both ways (the merchant's copies equal under JCS), while the gate's task log holds
 //     the sealed envelope's media type and none of the checkout JWT, the mandate, the receipt or their keys, and the
-//     part and message metadata stay plaintext (the message's with the hiring node's kontra.sealed.replyTo added);
-//   - /mcp hire of ap2 is isError naming the A2A URL and the AP2 URI, and writes no task row.
+//     part and message metadata stay plaintext (the message's with the calling node's kontra.sealed.replyTo added);
+//   - /mcp call of ap2 is isError naming the A2A URL and the AP2 URI, and writes no task row.
 func TestAP2Passthrough(t *testing.T) {
 	adm, err := StartAdmission()
 	if err != nil {
@@ -238,13 +238,13 @@ func TestAP2Passthrough(t *testing.T) {
 	h := start(t, Options{Tunnel: map[string]TunnelService{"ap2": {}, "ap2sealed": {Sealed: "true"}}, Admission: adm})
 	ctx := ctxFor(t, 8*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
-	merchant, err := h.StartExampleSeller(ctx, "ap2-merchant")
+	merchant, err := h.StartExampleService(ctx, "ap2-merchant")
 	if err != nil {
 		t.Fatal(err)
 	}
 	hostOn(t, ctx, h, b, map[string]string{"ap2": merchant.URL, "ap2sealed": merchant.URL})
 	waitSealedCard(t, ctx, h, "ap2sealed")
-	buyer := h.BuyerA()
+	caller := h.CallerA()
 	activate := http.Header{"A2A-Extensions": {ap2Ext}}
 
 	// The card entry, as the merchant wrote it.
@@ -266,7 +266,7 @@ func TestAP2Passthrough(t *testing.T) {
 
 	// Not activated: -32008, no task row.
 	before := taskCount(t, h)
-	res, err := buyer.RPCCall(ctx, a, "SendMessage", newMessage("I would like the example item"), Call{Service: "ap2"})
+	res, err := caller.RPCCall(ctx, a, "SendMessage", newMessage("I would like the example item"), Call{Service: "ap2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestAP2Passthrough(t *testing.T) {
 	}
 
 	// JSON-RPC, activated: the checkout.
-	res, err = buyer.RPCCall(ctx, a, "SendMessage", newMessage("I would like the example item"), Call{Service: "ap2", Header: activate})
+	res, err = caller.RPCCall(ctx, a, "SendMessage", newMessage("I would like the example item"), Call{Service: "ap2", Header: activate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestAP2Passthrough(t *testing.T) {
 	if ownJWT, _ := ownCo.(map[string]any)["checkout_jwt"].(string); jwt == "" || jwt != ownJWT {
 		t.Fatalf("the checkout JWT %q is not the merchant's %q byte for byte", jwt, ownJWT)
 	}
-	got, err := buyer.Client(t, b, "ap2").GetTask(ctx, &a2a.GetTaskRequest{ID: task.ID})
+	got, err := caller.Client(t, b, "ap2").GetTask(ctx, &a2a.GetTaskRequest{ID: task.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestAP2Passthrough(t *testing.T) {
 	mandate := a2a.NewMessage(a2a.MessageRoleUser, mandatePart)
 	mandate.TaskID, mandate.ContextID = task.ID, task.ContextID
 	mandate.Metadata = map[string]any{"shopper.example/ref": "order-42"}
-	res, err = buyer.RPCCall(ctx, b, "SendMessage", &a2a.SendMessageRequest{Message: mandate}, Call{Service: "ap2", Header: activate})
+	res, err = caller.RPCCall(ctx, b, "SendMessage", &a2a.SendMessageRequest{Message: mandate}, Call{Service: "ap2", Header: activate})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestAP2Passthrough(t *testing.T) {
 	// HTTP+JSON, streamed: the same round trip.
 	streamTurn := func(g *Gate, req *a2a.SendMessageRequest, want a2a.TaskState) (a2a.TaskID, *a2a.Message) {
 		t.Helper()
-		stream, err := buyer.SendStreaming(ctx, g, req, Call{Service: "ap2", Binding: HTTPJSON, Header: activate})
+		stream, err := caller.SendStreaming(ctx, g, req, Call{Service: "ap2", Binding: HTTPJSON, Header: activate})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -370,21 +370,21 @@ func TestAP2Passthrough(t *testing.T) {
 	ownReceipt, _ = ap2Part(t, "the merchant's streamed receipt", view.Status.Message, ap2KeyCheckoutReceipt)
 	samePart(t, "the streamed receipt", receiptPart, ownReceipt)
 
-	// Sealed, through a hiring node on replica A.
-	hirer, err := h.StartNode(ctx, NodeOptions{Name: "hirer", APIKey: h.APIKey})
+	// Sealed, through a calling node on replica A.
+	callingNode, err := h.StartNode(ctx, NodeOptions{Name: "caller", APIKey: h.APIKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	local, err := hirer.Local(30 * time.Second)
+	local, err := callingNode.Local(30 * time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	localCard, st := getBody(ctx, local+"/agents/ap2sealed/.well-known/agent-card.json", "")
 	if st != http.StatusOK {
-		t.Fatalf("the hiring node's local card: %d", st)
+		t.Fatalf("the calling node's local card: %d", st)
 	}
 	if got := ap2Extension(t, localCard); got != want {
-		t.Fatalf("the hiring node's local card has the AP2 entry\n%s\nwant the merchant's\n%s", got, want)
+		t.Fatalf("the calling node's local card has the AP2 entry\n%s\nwant the merchant's\n%s", got, want)
 	}
 	before = taskCount(t, h)
 	if _, err := headerClient(t, ctx, local+"/agents/ap2sealed", nil).SendMessage(ctx, newMessage("I would like the example item")); !errors.Is(err, a2a.ErrExtensionSupportRequired) {
@@ -416,7 +416,7 @@ func TestAP2Passthrough(t *testing.T) {
 	in = received(t, "the sealed mandate", view, ap2KeyCheckoutMandate)
 	inPart, _ = ap2Part(t, "the sealed mandate received", in, ap2KeyCheckoutMandate)
 	samePart(t, "the sealed mandate", inPart, mandatePart)
-	// The hiring node adds its reply-to recipient (ext-sealed.md: kontra.sealed.replyTo); the rest is the shopper's.
+	// The calling node adds its reply-to recipient (ext-sealed.md: kontra.sealed.replyTo); the rest is the shopper's.
 	inMeta := map[string]any{}
 	for k, v := range in.Metadata {
 		inMeta[k] = v
@@ -446,14 +446,14 @@ func TestAP2Passthrough(t *testing.T) {
 		}
 	}
 
-	// /mcp hire: AP2 is required, a hire cannot activate it.
+	// /mcp call: AP2 is required, a call cannot activate it.
 	before = taskCount(t, h)
 	s := OpenGateSession(t, ctx, a, h.APIKey, `{}`)
-	hire := Tool(t, s.Tool("hire", `{"service":"ap2","message":"I would like the example item"}`))
-	if !hire.IsError || !strings.Contains(hire.Text(), h.Front.URL+"/agents/ap2") || !strings.Contains(hire.Text(), ap2Ext) {
-		t.Fatalf("hire of the merchant: %+v, want isError naming %s and %s", hire, h.Front.URL+"/agents/ap2", ap2Ext)
+	sent := Tool(t, s.Tool("send_message", `{"service":"ap2","message":"I would like the example item"}`))
+	if !sent.IsError || !strings.Contains(sent.Text(), h.Front.URL+"/agents/ap2") || !strings.Contains(sent.Text(), ap2Ext) {
+		t.Fatalf("call of the merchant: %+v, want isError naming %s and %s", sent, h.Front.URL+"/agents/ap2", ap2Ext)
 	}
 	if n := taskCount(t, h); n != before {
-		t.Fatalf("the refused hire wrote %d task rows", n-before)
+		t.Fatalf("the refused call wrote %d task rows", n-before)
 	}
 }

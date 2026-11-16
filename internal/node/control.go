@@ -46,7 +46,7 @@ type session struct {
 	log     *slog.Logger
 	events  chan event
 	ctx     context.Context // ends when the session closes, or Run ends
-	// auth is the API key the session's hello carried (its hiring principal), "" for none.
+	// auth is the API key the session's hello carried (its calling principal), "" for none.
 	auth string
 	// slots bounds the node-opened streams in flight on the session to the gate's cap (§14; session.open).
 	slots chan struct{}
@@ -93,13 +93,13 @@ func (s *session) accept() {
 // it and ignores the types it does not know. Only the first control stream of a session is read.
 //
 //   - drain: Run dials a new session at once; this one goes on serving the streams the gate opens on it
-//     and closes when the gate closes it (make-before-break). The node opens no hiring streams on it: they go
-//     on the new session (Node.OpenHire).
+//     and closes when the gate closes it (make-before-break). The node opens no calling streams on it: they go
+//     on the new session (Node.OpenCall).
 //   - revoked: the key (no service): the node stops and does not redial (§12); a rotated key's session ends
 //     alone (Node.keyRevoked). revoked with a service: the active key's binding: the service is dropped
 //     from every session's served set and from the next hello (Node.dropService); a rotated key's binding:
 //     from that session alone (Node.bindingRevoked).
-//   - auth_revoked: the gate answers the session's hiring requests 401 from now on, and hosting goes on (§12,
+//   - auth_revoked: the gate answers the session's calling requests 401 from now on, and hosting goes on (§12,
 //     §13). The revoked API key is dropped from the credentials and from every later hello (Node.authRevoked),
 //     since the next handshake would otherwise be refused auth_invalid, which §4 makes final.
 //   - enrolled is logged; expiring (an anonymous session's end, §6.1, §13) is logged and printed.

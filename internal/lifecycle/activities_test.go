@@ -29,7 +29,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-var buyer = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
+var caller = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
 
 // pgEnv is one fresh migrated database with a tenant and a direct service.
 type pgEnv struct {
@@ -82,7 +82,7 @@ func (e *pgEnv) task(state store.State, meta map[string]any) uuid.UUID {
 	msg.TaskID, msg.ContextID = a2a.TaskID(id.String()), "ctx-1"
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: "ctx-1", Status: a2a.TaskStatus{State: state.A2A()},
 		History: []*a2a.Message{msg}, Metadata: meta}
-	nt := store.NewTask{ID: id, Service: e.svc, Protocol: store.ProtocolA2A, Owner: buyer, ContextID: "ctx-1",
+	nt := store.NewTask{ID: id, Service: e.svc, Protocol: store.ProtocolA2A, Owner: caller, ContextID: "ctx-1",
 		State: state, Snapshot: snap}
 	if _, err := e.log.CreateTask(context.Background(), nil, nt); err != nil {
 		e.t.Fatal(err)
@@ -325,8 +325,8 @@ func TestTaskRefCarriesOperatorKeysOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref.TaskID != id.String() || ref.Kind != "a2a" || ref.Protocol != "a2a" || ref.BuyerID != buyer.BuyerID.String() ||
-		ref.Principal != buyer.Principal || ref.Via != "api_key" || ref.ContextID != "ctx-1" || ref.State != "submitted" || ref.Service != "hello" {
+	if ref.TaskID != id.String() || ref.Kind != "a2a" || ref.Protocol != "a2a" || ref.CallerID != caller.CallerID.String() ||
+		ref.Principal != caller.Principal || ref.Via != "api_key" || ref.ContextID != "ctx-1" || ref.State != "submitted" || ref.Service != "hello" {
 		t.Errorf("task ref %+v", ref)
 	}
 	// kontra.keyRetainUntil is no longer an operator key (D351): a TaskRef leaves it out like any other.

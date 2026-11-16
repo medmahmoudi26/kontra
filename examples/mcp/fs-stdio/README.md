@@ -19,7 +19,7 @@ everything it depends on.
 - The process gets `PATH`, `HOME` and `LANG` from `kontra connect`'s environment, and the variables `--env NAME`
   names; nothing else. Its stderr goes to the node's log, at most 1 MiB a minute.
 - **Roots stay on the node** (D173). `server-filesystem@1.0.0` replaces the directories it was started with by the
-  client's roots, so a buyer (or the gate) that declared `file:///` would read and write the whole machine:
+  client's roots, so a caller (or the gate) that declared `file:///` would read and write the whole machine:
   `~/.kontra/identity.key`, the job keys, `~/.bashrc`. The node never relays the client's roots: it answers the
   server's `roots/list` itself, from `--roots fs=<dir>` (repeatable, one directory each; none by default, an empty
   list), and drops the client's `roots/list_changed`.

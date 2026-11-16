@@ -1,4 +1,4 @@
-// js/ap2.js: AP2 v0.2.0 data parts classified by the keys examples/sellers/ap2-merchant emits, a checkout's items and
+// js/ap2.js: AP2 v0.2.0 data parts classified by the keys examples/agents/ap2-merchant emits, a checkout's items and
 // total read from its JWT (decoded, never verified), mandates and receipts in brief, anything else under ap2. unknown,
 // and a part with no AP2 key left to the thread's other views.
 
@@ -9,7 +9,7 @@ import { load } from "./helpers.mjs";
 const b64url = (v) => Buffer.from(typeof v === "string" ? v : JSON.stringify(v)).toString("base64url");
 const jwt = (claims) => `${b64url({ alg: "ES256", typ: "JWT" })}.${b64url(claims)}.${b64url("sig")}`;
 
-// The merchant's checkout (examples/sellers/ap2-merchant main.go checkout()).
+// The merchant's checkout (examples/agents/ap2-merchant main.go checkout()).
 const totals = [{ type: "subtotal", amount: 1000 }, { type: "total", amount: 1000 }];
 const claims = {
   id: "c-1", merchant: { id: "example-merchant", name: "Example Merchant", website: "https://merchant.example" },

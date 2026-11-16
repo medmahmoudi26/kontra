@@ -15,7 +15,7 @@ import (
 // admit what the operator's hook denies. The operations are those that consult it (hooks.admission.operations): the
 // A2A interceptors ask it about every new task and RemoteAdmission answers the operations it is not asked about as
 // the built-in does; the MCP relay asks it only about the operations listed (session, call, task); the gate's own /mcp
-// (M4 WP-04) asks it about each hire.
+// (M4 WP-04) asks it about each call.
 func buildAdmission(cfg *config.Config, rules hooks.KeyRules, log *slog.Logger) (hooks.Admission, []hooks.Operation, error) {
 	h := cfg.Hooks.Admission
 	if h == nil {

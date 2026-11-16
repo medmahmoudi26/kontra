@@ -61,7 +61,7 @@ func (e *sweepEnv) task(state store.State, age time.Duration) uuid.UUID {
 	st := store.StateSubmitted
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: ctxID, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}, History: []*a2a.Message{msg}}
 	nt := store.NewTask{ID: id, Service: e.svc, Protocol: store.ProtocolA2A, ContextID: ctxID, State: st, Snapshot: snap,
-		Owner: store.Owner{BuyerID: uuid.New(), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}}
+		Owner: store.Owner{CallerID: uuid.New(), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}}
 	if _, err := e.log.CreateTask(context.Background(), nil, nt); err != nil {
 		e.t.Fatal(err)
 	}
@@ -214,10 +214,10 @@ func TestRetentionSweep(t *testing.T) {
 	}
 	sid := func() []byte { b := uuid.New(); return append(b[:], b[:]...) }
 	oldGate, freshGate, oldSvc, openSess := sid(), sid(), sid(), sid()
-	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, caller_id, principal, via, protocol_version, closed_at, close_reason)
 		values ($1, $2, 'anonymous', 'anonymous', '2025-11-25', now() - interval '8 days', 'idle'),
 		       ($3, $2, 'anonymous', 'anonymous', '2025-11-25', now() - interval '1 day', 'idle')`, oldGate, uuid.New(), freshGate)
-	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via, protocol_version, closed_at, close_reason)
 		values ($1, $2, 'hello', $3, 'anonymous', 'anonymous', '2025-11-25', now() - interval '2 hours', 'deleted'),
 		       ($4, $2, 'hello', $3, 'anonymous', 'anonymous', '2025-11-25', null, null)`, oldSvc, e.svc.TenantID, uuid.New(), openSess)
 
@@ -457,7 +457,7 @@ func TestRetentionSurvivesAFailingTask(t *testing.T) {
 		ids = append(ids, id)
 	}
 	old := uuid.New()
-	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, caller_id, principal, via, protocol_version, closed_at, close_reason)
 		values ($1, $2, 'anonymous', 'anonymous', '2025-11-25', now() - interval '8 days', 'idle')`, append(old[:], old[:]...), uuid.New())
 
 	d := &pickyDeleter{ObjectDeleter: bt.Store, fail: ids[0], calls: map[uuid.UUID]int{}}
@@ -500,7 +500,7 @@ func TestRetentionZeroKeepsForever(t *testing.T) {
 		t.Fatalf("a task ended under retention 0: retention_until %v terminal_at %v", r.RetentionUntil, r.TerminalAt)
 	}
 	sess := uuid.New()
-	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+	e.exec(`insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via, protocol_version, closed_at, close_reason)
 		values ($1, $2, 'hello', $3, 'anonymous', 'anonymous', '2025-11-25', now() - interval '400 days', 'deleted')`,
 		append(sess[:], sess[:]...), e.svc.TenantID, uuid.New())
 	if n, err := SweepRetention(ctx, e.log, time.Now().Add(10*365*24*time.Hour), nil); err != nil || n != 0 {

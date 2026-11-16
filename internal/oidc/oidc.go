@@ -15,7 +15,7 @@
 //     configuration), fetched as one of §10.3's operator-configured endpoints (D284: https://, no redirect, no
 //     proxy, no address check, bodies at most 256 KiB, 5 s), cached 10 minutes; an unknown kid refetches it at most
 //     once a minute. scope is not checked.
-//   - The principal is oidc:sub:<sub>, buyer UUIDv5(issuer ‖ sub), via mcp (spec §2.3), with the tenant its tenant
+//   - The principal is oidc:sub:<sub>, caller UUIDv5(issuer ‖ sub), via mcp (spec §2.3), with the tenant its tenant
 //     claim names (Issuer, below).
 //
 // With auth.oidc (M5, D314) a bearer JWT on the A2A routes is verified by the same Verifier, for the configured
@@ -78,10 +78,10 @@ type Claims struct {
 	members map[string]json.RawMessage
 }
 
-// BuyerID is UUIDv5(issuer ‖ sub) (spec §2.3; ids.OIDCBuyer): the same subject of the same issuer is the same buyer
+// CallerID is UUIDv5(issuer ‖ sub) (spec §2.3; ids.OIDCCaller): the same subject of the same issuer is the same caller
 // in every replica and release. An empty issuer or subject, which Verify never accepts, is uuid.Nil.
-func BuyerID(issuer, subject string) uuid.UUID {
-	id, err := ids.OIDCBuyer(issuer, subject)
+func CallerID(issuer, subject string) uuid.UUID {
+	id, err := ids.OIDCCaller(issuer, subject)
 	if err != nil {
 		return uuid.Nil
 	}

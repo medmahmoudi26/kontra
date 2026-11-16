@@ -23,10 +23,10 @@ const (
 	retryMax = time.Minute
 )
 
-// FetchTimeout bounds one fetch (both well-known paths). A seller that accepts the request and never
+// FetchTimeout bounds one fetch (both well-known paths). A service that accepts the request and never
 // answers (a deadlock, a half-dead proxy) fails that fetch, which Run retries on its backoff schedule;
 // without it, Run would wait on the one fetch forever and never refetch, and the service would go
-// unavailable 30 minutes later and stay so after the seller recovered.
+// unavailable 30 minutes later and stay so after the service recovered.
 const FetchTimeout = 30 * time.Second
 
 // ErrUnavailable is a service with no usable card: none fetched yet, or none fetched for UnavailableAfter.
@@ -35,7 +35,7 @@ var ErrUnavailable = errors.New("card: the service's card is unavailable")
 // Keeper keeps one direct service's card (spec §3; the card lifecycle of the M1 audit):
 //
 //   - it fetches the card when the service is configured, retrying the first fetch with backoff (1 s
-//     doubling to 1 min), so a gate started before its seller gets the card as soon as the seller is up;
+//     doubling to 1 min), so a gate started before its service gets the card as soon as the service is up;
 //   - it fetches again every Refresh (10 min); a failed fetch keeps the last good card and is retried on
 //     the backoff schedule;
 //   - after UnavailableAfter without a successful fetch, or before the first one, the service is
@@ -55,9 +55,9 @@ var ErrUnavailable = errors.New("card: the service's card is unavailable")
 //
 // Signing (spec §3, D13, D166): with a Signer (WithSigner) the served card is the rewrite with exactly one
 // signature, the gate's, whose protected header binds the upstream card's JCS hash, the URL it is served at and
-// whether a seller signature verified. Served.Hash is that hash (services.card_hash).
+// whether a service signature verified. Served.Hash is that hash (services.card_hash).
 //
-// Seller keys (spec §3; WithSellerKeys): every refresh fetches a {url} set again with the card, and verifies the
+// Service keys (spec §3; WithServiceKeys): every refresh fetches a {url} set again with the card, and verifies the
 // fetched card. A card none of whose signatures verifies is installed unavailable (its card routes answer 503,
 // Dispatch fails service_unavailable) and is neither persisted nor touched; a refresh whose card or key fetch
 // fails keeps the last verified card until UnavailableAfter past the last good refresh (D89). A stored card
@@ -73,8 +73,8 @@ type Keeper struct {
 	touch        func(ctx context.Context, s *Served)
 	signer       Signer
 	upstreamURL  string // {public_url}{svc}/.well-known/agent-card.upstream.json
-	jwksURL      string // {public_url}{svc}/.well-known/seller-jwks.json (kontra.upstream.jwks, D223)
-	seller       *SellerKeys
+	jwksURL      string // {public_url}{svc}/.well-known/service-jwks.json (kontra.upstream.jwks, D223)
+	service      *ServiceKeys
 
 	mu       sync.RWMutex
 	served   *Served
@@ -83,7 +83,7 @@ type Keeper struct {
 	info     upstream.Info
 	lastOK   time.Time
 	lastErr  error
-	// unverified is a served card whose signatures no configured seller key verifies; verifyPending a seeded
+	// unverified is a served card whose signatures no configured service key verifies; verifyPending a seeded
 	// card that waits for a {url} key set's first fetch. Either makes the service unavailable.
 	unverified    bool
 	verifyPending bool
@@ -110,7 +110,7 @@ func WithFetch(fn func(context.Context, upstream.Backend) (*upstream.Fetched, er
 func WithFetchTimeout(d time.Duration) KeeperOption { return func(k *Keeper) { k.fetchTimeout = d } }
 
 // WithTouch sets the hook called after a good fetch of a card already recorded (D89: every good fetch moves
-// card_fetched_at). It is never called for a card that does not verify against configured seller keys.
+// card_fetched_at). It is never called for a card that does not verify against configured service keys.
 func WithTouch(fn func(ctx context.Context, s *Served)) KeeperOption {
 	return func(k *Keeper) { k.touch = fn }
 }
@@ -119,14 +119,14 @@ func WithTouch(fn func(ctx context.Context, s *Served)) KeeperOption {
 // carries no signatures member.
 func WithSigner(s Signer) KeeperOption { return func(k *Keeper) { k.signer = s } }
 
-// WithSellerKeys verifies every upstream card against keys (spec §3); nil configures none (verified: false).
-func WithSellerKeys(keys *SellerKeys) KeeperOption { return func(k *Keeper) { k.seller = keys } }
+// WithServiceKeys verifies every upstream card against keys (spec §3); nil configures none (verified: false).
+func WithServiceKeys(keys *ServiceKeys) KeeperOption { return func(k *Keeper) { k.service = keys } }
 
-// UpstreamPath is where the upstream card is served under {svc} (spec §2.1), and SellerJWKSPath the seller key set
+// UpstreamPath is where the upstream card is served under {svc} (spec §2.1), and ServiceJWKSPath the service key set
 // the gate verified it with (kontra.upstream.jwks, D223).
 const (
-	UpstreamPath   = "/.well-known/agent-card.upstream.json"
-	SellerJWKSPath = "/.well-known/seller-jwks.json"
+	UpstreamPath    = "/.well-known/agent-card.upstream.json"
+	ServiceJWKSPath = "/.well-known/service-jwks.json"
 )
 
 // NewKeeper returns a keeper for backend b; in is the rewrite input (its Upstream is ignored).
@@ -136,16 +136,16 @@ func NewKeeper(b upstream.Backend, in Input, opts ...KeeperOption) *Keeper {
 		o(k)
 	}
 	k.upstreamURL = strings.TrimRight(in.PublicURL, "/") + in.ServicePath + UpstreamPath
-	k.jwksURL = strings.TrimRight(in.PublicURL, "/") + in.ServicePath + SellerJWKSPath
+	k.jwksURL = strings.TrimRight(in.PublicURL, "/") + in.ServicePath + ServiceJWKSPath
 	return k
 }
 
 // Seed installs a stored upstream card (services.upstream_card) fetched at fetchedAt as the last good one. With
-// seller keys it is verified now when the keys are at hand, and otherwise waits, unavailable, for the first
+// service keys it is verified now when the keys are at hand, and otherwise waits, unavailable, for the first
 // refresh that fetches them.
 func (k *Keeper) Seed(raw []byte, fetchedAt time.Time) error {
 	v, err := k.verify(context.Background(), raw)
-	if errors.Is(err, ErrNoSellerKeys) {
+	if errors.Is(err, ErrNoServiceKeys) {
 		return k.install(context.Background(), raw, fetchedAt, verdict{pending: true})
 	}
 	if err != nil {
@@ -154,7 +154,7 @@ func (k *Keeper) Seed(raw []byte, fetchedAt time.Time) error {
 	return k.install(context.Background(), raw, fetchedAt, v)
 }
 
-// verdict is what seller keys made of an upstream card.
+// verdict is what service keys made of an upstream card.
 type verdict struct {
 	verified bool   // a configured key verified one of its signatures
 	refused  bool   // keys are configured and none verified any
@@ -162,12 +162,12 @@ type verdict struct {
 	jwks     []byte // the public set that verified it (verified only): kontra.upstream.jwks (D223)
 }
 
-// verify checks raw against the seller keys; without keys the card is neither verified nor refused.
+// verify checks raw against the service keys; without keys the card is neither verified nor refused.
 func (k *Keeper) verify(ctx context.Context, raw []byte) (verdict, error) {
-	if k.seller == nil {
+	if k.service == nil {
 		return verdict{}, nil
 	}
-	ok, _, set, err := k.seller.verify(ctx, raw)
+	ok, _, set, err := k.service.verify(ctx, raw)
 	if err != nil {
 		return verdict{}, err
 	}
@@ -180,16 +180,16 @@ func (k *Keeper) verify(ctx context.Context, raw []byte) (verdict, error) {
 	return v, nil
 }
 
-// Refresh fetches the card once, within FetchTimeout, and a {url} seller key set with it, at the same time and
+// Refresh fetches the card once, within FetchTimeout, and a {url} service key set with it, at the same time and
 // within a FetchTimeout of its own (a slow key host does not eat into the card's budget). On success it
 // replaces the last good card and calls the persist hook while that card is unrecorded (a failed call is
 // returned, and made again at the next good fetch), or the touch hook when it is recorded; on failure, a fetch
 // that ran out of time included, the last good card stays and the error is returned. A fetched card that no
-// configured seller key verifies is installed unavailable and returned as an error. When the keys were fetched
+// configured service key verifies is installed unavailable and returned as an error. When the keys were fetched
 // and the card was not, the current card is verified again against them (reverify).
 func (k *Keeper) Refresh(ctx context.Context) error {
 	keysDone := make(chan error, 1)
-	if k.seller == nil {
+	if k.service == nil {
 		keysDone <- nil
 	} else {
 		go func() { keysDone <- k.refreshKeys(ctx) }()
@@ -229,12 +229,12 @@ func (k *Keeper) Refresh(ctx context.Context) error {
 	return k.record(ctx)
 }
 
-// RefreshSellerKeys fetches a {url} seller key set (an inline set, or none, does nothing), within FetchTimeout,
+// RefreshServiceKeys fetches a {url} service key set (an inline set, or none, does nothing), within FetchTimeout,
 // and verifies the current card against it again when it waits for it or was refused (reverify): a replica that
 // holds no session of a tunnel service fetches no card of its own, and its seeded card would otherwise wait for
-// keys forever, or stay refused against a set from before the seller rotated its key.
-func (k *Keeper) RefreshSellerKeys(ctx context.Context) error {
-	if k.seller == nil {
+// keys forever, or stay refused against a set from before the service rotated its key.
+func (k *Keeper) RefreshServiceKeys(ctx context.Context) error {
+	if k.service == nil {
 		return nil
 	}
 	if err := k.refreshKeys(ctx); err != nil {
@@ -244,25 +244,25 @@ func (k *Keeper) RefreshSellerKeys(ctx context.Context) error {
 	return nil
 }
 
-// refreshKeys fetches a {url} seller key set within a FetchTimeout of its own: a key host that accepts the request
+// refreshKeys fetches a {url} service key set within a FetchTimeout of its own: a key host that accepts the request
 // and never answers, or trickles its body, fails that fetch instead of holding the caller (the tunnel card loop's
 // context never ends).
 func (k *Keeper) refreshKeys(ctx context.Context) error {
 	kctx, cancel := context.WithTimeout(ctx, k.fetchTimeout)
 	defer cancel()
-	err := k.seller.Refresh(kctx)
+	err := k.service.Refresh(kctx)
 	if err != nil && ctx.Err() == nil && errors.Is(kctx.Err(), context.DeadlineExceeded) {
-		err = fmt.Errorf("card: the seller's keys were not fetched within %v: %w", k.fetchTimeout, err)
+		err = fmt.Errorf("card: the service's keys were not fetched within %v: %w", k.fetchTimeout, err)
 	}
 	return err
 }
 
-// ErrNotVerified is a card none of whose signatures the service's configured seller keys verify (spec §3).
-var ErrNotVerified = errors.New("card: no signature of the seller's card verifies against the configured seller keys")
+// ErrNotVerified is a card none of whose signatures the service's configured service keys verify (spec §3).
+var ErrNotVerified = errors.New("card: no signature of the service's card verifies against the configured service keys")
 
 // reverify verifies the current card again once a refresh fetched the {url} keys although the card itself was not
-// fetched (the seller down while its key host is up, or a replica with no session, which serves the stored card):
-// a seeded card that waited for the keys, and a card refused against the set fetched before (the seller rotated
+// fetched (the service down while its key host is up, or a replica with no session, which serves the stored card):
+// a seeded card that waited for the keys, and a card refused against the set fetched before (the service rotated
 // its key and re-signed its card, which reached this replica before its own key refresh). A card that verifies is
 // installed as of when it was fetched, so D89's 30 minutes run from its fetch, not from now.
 func (k *Keeper) reverify(ctx context.Context) {
@@ -324,12 +324,12 @@ func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v ve
 			return err
 		}
 	}
-	// SPEC-CONFLICT (D193; spec §3 with D49): §3 keeps the upstream card verbatim and serves every seller member
+	// SPEC-CONFLICT (D193; spec §3 with D49): §3 keeps the upstream card verbatim and serves every service member
 	// byte for byte, and signs the served card over its RFC 8785 JCS with the upstream card's JCS hash in the
 	// header; JCS is defined for valid Unicode only (I-JSON), so a card that is not valid UTF-8, or carries a lone
 	// surrogate, can be neither hashed nor signed, though M1 served such bytes as they were. The closest faithful
 	// behaviour: such a card is not installed (ErrBadCard, as for any card the gate cannot serve), so the service
-	// has no card until the seller publishes one; it is never served unsigned or altered.
+	// has no card until the service publishes one; it is never served unsigned or altered.
 	hash, err := UpstreamHash(raw)
 	if err != nil {
 		return err
@@ -359,7 +359,7 @@ func (k *Keeper) installOver(ctx context.Context, raw []byte, at time.Time, v ve
 		lastMod = k.served.LastModified // the same body keeps its Last-Modified, so caches stay valid
 	}
 	k.served = &Served{Body: body, Upstream: raw, ETag: ETag(body), LastModified: lastMod, Hash: hash, Verified: v.verified,
-		SellerJWKS: v.jwks}
+		ServiceJWKS: v.jwks}
 	k.servedAt = at
 	k.info = info
 	k.unverified, k.verifyPending = v.refused, v.pending
@@ -391,7 +391,7 @@ func (k *Keeper) Run(ctx context.Context) {
 }
 
 // available reports whether the last good card is still servable at now: one exists, it was fetched within
-// UnavailableAfter, and no configured seller key refused it or waits to be fetched for it.
+// UnavailableAfter, and no configured service key refused it or waits to be fetched for it.
 func (k *Keeper) available(now time.Time) bool {
 	return k.served != nil && !k.unverified && !k.verifyPending && now.Sub(k.lastOK) < UnavailableAfter
 }
@@ -428,7 +428,7 @@ func (k *Keeper) unavailable() error {
 	case k.unverified:
 		return fmt.Errorf("%w: %w", ErrUnavailable, ErrNotVerified)
 	case k.verifyPending && k.lastErr == nil:
-		return fmt.Errorf("%w: %w", ErrUnavailable, ErrNoSellerKeys)
+		return fmt.Errorf("%w: %w", ErrUnavailable, ErrNoServiceKeys)
 	case k.lastErr != nil:
 		return fmt.Errorf("%w: %w", ErrUnavailable, k.lastErr)
 	}

@@ -64,7 +64,7 @@ func TestAnonymousSweepsRunApart(t *testing.T) {
 			t.Fatalf("%s: %v", sql, err)
 		}
 	}
-	exec(`insert into kontra.tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version,
+	exec(`insert into kontra.tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state, version,
 		snapshot, status_at, terminal_at) values ($1, $2, 'a', 'a2a', $3, 'anonymous', 'node', 'ctx', 'completed', 1, '{}', now(), now())`,
 		uuid.Must(uuid.NewV7()), purged.ID, uuid.New())
 	exec(`update kontra.tenants set expires_at = now() - interval '25 hours' where id = $1`, purged.ID)

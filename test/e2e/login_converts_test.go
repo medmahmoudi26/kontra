@@ -15,7 +15,7 @@ import (
 
 // login_converts (spec/tunnel.md §16; §6.3, §6.1; D278, D286, D296). Multi-tenant, tunnel.anonymous on,
 // tunnel.enroll_with_api_key, auth.mcp_oauth at the in-repository authorization server, whose token endpoint issues a kk_
-// key of the account tenant acme (hire, enroll:*). Asserted:
+// key of the account tenant acme (call, enroll:*). Asserted:
 //
 //   - kontra login --no-browser (HOME = the anonymous node's) registers once (a second login reuses the client_id); the
 //     authorization request carries code_challenge_method S256, a state and resource = the gate's origin, and the token
@@ -33,7 +33,7 @@ func TestLoginConverts(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(as.Close)
-	seller := StartSeller(t)
+	service := StartService(t)
 	h := start(t, Options{Multi: true, Anonymous: anonConfig(10*time.Minute, 1000), EnrollWithAPIKey: true, AuthServer: as, ProxyProtocol: true})
 	ctx := ctxFor(t, 10*time.Minute)
 	acme, err := h.SeedTenant(ctx, "acme", "account")
@@ -44,7 +44,7 @@ func TestLoginConverts(t *testing.T) {
 	as.MintFor(h.Pool, acme, origin)
 
 	// An anonymous session hosting hello, public.
-	n := anonNode(t, ctx, h, "198.51.100.40", map[string]string{"hello": seller.URL}, nil, "hello")
+	n := anonNode(t, ctx, h, "198.51.100.40", map[string]string{"hello": service.URL}, nil, "hello")
 	anon := slugOf(n)
 	anonID := h.TenantOf(ctx, anon)
 	if err := h.WaitA2A(ctx, anon+"/hello", "", 60*time.Second); err != nil {

@@ -26,7 +26,7 @@ const EventAnonymous = "tunnel.anonymous_session"
 //     tunnel.anonymous;
 //   - from a key of a live anonymous tenant: an auth key with enroll:* of an account converts it (§6.3, convert; with
 //     tunnel.enroll_with_api_key); otherwise resumed when the hello asks, or carries an auth API key that cannot
-//     convert it (a hire-only key, D286: the session's hiring principal); a hello with neither (a probe, §2.4) is
+//     convert it (a call-only key, D286: the session's calling principal); a hello with neither (a probe, §2.4) is
 //     unknown_key, so that a node whose earlier hello converted nothing sends it again. On a gate without
 //     tunnel.anonymous only a hello that asks is anonymous_unavailable; any other goes through §5 as below (a probe is
 //     unknown_key);
@@ -103,8 +103,8 @@ func (a *admission) anonymousSession(ctx context.Context) (*Decision, error) {
 //
 // Everything else is §5's: the per-service advisory locks, an existing service that is disabled or not a tunnel
 // service (service_denied), the enrolled notices to a service's other nodes, the welcome naming the account's URLs
-// (Decision.Anonymous nil), and the API key as the session's hiring principal. A hello without services converts too
-// when the key may hire (admitted hire-only in the account, §9). The admission already holds the key's row and then
+// (Decision.Anonymous nil), and the API key as the session's calling principal. A hello without services converts too
+// when the key may call (admitted call-only in the account, §9). The admission already holds the key's row and then
 // the anonymous tenant's (lockAnonymousTenant), and locks no other anonymous tenant.
 func (a *admission) convert(ctx context.Context) (bool, error) {
 	p := a.principal
@@ -116,7 +116,7 @@ func (a *admission) convert(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("enroll: the auth API key's tenant: %w", err)
 	}
 	if anonymous {
-		return false, nil // no account to convert into: the key hires as the session's principal (D286)
+		return false, nil // no account to convert into: the key calls as the session's principal (D286)
 	}
 	// What the anonymous session serves: the only services a conversion creates. The tenant is locked already
 	// (lockAnonymousTenant); this reads, and locks nothing more.
@@ -148,7 +148,7 @@ func (a *admission) convert(ctx context.Context) (bool, error) {
 }
 
 // openAnonymous opens or resumes the key's anonymous tenant (anon.Open) and decides the welcome: the declared
-// services at the tenant's URLs, welcome.anonymous.expires_at, and the hiring principal (the auth API key's, else
+// services at the tenant's URLs, welcome.anonymous.expires_at, and the calling principal (the auth API key's, else
 // node:<key_id>). Open's refusals are the handshake's: anonymous_unavailable (max_tenants), rate_limited (the
 // network's tenants), service_denied (over services, or a public name not declared; nothing enrolled), kind_mismatch.
 func (a *admission) openAnonymous(ctx context.Context) (*Decision, error) {
@@ -212,11 +212,11 @@ func (a *admission) openAnonymous(ctx context.Context) (*Decision, error) {
 		d.Served = append(d.Served, tunnel.WelcomeService{Kind: s.Kind, Name: s.Name, URL: a.s.serviceURL(s.Kind, t.Slug, s.Name)})
 	}
 	if a.principal != nil {
-		d.HirePrincipal = a.principal.ID
-		hire := *a.principal
-		d.Hire = &hire
+		d.CallerPrincipal = a.principal.ID
+		call := *a.principal
+		d.Call = &call
 	} else {
-		d.HirePrincipal = string(auth.KindNode) + ":" + h.KID
+		d.CallerPrincipal = string(auth.KindNode) + ":" + h.KID
 	}
 	return d, nil
 }

@@ -45,15 +45,15 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// seller is an a2a-go v2.7.0 agent (local mode) that asks a question on the first turn and, on a
+// service is an a2a-go v2.7.0 agent (local mode) that asks a question on the first turn and, on a
 // follow-up, works until released, then answers with an artifact and completes.
-type seller struct {
+type service struct {
 	release chan struct{}
 	sends   atomic.Int64
 	srv     *httptest.Server
 }
 
-func (s *seller) executor() a2asrv.AgentExecutor {
+func (s *service) executor() a2asrv.AgentExecutor {
 	return a2asrv.AgentExecutorFunc(func(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 		return func(yield func(a2a.Event, error) bool) {
 			if ec.StoredTask == nil {
@@ -79,8 +79,8 @@ func (s *seller) executor() a2asrv.AgentExecutor {
 	})
 }
 
-func newSeller(t *testing.T) *seller {
-	s := &seller{release: make(chan struct{})}
+func newService(t *testing.T) *service {
+	s := &service{release: make(chan struct{})}
 	h := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(s.executor()))
 	mux := http.NewServeMux()
 	mux.Handle("/a2a/", http.StripPrefix("/a2a", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,8 +96,8 @@ func newSeller(t *testing.T) *seller {
 	return s
 }
 
-const sellerCard = `{"name":"booking","description":"books things","version":"1.0.0",
-"supportedInterfaces":[{"url":"http://seller.invalid/a2a/","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
+const serviceCard = `{"name":"booking","description":"books things","version":"1.0.0",
+"supportedInterfaces":[{"url":"http://service.invalid/a2a/","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
 "capabilities":{"streaming":true,"extensions":[{"uri":"https://example.com/ext/x/v1"}]},
 "defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"skills":[{"id":"book","name":"book","description":"book","tags":["b"]}]}`
 
@@ -140,19 +140,19 @@ func stackListener(t *testing.T, dsn string) *pg.Listener {
 	return l
 }
 
-// sseEvent is one event as a buyer reads it; id 0 is an event without an id line.
+// sseEvent is one event as a caller reads it; id 0 is an event without an id line.
 type sseEvent struct {
 	id   int64
 	data string
 }
 
-// buyerStream is one SSE response read by a buyer that keeps ids (a2a-go's client ignores them).
-type buyerStream struct {
+// callerStream is one SSE response read by a caller that keeps ids (a2a-go's client ignores them).
+type callerStream struct {
 	resp   *http.Response
 	events chan sseEvent
 }
 
-func openStream(t *testing.T, req *http.Request) (*buyerStream, *http.Response) {
+func openStream(t *testing.T, req *http.Request) (*callerStream, *http.Response) {
 	t.Helper()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -161,7 +161,7 @@ func openStream(t *testing.T, req *http.Request) (*buyerStream, *http.Response) 
 	if resp.Header.Get("Content-Type") != "text/event-stream" {
 		return nil, resp
 	}
-	s := &buyerStream{resp: resp, events: make(chan sseEvent, 64)}
+	s := &callerStream{resp: resp, events: make(chan sseEvent, 64)}
 	go func() {
 		defer close(s.events)
 		defer resp.Body.Close()
@@ -187,7 +187,7 @@ func openStream(t *testing.T, req *http.Request) (*buyerStream, *http.Response) 
 	return s, resp
 }
 
-func (s *buyerStream) all(t *testing.T) []sseEvent {
+func (s *callerStream) all(t *testing.T) []sseEvent {
 	t.Helper()
 	var out []sseEvent
 	timeout := time.After(60 * time.Second)
@@ -232,9 +232,9 @@ func stateOfEvent(ev a2a.Event) a2a.TaskState {
 	return ""
 }
 
-// carol is another buyer of alice's tenant: the service admits her, alice's tasks are not hers.
-var carol = auth.Principal{Kind: auth.KindKey, ID: "key:kk_carol_00000001", BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000c"),
-	Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeHire}, TenantID: &tenantID, TenantSlug: "default"}
+// carol is another caller of alice's tenant: the service admits her, alice's tasks are not hers.
+var carol = auth.Principal{Kind: auth.KindKey, ID: "key:kk_carol_00000001", CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000c"),
+	Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeCall}, TenantID: &tenantID, TenantSlug: "default"}
 
 type bearer struct{ token string }
 
@@ -248,10 +248,10 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 // Temporal-backed work queue, TaskLifecycle on a development server, the dispatch activity, the SSE
 // writer on the replica's LISTEN connection, behind the edge.
 type stack struct {
-	url    string
-	pool   *pgxpool.Pool
-	log    *store.Log
-	seller *seller
+	url     string
+	pool    *pgxpool.Pool
+	log     *store.Log
+	service *service
 }
 
 func newStack(t *testing.T) *stack {
@@ -274,7 +274,7 @@ func newStack(t *testing.T) *stack {
 	c := temporaltest.Client(t)
 	lc := lifecycle.NewClient(c)
 
-	sl := newSeller(t)
+	sl := newService(t)
 	b, err := upstream.NewDirect(sl.srv.URL, true)
 	if err != nil {
 		t.Fatal(err)
@@ -304,11 +304,11 @@ func newStack(t *testing.T) *stack {
 	var front http.Handler
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { front.ServeHTTP(w, r) }))
 	t.Cleanup(srv.Close)
-	body, err := card.Rewrite(card.Input{Upstream: []byte(sellerCard), PublicURL: srv.URL, ServicePath: "/agents/hello"})
+	body, err := card.Rewrite(card.Input{Upstream: []byte(serviceCard), PublicURL: srv.URL, ServicePath: "/agents/hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	served := &card.Served{Body: body, Upstream: []byte(sellerCard), ETag: card.ETag(body), LastModified: time.Now()}
+	served := &card.Served{Body: body, Upstream: []byte(serviceCard), ETag: card.ETag(body), LastModified: time.Now()}
 	allowList := allow(t, "org:default")
 	a := New(Deps{
 		Services: registry{"default/hello": &Service{Ref: svc, Allow: allowList, Cards: func() (*card.Served, error) { return served, nil }}},
@@ -318,7 +318,7 @@ func newStack(t *testing.T) *stack {
 	rt := edge.NewRouter()
 	a.Register(rt)
 	front = edge.Middleware(edge.MiddlewareConfig{}, rt)
-	return &stack{url: srv.URL, pool: pool, log: log, seller: sl}
+	return &stack{url: srv.URL, pool: pool, log: log, service: sl}
 }
 
 func (s *stack) request(t *testing.T, method, path, body, token string, header ...string) *http.Request {
@@ -355,11 +355,11 @@ func (s *stack) carried(t *testing.T, id a2a.TaskID) []int64 {
 // "follow-up turn through the real stack", spec §7, §9, §14.1):
 //
 //   - a2a-go's resolver fetches GET {svc} as the card, and a2a-go's client sends through the gate;
-//   - SendStreamingMessage of a new task on JSON-RPC: the task snapshot once the seller's answer exposed it (D362),
+//   - SendStreamingMessage of a new task on JSON-RPC: the task snapshot once the service's answer exposed it (D362),
 //     with its seq as its id, closing at input-required;
 //   - two concurrent follow-ups: exactly one is accepted, the other refused before any SSE header;
 //   - the accepted follow-up's stream leads with the snapshot at V without an id and closes after completed;
-//   - SubscribeToTask resumes over HTTP+JSON with Last-Event-ID, and refuses another buyer.
+//   - SubscribeToTask resumes over HTTP+JSON with Last-Event-ID, and refuses another caller.
 func TestStreamsOverTheRealStack(t *testing.T) {
 	s := newStack(t)
 	ctx := context.Background()
@@ -396,8 +396,8 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 	if len(turn1) < 1 || turn1[0].id < 1 {
 		t.Fatalf("turn 1: %+v", turn1)
 	}
-	// The lead is the task as the seller's first answer exposed it (D362): submitted, or already input-required
-	// when the seller's turn ended before the stream read it, which then is the stream's one event.
+	// The lead is the task as the service's first answer exposed it (D362): submitted, or already input-required
+	// when the service's turn ended before the stream read it, which then is the stream's one event.
 	first, ok := eventOf(t, turn1[0].data).(*a2a.Task)
 	if !ok || (first.Status.State != a2a.TaskStateSubmitted && first.Status.State != a2a.TaskStateInputRequired) {
 		t.Fatalf("turn 1 starts with %s", turn1[0].data)
@@ -407,7 +407,7 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 		if i > 0 && ev.id <= turn1[i-1].id {
 			t.Fatalf("ids not increasing: %+v", turn1)
 		}
-		if strings.Contains(ev.data, s.seller.srv.URL) {
+		if strings.Contains(ev.data, s.service.srv.URL) {
 			t.Errorf("an event names the upstream")
 		}
 	}
@@ -420,7 +420,7 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 		return `{"message":{"messageId":"` + uuid.NewString() + `","role":"ROLE_USER","taskId":"` + string(taskID) + `","parts":[{"text":"` + text + `"}]}}`
 	}
 	type outcome struct {
-		stream *buyerStream
+		stream *callerStream
 		status int
 		body   string
 	}
@@ -445,7 +445,7 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 	}
 	wg.Wait()
 	close(results)
-	var accepted *buyerStream
+	var accepted *callerStream
 	var refusals []outcome
 	for o := range results {
 		if o.stream != nil {
@@ -463,7 +463,7 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 	if r := refusals[0]; !strings.Contains(r.body, "UNSUPPORTED_OPERATION") && !strings.Contains(r.body, `"code":-32004`) {
 		t.Errorf("the refused follow-up: %d %s", r.status, r.body)
 	}
-	close(s.seller.release)
+	close(s.service.release)
 	turn2 := accepted.all(t)
 	if len(turn2) < 3 || turn2[0].id != 0 {
 		t.Fatalf("turn 2: %+v", turn2)
@@ -493,12 +493,12 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 	if fmt.Sprint(ids) != fmt.Sprint(carried) {
 		t.Errorf("both turns' ids %v, the log's carried seqs %v", ids, carried)
 	}
-	if n := s.seller.sends.Load(); n != 3 {
-		t.Errorf("the seller received %d messages: the a2a-go client's, turn 1 and one follow-up", n)
+	if n := s.service.sends.Load(); n != 3 {
+		t.Errorf("the service received %d messages: the a2a-go client's, turn 1 and one follow-up", n)
 	}
 
 	// Resume over HTTP+JSON with Last-Event-ID: K = terminal - 1 sends the snapshot as of it and the
-	// terminal row, GET and POST alike; K = terminal is refused; another buyer gets TaskNotFound.
+	// terminal row, GET and POST alike; K = terminal is refused; another caller gets TaskNotFound.
 	terminalSeq := carried[len(carried)-1]
 	for _, m := range []string{"GET", "POST"} {
 		st, resp := openStream(t, s.request(t, m, "/agents/hello/tasks/"+string(taskID)+":subscribe", "", "alice", "Last-Event-ID", strconv.FormatInt(terminalSeq-1, 10)))
@@ -517,7 +517,7 @@ func TestStreamsOverTheRealStack(t *testing.T) {
 		{"alice", strconv.FormatInt(terminalSeq, 10), "UNSUPPORTED_OPERATION", 400},
 		{"alice", "", "UNSUPPORTED_OPERATION", 400},
 		{"alice", "999", "INVALID_PARAMS", 400},
-		{"carol", "2", "TASK_NOT_FOUND", 404}, // another buyer the service admits (cross_buyer)
+		{"carol", "2", "TASK_NOT_FOUND", 404}, // another caller the service admits (cross_caller)
 		{"bob", "2", "unknown service", 404},  // a caller the service does not admit (D50)
 	} {
 		h := []string{}

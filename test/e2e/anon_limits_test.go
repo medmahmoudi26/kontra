@@ -21,7 +21,7 @@ import (
 // anonConfig is tunnel.anonymous compressed for the anonymous tests (spec/tunnel.md §16: compressed where a row waits
 // on a clock). Test configuration only, never deploy/ (the plan's WP-07 note).
 func anonConfig(ttl time.Duration, maxTenants int) string {
-	return fmt.Sprintf("{ ttl: %s, purge_after: 10s, tenants_per_network: 3, services: 4, tasks: 4, calls: 8, hiring_streams: 8, "+
+	return fmt.Sprintf("{ ttl: %s, purge_after: 10s, tenants_per_network: 3, services: 4, tasks: 4, calls: 8, calling_streams: 8, "+
 		"parts_bytes: 1MiB, max_tenants: %d }", ttl, maxTenants)
 }
 
@@ -121,9 +121,9 @@ const anonLimitsMaxTenants = 12
 //   - a hello declaring 5 services is service_denied, with no tenant, key or binding written; a tenant's services that
 //     are not disabled are at most 4 across a reconnect with 4 new names (the old ones disabled, 404);
 //   - with 4 tasks of the tenant's public service working, a 5th from an anonymous caller is 429 (-32600 "rate limited",
-//     Retry-After) and writes no task; with 4 tasks the node hired through its local endpoint working, a 5th is 429
-//     too (as hirer);
-//   - with 8 hiring streams of the session in flight, a 9th is 429;
+//     Retry-After) and writes no task; with 4 tasks the node called through its local endpoint working, a 5th is 429
+//     too (as caller);
+//   - with 8 calling streams of the session in flight, a 9th is 429;
 //   - with 8 plain MCP calls to the tenant's public MCP service in flight, a 9th is 429 with -32600;
 //   - a caller's message whose parts pass the tenant's 1 MiB is InvalidParams "anonymous storage limit" before any task
 //     row; an upstream's parts past it fail the task upstream_error;
@@ -132,7 +132,7 @@ const anonLimitsMaxTenants = 12
 //   - at expires_at the node gets expiring, then revoked, and exits saying the session expired; its /agents/anon-…/ and
 //     /mcp/anon-…/ URLs answer 404 on both replicas.
 func TestAnonLimits(t *testing.T) {
-	seller := StartSeller(t)
+	service := StartService(t)
 	calc := mcptest.New()
 	calc.Tools = []json.RawMessage{mcptest.Tool("add", "")}
 	release := make(chan struct{})
@@ -147,7 +147,7 @@ func TestAnonLimits(t *testing.T) {
 	h := start(t, Options{Multi: true, Anonymous: anonConfig(60*time.Second, anonLimitsMaxTenants), ProxyProtocol: true, Peer: true})
 	ctx := ctxFor(t, 12*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
-	echo := map[string]string{"echo": seller.URL}
+	echo := map[string]string{"echo": service.URL}
 
 	// Networks: three tenants from 198.51.100.0/24, a 4th rate_limited; the same for 2001:db8:1::/48 (four /64s).
 	var networkNodes []*Node
@@ -242,7 +242,7 @@ func TestAnonLimits(t *testing.T) {
 	h.Front.SetSource(netip.MustParseAddr("203.0.113.60"))
 	five := map[string]string{}
 	for i := 1; i <= 5; i++ {
-		five[fmt.Sprintf("s%d", i)] = seller.URL
+		five[fmt.Sprintf("s%d", i)] = service.URL
 	}
 	n5, err := h.LaunchNode(NodeOptions{Serves: five})
 	if err != nil {
@@ -258,7 +258,7 @@ func TestAnonLimits(t *testing.T) {
 		count(t, h, `select count(*) from kontra.key_services k join kontra.tunnel_keys t using (key_id) where t.node_name = $1`, n5.Name); n != 0 {
 		t.Errorf("the refused 5-service hello wrote %d tenants or bindings", n)
 	}
-	four := map[string]string{"s1": seller.URL, "s2": seller.URL, "s3": seller.URL, "s4": seller.URL}
+	four := map[string]string{"s1": service.URL, "s2": service.URL, "s3": service.URL, "s4": service.URL}
 	c1 := anonNode(t, ctx, h, "203.0.113.61", four, nil)
 	slugC := slugOf(c1)
 	tenantC := h.TenantOf(ctx, slugC)
@@ -266,7 +266,7 @@ func TestAnonLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.Front.SetSource(netip.MustParseAddr("203.0.113.61"))
-	c2, err := h.StartNode(ctx, NodeOptions{Home: c1.Home, Serves: map[string]string{"s5": seller.URL, "s6": seller.URL, "s7": seller.URL, "s8": seller.URL}})
+	c2, err := h.StartNode(ctx, NodeOptions{Home: c1.Home, Serves: map[string]string{"s5": service.URL, "s6": service.URL, "s7": service.URL, "s8": service.URL}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,15 +287,15 @@ func TestAnonLimits(t *testing.T) {
 	}
 
 	// The runtime limits, on one session: its tunnel on A, the callers on B.
-	if err := h.SeedServices(ctx, SeededService{Tenant: TeamTenant, Name: "open", URL: seller.URL, Allow: []string{"anonymous"}},
-		SeededService{Tenant: TeamTenant, Name: "catalog", URL: seller.URL, Listed: true}); err != nil {
+	if err := h.SeedServices(ctx, SeededService{Tenant: TeamTenant, Name: "open", URL: service.URL, Allow: []string{"anonymous"}},
+		SeededService{Tenant: TeamTenant, Name: "catalog", URL: service.URL, Listed: true}); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.WaitA2A(ctx, "default/open", "", 60*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	h.Front.Route(a)
-	d := anonNode(t, ctx, h, "203.0.113.70", map[string]string{"work": seller.URL}, map[string]string{"calc": calcURL}, "work", "calc")
+	d := anonNode(t, ctx, h, "203.0.113.70", map[string]string{"work": service.URL}, map[string]string{"calc": calcURL}, "work", "calc")
 	opened := time.Now()
 	slug := slugOf(d)
 	tenant := h.TenantOf(ctx, slug)
@@ -330,29 +330,29 @@ func TestAnonLimits(t *testing.T) {
 		t.Errorf("the refused 5th task as host wrote a row: %d tasks", n)
 	}
 
-	// As hirer: 4 slow tasks of the team's open service through the node's local endpoint, then a 5th.
+	// As caller: 4 slow tasks of the team's open service through the node's local endpoint, then a 5th.
 	teamID := h.TenantOf(ctx, TeamTenant)
-	hired := func() int64 {
+	sentByMCP := func() int64 {
 		return count(t, h, `select count(*) from kontra.tasks where tenant_id = $1 and principal like 'node:%'`, teamID)
 	}
 	for i := range 4 {
 		if st, _, body := rawJSONRPC(t, ctx, local+"/agents/default/open", "", "SendMessage", sendParams("slow"), nil); st != http.StatusOK ||
 			!strings.Contains(body, `"result"`) {
-			t.Fatalf("task %d as hirer: %d %s", i, st, body)
+			t.Fatalf("task %d as caller: %d %s", i, st, body)
 		}
 	}
-	eventually(t, 30*time.Second, "4 hired tasks working", func() bool {
+	eventually(t, 30*time.Second, "4 called tasks working", func() bool {
 		return count(t, h, `select count(*) from kontra.tasks where tenant_id = $1 and principal like 'node:%' and state = 'working'`, teamID) == 4
 	})
 	if st, hdr, body := rawJSONRPC(t, ctx, local+"/agents/default/open", "", "SendMessage", sendParams("slow"), nil); !rateLimited(st, hdr, body) {
-		t.Errorf("a 5th task as hirer: %d %v %s, want 429 -32600 rate limited", st, hdr, body)
+		t.Errorf("a 5th task as caller: %d %v %s, want 429 -32600 rate limited", st, hdr, body)
 	}
-	if n := hired(); n != 4 {
-		t.Errorf("the refused 5th task as hirer wrote a row: %d tasks", n)
+	if n := sentByMCP(); n != 4 {
+		t.Errorf("the refused 5th task as caller wrote a row: %d tasks", n)
 	}
 
-	// Hiring streams: 8 SubscribeToTask held open through the local endpoint, then a 9th request.
-	hiredIDs := texts(t, h, `select id::text from kontra.tasks where tenant_id = $1 and principal like 'node:%'`, teamID)
+	// Calling streams: 8 SubscribeToTask held open through the local endpoint, then a 9th request.
+	sentByMCPIDs := texts(t, h, `select id::text from kontra.tasks where tenant_id = $1 and principal like 'node:%'`, teamID)
 	sctx, stopStreams := context.WithCancel(ctx)
 	var streams sync.WaitGroup
 	opens := make(chan int, 8)
@@ -360,7 +360,7 @@ func TestAnonLimits(t *testing.T) {
 		streams.Add(1)
 		go func() {
 			defer streams.Done()
-			b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": i, "method": "SubscribeToTask", "params": map[string]any{"id": hiredIDs[i%4]}})
+			b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": i, "method": "SubscribeToTask", "params": map[string]any{"id": sentByMCPIDs[i%4]}})
 			req, _ := http.NewRequestWithContext(sctx, http.MethodPost, local+"/agents/default/open", strings.NewReader(string(b)))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "text/event-stream")
@@ -381,11 +381,11 @@ func TestAnonLimits(t *testing.T) {
 	}
 	for range 8 {
 		if st := <-opens; st != http.StatusOK {
-			t.Fatalf("a hiring stream of the 8: %d", st)
+			t.Fatalf("a calling stream of the 8: %d", st)
 		}
 	}
-	if st, _, body := rawJSONRPC(t, ctx, local+"/agents/default/open", "", "GetTask", map[string]any{"id": hiredIDs[0]}, nil); st != http.StatusTooManyRequests {
-		t.Errorf("a 9th hiring stream: %d %s, want 429", st, body)
+	if st, _, body := rawJSONRPC(t, ctx, local+"/agents/default/open", "", "GetTask", map[string]any{"id": sentByMCPIDs[0]}, nil); st != http.StatusTooManyRequests {
+		t.Errorf("a 9th calling stream: %d %s, want 429", st, body)
 	}
 	stopStreams()
 	streams.Wait()
@@ -423,7 +423,7 @@ func TestAnonLimits(t *testing.T) {
 
 	// Parts, on a tenant of their own (the host cap and the stored total are per tenant): a caller's message whose parts
 	// pass 1 MiB, before any task row; an upstream's parts past it fail the task.
-	pn := anonNode(t, ctx, h, "203.0.113.80", map[string]string{"big": seller.URL}, nil, "big")
+	pn := anonNode(t, ctx, h, "203.0.113.80", map[string]string{"big": service.URL}, nil, "big")
 	pslug, ptenant := slugOf(pn), h.TenantOf(ctx, slugOf(pn))
 	if err := h.WaitA2A(ctx, pslug+"/big", "", 60*time.Second); err != nil {
 		t.Fatal(err)

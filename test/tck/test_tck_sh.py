@@ -47,7 +47,7 @@ def test_the_template_is_filled_literally() -> None:
     text = "\n".join(code())
     assert not re.search(r"\bsed\b[^\n]*@[A-Z_]+@", text), "a sed fills a placeholder"
     assert "test/tck/kontra_tck_config.py" in text
-    for name in ("LISTEN", "PUBLIC_URL", "POSTGRES", "TEMPORAL", "SELLER"):
+    for name in ("LISTEN", "PUBLIC_URL", "POSTGRES", "TEMPORAL", "SERVICE"):
         assert f"KONTRA_TCK_FILL_{name}=" in text
 
 

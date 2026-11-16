@@ -25,13 +25,13 @@ const allowsReadTimeout = 2 * time.Second
 
 // Session is one live tunnel session on this replica.
 type Session struct {
-	ID            uuid.UUID
-	KeyID         string
-	TenantID      uuid.UUID
-	Tenant        string
-	HirePrincipal string
-	CLIVersion    string
-	NodeName      string
+	ID              uuid.UUID
+	KeyID           string
+	TenantID        uuid.UUID
+	Tenant          string
+	CallerPrincipal string
+	CLIVersion      string
+	NodeName        string
 
 	// expiresAt is an anonymous session's end (spec/tunnel.md §6.1); zero for any other session. ended is set when
 	// its tenant ended before that (a conversion, or the sweep at a clock ahead of this replica's): Registry.ExpireTenant.
@@ -43,12 +43,12 @@ type Session struct {
 	control   net.Conn  // the control stream, the first one the gate opened (set by the Handler)
 	controlMu sync.Mutex
 
-	// Hiring (spec/tunnel.md §9, §12; set by the Handler): the auth API key's principal as the admission
-	// authenticated it (nil: the session hires as node:<key_id>), whether it was found revoked, the NodeStreams
+	// Calling (spec/tunnel.md §9, §12; set by the Handler): the auth API key's principal as the admission
+	// authenticated it (nil: the session calls as node:<key_id>), whether it was found revoked, the NodeStreams
 	// that serve the session's node-opened streams, and their counts.
-	hire         *auth.Principal
-	hireRevoked  atomic.Bool
-	hiring       *NodeStreams
+	call         *auth.Principal
+	callRevoked  atomic.Bool
+	calling      *NodeStreams
 	nodeAccepted atomic.Int64
 	nodeInFlight atomic.Int64
 

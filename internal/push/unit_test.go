@@ -361,7 +361,7 @@ func TestBadInputIsNotRetried(t *testing.T) {
 }
 
 // TestRefusalNamesNoResolution: a refused push URL is answered with the rule only, never what its host
-// resolves to or what the resolver said, so a hire-scoped key cannot map the gate's internal DNS: a name
+// resolves to or what the resolver said, so a call-scoped key cannot map the gate's internal DNS: a name
 // that resolves to a private address and one that does not resolve get the same answer (spec §10.3). The
 // operator's Debug log has the detail, naming the host and never the URL.
 func TestRefusalNamesNoResolution(t *testing.T) {
@@ -399,7 +399,7 @@ func TestRefusalNamesNoResolution(t *testing.T) {
 	lb := &logBuffer{}
 	e := newEnv(t)
 	cs := NewConfigStore(e.pool, nil, p, newLogger(lb))
-	_, err := cs.Save(ctx, tid(e.newTask(buyerA)), pushConfig("https://db.corp.internal/"+secretPath))
+	_, err := cs.Save(ctx, tid(e.newTask(callerA)), pushConfig("https://db.corp.internal/"+secretPath))
 	if err == nil || err.Error() != toPrivate.Error() {
 		t.Errorf("Save's refusal %v, want %v", err, toPrivate)
 	}

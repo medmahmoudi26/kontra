@@ -10,9 +10,9 @@ import (
 
 // mcp_session_cross_node (spec/relay.md §11.2, §16; D163, D179): MCP services a and b, each a
 // server-everything@1.0.0 behind its own node and recording proxy; node a's tunnel on replica B, every client on
-// replica A. Principal P1 (buyer A's key) initializes /mcp/a, calls a tool and holds the session's GET stream: both
+// replica A. Principal P1 (caller A's key) initializes /mcp/a, calls a tool and holds the session's GET stream: both
 // complete through the peer hop, the row naming B, the replica holding the tunnel. P1's session id presented on
-// /mcp/b, the same id presented by P2 (buyer B's key) on /mcp/a, and the id once DELETEd are each 404, and node b's
+// /mcp/b, the same id presented by P2 (caller B's key) on /mcp/a, and the id once DELETEd are each 404, and node b's
 // server sees no request. With node a SIGKILLed, P1's next request on another session is 404 and that row is closed
 // tunnel_lost; a new initialize finds no node until node a is back, then succeeds.
 func TestMCPSessionCrossNode(t *testing.T) {

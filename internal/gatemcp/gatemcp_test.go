@@ -108,7 +108,7 @@ func inlineRefs(t *testing.T, v any, defs map[string]any) any {
 }
 
 // ToolsList's input schemas are spec/schema/mcp-tools.json's $defs (their $refs inlined) under JCS; every tool
-// declares readOnlyHint and destructiveHint; hire's execution.taskSupport is "optional" in a 2025-11-25 session's list
+// declares readOnlyHint and destructiveHint; send_message's execution.taskSupport is "optional" in a 2025-11-25 session's list
 // only (§12.5).
 func TestToolsListSchemas(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join("..", "..", "spec", "schema", "mcp-tools.json"))
@@ -149,10 +149,10 @@ func TestToolsListSchemas(t *testing.T) {
 			if !bytes.Equal(gotJCS, wantJCS) {
 				t.Errorf("%s's inputSchema\n%s\nwant mcp-tools.json's\n%s", name, gotJCS, wantJCS)
 			}
-			// hire and reply declare hireResult as their outputSchema (D324); search and describe declare none.
-			// hire, reply and cancel declare hireResult as their outputSchema (D324, D334), the tools that follow a task
+			// send_message and reply declare sendMessageResult as their outputSchema (D324); search and describe declare none.
+			// send_message, reply and cancel declare sendMessageResult as their outputSchema (D324, D334), the tools that follow a task
 			// their own (D332..D337); search and describe declare none.
-			outDef := map[string]string{ToolHire: "hireResult", ToolReply: "hireResult", ToolCancel: "hireResult",
+			outDef := map[string]string{ToolSendMessage: "sendMessageResult", ToolReply: "sendMessageResult", ToolCancel: "sendMessageResult",
 				ToolStatus: "statusResult", ToolTasks: "tasksResult", ToolArtifact: "artifactResult",
 				ToolPushSet: "pushResult", ToolPushList: "pushResult", ToolPushDelete: "pushResult"}[name]
 			out, has := tool["outputSchema"]
@@ -173,14 +173,14 @@ func TestToolsListSchemas(t *testing.T) {
 				t.Errorf("%s's annotations %s lack readOnlyHint or destructiveHint", name, tool["annotations"])
 			}
 			_, exec := tool["execution"]
-			if wantExec := name == ToolHire && v == mcpwire.V20251125; exec != wantExec {
+			if wantExec := name == ToolSendMessage && v == mcpwire.V20251125; exec != wantExec {
 				t.Errorf("%s in a %s list: execution present %v, want %v", name, v, exec, wantExec)
 			}
 			if exec && string(tool["execution"]) != `{"taskSupport":"optional"}` {
-				t.Errorf("hire's execution = %s", tool["execution"])
+				t.Errorf("send_message's execution = %s", tool["execution"])
 			}
 		}
-		if !reflect.DeepEqual(names, []string{ToolSearch, ToolDescribe, ToolHire, ToolReply, ToolStatus, ToolTasks, ToolCancel,
+		if !reflect.DeepEqual(names, []string{ToolSearch, ToolDescribe, ToolSendMessage, ToolReply, ToolStatus, ToolTasks, ToolCancel,
 			ToolArtifact, ToolPushSet, ToolPushList, ToolPushDelete}) {
 			t.Errorf("tools %v", names)
 		}
@@ -264,7 +264,7 @@ func TestRender(t *testing.T) {
 	if l := r.Content[5]; l.URI != "https://example.com/output.txt" || l.Name != "output.txt" || l.MIMEType != "text/plain" {
 		t.Errorf("the URL part: %+v", l)
 	}
-	var sc HireResult
+	var sc SendMessageResult
 	scb, _ := json.Marshal(r.StructuredContent)
 	if err := json.Unmarshal(scb, &sc); err != nil {
 		t.Fatal(err)
@@ -304,7 +304,7 @@ func TestRender(t *testing.T) {
 		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "client"}, nil, MetaCanceled, "client", "the task was canceled"},
 		// A row an earlier release canceled for its quote (D351) keeps its reason in _meta, and reads as any cancel.
 		{store.StateCanceled, a2a.TaskStateCanceled, map[string]any{store.MetaCanceled: "quote_expired"}, nil, MetaCanceled, "quote_expired", "the task was canceled"},
-		// §12.2: a rejected hire task has sh.kontra/failure too (M4 WP-04 review): "rejected".
+		// §12.2: a rejected send_message task has sh.kontra/failure too (M4 WP-04 review): "rejected".
 		{store.StateRejected, a2a.TaskStateRejected, nil, agentText("no"), MetaFailure, "rejected", "no"},
 		{store.StateRejected, a2a.TaskStateRejected, nil, nil, MetaFailure, "rejected", "the task was rejected"},
 	} {
@@ -440,12 +440,12 @@ func TestArguments(t *testing.T) {
 			t.Errorf("search %s: %v", bad, err)
 		}
 	}
-	if _, _, err := parseHireArgs(json.RawMessage(`{"service":"Hello","message":"hi"}`)); err == nil {
-		t.Error("hire of a ref that is not one")
+	if _, _, err := parseSendMessageArgs(json.RawMessage(`{"service":"Hello","message":"hi"}`)); err == nil {
+		t.Error("send_message of a ref that is not one")
 	}
-	a, parts, err := parseHireArgs(json.RawMessage(`{"service":"acme/hello","message":"hi","contextId":"c1"}`))
+	a, parts, err := parseSendMessageArgs(json.RawMessage(`{"service":"acme/hello","message":"hi","contextId":"c1"}`))
 	if err != nil || a.Service != "acme/hello" || a.ContextID != "c1" || len(parts) != 1 {
-		t.Errorf("hire: %+v %v", a, err)
+		t.Errorf("send_message: %+v %v", a, err)
 	}
 	if _, _, err := parseReplyArgs(json.RawMessage(`{"taskId":"nope","message":"x"}`)); err == nil {
 		t.Error("reply with a task id that is not one")
@@ -497,12 +497,12 @@ func TestAcceptedReply(t *testing.T) {
 func TestAdmitsNamed(t *testing.T) {
 	tid := uuid.Must(uuid.NewV7())
 	p := auth.Principal{Kind: auth.KindKey, ID: "key:kk_acme_ab12cd34", TenantID: &tid, TenantSlug: "acme",
-		BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeHire}}
-	o := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaMCP}
+		CallerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeCall}}
+	o := auth.Principal{Kind: auth.KindOIDC, ID: "oidc:sub:user-7", CallerID: uuid.Must(uuid.NewV7()), Via: auth.ViaMCP}
 	for _, tc := range []struct {
 		allow       []string
 		p           auth.Principal
-		named, hire bool
+		named, send bool
 	}{
 		{[]string{"anonymous"}, p, false, true},
 		{[]string{"anonymous", "org:acme"}, p, true, true},
@@ -519,7 +519,7 @@ func TestAdmitsNamed(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if AdmitsNamed(al, tc.p) != tc.named || al.Admits(tc.p) != tc.hire {
+		if AdmitsNamed(al, tc.p) != tc.named || al.Admits(tc.p) != tc.send {
 			t.Errorf("%v, %s: named %v admits %v", tc.allow, tc.p.ID, AdmitsNamed(al, tc.p), al.Admits(tc.p))
 		}
 	}

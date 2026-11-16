@@ -58,7 +58,7 @@ func TestHandlerWithEnrollStore(t *testing.T) {
 	}
 	s := g.sink.next(t)
 	_ = m.Close()
-	if s.KeyID != id.KeyID() || s.TenantID != team || s.HirePrincipal != "node:"+id.KeyID() {
+	if s.KeyID != id.KeyID() || s.TenantID != team || s.CallerPrincipal != "node:"+id.KeyID() {
 		t.Fatalf("session %+v", s)
 	}
 	var pub []byte

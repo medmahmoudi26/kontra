@@ -25,14 +25,14 @@ import (
 	"kontra.sh/kontra/internal/store"
 )
 
-// recordingSeller records the message of each turn it executes, then runs then (completed with "ok" when nil).
-type recordingSeller struct {
+// recordingService records the message of each turn it executes, then runs then (completed with "ok" when nil).
+type recordingService struct {
 	mu   sync.Mutex
 	got  []*a2a.Message
 	then func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool)
 }
 
-func (s *recordingSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *recordingService) Execute(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		s.mu.Lock()
 		s.got = append(s.got, ec.Message)
@@ -49,11 +49,11 @@ func (s *recordingSeller) Execute(_ context.Context, ec *a2asrv.ExecutorContext)
 	}
 }
 
-func (s *recordingSeller) Cancel(context.Context, *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *recordingService) Cancel(context.Context, *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) { yield(nil, a2a.ErrTaskNotCancelable) }
 }
 
-func (s *recordingSeller) messages() []*a2a.Message {
+func (s *recordingService) messages() []*a2a.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]*a2a.Message(nil), s.got...)
@@ -128,15 +128,15 @@ func (e *env) creationMessage(id a2a.TaskID) *a2a.Message {
 func TestCallerPartGoesToTheBucket(t *testing.T) {
 	bt := blobtest.New(t, "parts")
 	e := newEnv(t, envOptions{bucket: bt.Store})
-	seller := &recordingSeller{}
-	_, b, info := newAgent(t, seller, agentConfig{streaming: true})
+	service := &recordingService{}
+	_, b, info := newAgent(t, service, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
 
 	data := bytes.Repeat([]byte("0123456789abcdef"), 300<<10/16) // 300 KiB
 	big := &a2a.Part{Content: a2a.Raw(data), MediaType: "application/pdf", Filename: "brief.pdf"}
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("read this"), big)
-	res, err := e.handler().SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg})
+	res, err := e.handler().SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,9 +165,9 @@ func TestCallerPartGoesToTheBucket(t *testing.T) {
 		t.Fatalf("the part's bytes reached the log (%d bytes of log)", len(text))
 	}
 	// The direct backend got a presigned GET of the same bytes.
-	sent := seller.messages()
+	sent := service.messages()
 	if len(sent) != 1 || len(sent[0].Parts) != 2 {
-		t.Fatalf("the seller got %+v", sent)
+		t.Fatalf("the service got %+v", sent)
 	}
 	if got := fetch(t, presigned(t, bt, sent[0].Parts[1])); !bytes.Equal(got, data) {
 		t.Fatal("the backend's presigned GET does not fetch the part's bytes")
@@ -182,14 +182,14 @@ func TestCallerPartGoesToTheBucket(t *testing.T) {
 		}
 	}
 	hl := 10
-	got, err := e.handler().GetTask(asCaller(buyerA), &a2a.GetTaskRequest{ID: id, HistoryLength: &hl})
+	got, err := e.handler().GetTask(asCaller(callerA), &a2a.GetTaskRequest{ID: id, HistoryLength: &hl})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(fetch(t, presigned(t, bt, got.History[0].Parts[1])), data) {
 		t.Error("GetTask: the presigned GET does not fetch the part's bytes")
 	}
-	list, err := e.handler().ListTasks(asCaller(buyerA), &a2a.ListTasksRequest{HistoryLength: &hl})
+	list, err := e.handler().ListTasks(asCaller(callerA), &a2a.ListTasksRequest{HistoryLength: &hl})
 	if err != nil || len(list.Tasks) != 1 {
 		t.Fatalf("ListTasks: %+v %v", list, err)
 	}
@@ -211,7 +211,7 @@ func TestFollowUpPartGoesToTheBucket(t *testing.T) {
 	info.Streaming = true
 	e.backends.set(b, info, nil)
 	h := e.handler()
-	res, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
+	res, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("book"))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestFollowUpPartGoesToTheBucket(t *testing.T) {
 	data := []byte(strings.Repeat("é", 200<<10)) // 400 KiB of UTF-8
 	m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart(string(data)))
 	m.TaskID = task.ID
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m}); err != nil {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: m}); err != nil {
 		t.Fatal(err)
 	}
 	e.queue.wait(t)
@@ -257,7 +257,7 @@ func TestFollowUpPartGoesToTheBucket(t *testing.T) {
 func TestCallerReservedSchemeRefused(t *testing.T) {
 	bt := blobtest.New(t, "")
 	e := newEnv(t, envOptions{bucket: bt.Store})
-	victim, _ := e.newTask(taskSpec{owner: buyerB, text: "mine"})
+	victim, _ := e.newTask(taskSpec{owner: callerB, text: "mine"})
 	_, row, err := blob.Externalize(context.Background(), bt.Store, e.svc.TenantID, uid(t, victim), &a2a.Part{Content: a2a.Raw(bytes.Repeat([]byte{1}, 300<<10))})
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +268,7 @@ func TestCallerReservedSchemeRefused(t *testing.T) {
 	h := e.handler()
 	withCaller := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), principal(buyerA))))
+			next.ServeHTTP(w, r.WithContext(auth.WithPrincipal(r.Context(), principal(callerA))))
 		})
 	}
 	rpc := httptest.NewServer(withCaller(a2asrv.NewJSONRPCHandler(h)))
@@ -310,7 +310,7 @@ func TestCallerReservedSchemeRefused(t *testing.T) {
 			t.Errorf("HTTP+JSON with %q: %d %s, want 400", u, resp.StatusCode, b)
 		}
 		// And straight through the handler, the error is a2a-go's InvalidRequest.
-		if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidRequest) {
+		if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidRequest) {
 			t.Errorf("SendMessage with %q: %v", u, err)
 		}
 	}
@@ -320,7 +320,7 @@ func TestCallerReservedSchemeRefused(t *testing.T) {
 	// Without a bucket too.
 	e2 := newEnv(t, envOptions{})
 	msg := a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.URL(row.Ref.URL())})
-	if _, err := e2.handler().SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidRequest) {
+	if _, err := e2.handler().SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidRequest) {
 		t.Errorf("without a bucket: %v", err)
 	}
 }
@@ -328,7 +328,7 @@ func TestCallerReservedSchemeRefused(t *testing.T) {
 // A service's url part in the reserved scheme fails the task upstream_error (D181), and nothing of it is logged.
 func TestUpstreamReservedSchemeFails(t *testing.T) {
 	e := newEnv(t, envOptions{})
-	seller := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+	service := &recordingService{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
 		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}
@@ -337,10 +337,10 @@ func TestUpstreamReservedSchemeFails(t *testing.T) {
 		}
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
 	}}
-	_, b, info := newAgent(t, seller, agentConfig{streaming: true})
+	_, b, info := newAgent(t, service, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "q"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || p.Metadata[store.MetaFailure] != "upstream_error" || len(p.Artifacts) != 0 ||
@@ -359,7 +359,7 @@ func TestUpstreamPartGoesToTheBucket(t *testing.T) {
 	bt := blobtest.New(t, "")
 	e := newEnv(t, envOptions{bucket: bt.Store, opts: ExecutorOptions{TaskBytes: 400 << 10}})
 	data := bytes.Repeat([]byte("artifact"), 300<<10/8) // 300 KiB
-	seller := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+	service := &recordingService{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
 		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}
@@ -368,10 +368,10 @@ func TestUpstreamPartGoesToTheBucket(t *testing.T) {
 		}
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
 	}}
-	_, b, info := newAgent(t, seller, agentConfig{streaming: true})
+	_, b, info := newAgent(t, service, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "zip it"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "zip it"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateCompleted || len(p.Artifacts) != 1 {
@@ -400,7 +400,7 @@ func TestUpstreamPartGoesToTheBucket(t *testing.T) {
 	if !rowAt.Equal(artifactAt) {
 		t.Errorf("the blobs row (%v) was not written in the artifact's transaction (%v)", rowAt, artifactAt)
 	}
-	got, err := e.handler().GetTask(asCaller(buyerA), &a2a.GetTaskRequest{ID: id})
+	got, err := e.handler().GetTask(asCaller(callerA), &a2a.GetTaskRequest{ID: id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,7 +412,7 @@ func TestUpstreamPartGoesToTheBucket(t *testing.T) {
 	one := int64(1)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/agents/hello", nil)
-	w.Subscribe(rec, req, ssew.Stream{Binding: ssew.HTTPJSON, Service: e.svc, Owner: buyerA, TaskID: id, LastEventID: &one})
+	w.Subscribe(rec, req, ssew.Stream{Binding: ssew.HTTPJSON, Service: e.svc, Owner: callerA, TaskID: id, LastEventID: &one})
 	var streamed []string
 	for line := range strings.SplitSeq(rec.Body.String(), "\n") {
 		if d, ok := strings.CutPrefix(line, "data: "); ok && strings.Contains(d, "artifactUpdate") {
@@ -437,7 +437,7 @@ func TestPolledLargeArtifactLoggedOnce(t *testing.T) {
 	bt := blobtest.New(t, "")
 	e := newEnv(t, envOptions{bucket: bt.Store})
 	data := bytes.Repeat([]byte("p"), 300<<10)
-	seller := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+	service := &recordingService{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
 		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}
@@ -450,9 +450,9 @@ func TestPolledLargeArtifactLoggedOnce(t *testing.T) {
 		time.Sleep(600 * time.Millisecond) // several 50 ms polls see the artifact
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
 	}}
-	_, b, info := newAgent(t, seller, agentConfig{})
+	_, b, info := newAgent(t, service, agentConfig{})
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "slow"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "slow"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	if res.Outcome != lifecycle.DispatchTerminal || projection(t, e, id).Status.State != a2a.TaskStateCompleted {
 		t.Fatalf("%+v %v", res, e.states(id))
@@ -473,9 +473,9 @@ func TestPolledLargeArtifactLoggedOnce(t *testing.T) {
 func TestTunnelDispatchKeepsRefs(t *testing.T) {
 	bt := blobtest.New(t, "")
 	s1 := newSession()
-	seller := &recordingSeller{}
-	e, _, _ := tunnelEnv(t, envOptions{bucket: bt.Store}, true, seller, s1)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "x", session: &s1})
+	service := &recordingService{}
+	e, _, _ := tunnelEnv(t, envOptions{bucket: bt.Store}, true, service, s1)
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "x", session: &s1})
 	// The work item's message names an object of the task, as the interceptors write it.
 	_, row, err := blob.Externalize(context.Background(), bt.Store, e.svc.TenantID, uid(t, id), &a2a.Part{Content: a2a.Raw(bytes.Repeat([]byte{9}, 300<<10))})
 	if err != nil {
@@ -485,11 +485,11 @@ func TestTunnelDispatchKeepsRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := a2a.NewMessage(a2a.MessageRoleUser, &a2a.Part{Content: a2a.URL(row.Ref.URL())})
-	e.exec(`update kontra.work_items set payload = $2::json where id = $1`, wid, mustPayload(t, msg, buyerA))
+	e.exec(`update kontra.work_items set payload = $2::json where id = $1`, wid, mustPayload(t, msg, callerA))
 	if res := e.dispatch(context.Background(), id, 1, wid, false); res.Outcome != lifecycle.DispatchTerminal {
 		t.Fatalf("%+v", res)
 	}
-	got := seller.messages()
+	got := service.messages()
 	if len(got) != 1 || got[0].Parts[0].Content != a2a.URL(row.Ref.URL()) {
 		t.Fatalf("the node's service got %+v, want kontra-blob:<ref>", got)
 	}
@@ -534,7 +534,7 @@ func TestRefusedNewTaskLeavesNoObjects(t *testing.T) {
 
 	// The push URL is refused after Admission.
 	msg := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("read this"), bigPart(1))
-	_, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg,
+	_, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg,
 		Config: &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: "https://10.0.0.1/hook"}}})
 	if err == nil || !strings.Contains(err.Error(), "push") {
 		t.Fatalf("a private push URL: %v", err)
@@ -546,7 +546,7 @@ func TestRefusedNewTaskLeavesNoObjects(t *testing.T) {
 	// a2a-go refuses a message without an id after every interceptor ran.
 	msg = a2a.NewMessage(a2a.MessageRoleUser, bigPart(2))
 	msg.ID = ""
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidParams) {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: msg}); !errors.Is(err, a2a.ErrInvalidParams) {
 		t.Fatalf("a message without an id: %v", err)
 	}
 	if keys := bt.Keys(t); len(keys) != 0 {
@@ -555,7 +555,7 @@ func TestRefusedNewTaskLeavesNoObjects(t *testing.T) {
 
 	// The work queue fails.
 	e.queue.failNew = errors.New("the database is gone")
-	if _, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, bigPart(3))}); err == nil {
+	if _, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, bigPart(3))}); err == nil {
 		t.Fatal("a failed work queue answered")
 	}
 	e.queue.failNew = nil
@@ -568,12 +568,12 @@ func TestRefusedNewTaskLeavesNoObjects(t *testing.T) {
 
 	// The resend race: the first request created its task; the second, identical, stored its own objects under
 	// the task Admission pre-minted for it, and the work queue answers it with the first task.
-	seller := &recordingSeller{}
-	_, b, info := newAgent(t, seller, agentConfig{streaming: true})
+	service := &recordingService{}
+	_, b, info := newAgent(t, service, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
 	first := a2a.NewMessage(a2a.MessageRoleUser, bigPart(4))
-	res, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: first})
+	res, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: first})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +587,7 @@ func TestRefusedNewTaskLeavesNoObjects(t *testing.T) {
 	// message id, so it does) is answered by the work queue with the first task, as lifecycle.Queue answers the
 	// later of two identical requests under the resend key's lock.
 	e.queue.resendTo = kept
-	res, err = h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, bigPart(4))})
+	res, err = h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, bigPart(4))})
 	e.queue.resendTo = ""
 	if err != nil {
 		t.Fatalf("the resend: %v", err)
@@ -611,12 +611,12 @@ func TestRefusedMessagesLeaveNoObjects(t *testing.T) {
 	bt := blobtest.New(t, "")
 	e := newEnv(t, envOptions{bucket: bt.Store})
 	h := e.handler()
-	done, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	done, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.setState(done, a2a.TaskStateCompleted)
 	send := func(id a2a.TaskID, b byte, md map[string]any, cfg *a2a.SendMessageConfig) error {
 		m := a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("about this"), bigPart(b))
 		m.TaskID, m.Metadata = id, md
-		_, err := h.SendMessage(asCaller(buyerA), &a2a.SendMessageRequest{Message: m, Config: cfg})
+		_, err := h.SendMessage(asCaller(callerA), &a2a.SendMessageRequest{Message: m, Config: cfg})
 		return err
 	}
 	clean := func(what string, id a2a.TaskID) {
@@ -634,7 +634,7 @@ func TestRefusedMessagesLeaveNoObjects(t *testing.T) {
 	clean("a message to a completed task", done)
 
 	// Follow-ups to a task waiting for input.
-	waiting, _ := e.newTask(taskSpec{owner: buyerA, text: "q"})
+	waiting, _ := e.newTask(taskSpec{owner: callerA, text: "q"})
 	e.setState(waiting, a2a.TaskStateInputRequired)
 	if err := send(waiting, 8, nil, &a2a.SendMessageConfig{PushConfig: &a2a.PushConfig{URL: "https://10.0.0.2/hook"}}); err == nil {
 		t.Fatal("a follow-up with a private push URL was taken")
@@ -649,14 +649,14 @@ func TestRefusedMessagesLeaveNoObjects(t *testing.T) {
 }
 
 // Objects count toward limits.task_bytes (spec §6.6 "nothing an upstream sends is unbounded", §10.4 "per-task
-// totals are bounded"): a seller that streams large artifacts fails the task upstream_error once the objects it
+// totals are bounded"): a service that streams large artifacts fails the task upstream_error once the objects it
 // stored and the events logged would exceed the limit, the object that would cross it never written; and a
 // dispatch starts from the objects the task already holds (the caller's too, by their blobs rows).
 func TestObjectsCountTowardTaskBytes(t *testing.T) {
 	bt := blobtest.New(t, "")
 	e := newEnv(t, envOptions{bucket: bt.Store, opts: ExecutorOptions{TaskBytes: 1 << 20}})
 	chunk := bytes.Repeat([]byte("z"), 300<<10)
-	seller := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+	service := &recordingService{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
 		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}
@@ -667,15 +667,15 @@ func TestObjectsCountTowardTaskBytes(t *testing.T) {
 		}
 		yield(a2a.NewStatusUpdateEvent(ec, a2a.TaskStateCompleted, nil), nil)
 	}}
-	_, b, info := newAgent(t, seller, agentConfig{streaming: true})
+	_, b, info := newAgent(t, service, agentConfig{streaming: true})
 	info.Streaming = true
 	e.backends.set(b, info, nil)
-	id, wid := e.newTask(taskSpec{owner: buyerA, text: "stream"})
+	id, wid := e.newTask(taskSpec{owner: callerA, text: "stream"})
 	res := e.dispatch(context.Background(), id, 1, wid, false)
 	p := projection(t, e, id)
 	if res.Outcome != lifecycle.DispatchTerminal || p.Status.State != a2a.TaskStateFailed || p.Metadata[store.MetaFailure] != "upstream_error" ||
 		!strings.Contains(p.Status.Message.Parts[0].Text(), "limits.task_bytes") {
-		t.Fatalf("a seller storing 20 objects of 300 KiB under a 1 MiB task_bytes: %+v %v %v", res, p.Status.State, p.Metadata)
+		t.Fatalf("a service storing 20 objects of 300 KiB under a 1 MiB task_bytes: %+v %v %v", res, p.Status.State, p.Metadata)
 	}
 	if keys := objectsOf(t, bt, id); len(keys) != 3 || len(e.blobRows(id)) != 3 {
 		t.Fatalf("objects %v, rows %d: want the three that fit in 1 MiB", keys, len(e.blobRows(id)))
@@ -684,7 +684,7 @@ func TestObjectsCountTowardTaskBytes(t *testing.T) {
 	// The caller's objects count: a task whose first message holds a 300 KiB object has 212 KiB left of 512 KiB,
 	// and a 300 KiB artifact fails it.
 	e2 := newEnv(t, envOptions{bucket: bt.Store, opts: ExecutorOptions{TaskBytes: 512 << 10}})
-	one := &recordingSeller{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
+	one := &recordingService{then: func(ec *a2asrv.ExecutorContext, yield func(a2a.Event, error) bool) {
 		if !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
 			return
 		}
@@ -696,7 +696,7 @@ func TestObjectsCountTowardTaskBytes(t *testing.T) {
 	_, b2, info2 := newAgent(t, one, agentConfig{streaming: true})
 	info2.Streaming = true
 	e2.backends.set(b2, info2, nil)
-	id2, wid2 := e2.newTask(taskSpec{owner: buyerA, text: "with an attachment"})
+	id2, wid2 := e2.newTask(taskSpec{owner: callerA, text: "with an attachment"})
 	_, row, err := blob.Externalize(context.Background(), bt.Store, e2.svc.TenantID, uid(t, id2), bigPart(1))
 	if err != nil {
 		t.Fatal(err)

@@ -22,7 +22,7 @@ func (f *fakeRS) VerifyMCP(_ context.Context, token, svc string) (Principal, err
 	if f.err != nil {
 		return Principal{}, f.err
 	}
-	return Principal{Kind: KindOIDC, ID: "oidc:sub:alice", BuyerID: buyer1, Via: ViaMCP}, nil
+	return Principal{Kind: KindOIDC, ID: "oidc:sub:alice", CallerID: caller1, Via: ViaMCP}, nil
 }
 
 func (f *fakeRS) Challenge(svc string, refused bool) string {
@@ -36,7 +36,7 @@ const jwtShaped = "eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2ln"
 
 type sessionSource struct{ p Principal }
 
-func (s sessionSource) HirePrincipal(context.Context) (Principal, error) { return s.p, nil }
+func (s sessionSource) CallerPrincipal(context.Context) (Principal, error) { return s.p, nil }
 
 // §12.1, D296: on an MCP route with a resource server, a bearer shaped as a JWT is verified for that route; any
 // other bearer is an API key, as on every route; the A2A routes' Authenticate never asks the resource server; a
@@ -88,12 +88,12 @@ func TestAuthenticateMCP(t *testing.T) {
 		t.Fatalf("a JWT on an A2A route: %v", err)
 	}
 	// No credential: the anonymous principal, not authenticated.
-	if p, ok, err := a.AuthenticateMCP(req(""), buyer1, "fs"); err != nil || ok || p.Kind != KindAnonymous || p.BuyerID != buyer1 {
+	if p, ok, err := a.AuthenticateMCP(req(""), caller1, "fs"); err != nil || ok || p.Kind != KindAnonymous || p.CallerID != caller1 {
 		t.Fatalf("no credential: %+v %v %v", p, ok, err)
 	}
 	// A node's request: its session's principal, whatever it carries.
-	sess := Principal{Kind: KindNode, ID: "node:k1_x", BuyerID: buyer1, Via: ViaNode}
-	r := req("Bearer " + jwtShaped).WithContext(WithHireSource(context.Background(), sessionSource{sess}))
+	sess := Principal{Kind: KindNode, ID: "node:k1_x", CallerID: caller1, Via: ViaNode}
+	r := req("Bearer " + jwtShaped).WithContext(WithCallSource(context.Background(), sessionSource{sess}))
 	if p, ok, err := a.AuthenticateMCP(r, uuid.Nil, ""); err != nil || !ok || p.ID != sess.ID || len(rs.calls) != n {
 		t.Fatalf("a node's request: %+v %v %v", p, ok, err)
 	}

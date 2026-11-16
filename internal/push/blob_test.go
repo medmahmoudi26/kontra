@@ -27,9 +27,9 @@ func TestDeliveryRendersBucketParts(t *testing.T) {
 	ctx := context.Background()
 	cs := NewConfigStore(e.pool, nil, private, nil)
 	r := newReceiver(t, nil)
-	id := e.newTask(buyerA)
-	other := e.newTask(buyerB)
-	cid, _ := e.saveInline(cs, id, buyerA, pushConfig(r.url("/hook")))
+	id := e.newTask(callerA)
+	other := e.newTask(callerB)
+	cid, _ := e.saveInline(cs, id, callerA, pushConfig(r.url("/hook")))
 
 	data := bytes.Repeat([]byte("kontra-"), 300<<10/7)
 	own, ownRow, err := blob.Externalize(ctx, bucket.Store, e.svc.TenantID, id, &a2a.Part{Content: a2a.Raw(data), MediaType: "application/octet-stream"})

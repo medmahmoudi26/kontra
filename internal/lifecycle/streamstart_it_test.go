@@ -36,7 +36,7 @@ func TestStreamStartOnlyWhenWriteAcceptsTheTurn(t *testing.T) {
 	e := newPGEnv(t)
 	q := NewQueue(e.svc, e.log, unreachableTemporal(t), QueueOptions{Owner: ownerFrom, Hooks: HooksSnapshot{LifecycleQueue: QueueLifecycle}})
 
-	cctx, pre := caller(true)
+	cctx, pre := callerCtx(true)
 	var ss StreamStart
 	_, err := q.Write(WithStreamStart(cctx, &ss), payloadOf(requestOf("m-1", "hello")))
 	if !errors.Is(err, ErrUnavailable) {
@@ -50,7 +50,7 @@ func TestStreamStartOnlyWhenWriteAcceptsTheTurn(t *testing.T) {
 	}
 
 	id := e.task(store.StateInputRequired, nil)
-	fctx, _ := caller(false)
+	fctx, _ := callerCtx(false)
 	req := requestOf("m-2", "more")
 	req.Message.TaskID = a2a.TaskID(id.String())
 	ss = StreamStart{}

@@ -1,6 +1,6 @@
 // Package node is `kontra connect` (spec/tunnel.md; note 2 §1–§2): one outbound WebSocket to a gate the
 // node chose, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the
-// node sends local clients' requests to the gate (hiring).
+// node sends local clients' requests to the gate (calling).
 //
 //	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
 //	               [--roots <name>=<dir> …] [--env NAME …] [--session-idle 1h] [--max-sessions 8]
@@ -13,11 +13,11 @@
 // nowhere else. The kontra-blob: parts of an A2A request are fetched on blob streams inside the node's own
 // tunnel and inlined (§8.3); a URL taken from a part is never dialed (D56).
 //
-// Hiring (§9, internal/hiring): the node serves --listen (default 127.0.0.1:7777) to local clients and forwards
+// Calling (§9, internal/calling): the node serves --listen (default 127.0.0.1:7777) to local clients and forwards
 // each request on a stream it opens on its current session, never on a draining one (§13), keeping at most the
-// gate's cap of node-opened streams in flight per session (§14); --listen off turns hiring off, for a node that only
-// hosts (D208). A node with no --serve only hires; its key is
-// admitted on its --api-key (hire scope) alone, on every hello, and the gate refuses it once that key is revoked.
+// gate's cap of node-opened streams in flight per session (§14); --listen off turns calling off, for a node that only
+// hosts (D208). A node with no --serve only calls; its key is
+// admitted on its --api-key (call scope) alone, on every hello, and the gate refuses it once that key is revoked.
 //
 // MCP hosting (§10, M3 WP-05): `mcp:<name>=<url>` goes through the same fixed-target proxy, which forwards MCP
 // exchanges unchanged except for roots (mcp.go; a URL target may name the server's endpoint path, which the gate's
@@ -35,10 +35,10 @@
 //
 // Sealing (spec/ext-sealed.md, M3 WP-08; internal/sealing): as a hosting node it opens the sealed parts the gate
 // forwards to a hosted service and seals what the service answers, keeping its durable job state under
-// ~/.kontra/hosted/<gate host>/ (--sealed-max-age, --sealed-required); as a hiring node it seals what local clients
+// ~/.kontra/hosted/<gate host>/ (--sealed-max-age, --sealed-required); as a calling node it seals what local clients
 // send to a sealed service and opens what comes back, with a per-job key under ~/.kontra/jobs/<gate host>/ (§2.3),
 // after checking the service's pin in ~/.kontra/pins (--pin-recipients, --accept-change), whose recipient key ids
-// and seller key thumbprints it prints on stderr and in its log on a first sight and on every change (D187).
+// and service key thumbprints it prints on stderr and in its log on a first sight and on every change (D187).
 //
 // The node holds no task state: after any close but `revoked` it redials with the same key, backing off from 1 s
 // to 60 s with full jitter, reset after a session that lived 60 s (§13).
@@ -50,7 +50,7 @@
 // flags, as note 2's compose sidecar does, and a secret as --enroll @/run/secrets/<file>.
 //
 // Work packages: M2 WP-03 (dial.go: the dial and the node's half of the handshake), M2 WP-06 (the rest), M3
-// WP-03 (hiring, blob streams), M3 WP-05 (MCP hosting).
+// WP-03 (calling, blob streams), M3 WP-05 (MCP hosting).
 package node
 
 import (
@@ -72,7 +72,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 
-	"kontra.sh/kontra/internal/hiring"
+	"kontra.sh/kontra/internal/calling"
 	"kontra.sh/kontra/internal/mcproots"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/sealing"
@@ -91,7 +91,7 @@ type Config struct {
 	Rotate                bool     // --rotate (§12)
 	RequireChannelBinding bool     // --require-channel-binding: refuse cb none (§4.1)
 	MaxInflight           int      // --max-inflight, default tunnel.NodeMaxInflight
-	Listen                string   // --listen, default hiring.DefaultListen (§9); hiring.ListenOff binds nothing (D208)
+	Listen                string   // --listen, default calling.DefaultListen (§9); calling.ListenOff binds nothing (D208)
 	LocalToken            string   // --local-token <file>, read: required when Listen is not loopback
 	AllowOrigins          []string // --allow-origin, repeatable
 	LogJSON               bool     // --log json; human-readable on stderr otherwise
@@ -104,7 +104,7 @@ type Config struct {
 	Version         string                     // for hello.agent and the User-Agent
 	// Sealing (spec/ext-sealed.md §5, §7): --sealed-max-age (hosting rule 1's max_age, default 25 h),
 	// --sealed-required <service> (the hosting node refuses an unsealed request to it), --pin-recipients and
-	// --accept-change <service> (the hiring node's pins).
+	// --accept-change <service> (the calling node's pins).
 	SealedMaxAge   time.Duration
 	SealedRequired []string
 	PinRecipients  bool
@@ -116,7 +116,7 @@ type Config struct {
 	Home string
 	// Out receives the welcome's service URLs (the CLI's stdout); nil discards them.
 	Out io.Writer
-	// Err receives the pins' lines (D187: recipient key ids and seller key thumbprints on a first sight and on every
+	// Err receives the pins' lines (D187: recipient key ids and service key thumbprints on a first sight and on every
 	// change; the CLI's stderr); nil writes them to the log only.
 	Err io.Writer
 }
@@ -159,7 +159,7 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	requireCB := fs.Bool("require-channel-binding", false, "")
 	maxInflight := fs.Int("max-inflight", tunnel.NodeMaxInflight, "")
 	logFormat := fs.String("log", "text", "")
-	listen := fs.String("listen", hiring.DefaultListen, "")
+	listen := fs.String("listen", calling.DefaultListen, "")
 	localToken := fs.String("local-token", "", "")
 	fs.Func("serve", "", func(v string) error { serves = append(serves, v); return nil })
 	fs.Func("roots", "", func(v string) error { roots = append(roots, v); return nil })
@@ -204,7 +204,7 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 		}
 	}
 
-	// No --serve: the node only hires (§4: a hello may declare no services; its key is admitted on its
+	// No --serve: the node only calls (§4: a hello may declare no services; its key is admitted on its
 	// --api-key alone).
 	seen := map[string]bool{}
 	mcp := map[string]bool{}
@@ -336,18 +336,18 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	}
 	cfg.MaxInflight = *maxInflight
 	if *localToken != "" {
-		if cfg.LocalToken, err = hiring.ReadLocalToken(*localToken); err != nil {
+		if cfg.LocalToken, err = calling.ReadLocalToken(*localToken); err != nil {
 			return Config{}, &UsageError{Err: err}
 		}
 	}
-	if err := hiring.CheckListen(*listen, cfg.LocalToken); err != nil {
+	if err := calling.CheckListen(*listen, cfg.LocalToken); err != nil {
 		return Config{}, &UsageError{Err: err}
 	}
 	cfg.Listen = *listen
-	if cfg.Listen == hiring.ListenOff && len(cfg.Serves) == 0 {
-		return Config{}, usage("--listen off with no --serve: the node would neither host nor hire (D208)")
+	if cfg.Listen == calling.ListenOff && len(cfg.Serves) == 0 {
+		return Config{}, usage("--listen off with no --serve: the node would neither host nor call (D208)")
 	}
-	if _, err := hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: origins, Gate: cfg.Gate},
+	if _, err := calling.New(calling.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: origins, Gate: cfg.Gate},
 		noOpener{}, nil); err != nil {
 		return Config{}, &UsageError{Err: err}
 	}
@@ -415,7 +415,7 @@ type Node struct {
 	redials     int
 	lastWelcome string
 	// slotWait is how long a node-opened stream waits for one of its session's slots (§14) before the open
-	// gives up (hiring: 429; a hosted exchange's blob fetch: 503 full); tests shorten it.
+	// gives up (calling: 429; a hosted exchange's blob fetch: 503 full); tests shorten it.
 	slotWait time.Duration
 
 	creds  *Credentials
@@ -431,13 +431,13 @@ type Node struct {
 	// stamp could not be written (connect's SPEC-CONFLICT on §12).
 	skipRotation string
 	sessions     map[*session]struct{}
-	// current is the session hiring streams go on (setCurrent); currentCh is closed whenever it changes.
-	current    *session
-	currentCh  chan struct{}
-	hire       *hiring.Server
-	hosting    *sealing.Hosting // the hosting node's sealing (job state under ~/.kontra/hosted/<gate host>)
-	hiringSeal *sealing.Hiring  // the hiring node's sealing (per-job keys under ~/.kontra/jobs/<gate host>, pins)
-	lastPrune  time.Time
+	// current is the session calling streams go on (setCurrent); currentCh is closed whenever it changes.
+	current     *session
+	currentCh   chan struct{}
+	call        *calling.Server
+	hosting     *sealing.Hosting // the hosting node's sealing (job state under ~/.kontra/hosted/<gate host>)
+	callingSeal *sealing.Calling // the calling node's sealing (per-job keys under ~/.kontra/jobs/<gate host>, pins)
+	lastPrune   time.Time
 	// lastSealSweep is when sealing's state was last swept (sweepSealing).
 	lastSealSweep time.Time
 	revoked       chan struct{} // closed when the gate revoked the active key, or ended its anonymous session
@@ -535,10 +535,10 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		revoked:       make(chan struct{}),
 	}
 	if cfg.Listen == "" {
-		cfg.Listen = hiring.DefaultListen
+		cfg.Listen = calling.DefaultListen
 		n.cfg.Listen = cfg.Listen
 	}
-	if n.hire, err = hiring.New(hiring.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: cfg.AllowOrigins, Gate: gate},
+	if n.call, err = calling.New(calling.Config{Listen: cfg.Listen, LocalToken: cfg.LocalToken, AllowOrigins: cfg.AllowOrigins, Gate: gate},
 		n, log); err != nil {
 		return nil, err
 	}

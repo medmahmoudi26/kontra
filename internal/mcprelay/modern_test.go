@@ -174,7 +174,7 @@ func TestModernClassification(t *testing.T) {
 	up, url := dualEra(t, mcptest.Tool("echo", ""))
 	e.service("svc", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	u := r.url + "/mcp/svc"
 
 	c := newClient(t, key)
@@ -225,7 +225,7 @@ func TestModernHeaderChecks(t *testing.T) {
 	up, url := dualEra(t, mcptest.Tool("echo", ""), mcptest.Tool("add", ""))
 	e.service("svc", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/svc", false)
 	call := `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"text":"x"},%s}}`
 	hdr := map[string]string{"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "echo"}
@@ -288,8 +288,8 @@ func TestModernDualEra(t *testing.T) {
 		s.InitializeMeta = map[string]json.RawMessage{"sh.kontra/operator": json.RawMessage(`"op"`)}
 	})
 	r := e.replica("a", replicaOpts{})
-	keyA, pA := e.apiKey("buyer-a")
-	keyB, pB := e.apiKey("buyer-b")
+	keyA, pA := e.apiKey("caller-a")
+	keyB, pB := e.apiKey("caller-b")
 	u := r.url + "/mcp/svc"
 	a := newModern(t, keyA, u, true)
 
@@ -414,7 +414,7 @@ func TestModernLegacyOnly(t *testing.T) {
 	sealedUp, sealedURL := upstreamDouble(t)
 	e.service("sealed", sealedURL, func(s *Service) { s.Sealed = true })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/legacy", false)
 	for i := range 3 {
 		rep := m.req(i, "tools/list", nil)
@@ -469,7 +469,7 @@ func TestModernLegacyOnly(t *testing.T) {
 func TestModernProbeInconclusive(t *testing.T) {
 	e := newEnv(t)
 	r := e.replica("a", replicaOpts{probeTimeout: 300 * time.Millisecond})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	gateProbe := func(q mcptest.Request) bool {
 		return q.Method == "server/discover" && string(q.ID) == `"kontra-discover"`
 	}
@@ -647,7 +647,7 @@ func TestModernPeerHop(t *testing.T) {
 	ra := e.replica("a", replicaOpts{peer: true})
 	rb := e.replica("b", replicaOpts{peer: true})
 	n := e.node(rb, up, "tun")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, ra.url+"/mcp/tun", false)
 	rep := m.req(1, "tools/call", map[string]any{"name": "echo", "arguments": map[string]any{"text": "via the hop"}})
 	if rep.status != 200 || !strings.Contains(string(rep.body), "via the hop") {
@@ -684,7 +684,7 @@ func TestModernPlainMRTRMetering(t *testing.T) {
 	}
 	e.service("svc", url, func(s *Service) { s.Tasks = config.TasksOff })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/svc", true)
 	rep := m.req(1, "tools/call", map[string]any{"name": "ask", "arguments": map[string]any{}})
 	if res := result(t, rep); res["resultType"] != "input_required" || res["requestState"] != "st" {
@@ -775,7 +775,7 @@ func TestModernServerEverything(t *testing.T) {
 		s.Tools = Policy{Deny: []string{"get-env", "gzip-file-as-resource"}}
 	})
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/everything", false)
 	d := result(t, m.req(1, "server/discover", nil))
 	if !reflect.DeepEqual(d["supportedVersions"], []any{"2026-07-28", "2025-11-25", "2025-06-18"}) || d["cacheScope"] != "private" {
@@ -873,7 +873,7 @@ func createdModern(t *testing.T, r reply) string {
 // declares the extension is a gate task (CreateTaskResult, resultType task, a gate id); tasks/get is input_required
 // with one request keyed by its gate id, the same from either replica; tasks/update logs the answer once (a second
 // answer to the key is ignored) and the upstream receives it once under its own key; the task completes; tasks/result
-// is -32601; another buyer's tasks/get is -32602; a legacy reader of the task sees the same log; the upstream's task
+// is -32601; another caller's tasks/get is -32602; a legacy reader of the task sees the same log; the upstream's task
 // id reaches no client; the calls row names the virtual session; nothing relayed enters Temporal history.
 func TestModernTask(t *testing.T) {
 	e := newTaskEnv(t)
@@ -881,7 +881,7 @@ func TestModernTask(t *testing.T) {
 	e.service("research", url, nil)
 	ra := e.replica("a", replicaOpts{})
 	rb := e.replica("b", replicaOpts{})
-	key, principal := e.apiKey("buyer")
+	key, principal := e.apiKey("caller")
 	other, _ := e.apiKey("other")
 	m := newModern(t, key, ra.url+"/mcp/research", true)
 
@@ -916,15 +916,15 @@ func TestModernTask(t *testing.T) {
 	if !reflect.DeepEqual(get, getB) {
 		t.Errorf("the replicas answer differently:\n%v\n%v", get, getB)
 	}
-	// Another buyer: -32602, as for an unknown task.
+	// Another caller: -32602, as for an unknown task.
 	if code, _ := rpcError(t, newModern(t, other, ra.url+"/mcp/research", true).req(5, "tasks/get", map[string]any{"taskId": taskID})); code != -32602 {
-		t.Errorf("another buyer's tasks/get: %d", code)
+		t.Errorf("another caller's tasks/get: %d", code)
 	}
 	// tasks/result is removed by the extension.
 	if rep := m.req(6, "tasks/result", map[string]any{"taskId": taskID}); rep.status != 404 || func() int { c, _ := rpcError(t, rep); return c }() != -32601 {
 		t.Errorf("tasks/result: %d %s", rep.status, rep.body)
 	}
-	// A legacy reader of the same buyer sees the same request, under the same gate id.
+	// A legacy reader of the same caller sees the same request, under the same gate id.
 	lc := newTaskClient(t, key, ra.url+"/mcp/research")
 	if s := status(t, lc.tasks("tasks/get", taskID, 9)); s != "input_required" {
 		t.Errorf("a legacy reader's tasks/get: %s", s)
@@ -1034,7 +1034,7 @@ func TestModernTaskInline(t *testing.T) {
 	up, url := modernTaskDouble(t)
 	e.service("research", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/research", true)
 	result(t, m.req(1, "tools/list", nil)) // the era and the cached capabilities
 	start := time.Now()
@@ -1082,7 +1082,7 @@ func TestModernMRTR(t *testing.T) {
 	up, url := mrtrDouble(t)
 	e.service("mrtr", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/mrtr", true)
 	result(t, m.req(1, "server/discover", nil))
 	taskID := createdModern(t, m.req(2, "tools/call", map[string]any{"name": "ask", "arguments": map[string]any{}}))
@@ -1139,7 +1139,7 @@ func TestModernMRTRTunnelLost(t *testing.T) {
 	e.service("mrtr", "", nil)
 	r := e.replica("a", replicaOpts{})
 	n := e.node(r, up, "mrtr")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/mrtr", true)
 	result(t, m.req(1, "server/discover", nil))
 	taskID := createdModern(t, m.req(2, "tools/call", map[string]any{"name": "ask", "arguments": map[string]any{}}))
@@ -1183,7 +1183,7 @@ func TestModernCancelOnClose(t *testing.T) {
 	up, url := modernTaskDouble(t)
 	e.service("research", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/research", true)
 	result(t, m.req(1, "tools/list", nil))
 	body := m.body(2, "tools/call", map[string]any{"name": "slow", "arguments": map[string]any{}})
@@ -1223,7 +1223,7 @@ func TestModernTaskCancel(t *testing.T) {
 	up, url := modernTaskDouble(t)
 	e.service("research", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/research", true)
 	taskID := createdModern(t, m.req(1, "tools/call", map[string]any{"name": "long", "arguments": map[string]any{}}))
 	start := time.Now()
@@ -1254,7 +1254,7 @@ func TestModernLegacyAnswerRelayed(t *testing.T) {
 	}
 	e.service("legacy", url, nil)
 	r := e.replica("a", replicaOpts{probeTimeout: 200 * time.Millisecond})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/legacy", false)
 	for i, method := range []string{"tools/list", "tools/call", "resources/list"} {
 		params := map[string]any{}
@@ -1286,7 +1286,7 @@ func TestModernClientCloseClosesUpstream(t *testing.T) {
 	}
 	e.service("svc", url, func(s *Service) { s.Tasks = config.TasksOff })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/svc", false)
 	result(t, m.req(1, "tools/list", nil))
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -1310,7 +1310,7 @@ func TestModernVirtualSessionIdle(t *testing.T) {
 	up, url := dualEra(t, mcptest.Tool("echo", ""))
 	e.service("svc", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/svc", false)
 	result(t, m.req(1, "tools/list", nil))
 	first := e.virtualRows("svc")
@@ -1353,7 +1353,7 @@ func TestModernAdmissionSessionDeny(t *testing.T) {
 	adm := &fakeAdmission{}
 	adm.set(hooks.Decision{Outcome: hooks.Deny, Refusal: &hooks.Refusal{Code: -32001, Message: "no budget"}}, nil)
 	r := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpSession}})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	rep := newModern(t, key, r.url+"/mcp/svc", false).req(1, "tools/list", nil)
 	if code, _ := rpcError(t, rep); code != -32001 || !strings.Contains(string(rep.body), "no budget") {
 		t.Fatalf("the refusal: %d %s", rep.status, rep.body)
@@ -1372,7 +1372,7 @@ func TestPassthroughDiscoverShowsNoTasks(t *testing.T) {
 	_, purl := modernTaskDouble(t)
 	e.service("pass", purl, func(s *Service) { s.Tasks = config.TasksPassthrough })
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	d := result(t, newModern(t, key, r.url+"/mcp/pass", true).req(1, "server/discover", nil))
 	if ext, _ := d["capabilities"].(map[string]any)["extensions"].(map[string]any); ext["io.modelcontextprotocol/tasks"] != nil {
 		t.Fatalf("a passthrough service shows the tasks extension: %v", d)
@@ -1389,7 +1389,7 @@ func directModernTask(t *testing.T, e *env, log *store.Log, tool string) (uuid.U
 		t.Fatal(err)
 	}
 	id := uuid.Must(uuid.NewV7())
-	owner := store.Owner{BuyerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
+	owner := store.Owner{CallerID: uuid.New(), Principal: "key:x", Via: store.ViaAPIKey}
 	nt, err := store.NewMCPTask(id, svc, owner, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1435,7 +1435,7 @@ func TestModernDispatchReattach(t *testing.T) {
 		return seq > 0
 	})
 	resp := `{"jsonrpc":"2.0","id":"` + store.GateRequestID(id, seq) + `","result":{"action":"accept","content":{"answer":"A1"}}}`
-	if _, ok, err := log.AppendInputResponse(ctx, store.Scope{TenantID: e.team, Service: "research", BuyerID: owner.BuyerID}, id, seq, json.RawMessage(resp)); err != nil || !ok {
+	if _, ok, err := log.AppendInputResponse(ctx, store.Scope{TenantID: e.team, Service: "research", CallerID: owner.CallerID}, id, seq, json.RawMessage(resp)); err != nil || !ok {
 		t.Fatalf("the answer: %v %v", ok, err)
 	}
 	eventually(t, 10*time.Second, "the first dispatch wrote the answer upstream", func() bool { return up.Count("tasks/update") == 1 })
@@ -1504,7 +1504,7 @@ func TestModernDispatchReattachMRTR(t *testing.T) {
 		t.Fatalf("the lost dispatch: %+v", res)
 	}
 	resp := `{"jsonrpc":"2.0","id":"` + store.GateRequestID(id, seq) + `","result":{"action":"accept","content":{"answer":"later"}}}`
-	if _, ok, err := log.AppendInputResponse(ctx, store.Scope{TenantID: e.team, Service: "research", BuyerID: owner.BuyerID}, id, seq, json.RawMessage(resp)); err != nil || !ok {
+	if _, ok, err := log.AppendInputResponse(ctx, store.Scope{TenantID: e.team, Service: "research", CallerID: owner.CallerID}, id, seq, json.RawMessage(resp)); err != nil || !ok {
 		t.Fatalf("the answer: %v %v", ok, err)
 	}
 	d2 := &Dispatcher{ReplicaID: "r2", Log: log, Registry: relay.NewRegistry(), Services: e.svcs, minPoll: 50 * time.Millisecond}
@@ -1536,7 +1536,7 @@ func TestModernMRTRCancel(t *testing.T) {
 	up, url := mrtrDouble(t)
 	e.service("mrtr", url, nil)
 	r := e.replica("a", replicaOpts{})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, r.url+"/mcp/mrtr", true)
 	result(t, m.req(1, "server/discover", nil))
 	taskID := createdModern(t, m.req(2, "tools/call", map[string]any{"name": "ask", "arguments": map[string]any{}}))
@@ -1565,7 +1565,7 @@ func TestModernRequiredTasks(t *testing.T) {
 	}
 	adm := &fakeAdmission{}
 	ra := e.replica("a", replicaOpts{admission: adm, ops: []hooks.Operation{hooks.OpTask, hooks.OpCall}})
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	m := newModern(t, key, ra.url+"/mcp/research", true)
 	d := result(t, m.req(1, "server/discover", nil))
 	if ext := d["capabilities"].(map[string]any)["extensions"].(map[string]any); ext["io.modelcontextprotocol/tasks"] == nil {

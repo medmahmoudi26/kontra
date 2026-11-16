@@ -75,7 +75,7 @@ func TestRedactionBackstop(t *testing.T) {
 			slog.Any("cfg", map[string]any{"postgres": "postgres://u:secret7@h/db", "nested": map[string]string{"password": "secret11"}, "ok": "visible1"}),
 			slog.Any("req", hdr),
 			slog.String("dsn_kv", "host=db user=k password=secret12 dbname=k"),
-			slog.Any("error", errors.New("dial https://bob:secret13@seller.example/a2a: refused")),
+			slog.Any("error", errors.New("dial https://bob:secret13@service.example/a2a: refused")),
 			slog.String(KeyTaskID, "visible2"),
 			slog.String("path", "/agents/x"),
 		)
@@ -87,7 +87,7 @@ func TestRedactionBackstop(t *testing.T) {
 				t.Errorf("%s: secret%d reached the log:\n%s", f, i, out)
 			}
 		}
-		for _, want := range []string{"visible1", "visible2", "/agents/x", "text/event-stream", "seller.example/a2a", "postgres://u:"} {
+		for _, want := range []string{"visible1", "visible2", "/agents/x", "text/event-stream", "service.example/a2a", "postgres://u:"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("%s: %q was redacted too:\n%s", f, want, out)
 			}

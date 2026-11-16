@@ -1,11 +1,11 @@
 // Package pins is kontra connect's pin per (gate, service) in ~/.kontra/pins (spec/ext-sealed.md §7, D31,
-// D164): whether the service is sealed, the key ids of its recipients, the thumbprints of the seller keys that
+// D164): whether the service is sealed, the key ids of its recipients, the thumbprints of the service keys that
 // verified its upstream card, and whether that card was signed.
 //
-// What a hiring node learns from a gate is only what the gate serves, so an active gate could substitute its own
-// recipient, drop the extension or strip the seller's signature. Pins make that visible and, where it matters,
+// What a calling node learns from a gate is only what the gate serves, so an active gate could substitute its own
+// recipient, drop the extension or strip the service's signature. Pins make that visible and, where it matters,
 // refused: a downgrade (sealed to unsealed, signed to unsigned) is always refused; with --pin-recipients any new
-// recipient, and any new or removed seller key, is refused; without it such a change is refused until the operator
+// recipient, and any new or removed service key, is refused; without it such a change is refused until the operator
 // runs kontra connect with --accept-change <service>, and is named on stderr and in the log (there is no local
 // console, D164, D228).
 // kontra seal reads and writes the same file.
@@ -41,12 +41,31 @@ const maxFile = 16 << 20
 type Pin struct {
 	Sealed     bool     `json:"sealed"`
 	Recipients []string `json:"recipients"` // key ids (k1_…), sorted
-	// SellerKeys are the RFC 7638 thumbprints of the seller keys that verified the upstream card (a signature that
+	// ServiceKeys are the RFC 7638 thumbprints of the service keys that verified the upstream card (a signature that
 	// carries its key), and "kid:<kid>" for a signature that names its key only, which the node cannot verify
-	// (sealing.SellerKeyIDs), sorted.
-	SellerKeys []string  `json:"seller_keys"`
-	Signed     bool      `json:"signed"` // the upstream card carried a seller signature the gate verified
-	At         time.Time `json:"at"`
+	// (sealing.ServiceKeyIDs), sorted.
+	ServiceKeys []string  `json:"service_keys"`
+	Signed      bool      `json:"signed"` // the upstream card carried a service signature the gate verified
+	At          time.Time `json:"at"`
+}
+
+// UnmarshalJSON reads a pin, and a pin a node saved before D363 renamed its seller_keys member service_keys: that
+// member is read as service_keys when service_keys is absent, so an upgraded node sees no key change that did not
+// happen. The next save writes service_keys only.
+func (p *Pin) UnmarshalJSON(b []byte) error {
+	type plain Pin
+	var v struct {
+		plain
+		Legacy []string `json:"seller_keys"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*p = Pin(v.plain)
+	if p.ServiceKeys == nil && v.Legacy != nil {
+		p.ServiceKeys = v.Legacy
+	}
+	return nil
 }
 
 // Change is one difference between a pin and what a gate now serves.
@@ -54,14 +73,14 @@ type Change string
 
 // Changes (ext-sealed §7).
 const (
-	ChangeUnsealed      Change = "unsealed"       // always refused
-	ChangeUnsigned      Change = "unsigned"       // always refused
-	ChangeNewRecipient  Change = "new_recipient"  // refused under --pin-recipients, else until accepted
-	ChangeNewSellerKey  Change = "new_seller_key" // as new_recipient
+	ChangeUnsealed      Change = "unsealed"        // always refused
+	ChangeUnsigned      Change = "unsigned"        // always refused
+	ChangeNewRecipient  Change = "new_recipient"   // refused under --pin-recipients, else until accepted
+	ChangeNewServiceKey Change = "new_service_key" // as new_recipient
 	ChangeLessRecipient Change = "removed_recipient"
-	// ChangeLessSellerKey is a pinned seller key the card no longer verifies with: a gate that strips or replaces the
-	// seller's signature loses it, so it is refused as a new one is (round 2 sealing-fixes-5, D228).
-	ChangeLessSellerKey Change = "removed_seller_key"
+	// ChangeLessServiceKey is a pinned service key the card no longer verifies with: a gate that strips or replaces the
+	// service's signature loses it, so it is refused as a new one is (round 2 sealing-fixes-5, D228).
+	ChangeLessServiceKey Change = "removed_service_key"
 	// ChangeSealed and ChangeSigned are accepted and recorded: an upgrade to sealed or signed gives an active gate
 	// nothing (and makes a later downgrade refused); so is ChangeLessRecipient.
 	ChangeSealed Change = "sealed"
@@ -73,10 +92,10 @@ func (c Change) refusedAlways() bool { return c == ChangeUnsealed || c == Change
 
 // needsAccept are refused under --pin-recipients, and otherwise until --accept-change names the service.
 func (c Change) needsAccept() bool {
-	return c == ChangeNewRecipient || c == ChangeNewSellerKey || c == ChangeLessSellerKey
+	return c == ChangeNewRecipient || c == ChangeNewServiceKey || c == ChangeLessServiceKey
 }
 
-// ChangeError is a refused change; the hiring node answers its local client without forwarding anything.
+// ChangeError is a refused change; the calling node answers its local client without forwarding anything.
 type ChangeError struct {
 	Gate, Service string
 	Changes       []Change
@@ -158,11 +177,11 @@ func Open(path string) (*Store, error) {
 // (trust on first use). An accepted change is recorded; a refused one is a *ChangeError.
 //
 // unsealed (sealed to unsealed) and unsigned (signed to unsigned) are always refused, --accept-change or not.
-// new_recipient and new_seller_key are refused under --pin-recipients, and otherwise unless opts.Accept names
-// the service. Fewer recipients or seller keys, and an upgrade to sealed or signed, are accepted; a service
+// new_recipient and new_service_key are refused under --pin-recipients, and otherwise unless opts.Accept names
+// the service. Fewer recipients or service keys, and an upgrade to sealed or signed, are accepted; a service
 // pinned unsealed that turns sealed brings new recipients, which wait for --accept-change like any others (they
 // are exactly what an active gate would substitute). A refused check records nothing, so the next run sees the
-// same change. Recipients and seller keys are compared as sets
+// same change. Recipients and service keys are compared as sets
 // and recorded sorted; At is when the pin was recorded.
 //
 // The file is re-read, changed and rewritten atomically under an exclusive flock(2), so that two kontra connect
@@ -251,11 +270,11 @@ func diff(prev, now Pin) []Change {
 	if !subset(prev.Recipients, now.Recipients) {
 		out = append(out, ChangeLessRecipient)
 	}
-	if !subset(now.SellerKeys, prev.SellerKeys) {
-		out = append(out, ChangeNewSellerKey)
+	if !subset(now.ServiceKeys, prev.ServiceKeys) {
+		out = append(out, ChangeNewServiceKey)
 	}
-	if !subset(prev.SellerKeys, now.SellerKeys) {
-		out = append(out, ChangeLessSellerKey)
+	if !subset(prev.ServiceKeys, now.ServiceKeys) {
+		out = append(out, ChangeLessServiceKey)
 	}
 	return out
 }
@@ -271,7 +290,7 @@ func subset(a, b []string) bool {
 
 // normalize sorts and deduplicates the key lists (never nil, so the file says [] rather than null).
 func normalize(p Pin) Pin {
-	for _, l := range []*[]string{&p.Recipients, &p.SellerKeys} {
+	for _, l := range []*[]string{&p.Recipients, &p.ServiceKeys} {
 		v := slices.Clone(*l)
 		slices.Sort(v)
 		v = slices.Compact(v)

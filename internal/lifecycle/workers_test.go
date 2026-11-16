@@ -186,7 +186,7 @@ func (s tunnelStop) Stop() {
 }
 
 // A follow-up of a task on this replica's sessions that starts on kontra-tunnel-<replica> during the settle
-// (the worker still polls: the drain saw no tunnel dispatch running, and the buyer's reply came a second
+// (the worker still polls: the drain saw no tunnel dispatch running, and the caller's reply came a second
 // later) is waited for, and settled, before the worker stops; the worker never stops with a dispatch running
 // that drain_timeout has not cut (spec §14.3: "rolling deploys do not cut tasks that finish within
 // drain_timeout"; M2 review, relay-tunnel-2 and robustness-4). Once the drain has closed the queue, a
@@ -220,7 +220,7 @@ func TestDrainWaitsForAFollowUpThatStartsDuringTheSettle(t *testing.T) {
 		mu.Unlock()
 		clock = clock.Add(d)
 		if settles++; settles == 1 {
-			// The buyer's reply arrives during the settle: its dispatch starts on kontra-tunnel-<replica>.
+			// The caller's reply arrives during the settle: its dispatch starts on kontra-tunnel-<replica>.
 			started := make(chan struct{})
 			go func() {
 				res, _ := w.runTunnel(context.Background(), DispatchInput{TaskID: "t1"}, func(context.Context, DispatchInput) (DispatchResult, error) {

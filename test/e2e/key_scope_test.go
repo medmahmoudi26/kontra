@@ -21,10 +21,10 @@ import (
 //     service_denied (close 4006: the token binds hello only, and nothing enrolls recon), exits 1, and
 //     nothing is written: no key, no key_services row for recon (M2 plan audit: not N's used token,
 //     which would be enroll_invalid).
-//  3. A task to recon fails no_session after its retries, while hello's seller and N's log show no request
+//  3. A task to recon fails no_session after its retries, while hello's service and N's log show no request
 //     or preamble for recon; tunnels.services is {hello}; a task to hello completes.
 //  4. N is SIGKILLed and its row is gone (the audit: two sessions of one key would supersede each other).
-//     A FakeNode holding N's key connects declaring hello; it proxies to hello's seller and ignores every
+//     A FakeNode holding N's key connects declaring hello; it proxies to hello's service and ignores every
 //     control line. An 'ask' task waits at input-required on its session; the hello binding is revoked
 //     (`kontra-gate enroll --revoke <key> --service hello`). Within 5 s tunnels.services no longer holds
 //     hello. The reply fails the task tunnel_lost and opens no stream: the FakeNode counts no new preamble,
@@ -39,10 +39,10 @@ func TestKeyScope(t *testing.T) {
 		Tunnel:   map[string]TunnelService{"hello": {}, "recon": {}},
 	})
 	ctx := ctxFor(t, 6*time.Minute)
-	seller := h.Upstreams["hello"]
+	service := h.Upstreams["hello"]
 
 	// 1. N, enrolled for hello.
-	n, sess := startNode(t, ctx, h, "n", map[string]string{"hello": seller.URL()})
+	n, sess := startNode(t, ctx, h, "n", map[string]string{"hello": service.URL()})
 	if err := h.WaitCard(ctx, "hello", time.Minute); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestKeyScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	both, err := h.LaunchNode(NodeOptions{Name: "both", Serves: map[string]string{"hello": seller.URL(), "recon": seller.URL()}, Enroll: []string{tok}})
+	both, err := h.LaunchNode(NodeOptions{Name: "both", Serves: map[string]string{"hello": service.URL(), "recon": service.URL()}, Enroll: []string{tok}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestKeyScope(t *testing.T) {
 	}
 
 	// 3. recon has no session: its task fails no_session after its retries, and nothing reaches N for it.
-	res, err := h.BuyerA().Client(t, h.Gates[1], "recon").SendMessage(ctx, newMessage("for recon"))
+	res, err := h.CallerA().Client(t, h.Gates[1], "recon").SendMessage(ctx, newMessage("for recon"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +95,9 @@ func TestKeyScope(t *testing.T) {
 			t.Fatalf("recon's attempt %+v: want no_session, with no session", a)
 		}
 	}
-	for _, r := range seller.Requests() {
+	for _, r := range service.Requests() {
 		if strings.Contains(string(r.Body), "for recon") {
-			t.Fatalf("hello's seller received recon's task: %s %s", r.Method, r.Body)
+			t.Fatalf("hello's service received recon's task: %s %s", r.Method, r.Body)
 		}
 	}
 	if lines := n.Log(`"service":"recon"`); len(lines) > 0 {
@@ -106,7 +106,7 @@ func TestKeyScope(t *testing.T) {
 	if services, ok, err := h.SessionServices(ctx, sess); err != nil || !ok || !slices.Equal(services, []string{"hello"}) {
 		t.Fatalf("N's tunnels.services %v %v %v, want {hello}", services, ok, err)
 	}
-	res, err = h.BuyerA().Client(t, h.Gates[0], "hello").SendMessage(ctx, newMessage("for hello"))
+	res, err = h.CallerA().Client(t, h.Gates[0], "hello").SendMessage(ctx, newMessage("for hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestKeyScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake, err := DialFakeNode(ctx, h.Front.URL, key, []string{"hello"}, nil, seller.URL())
+	fake, err := DialFakeNode(ctx, h.Front.URL, key, []string{"hello"}, nil, service.URL())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +133,7 @@ func TestKeyScope(t *testing.T) {
 		t.Fatalf("the FakeNode's welcome serves %v, want [hello]", fake.Served)
 	}
 	eventually(t, 15*time.Second, "the FakeNode's tunnels row", func() bool { return sessionReplica(ctx, h, fake.Session) != "" })
-	res, err = h.BuyerA().Client(t, h.Gates[1], "hello").SendMessage(ctx, newMessage(slowagent.AskPrefix+" key_scope"))
+	res, err = h.CallerA().Client(t, h.Gates[1], "hello").SendMessage(ctx, newMessage(slowagent.AskPrefix+" key_scope"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,14 +167,14 @@ func TestKeyScope(t *testing.T) {
 	if got := len(fake.Preambles()); got != served {
 		t.Fatalf("the FakeNode received %d streams after the binding's revocation: %+v", got-served, fake.Preambles()[served:])
 	}
-	if requestWith(seller, msg.ID) != nil {
-		t.Fatal("the reply reached the seller")
+	if requestWith(service, msg.ID) != nil {
+		t.Fatal("the reply reached the service")
 	}
 	if a := endedAttempt(t, ctx, h, waiting.ID); a.Outcome != "tunnel_lost" {
 		t.Fatalf("the attempt %+v, want ended tunnel_lost", a)
 	}
 	checkHistory(t, h, waiting.ID, "e2e_key_scope_revoked_binding", tunnelForbidden(h)...)
-	res, err = h.BuyerA().Client(t, h.Gates[1], "hello").SendMessage(ctx, newMessage("hello, after the revocation"))
+	res, err = h.CallerA().Client(t, h.Gates[1], "hello").SendMessage(ctx, newMessage("hello, after the revocation"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestKeyScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitRowGone(t, ctx, h, fake.Session, 5*time.Second, "the FakeNode left")
-	known, err := h.LaunchNode(NodeOptions{Name: "known", Home: n.Home, Serves: map[string]string{"hello": seller.URL(), "recon": seller.URL()}})
+	known, err := h.LaunchNode(NodeOptions{Name: "known", Home: n.Home, Serves: map[string]string{"hello": service.URL(), "recon": service.URL()}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -88,7 +88,7 @@ func TestAdmissionDouble(t *testing.T) {
 	ask := func(service, task string) (hooks.Decision, error) {
 		t.Helper()
 		body := `{"operation":"task","taskId":"` + task + `","service":{"tenantId":"00000000-0000-0000-0000-000000000001","tenant":"default","name":"` +
-			service + `","kind":"a2a"},"principal":{"kind":"key","id":"key:kk_e2e","buyerId":"00000000-0000-0000-0000-000000000002","via":"api_key"},` +
+			service + `","kind":"a2a"},"principal":{"kind":"key","id":"key:kk_e2e","callerId":"00000000-0000-0000-0000-000000000002","via":"api_key"},` +
 			`"protocol":"a2a","extensions":["https://github.com/google-agentic-commerce/ap2/v1"]}`
 		req, _ := http.NewRequest(http.MethodPost, a.URL(), strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+a.Secret)

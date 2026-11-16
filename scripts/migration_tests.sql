@@ -4,7 +4,7 @@ set local search_path to kontra;
 insert into tenants (id, slug, kind) values ('01900000-0000-7000-8000-000000000001', 'default', 'team');
 insert into services (tenant_id, name, kind, backend, source)
     values ('01900000-0000-7000-8000-000000000001', 'hello', 'a2a', '{"tunnel": {}}', 'config');
-insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version,
+insert into tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state, version,
                    snapshot, status_at, first_message_id, first_request)
     values ('01900000-0000-7000-8000-0000000000aa', '01900000-0000-7000-8000-000000000001', 'hello', 'a2a',
             '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', 'ctx-1', 'submitted', 1,
@@ -81,23 +81,23 @@ exception when check_violation then null; end $$;
 
 -- A service's MCP session has a tenant; the gate's own /mcp may have none.
 do $$ begin
-    insert into mcp_sessions (client_sid_hash, service, buyer_id, principal, via, protocol_version)
+    insert into mcp_sessions (client_sid_hash, service, caller_id, principal, via, protocol_version)
         values (sha256('s1'), 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2025-11-25');
     raise exception 'FAIL: a service MCP session without a tenant';
 exception when check_violation then null; end $$;
-insert into mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version)
+insert into mcp_sessions (client_sid_hash, caller_id, principal, via, protocol_version)
     values (sha256('s2'), '01900000-0000-7000-8000-0000000000bb', 'oidc:https://idp.example/#u1', 'oidc', '2025-11-25');
 
--- An API key defaults to the hire scope; prefixes are unique.
-insert into api_keys (id, tenant_id, buyer_id, prefix, hash)
+-- An API key defaults to the call scope; prefixes are unique.
+insert into api_keys (id, tenant_id, caller_id, prefix, hash)
     values ('01900000-0000-7000-8000-0000000000d1', '01900000-0000-7000-8000-000000000001', '01900000-0000-7000-8000-0000000000bb', 'kk_test', sha256('k1'));
 do $$ begin
-    if (select scopes from api_keys where prefix = 'kk_test') <> '{hire}' then
-        raise exception 'FAIL: api_keys.scopes default is not {hire}';
+    if (select scopes from api_keys where prefix = 'kk_test') <> '{call}' then
+        raise exception 'FAIL: api_keys.scopes default is not {call}';
     end if;
 end $$;
 do $$ begin
-    insert into api_keys (id, tenant_id, buyer_id, prefix, hash)
+    insert into api_keys (id, tenant_id, caller_id, prefix, hash)
         values ('01900000-0000-7000-8000-0000000000d2', '01900000-0000-7000-8000-000000000001', '01900000-0000-7000-8000-0000000000bb', 'kk_test', sha256('k2'));
     raise exception 'FAIL: a duplicate api key prefix';
 exception when unique_violation then null; end $$;
@@ -133,21 +133,21 @@ insert into gate_replicas (replica_id, version) values ('r-nopeer', 'test');
 
 -- 0002 (D177): two open 2026-07-28 sessions of one principal on one service conflict, the gate's own /mcp
 -- (service null) included; a closed one, or an older revision's, does not.
-insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version)
+insert into mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via, protocol_version)
     values (sha256('v1'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2026-07-28');
 do $$ begin
-    insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version)
+    insert into mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via, protocol_version)
         values (sha256('v2'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2026-07-28');
     raise exception 'FAIL: two open virtual sessions for one principal and service';
 exception when unique_violation then null; end $$;
-insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version, closed_at, close_reason)
+insert into mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via, protocol_version, closed_at, close_reason)
     values (sha256('v3'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2026-07-28', now(), 'idle');
-insert into mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via, protocol_version)
+insert into mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via, protocol_version)
     values (sha256('v4'), '01900000-0000-7000-8000-000000000001', 'hello', '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', '2025-11-25');
-insert into mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version)
+insert into mcp_sessions (client_sid_hash, caller_id, principal, via, protocol_version)
     values (sha256('v5'), '01900000-0000-7000-8000-0000000000bb', 'key:kk_own', 'api_key', '2026-07-28');
 do $$ begin
-    insert into mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version)
+    insert into mcp_sessions (client_sid_hash, caller_id, principal, via, protocol_version)
         values (sha256('v6'), '01900000-0000-7000-8000-0000000000bb', 'key:kk_own', 'api_key', '2026-07-28');
     raise exception 'FAIL: two open virtual sessions of the gate''s own /mcp for one principal';
 exception when unique_violation then null; end $$;
@@ -175,20 +175,20 @@ do $$ begin
     end if;
 end $$;
 
--- 0003 (R §12.2, D272): a task is not hired unless the gate's /mcp marks it; hired tasks are indexed by buyer.
-insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version,
+-- 0003 (R §12.2, D272): a task is not sent_by_mcp unless the gate's /mcp marks it; sent_by_mcp tasks are indexed by caller.
+insert into tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state, version,
                    snapshot, status_at)
     values ('01900000-0000-7000-8000-0000000000e1', '01900000-0000-7000-8000-000000000001', 'hello', 'a2a',
             '01900000-0000-7000-8000-0000000000bb', 'key:kk_test', 'api_key', 'ctx-h', 'submitted', 1, '{"id": "h"}', now());
 do $$ begin
-    if (select hired from tasks where id = '01900000-0000-7000-8000-0000000000e1') then
-        raise exception 'FAIL: tasks.hired defaults to true';
+    if (select sent_by_mcp from tasks where id = '01900000-0000-7000-8000-0000000000e1') then
+        raise exception 'FAIL: tasks.sent_by_mcp defaults to true';
     end if;
-    if to_regclass('kontra.tasks_hired') is null then
-        raise exception 'FAIL: no tasks_hired index';
+    if to_regclass('kontra.tasks_sent_by_mcp') is null then
+        raise exception 'FAIL: no tasks_sent_by_mcp index';
     end if;
 end $$;
-update tasks set hired = true where id = '01900000-0000-7000-8000-0000000000e1';
+update tasks set sent_by_mcp = true where id = '01900000-0000-7000-8000-0000000000e1';
 
 -- 0003 (R §12.3, D288): a notification is claimed once, and only for a task that sent a URL elicitation.
 do $$ begin
@@ -317,12 +317,12 @@ do $$ begin
     end if;
 end $$;
 
--- 0004 (R §2.3, §13.5, D319; Cloud's D-M5-120): one buyer's tasks across services, newest first, are read through
--- tasks_by_buyer. 20000 tasks on two services, analyzed: an active buyer holds 66 of them, and its newest 50 are an
--- ordered scan of the index with no sort; a buyer with 20 is found through the index too, not by walking the table.
+-- 0004 (R §2.3, §13.5, D319; Cloud's D-M5-120): one caller's tasks across services, newest first, are read through
+-- tasks_by_caller_id. 20000 tasks on two services, analyzed: an active caller holds 66 of them, and its newest 50 are an
+-- ordered scan of the index with no sort; a caller with 20 is found through the index too, not by walking the table.
 insert into services (tenant_id, name, kind, backend, source)
     values ('01900000-0000-7000-8000-000000000001', 'hello2', 'a2a', '{"tunnel": {}}', 'config');
-insert into tasks (id, tenant_id, service, protocol, buyer_id, principal, via, context_id, state, version, snapshot, status_at)
+insert into tasks (id, tenant_id, service, protocol, caller_id, principal, via, context_id, state, version, snapshot, status_at)
     select ('01900000-0000-7000-8001-' || lpad(to_hex(i), 12, '0'))::uuid, '01900000-0000-7000-8000-000000000001',
            case when i % 2 = 0 then 'hello' else 'hello2' end, 'a2a',
            ('01900000-0000-7000-8002-' || lpad(to_hex(case when i % 300 = 0 then 4095 else i % 1000 end), 12, '0'))::uuid,
@@ -332,15 +332,15 @@ analyze tasks;
 do $$
 declare plan text;
 begin
-    execute 'explain (format json) select id from kontra.tasks where buyer_id = ''01900000-0000-7000-8002-000000000fff''
+    execute 'explain (format json) select id from kontra.tasks where caller_id = ''01900000-0000-7000-8002-000000000fff''
              and via in (''api_key'', ''oidc'', ''mcp'', ''node'') order by id desc limit 50' into plan;
-    if plan not like '%"Node Type": "Index Scan"%' or plan not like '%"Index Name": "tasks_by_buyer"%' or plan like '%"Sort"%' then
-        raise exception 'FAIL: an active buyer''s newest tasks are not an ordered scan of tasks_by_buyer: %', plan;
+    if plan not like '%"Node Type": "Index Scan"%' or plan not like '%"Index Name": "tasks_by_caller_id"%' or plan like '%"Sort"%' then
+        raise exception 'FAIL: an active caller''s newest tasks are not an ordered scan of tasks_by_caller_id: %', plan;
     end if;
-    execute 'explain (format json) select id from kontra.tasks where buyer_id = ''01900000-0000-7000-8002-000000000007''
+    execute 'explain (format json) select id from kontra.tasks where caller_id = ''01900000-0000-7000-8002-000000000007''
              order by id desc limit 50' into plan;
-    if plan not like '%"Index Name": "tasks_by_buyer"%' or plan like '%"Seq Scan"%' then
-        raise exception 'FAIL: a buyer''s few tasks are not read through tasks_by_buyer: %', plan;
+    if plan not like '%"Index Name": "tasks_by_caller_id"%' or plan like '%"Seq Scan"%' then
+        raise exception 'FAIL: a caller''s few tasks are not read through tasks_by_caller_id: %', plan;
     end if;
 end $$;
 
@@ -353,20 +353,20 @@ do $$ begin
     raise exception 'FAIL: tasks_mode always was accepted';
 exception when check_violation then null; end $$;
 
--- 0005 (R §12.3 Idempotency, D338): a hire's idempotencyKey is found through tasks_hired_by_message, across services:
--- the 20000 tasks above made hire tasks, each with its own first_message_id, analyzed; the lookup of one buyer's
+-- 0005 (R §12.3 Idempotency, D338): a call's idempotencyKey is found through tasks_sent_by_mcp_by_message, across services:
+-- the 20000 tasks above made call tasks, each with its own first_message_id, analyzed; the lookup of one caller's
 -- messageId reads the index, never the table.
-update tasks set hired = true, first_message_id = id::text, first_request = sha256(convert_to(id::text, 'UTF8'))
+update tasks set sent_by_mcp = true, first_message_id = id::text, first_request = sha256(convert_to(id::text, 'UTF8'))
     where id::text like '01900000-0000-7000-8001-%';
 analyze tasks;
 do $$
 declare plan text;
 begin
-    execute 'explain (format json) select id from kontra.tasks t where t.buyer_id = ''01900000-0000-7000-8002-000000000fff''
-             and t.first_message_id = ''01900000-0000-7000-8001-000000000258'' and t.hired and t.principal = ''node:k1_x''
+    execute 'explain (format json) select id from kontra.tasks t where t.caller_id = ''01900000-0000-7000-8002-000000000fff''
+             and t.first_message_id = ''01900000-0000-7000-8001-000000000258'' and t.sent_by_mcp and t.principal = ''node:k1_x''
              and t.created_at > now() - interval ''1 day'' order by t.created_at desc, t.id desc limit 1' into plan;
-    if plan not like '%"Index Name": "tasks_hired_by_message"%' or plan like '%"Seq Scan"%' then
-        raise exception 'FAIL: a hire''s idempotency key is not found through tasks_hired_by_message: %', plan;
+    if plan not like '%"Index Name": "tasks_sent_by_mcp_by_message"%' or plan like '%"Seq Scan"%' then
+        raise exception 'FAIL: a call''s idempotency key is not found through tasks_sent_by_mcp_by_message: %', plan;
     end if;
 end $$;
 

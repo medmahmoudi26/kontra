@@ -24,7 +24,7 @@ import (
 )
 
 // whoAmI is a stand-in for the gate's router: it authenticates the request as the edge's routes do
-// (auth.Authenticator, which takes the session's principal from the hire source) and answers who it is.
+// (auth.Authenticator, which takes the session's principal from the call source) and answers who it is.
 type whoAmI struct {
 	mu      sync.Mutex
 	calls   int
@@ -35,7 +35,7 @@ type whoAmI struct {
 type whoAnswer struct {
 	Principal string    `json:"principal"`
 	Via       string    `json:"via"`
-	Buyer     uuid.UUID `json:"buyer"`
+	Caller    uuid.UUID `json:"caller"`
 	Tenant    string    `json:"tenant"`
 	KeepRefs  bool      `json:"keep_refs"`
 	Session   bool      `json:"session"`
@@ -63,8 +63,8 @@ func (h *whoAmI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	_, hs := HiringSession(r.Context())
-	_ = json.NewEncoder(w).Encode(whoAnswer{Principal: p.ID, Via: string(p.Via), Buyer: p.BuyerID, Tenant: p.TenantSlug,
+	_, hs := CallingSession(r.Context())
+	_ = json.NewEncoder(w).Encode(whoAnswer{Principal: p.ID, Via: string(p.Via), Caller: p.CallerID, Tenant: p.TenantSlug,
 		KeepRefs: blob.KeepRefs(r.Context()), Session: hs, AuthzSeen: r.Header.Get("Authorization") != "", Remote: r.RemoteAddr})
 }
 
@@ -74,7 +74,7 @@ func (h *whoAmI) count() int {
 	return h.calls
 }
 
-// fakeKeys is a HireKeys whose answer the test sets.
+// fakeKeys is a SendMessageKeys whose answer the test sets.
 type fakeKeys struct {
 	mu       sync.Mutex
 	err      error
@@ -106,15 +106,15 @@ func (k *fakeKeys) counts() (holds, releases, checks int) {
 	return k.holds, k.releases, k.checks
 }
 
-// hiringNode is a node's yamux.Client over a completed handshake with the gate's control stream read into
+// callingNode is a node's yamux.Client over a completed handshake with the gate's control stream read into
 // controls, and the session the gate registered.
-type hiringNode struct {
+type callingNode struct {
 	m        *yamux.Session
 	s        *Session
 	controls chan tunnel.Control
 }
 
-func dialHiring(t *testing.T, g *testGate) *hiringNode {
+func dialCalling(t *testing.T, g *testGate) *callingNode {
 	t.Helper()
 	d, _, err := g.connect(t, newIdentity(t), newHello("hello"), false)
 	if err != nil {
@@ -129,7 +129,7 @@ func dialHiring(t *testing.T, g *testGate) *hiringNode {
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := &hiringNode{m: m, s: g.sink.next(t), controls: make(chan tunnel.Control, 16)}
+	n := &callingNode{m: m, s: g.sink.next(t), controls: make(chan tunnel.Control, 16)}
 	go func() {
 		br := bufio.NewReader(ctl)
 		if p, err := tunnel.ReadPreamble(br); err != nil || p.Op != tunnel.OpControl {
@@ -147,7 +147,7 @@ func dialHiring(t *testing.T, g *testGate) *hiringNode {
 }
 
 // open opens a node-opened stream with preamble p and writes raw after it; it does not close it.
-func (n *hiringNode) open(t *testing.T, p tunnel.Preamble, raw string) *yamux.Stream {
+func (n *callingNode) open(t *testing.T, p tunnel.Preamble, raw string) *yamux.Stream {
 	t.Helper()
 	st, err := n.m.OpenStream()
 	if err != nil {
@@ -164,19 +164,19 @@ func (n *hiringNode) open(t *testing.T, p tunnel.Preamble, raw string) *yamux.St
 	return st
 }
 
-// do runs one hiring exchange and returns the response, its body read, the stream closed.
-func (n *hiringNode) do(t *testing.T, raw string) (*http.Response, []byte) {
+// do runs one calling exchange and returns the response, its body read, the stream closed.
+func (n *callingNode) do(t *testing.T, raw string) (*http.Response, []byte) {
 	t.Helper()
 	st := n.open(t, tunnel.Preamble{Op: tunnel.OpHTTP}, raw)
 	defer st.Close()
 	_ = st.SetReadDeadline(time.Now().Add(10 * time.Second))
 	res, err := http.ReadResponse(bufio.NewReader(st), nil)
 	if err != nil {
-		t.Fatalf("hiring exchange: %v", err)
+		t.Fatalf("calling exchange: %v", err)
 	}
 	b, err := io.ReadAll(res.Body)
 	if err != nil {
-		t.Fatalf("hiring exchange body: %v", err)
+		t.Fatalf("calling exchange body: %v", err)
 	}
 	return res, b
 }
@@ -185,29 +185,29 @@ func get(path string, headers ...string) string {
 	return "GET " + path + " HTTP/1.1\r\nHost: x\r\n" + strings.Join(headers, "") + "\r\n"
 }
 
-// A hiring request is served by the gate's router with the session's principal (spec/tunnel.md §9, relay.md
-// §2.3): node:<key_id> with ids.NodeBuyer and the key's tenant, whatever Authorization the node forwards (never
+// A calling request is served by the gate's router with the session's principal (spec/tunnel.md §9, relay.md
+// §2.3): node:<key_id> with ids.NodeCaller and the key's tenant, whatever Authorization the node forwards (never
 // read, removed); its answers keep kontra-blob: refs; the edge sees one client address per session. A path outside
 // the four prefixes is 404 and never reaches the router.
-func TestHiringNodePrincipal(t *testing.T) {
+func TestCallingNodePrincipal(t *testing.T) {
 	who := &whoAmI{}
-	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Hire: who} }})
-	n := dialHiring(t, g)
+	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Call: who} }})
+	n := dialCalling(t, g)
 	kid := n.s.KeyID
 	res, body := n.do(t, get("/agents/hello", "Authorization: Bearer kk_someone_else\r\n"))
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("hiring request: %d %s", res.StatusCode, body)
+		t.Fatalf("calling request: %d %s", res.StatusCode, body)
 	}
 	var a whoAnswer
 	if err := json.Unmarshal(body, &a); err != nil {
 		t.Fatal(err)
 	}
-	buyer, _ := ids.NodeBuyer(ids.Namespace, kid)
-	if a.Principal != "node:"+kid || a.Via != "node" || a.Buyer != buyer || a.Tenant != "team" || !a.KeepRefs || !a.Session || a.AuthzSeen {
-		t.Fatalf("the router saw %+v; want node:%s, buyer %s, tenant team, keep refs, the session, no Authorization", a, kid, buyer)
+	caller, _ := ids.NodeCaller(ids.Namespace, kid)
+	if a.Principal != "node:"+kid || a.Via != "node" || a.Caller != caller || a.Tenant != "team" || !a.KeepRefs || !a.Session || a.AuthzSeen {
+		t.Fatalf("the router saw %+v; want node:%s, caller %s, tenant team, keep refs, the session, no Authorization", a, kid, caller)
 	}
-	if !strings.HasPrefix(a.Remote, "[fd") || a.Remote != n.s.hireAddr().String() {
-		t.Fatalf("the edge's client address %q, want the session's own %s", a.Remote, n.s.hireAddr())
+	if !strings.HasPrefix(a.Remote, "[fd") || a.Remote != n.s.callAddr().String() {
+		t.Fatalf("the edge's client address %q, want the session's own %s", a.Remote, n.s.callAddr())
 	}
 	for _, path := range []string{"/agents/hello/tasks", "/mcp", "/mcp/fs", "/.well-known/jwks.json"} {
 		if res, _ := n.do(t, get(path)); res.StatusCode != http.StatusOK {
@@ -242,7 +242,7 @@ func TestHiringNodePrincipal(t *testing.T) {
 	}
 }
 
-func (n *hiringNode) do2(t *testing.T, p tunnel.Preamble) (*http.Response, []byte) {
+func (n *callingNode) do2(t *testing.T, p tunnel.Preamble) (*http.Response, []byte) {
 	t.Helper()
 	st := n.open(t, p, "")
 	defer st.Close()
@@ -255,31 +255,31 @@ func (n *hiringNode) do2(t *testing.T, p tunnel.Preamble) (*http.Response, []byt
 	return res, b
 }
 
-// A session that hires with its handshake's API key takes the key's principal, re-validated on every request and
+// A session that calls with its handshake's API key takes the key's principal, re-validated on every request and
 // held under the revocation cache's watch for the session's life. Once the key no longer authenticates, every
-// hiring request is 401 without asking again, and the node is told {"t": "auth_revoked"} once (spec/tunnel.md
+// calling request is 401 without asking again, and the node is told {"t": "auth_revoked"} once (spec/tunnel.md
 // §12); APIKeyRevoked (NOTIFY kontra_revoke 'apikey:<id>') does the same for a key found revoked elsewhere.
-func TestHiringAPIKeyPrincipal(t *testing.T) {
+func TestCallingAPIKeyPrincipal(t *testing.T) {
 	who := &whoAmI{}
 	keys := &fakeKeys{}
 	keyID := uuid.Must(uuid.NewV7())
-	hire := auth.Principal{Kind: auth.KindKey, ID: "key:kk_hire_abcdefgh", TenantID: &testTenantID, TenantSlug: "team",
-		BuyerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeHire}, KeyID: &keyID}
-	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Hire: who, Keys: keys} }})
+	call := auth.Principal{Kind: auth.KindKey, ID: "key:kk_call_abcdefgh", TenantID: &testTenantID, TenantSlug: "team",
+		CallerID: uuid.Must(uuid.NewV7()), Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeCall}, KeyID: &keyID}
+	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Call: who, Keys: keys} }})
 	g.adm.set(func(req enroll.Request) (*enroll.Decision, error) {
 		d := admitAll(req)
-		d.HirePrincipal, d.Hire = hire.ID, &hire
+		d.CallerPrincipal, d.Call = call.ID, &call
 		return d, nil
 	})
-	n := dialHiring(t, g)
+	n := dialCalling(t, g)
 	if h, _, _ := keys.counts(); h != 1 {
-		t.Fatalf("the hiring key was held %d times, want once for the session", h)
+		t.Fatalf("the calling key was held %d times, want once for the session", h)
 	}
 	res, body := n.do(t, get("/agents/hello"))
 	var a whoAnswer
 	_ = json.Unmarshal(body, &a)
-	if res.StatusCode != http.StatusOK || a.Principal != hire.ID || a.Buyer != hire.BuyerID || a.Via != "api_key" {
-		t.Fatalf("hiring with the API key: %d %+v", res.StatusCode, a)
+	if res.StatusCode != http.StatusOK || a.Principal != call.ID || a.Caller != call.CallerID || a.Via != "api_key" {
+		t.Fatalf("calling with the API key: %d %+v", res.StatusCode, a)
 	}
 	keys.mu.Lock()
 	keys.err = auth.ErrUnauthenticated
@@ -304,8 +304,8 @@ func TestHiringAPIKeyPrincipal(t *testing.T) {
 	if _, _, c := keys.counts(); c != checks {
 		t.Errorf("the revoked key was checked again (%d times): it stays revoked for the session", c-checks)
 	}
-	if !n.s.HireRevoked() || n.s.Mux().IsClosed() {
-		t.Fatal("the session must stay open, hosting on it unaffected, with its hiring revoked")
+	if !n.s.CallRevoked() || n.s.Mux().IsClosed() {
+		t.Fatal("the session must stay open, hosting on it unaffected, with its calling revoked")
 	}
 	n.s.authRevoked(g.h.log) // a second report of the same revocation tells nothing more
 	select {
@@ -320,14 +320,14 @@ func TestHiringAPIKeyPrincipal(t *testing.T) {
 	})
 }
 
-// Registry.APIKeyRevoked reaches only the sessions hiring with that key.
+// Registry.APIKeyRevoked reaches only the sessions calling with that key.
 func TestRegistryAPIKeyRevoked(t *testing.T) {
 	r := NewRegistry(RegistryConfig{})
 	k1, k2 := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	mk := func(k *uuid.UUID) *Session {
 		s := &Session{ID: uuid.Must(uuid.NewV7()), KeyID: "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa", reg: r}
 		if k != nil {
-			s.hire = &auth.Principal{Kind: auth.KindKey, KeyID: k}
+			s.call = &auth.Principal{Kind: auth.KindKey, KeyID: k}
 		}
 		r.sessions[s.ID] = s
 		return s
@@ -335,17 +335,17 @@ func TestRegistryAPIKeyRevoked(t *testing.T) {
 	a, b, c := mk(&k1), mk(&k2), mk(nil)
 	r.APIKeyRevoked(k1)
 	r.async.Wait()
-	if !a.HireRevoked() || b.HireRevoked() || c.HireRevoked() {
-		t.Fatalf("revoked: %v %v %v, want only the first", a.HireRevoked(), b.HireRevoked(), c.HireRevoked())
+	if !a.CallRevoked() || b.CallRevoked() || c.CallRevoked() {
+		t.Fatalf("revoked: %v %v %v, want only the first", a.CallRevoked(), b.CallRevoked(), c.CallRevoked())
 	}
 }
 
-// The in-flight cap (§14, D137, D182): 33 concurrent hiring streams give one 429 and keep the session; a node
+// The in-flight cap (§14, D137, D182): 33 concurrent calling streams give one 429 and keep the session; a node
 // that keeps more than 32 refused streams open loses it.
 func TestNodeOpenedStreamsCap(t *testing.T) {
 	who := &whoAmI{release: make(chan struct{}), entered: make(chan struct{}, 64)}
-	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Hire: who} }})
-	n := dialHiring(t, g)
+	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Call: who} }})
+	n := dialCalling(t, g)
 	var held []*yamux.Stream
 	for range tunnel.GateMaxInflight {
 		held = append(held, n.open(t, tunnel.Preamble{Op: tunnel.OpHTTP}, get("/agents/hello")))
@@ -391,8 +391,8 @@ func TestNodeOpenedStreamsCap(t *testing.T) {
 // the round ends, keep the session open, and the gate's yamux forgets every stream once the node closes them.
 func TestNodeOpenedStreamsFreedWhenTheNodeCloses(t *testing.T) {
 	who := &whoAmI{}
-	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Hire: who} }})
-	n := dialHiring(t, g)
+	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Call: who} }})
+	n := dialCalling(t, g)
 	for round := range 3 {
 		var held []*yamux.Stream
 		for range tunnel.GateMaxInflight {
@@ -452,8 +452,8 @@ func (f *fakeStore) Delete(context.Context, blob.Key) error                 { re
 func (f *fakeStore) DeleteTask(context.Context, uuid.UUID, uuid.UUID) error { return nil }
 
 // Blob streams (spec/tunnel.md §8.3, D181) through the session, fetched with blob.Fetch as a node does: a task
-// served on the session and a task its hiring principal's buyer owns are served; an unknown ref is not_found; a
-// task of another tenant that the session neither serves nor hires is forbidden; a row or a store object over 64
+// served on the session and a task its calling principal's caller owns are served; an unknown ref is not_found; a
+// task of another tenant that the session neither serves nor calls is forbidden; a row or a store object over 64
 // MiB is too_large (no 64 MiB write); without a bucket every ref is not_found.
 func TestBlobStreams(t *testing.T) {
 	type entry struct {
@@ -461,7 +461,7 @@ func TestBlobStreams(t *testing.T) {
 		data []byte
 	}
 	refs := map[string]blob.Ref{}
-	for _, name := range []string{"served", "hired", "other", "bigrow", "bigobj", "missing", "unknown"} {
+	for _, name := range []string{"served", "called", "other", "bigrow", "bigobj", "missing", "unknown"} {
 		r, err := blob.NewRef()
 		if err != nil {
 			t.Fatal(err)
@@ -472,16 +472,16 @@ func TestBlobStreams(t *testing.T) {
 	store := &fakeStore{objs: map[blob.Key][]byte{}, sizes: map[blob.Key]int64{}}
 	rows := map[blob.Ref]*entry{}
 	var session uuid.UUID
-	var hireBuyer uuid.UUID
-	add := func(name string, tenant uuid.UUID, serves bool, buyer uuid.UUID, size int64, data []byte) {
-		r := BlobRow{Row: blob.Row{Ref: refs[name], Tenant: tenant, Task: uuid.Must(uuid.NewV7()), Size: size}, Buyer: buyer, Serves: serves}
+	var callCaller uuid.UUID
+	add := func(name string, tenant uuid.UUID, serves bool, caller uuid.UUID, size int64, data []byte) {
+		r := BlobRow{Row: blob.Row{Ref: refs[name], Tenant: tenant, Task: uuid.Must(uuid.NewV7()), Size: size}, Caller: caller, Serves: serves}
 		rows[refs[name]] = &entry{row: r, data: data}
 		if data != nil {
 			store.objs[r.Key()] = data
 		}
 	}
 	served := bytes.Repeat([]byte("served "), 300<<10/7)
-	hired := []byte("the hiring node's own answer")
+	sentByMCP := []byte("the calling node's own answer")
 	blobs := &Blobs{Store: store, Lookup: func(_ context.Context, ref blob.Ref, s uuid.UUID) (BlobRow, bool, error) {
 		e, ok := rows[ref]
 		if !ok {
@@ -489,17 +489,17 @@ func TestBlobStreams(t *testing.T) {
 		}
 		row := e.row
 		row.Serves = row.Serves && s == session
-		if row.Buyer == uuid.Nil {
-			row.Buyer = hireBuyer
+		if row.Caller == uuid.Nil {
+			row.Caller = callCaller
 		}
 		return row, true, nil
 	}}
 	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Blobs: blobs} }})
-	n := dialHiring(t, g)
+	n := dialCalling(t, g)
 	session = n.s.ID
-	hireBuyer, _ = ids.NodeBuyer(ids.Namespace, n.s.KeyID)
+	callCaller, _ = ids.NodeCaller(ids.Namespace, n.s.KeyID)
 	add("served", testTenantID, true, uuid.Must(uuid.NewV7()), int64(len(served)), served)
-	add("hired", testTenantID, false, uuid.Nil, int64(len(hired)), hired) // the buyer is the session's own
+	add("called", testTenantID, false, uuid.Nil, int64(len(sentByMCP)), sentByMCP) // the caller is the session's own
 	add("other", other, false, uuid.Must(uuid.NewV7()), 4, []byte("nope"))
 	add("bigrow", testTenantID, true, uuid.Nil, blob.MaxObject+1, nil)
 	add("bigobj", testTenantID, true, uuid.Nil, 10, nil)
@@ -517,7 +517,7 @@ func TestBlobStreams(t *testing.T) {
 		_, err = blob.Fetch(ctx, st, ref, &buf)
 		return buf.Bytes(), err
 	}
-	for name, want := range map[string][]byte{"served": served, "hired": hired} {
+	for name, want := range map[string][]byte{"served": served, "called": sentByMCP} {
 		got, err := fetch(refs[name])
 		if err != nil || !bytes.Equal(got, want) {
 			t.Errorf("%s: %d bytes, %v", name, len(got), err)
@@ -531,11 +531,11 @@ func TestBlobStreams(t *testing.T) {
 			t.Errorf("%s: %v, want %s", name, err, reason)
 		}
 	}
-	// A session whose hiring API key was revoked hires nothing: a task it does not serve is forbidden.
-	n.s.hire = &auth.Principal{Kind: auth.KindKey, BuyerID: hireBuyer, KeyID: &other}
-	n.s.hireRevoked.Store(true)
-	if _, err := fetch(refs["hired"]); err == nil || !strings.Contains(err.Error(), blob.ReasonForbidden) {
-		t.Errorf("a hired task after auth_revoked: %v", err)
+	// A session whose calling API key was revoked calls nothing: a task it does not serve is forbidden.
+	n.s.call = &auth.Principal{Kind: auth.KindKey, CallerID: callCaller, KeyID: &other}
+	n.s.callRevoked.Store(true)
+	if _, err := fetch(refs["called"]); err == nil || !strings.Contains(err.Error(), blob.ReasonForbidden) {
+		t.Errorf("a send_message task after auth_revoked: %v", err)
 	}
 	if got, err := fetch(refs["served"]); err != nil || !bytes.Equal(got, served) {
 		t.Errorf("a served task after auth_revoked (hosting goes on): %v", err)
@@ -543,7 +543,7 @@ func TestBlobStreams(t *testing.T) {
 
 	// No bucket: not_found.
 	g2 := newTestGate(t, gateOpts{})
-	n2 := dialHiring(t, g2)
+	n2 := dialCalling(t, g2)
 	st, err := n2.m.OpenStream()
 	if err != nil {
 		t.Fatal(err)
@@ -554,13 +554,13 @@ func TestBlobStreams(t *testing.T) {
 	}
 	// No router: 404.
 	if res, _ := n2.do(t, get("/agents/hello")); res.StatusCode != http.StatusNotFound {
-		t.Fatalf("a gate without a hiring router: %d", res.StatusCode)
+		t.Fatalf("a gate without a calling router: %d", res.StatusCode)
 	}
 }
 
-// The writes of a hiring answer have their own deadline: a node that stops reading an endless answer frees the
+// The writes of a calling answer have their own deadline: a node that stops reading an endless answer frees the
 // handler (D155), and the stream ends.
-func TestHiringWriteDeadline(t *testing.T) {
+func TestCallingWriteDeadline(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits for tunnel.ConnectionWriteTimeout")
 	}
@@ -576,8 +576,8 @@ func TestHiringWriteDeadline(t *testing.T) {
 			_ = http.NewResponseController(w).Flush()
 		}
 	})
-	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Hire: endless} }})
-	n := dialHiring(t, g)
+	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) { c.NodeStreams = &NodeStreams{Call: endless} }})
+	n := dialCalling(t, g)
 	st := n.open(t, tunnel.Preamble{Op: tunnel.OpHTTP}, get("/agents/hello"))
 	defer st.Close()
 	select { // the node never reads

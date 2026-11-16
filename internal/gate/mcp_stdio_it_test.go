@@ -135,7 +135,7 @@ services:
     tools: { deny: ["write_file", "edit_file", "create_directory", "move_file"] }
 `
 	run := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), fastTiming)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	team, err := tenant.EnsureTeam(ctx, e.pool)
 	if err != nil {
 		t.Fatal(err)

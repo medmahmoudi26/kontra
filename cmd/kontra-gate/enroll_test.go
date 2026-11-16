@@ -47,7 +47,7 @@ var keyLine = regexp.MustCompile(`^kk_[a-z0-9]{1,16}_[A-Za-z0-9]{32}\n$`)
 
 // The README order on a fresh database: migrate, then `enroll --api-key demo`, which upserts the team
 // tenant and prints only the key on stdout; api_keys holds its sha256 and prefix; the key authenticates
-// as key:<prefix> with the tenant, a buyer and the hire scope; the mint is an audit row.
+// as key:<prefix> with the tenant, a caller and the call scope; the mint is an audit row.
 func TestEnrollAPIKey(t *testing.T) {
 	dsn := pgtest.Database(t)
 	cfg := writeConfig(t, dsn, "auth: { api_keys: true }\n")
@@ -80,26 +80,26 @@ func TestEnrollAPIKey(t *testing.T) {
 		scopes      []string
 		tenantSlug  string
 		tenantKind  string
-		buyer       uuid.UUID
+		caller      uuid.UUID
 		tenantCount int
 	)
-	err = pool.QueryRow(ctx, `select k.hash, k.prefix, k.scopes, t.slug, t.kind, k.buyer_id, (select count(*) from kontra.tenants)
-		from kontra.api_keys k join kontra.tenants t on t.id = k.tenant_id`).Scan(&hash, &prefix, &scopes, &tenantSlug, &tenantKind, &buyer, &tenantCount)
+	err = pool.QueryRow(ctx, `select k.hash, k.prefix, k.scopes, t.slug, t.kind, k.caller_id, (select count(*) from kontra.tenants)
+		from kontra.api_keys k join kontra.tenants t on t.id = k.tenant_id`).Scan(&hash, &prefix, &scopes, &tenantSlug, &tenantKind, &caller, &tenantCount)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte(key))
-	if !bytes.Equal(hash, sum[:]) || prefix != key[:16] || len(scopes) != 1 || scopes[0] != "hire" ||
+	if !bytes.Equal(hash, sum[:]) || prefix != key[:16] || len(scopes) != 1 || scopes[0] != "call" ||
 		tenantSlug != "default" || tenantKind != "team" || tenantCount != 1 {
 		t.Errorf("row: prefix %q scopes %v tenant %s/%s (%d tenants)", prefix, scopes, tenantSlug, tenantKind, tenantCount)
 	}
 	p, err := auth.NewAPIKeys(pool, nil).Authenticate(ctx, key)
-	if err != nil || p.ID != "key:"+prefix || p.TenantSlug != "default" || p.BuyerID != buyer || !p.HasScope(auth.ScopeHire) {
+	if err != nil || p.ID != "key:"+prefix || p.TenantSlug != "default" || p.CallerID != caller || !p.HasScope(auth.ScopeCall) {
 		t.Errorf("authenticate the printed key: %+v %v", p, err)
 	}
 
-	// A second key: operator prefix and scopes; the same tenant, its own buyer.
-	stdout, _, err = runSplit(t, "enroll", "-f", cfg, "--api-key", "Node One", "--prefix", "acme", "--scope", "hire", "--scope", "enroll:hello")
+	// A second key: operator prefix and scopes; the same tenant, its own caller.
+	stdout, _, err = runSplit(t, "enroll", "-f", cfg, "--api-key", "Node One", "--prefix", "acme", "--scope", "call", "--scope", "enroll:hello")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,12 +107,18 @@ func TestEnrollAPIKey(t *testing.T) {
 		t.Fatalf("second key %q", stdout)
 	}
 	p2, err := auth.NewAPIKeys(pool, nil).Authenticate(ctx, strings.TrimSpace(stdout))
-	if err != nil || !p2.HasScope("enroll:hello") || p2.BuyerID == buyer || *p2.TenantID != *p.TenantID {
+	if err != nil || !p2.HasScope("enroll:hello") || p2.CallerID == caller || *p2.TenantID != *p.TenantID {
 		t.Errorf("second key: %+v %v", p2, err)
 	}
 	rows, err := audit.Verify(ctx, pool)
 	if err != nil || len(rows) != 2 {
 		t.Errorf("audit: %d rows, %v", len(rows), err)
+	}
+
+	// The scope's old name is refused, naming the new one (D363).
+	if out, _, err := runSplit(t, "enroll", "-f", cfg, "--api-key", "x", "--scope", "hire"); err == nil || out != "" ||
+		!strings.Contains(err.Error(), "scope hire was renamed call") {
+		t.Errorf("--scope hire = %q, %v; want refused naming call", out, err)
 	}
 
 	// Usage errors print no key.

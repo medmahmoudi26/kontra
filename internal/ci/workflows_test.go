@@ -113,13 +113,13 @@ func keys(m map[string]any) []string {
 	return out
 }
 
-// The helloworld seller's tests run in CI and cannot pass by skipping (M2 review, robustness-2): the e2e job
+// The helloworld service's tests run in CI and cannot pass by skipping (M2 review, robustness-2): the e2e job
 // (TestHelloworldTunnel: hello-world unmodified behind the tunnel, a hard rule of M2) and the integration job
-// (run.sh's guards, examples/sellers/helloworld) install uv, fetch a2a-samples at the commit run.sh pins
+// (run.sh's guards, examples/agents/helloworld) install uv, fetch a2a-samples at the commit run.sh pins
 // into KONTRA_A2A_SAMPLES before the tests, and set KONTRA_REQUIRE_HELLOWORLD, which turns the tests' skips
 // (no uv, no checkout, 127.0.0.1:9999 taken) into failures.
 func TestHelloworldRunsInCI(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "examples", "sellers", "helloworld", "run.sh"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "examples", "agents", "helloworld", "run.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}

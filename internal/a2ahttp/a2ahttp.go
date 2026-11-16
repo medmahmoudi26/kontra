@@ -4,7 +4,7 @@
 //
 //	GET  {svc} and {svc}/.well-known/agent-card.json   the served card (D10)
 //	GET  {svc}/.well-known/agent-card.upstream.json    the upstream card, verbatim (D13)
-//	GET  {svc}/.well-known/seller-jwks.json            the seller key set the gate verified it with (D223)
+//	GET  {svc}/.well-known/service-jwks.json            the service key set the gate verified it with (D223)
 //	POST {svc} and {svc}/                              JSON-RPC 2.0 (the TCK posts the trailing slash)
 //	     {svc}/message:send, {svc}/tasks…, …           HTTP+JSON, every route of spec §5.3
 //
@@ -65,7 +65,7 @@ type Service struct {
 	// makes the card routes answer 503 (spec §3).
 	Cards func() (*card.Served, error)
 	// OperatorExtensions are the URIs of the operator's card_extensions entries (spec §13.4) the served card was
-	// built with: a hire of the gate's own /mcp activates those the card requires for the buyer (§12.2, D300).
+	// built with: a send_message of the gate's own /mcp activates those the card requires for the caller (§12.2, D300).
 	OperatorExtensions []string
 }
 
@@ -83,7 +83,7 @@ type HandlerSource interface {
 // Authenticator turns a request's credential into a principal: an API key, a request a node opened, or with auth.oidc
 // a JWT of the configured issuer (spec §2.3, D314); *auth.Authenticator implements it.
 type Authenticator interface {
-	AuthenticateA2A(r *http.Request, anonymousBuyer uuid.UUID) (auth.Principal, bool, error)
+	AuthenticateA2A(r *http.Request, anonymousCaller uuid.UUID) (auth.Principal, bool, error)
 }
 
 // Streams is the gate's SSE writer; *sse.Writer implements it.
@@ -130,7 +130,7 @@ type cachedExtensions struct {
 }
 
 // ExtensionSet is what a served card declares in capabilities.extensions (spec §2.4): every URI, as a set,
-// and those marked required: true, in the card's order. The card is the seller's (up to 256 KiB, §6.6), so
+// and those marked required: true, in the card's order. The card is the service's (up to 256 KiB, §6.6), so
 // a lookup never walks the list.
 type ExtensionSet struct {
 	declared map[string]struct{}
@@ -195,7 +195,7 @@ func (s *Server) Register(rt *edge.Router) {
 		"GET " + p,
 		"GET " + p + "/.well-known/agent-card.json",
 		"GET " + p + "/.well-known/agent-card.upstream.json",
-		"GET " + p + "/.well-known/seller-jwks.json",
+		"GET " + p + "/.well-known/service-jwks.json",
 		"POST " + p + "/message:send",
 		"POST " + p + "/message:stream",
 		"GET " + p + "/tasks",
@@ -217,7 +217,7 @@ type kind int
 const (
 	routeCard          kind = iota // GET {svc}, {svc}/.well-known/agent-card.json
 	routeUpstreamCard              // GET {svc}/.well-known/agent-card.upstream.json
-	routeSellerJWKS                // GET {svc}/.well-known/seller-jwks.json (D223)
+	routeServiceJWKS               // GET {svc}/.well-known/service-jwks.json (D223)
 	routeJSONRPC                   // POST {svc}, POST {svc}/
 	routeREST                      // HTTP+JSON, served by a2a-go
 	routeRESTStream                // POST {svc}/message:stream
@@ -243,7 +243,7 @@ func (rt route) binding() sse.Binding {
 }
 
 func (rt route) card() bool {
-	return rt.kind == routeCard || rt.kind == routeUpstreamCard || rt.kind == routeSellerJWKS
+	return rt.kind == routeCard || rt.kind == routeUpstreamCard || rt.kind == routeServiceJWKS
 }
 
 // parseRoute classifies a request by method and path; ok is false for anything that is not an A2A route.
@@ -281,8 +281,8 @@ func parseRoute(r *http.Request, multi bool) (route, bool) {
 		rt.kind = routeCard
 	case rest == ".well-known/agent-card.upstream.json" && get:
 		rt.kind = routeUpstreamCard
-	case rest == ".well-known/seller-jwks.json" && get:
-		rt.kind = routeSellerJWKS
+	case rest == ".well-known/service-jwks.json" && get:
+		rt.kind = routeServiceJWKS
 	case rest == "message:send" && post:
 		rt.kind, rt.message = routeREST, true
 	case rest == "message:stream" && post:
@@ -381,16 +381,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		traffic.SetNoBodies(ctx) // a sealed service's calls keep no bodies (D358)
 	}
 	if !authenticated {
-		buyerTenant := uuid.Nil // a team gate: one fixed buyer for every anonymous caller (spec §2.3)
+		callerTenant := uuid.Nil // a team gate: one fixed caller for every anonymous caller (spec §2.3)
 		if s.deps.Multi {
-			buyerTenant = svc.Ref.TenantID
+			callerTenant = svc.Ref.TenantID
 		}
-		buyer, err := ids.AnonymousBuyer(buyerTenant)
+		caller, err := ids.AnonymousCaller(callerTenant)
 		if err != nil {
-			s.internal(w, rt, id, "derive the anonymous buyer", err)
+			s.internal(w, rt, id, "derive the anonymous caller", err)
 			return
 		}
-		p = auth.Anonymous(buyer)
+		p = auth.Anonymous(caller)
 	}
 	traffic.SetCaller(ctx, p.ID, string(p.Via))
 	admitted := svc.Allow.Admits(p)
@@ -407,8 +407,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			return cards()
 		}
-		if rt.kind == routeSellerJWKS {
-			card.SellerJWKSHandler(get).ServeHTTP(w, r)
+		if rt.kind == routeServiceJWKS {
+			card.ServiceJWKSHandler(get).ServeHTTP(w, r)
 			return
 		}
 		card.Handler(get, rt.kind == routeUpstreamCard).ServeHTTP(w, r)
@@ -665,7 +665,7 @@ func decodeStrict(b []byte, v any) error {
 }
 
 func ownerOf(p auth.Principal) store.Owner {
-	return store.Owner{BuyerID: p.BuyerID, Principal: p.ID, Via: string(p.Via), TenantID: p.TenantID}
+	return store.Owner{CallerID: p.CallerID, Principal: p.ID, Via: string(p.Via), TenantID: p.TenantID}
 }
 
 // transportsFor returns a2a-go's transports over the service's handler, built again when the relay's
@@ -720,7 +720,7 @@ func (s *Server) declared(svc *Service) func(*http.Request) *ExtensionSet {
 
 // Declared is what svc's served card declares in capabilities.extensions, read as Extensions reads it for the
 // service's routes (spec §2.4); nil (none) for no service or one without a servable card. The gate's own /mcp checks a
-// hire against it (relay.Hirer.Extensions, with Service.OperatorExtensions: D294, D300).
+// call against it (relay.Caller.Extensions, with Service.OperatorExtensions: D294, D300).
 func (s *Server) Declared(svc *Service) *ExtensionSet {
 	if svc == nil {
 		return nil
@@ -730,8 +730,8 @@ func (s *Server) Declared(svc *Service) *ExtensionSet {
 
 // cardExtensions reads capabilities.extensions of a served card, entry by entry, with exact keys (D311): the
 // capabilities object and each entry as the gate wrote them (card.Rewrite refuses a card with a case variant of any of
-// them), never a seller's "Extensions" or "Required" that a case-insensitive decoder would take for them. An entry that
-// is not an object with a string uri is skipped, so one malformed seller entry cannot hide the operator's.
+// them), never a service's "Extensions" or "Required" that a case-insensitive decoder would take for them. An entry that
+// is not an object with a string uri is skipped, so one malformed service entry cannot hide the operator's.
 func cardExtensions(body []byte) (all, required []string) {
 	top, err := strictjson.Members(body)
 	if err != nil {

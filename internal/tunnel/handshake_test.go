@@ -429,7 +429,7 @@ func TestParseHelloRefusals(t *testing.T) {
 		}
 	}
 
-	// A hello may declare no service (a node that only hires), with services null or [].
+	// A hello may declare no service (a node that only calls), with services null or [].
 	h := validHello(t)
 	h.Services = nil
 	h.RotateFrom = nil

@@ -96,8 +96,8 @@ const initialize = `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"pro
 // in-repository authorization server: a request without a credential to /mcp, to an existing /mcp/{svc} and to an
 // unknown one is 401 with the exact challenge naming that route's RFC 9728 document (a malformed name, none), and a
 // service whose allow: admits anonymous still serves it; each document's resource is the route's canonical URI and
-// names the issuer; a token for /mcp is accepted there (the session and its hire task are via mcp, principal
-// oidc:sub:<sub>, buyer UUIDv5(issuer ‖ sub)) and is 401 with error="invalid_token" on /mcp/{svc} and 401 on the A2A
+// names the issuer; a token for /mcp is accepted there (the session and its send_message task are via mcp, principal
+// oidc:sub:<sub>, caller UUIDv5(issuer ‖ sub)) and is 401 with error="invalid_token" on /mcp/{svc} and 401 on the A2A
 // routes; a token for /mcp/{svc} is accepted there only; expired, foreign, none, HS256 and tampered tokens are 401; an
 // API key still works on both.
 func TestGateMCPOAuth(t *testing.T) {
@@ -114,7 +114,7 @@ func TestGateMCPOAuth(t *testing.T) {
 	services := `services:
   hi:
     kind: a2a
-    backend: { a2a: { url: "` + e.seller.srv.URL + `/base", allow_private: true } }
+    backend: { a2a: { url: "` + e.service.srv.URL + `/base", allow_private: true } }
     allow: ["org:default", "oidc:sub:alice"]
     task: { timeout: 10m, retries: 1 }
   fs:
@@ -131,7 +131,7 @@ func TestGateMCPOAuth(t *testing.T) {
     allow: ["anonymous"]
   anyone:
     kind: a2a
-    backend: { a2a: { url: "` + e.seller.srv.URL + `/base", allow_private: true } }
+    backend: { a2a: { url: "` + e.service.srv.URL + `/base", allow_private: true } }
     allow: ["oidc:*"]
     task: { timeout: 10m, retries: 1 }
   signedin:
@@ -194,7 +194,7 @@ func TestGateMCPOAuth(t *testing.T) {
 		t.Errorf("a malformed name's document: %d", status)
 	}
 
-	// A token for /mcp: a session there, via mcp; its hire task too.
+	// A token for /mcp: a session there, via mcp; its send_message task too.
 	mcpTok := as.MustSign(oidctest.Token{Audience: []string{oidc.CanonicalURI(pub, "")}})
 	c := newMCPClient(t, a.url, mcpTok)
 	c.initialize(`{}`)
@@ -202,15 +202,15 @@ func TestGateMCPOAuth(t *testing.T) {
 		and via = 'mcp' and principal = 'oidc:sub:alice'`); n != 1 {
 		t.Fatalf("the /mcp session of the token: %d rows", n)
 	}
-	_, ans := c.call("hire", `{"service":"hi","message":"hi"}`)
+	_, ans := c.call("send_message", `{"service":"hi","message":"hi"}`)
 	r := ans.tool(t)
 	if r.IsError || r.Structured.TaskID == "" {
-		t.Fatalf("a hire with the token: %s", ans.raw)
+		t.Fatalf("a call with the token: %s", ans.raw)
 	}
-	buyer, _ := ids.OIDCBuyer(as.Issuer(), "alice")
-	if !scalar[bool](t, e.pool, `select via = 'mcp' and principal = 'oidc:sub:alice' and buyer_id = $2 and hired from kontra.tasks where id = $1`,
-		r.Structured.TaskID, buyer) {
-		t.Error("the hire task is not the token's (via mcp, oidc:sub:alice, UUIDv5(issuer ‖ sub))")
+	caller, _ := ids.OIDCCaller(as.Issuer(), "alice")
+	if !scalar[bool](t, e.pool, `select via = 'mcp' and principal = 'oidc:sub:alice' and caller_id = $2 and sent_by_mcp from kontra.tasks where id = $1`,
+		r.Structured.TaskID, caller) {
+		t.Error("the send_message task is not the token's (via mcp, oidc:sub:alice, UUIDv5(issuer ‖ sub))")
 	}
 	// The same token elsewhere: 401 with error="invalid_token" on /mcp/{svc}, 401 on the A2A routes.
 	for _, svc := range []string{"mine", "fs", "nope"} {
@@ -238,15 +238,15 @@ func TestGateMCPOAuth(t *testing.T) {
 		t.Errorf("a token for a service whose allow: does not admit it: %d %s", status, body)
 	}
 
-	// oidc:* (D301): every principal of the configured issuer, whatever its subject. search shows the service and hire
+	// oidc:* (D301): every principal of the configured issuer, whatever its subject. search shows the service and call
 	// takes it on /mcp; a token for /mcp/signedin is served there. API keys are not admitted by it (below).
 	_, ans = c.call("search", `{"query":"anyone"}`)
 	if sr := ans.tool(t); sr.IsError || !strings.Contains(sr.text(), `"ref":"anyone"`) {
 		t.Errorf("search for an oidc:* service with the token: %s", ans.raw)
 	}
-	_, ans = c.call("hire", `{"service":"anyone","message":"hi"}`)
+	_, ans = c.call("send_message", `{"service":"anyone","message":"hi"}`)
 	if hr := ans.tool(t); hr.IsError || hr.Structured.TaskID == "" {
-		t.Errorf("a hire of an oidc:* service with the token: %s", ans.raw)
+		t.Errorf("a call of an oidc:* service with the token: %s", ans.raw)
 	}
 	signedTok := as.MustSign(oidctest.Token{Audience: []string{oidc.CanonicalURI(pub, "signedin")}})
 	if status, _, body := oauthSend(t, http.MethodPost, pub+"/mcp/signedin", signedTok, initialize); status != http.StatusOK || !strings.Contains(string(body), `"result"`) {
@@ -271,17 +271,17 @@ func TestGateMCPOAuth(t *testing.T) {
 		t.Errorf("the key set was fetched %d times within the minute, want once", n)
 	}
 
-	// An API key still works on both; oidc:* does not admit it (D301): hire answers the unknown service, and
+	// An API key still works on both; oidc:* does not admit it (D301): call answers the unknown service, and
 	// /mcp/signedin is 404 as an unknown service is (D50).
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	kc := newMCPClient(t, a.url, key)
 	kc.initialize(`{}`)
 	if status, _, body := oauthSend(t, http.MethodPost, pub+"/mcp/fs", key, initialize); status != http.StatusOK || !strings.Contains(string(body), `"result"`) {
 		t.Errorf("an API key on /mcp/fs: %d %s", status, body)
 	}
-	_, ans = kc.call("hire", `{"service":"anyone","message":"hi"}`)
+	_, ans = kc.call("send_message", `{"service":"anyone","message":"hi"}`)
 	if kr := ans.tool(t); !kr.IsError || kr.text() != "unknown service" {
-		t.Errorf("an API key's hire of an oidc:* service: %s", ans.raw)
+		t.Errorf("an API key's call of an oidc:* service: %s", ans.raw)
 	}
 	if status, _, body := oauthSend(t, http.MethodPost, pub+"/mcp/signedin", key, initialize); status != http.StatusNotFound || !strings.Contains(string(body), "unknown service") {
 		t.Errorf("an API key on /mcp/signedin, whose allow: is oidc:*: %d %s", status, body)

@@ -189,8 +189,8 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
     d.mkdir(parents=True, exist_ok=True)
     bindir = d / "bin"
     go = os.environ.get("GO", "go")
-    subprocess.run([go, "build", "-o", str(bindir) + "/", "./cmd/kontra-gate", "./cmd/kontra", "./examples/sellers/a2ui",
-                    "./examples/sellers/ap2-merchant", "./test/browser/echoagent"], cwd=ROOT, check=True)
+    subprocess.run([go, "build", "-o", str(bindir) + "/", "./cmd/kontra-gate", "./cmd/kontra", "./examples/agents/a2ui",
+                    "./examples/agents/ap2-merchant", "./test/browser/echoagent"], cwd=ROOT, check=True)
 
     db = "kontra_browser_" + uuid.uuid4().hex[:10]
     with psycopg.connect(server, autocommit=True) as c:

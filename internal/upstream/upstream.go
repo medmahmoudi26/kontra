@@ -8,7 +8,7 @@
 // A direct backend's configured URL is the base, not the A2A endpoint (D71): the card is fetched relative
 // to its path, and every request goes to the configured scheme://host:port with only the path, binding and
 // protocol version taken from the upstream card. The backend's dialer refuses any other host:port, so a
-// seller-controlled card value never steers it.
+// service-controlled card value never steers it.
 package upstream
 
 import (
@@ -458,7 +458,7 @@ type Info struct {
 	ProtocolVersion a2a.ProtocolVersion // "1.0", or "0.3" for the a2av0 transports
 	Binding         a2a.TransportProtocol
 	Path            string // the interface URL's path, joined to the backend's origin
-	Tenant          string // the interface's A2A tenant, if the seller's card names one
+	Tenant          string // the interface's A2A tenant, if the service's card names one
 	Streaming       bool
 	Extensions      []string // URIs the upstream card declares
 	PushToUpstream  bool     // always false: the gate is the agent's only client (spec §10.1)
@@ -659,7 +659,7 @@ func NewClient(ctx context.Context, b Backend, info Info, activated []string) (*
 // Fetched is an upstream card exactly as fetched.
 type Fetched struct {
 	Raw  []byte
-	Path string // the path it was fetched from: …/.well-known/agent-card.json, or …/agent.json for 0.2.x sellers
+	Path string // the path it was fetched from: …/.well-known/agent-card.json, or …/agent.json for 0.2.x services
 }
 
 // Well-known card paths, relative to the backend's base (D71).

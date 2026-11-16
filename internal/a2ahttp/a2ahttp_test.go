@@ -179,10 +179,10 @@ func (f *streams) take() (string, sse.Stream, http.Header) {
 // authn maps bearer tokens to principals; "bad" is a refused credential.
 type authn map[string]auth.Principal
 
-func (a authn) AuthenticateA2A(r *http.Request, anonymousBuyer uuid.UUID) (auth.Principal, bool, error) {
+func (a authn) AuthenticateA2A(r *http.Request, anonymousCaller uuid.UUID) (auth.Principal, bool, error) {
 	tok, present, err := auth.BearerToken(r.Header)
 	if !present {
-		return auth.Anonymous(anonymousBuyer), false, nil
+		return auth.Anonymous(anonymousCaller), false, nil
 	}
 	if err != nil {
 		return auth.Principal{}, false, auth.ErrUnauthenticated
@@ -201,12 +201,12 @@ func (r registry) Lookup(_ context.Context, tenant, name string) (*Service, erro
 }
 
 var (
-	buyerA = uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a")
-	alice  = auth.Principal{Kind: auth.KindKey, ID: "key:kk_alice_00000001", BuyerID: buyerA, Via: auth.ViaAPIKey,
-		Scopes: []auth.Scope{auth.ScopeHire}, TenantID: &tenantID, TenantSlug: "default"}
-	bob = auth.Principal{Kind: auth.KindKey, ID: "key:kk_bob_00000001", BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"),
-		Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeHire}}
-	enroller = auth.Principal{Kind: auth.KindKey, ID: "key:kk_alice_00000002", BuyerID: buyerA, Via: auth.ViaAPIKey,
+	callerA = uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a")
+	alice   = auth.Principal{Kind: auth.KindKey, ID: "key:kk_alice_00000001", CallerID: callerA, Via: auth.ViaAPIKey,
+		Scopes: []auth.Scope{auth.ScopeCall}, TenantID: &tenantID, TenantSlug: "default"}
+	bob = auth.Principal{Kind: auth.KindKey, ID: "key:kk_bob_00000001", CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"),
+		Via: auth.ViaAPIKey, Scopes: []auth.Scope{auth.ScopeCall}}
+	enroller = auth.Principal{Kind: auth.KindKey, ID: "key:kk_alice_00000002", CallerID: callerA, Via: auth.ViaAPIKey,
 		Scopes: []auth.Scope{auth.ScopeEnrollAll}, TenantID: &tenantID, TenantSlug: "default"}
 )
 
@@ -222,7 +222,7 @@ func cardOf(t *testing.T, required bool) *card.Served {
 		exts = append(exts, map[string]any{"uri": extRequired, "required": true})
 	}
 	body, _ := json.Marshal(map[string]any{"name": "hello", "capabilities": map[string]any{"extensions": exts}})
-	return &card.Served{Body: body, Upstream: []byte(`{"name":"hello","url":"http://seller"}`), ETag: card.ETag(body), LastModified: time.Now()}
+	return &card.Served{Body: body, Upstream: []byte(`{"name":"hello","url":"http://service"}`), ETag: card.ETag(body), LastModified: time.Now()}
 }
 
 func allow(t *testing.T, entries ...string) auth.AllowList {
@@ -257,7 +257,7 @@ func newFixture(t *testing.T, multi bool) *fixture {
 	f.reg[tn+"/listed"] = &Service{Ref: ref("listed", "a2a"), Allow: allow(t, "org:default"), Listed: true, Cards: cards}
 	f.reg[tn+"/off"] = &Service{Ref: ref("off", "a2a"), Allow: allow(t, "org:default"), Disabled: true, Cards: cards}
 	verified := cardOf(t, false)
-	verified.Verified, verified.SellerJWKS = true, []byte(`{"keys":[]}`)
+	verified.Verified, verified.ServiceJWKS = true, []byte(`{"keys":[]}`)
 	f.reg[tn+"/verified"] = &Service{Ref: ref("verified", "a2a"), Allow: allow(t, "org:default"),
 		Cards: func() (*card.Served, error) { return verified, nil }}
 	f.reg[tn+"/tools"] = &Service{Ref: ref("tools", "mcp"), Allow: allow(t, "org:default"), Cards: cards}
@@ -353,7 +353,7 @@ func TestJSONRPCRoutes(t *testing.T) {
 	w := f.do(req{"POST", "/agents/hello/", rpc("SubscribeToTask", `{"id":"`+tid+`"}`, "sub-1"), v1("alice", "Last-Event-ID", "12")})
 	m, s, _ := f.st.take()
 	if w.Code != 200 || m != "Subscribe" || s.Binding != sse.JSONRPC || string(s.RequestID) != `"sub-1"` ||
-		string(s.TaskID) != tid || s.LastEventID == nil || *s.LastEventID != 12 || s.Owner.BuyerID != buyerA ||
+		string(s.TaskID) != tid || s.LastEventID == nil || *s.LastEventID != 12 || s.Owner.CallerID != callerA ||
 		s.Owner.Principal != alice.ID || s.Service.Name != "hello" {
 		t.Errorf("SubscribeToTask: %d %s %+v", w.Code, m, s)
 	}
@@ -458,17 +458,17 @@ func TestCards(t *testing.T) {
 	if w.Code != 200 || w.Body.String() != string(c.Upstream) {
 		t.Errorf("upstream card: %d %s", w.Code, w.Body)
 	}
-	// The seller key set (D223): a card route like the others, 404 when the gate verified the card with none, and
+	// The service key set (D223): a card route like the others, 404 when the gate verified the card with none, and
 	// the unknown-service 404 for a caller the service does not admit.
-	if w := f.do(req{"GET", "/agents/hello/.well-known/seller-jwks.json", "", hdr("Authorization", "Bearer alice")}); w.Code != 404 || w.Body.Len() != 0 {
-		t.Errorf("the seller key set of a card no seller key verified: %d %s", w.Code, w.Body)
+	if w := f.do(req{"GET", "/agents/hello/.well-known/service-jwks.json", "", hdr("Authorization", "Bearer alice")}); w.Code != 404 || w.Body.Len() != 0 {
+		t.Errorf("the service key set of a card no service key verified: %d %s", w.Code, w.Body)
 	}
-	if w := f.do(req{"GET", "/agents/verified/.well-known/seller-jwks.json", "", hdr("Authorization", "Bearer bob")}); w.Code != 404 || w.Body.Len() != 0 {
-		t.Errorf("the seller key set for a caller the service does not admit: %d %s", w.Code, w.Body)
+	if w := f.do(req{"GET", "/agents/verified/.well-known/service-jwks.json", "", hdr("Authorization", "Bearer bob")}); w.Code != 404 || w.Body.Len() != 0 {
+		t.Errorf("the service key set for a caller the service does not admit: %d %s", w.Code, w.Body)
 	}
-	if w := f.do(req{"GET", "/agents/verified/.well-known/seller-jwks.json", "", hdr("Authorization", "Bearer alice")}); w.Code != 200 ||
+	if w := f.do(req{"GET", "/agents/verified/.well-known/service-jwks.json", "", hdr("Authorization", "Bearer alice")}); w.Code != 200 ||
 		w.Body.String() != `{"keys":[]}` || w.Header().Get("Content-Type") != "application/jwk-set+json" {
-		t.Errorf("the seller key set of a verified card: %d %s %v", w.Code, w.Body, w.Header())
+		t.Errorf("the service key set of a verified card: %d %s %v", w.Code, w.Body, w.Header())
 	}
 	// Public cards: anonymous and listed services show their cards to anyone; their A2A routes still
 	// follow allow:.
@@ -482,11 +482,11 @@ func TestCards(t *testing.T) {
 	if w := f.do(req{"POST", "/agents/listed", rpc("GetTask", `{"id":"x"}`, 1), v1("bob")}); w.Code != 404 {
 		t.Errorf("a listed service's A2A route for an unadmitted caller: %d", w.Code)
 	}
-	// The anonymous principal reaches an anonymous service with its fixed buyer (spec §2.3).
+	// The anonymous principal reaches an anonymous service with its fixed caller (spec §2.3).
 	w = f.do(req{"POST", "/agents/open", rpc("SubscribeToTask", `{"id":"x"}`, 1), v1("")})
 	_, s, _ := f.st.take()
-	want, _ := ids.AnonymousBuyer(uuid.Nil)
-	if w.Code != 200 || s.Owner.BuyerID != want || s.Owner.Via != string(auth.ViaAnonymous) || s.Owner.Principal != auth.AnonymousID {
+	want, _ := ids.AnonymousCaller(uuid.Nil)
+	if w.Code != 200 || s.Owner.CallerID != want || s.Owner.Via != string(auth.ViaAnonymous) || s.Owner.Principal != auth.AnonymousID {
 		t.Errorf("anonymous: %d %+v", w.Code, s.Owner)
 	}
 }
@@ -532,7 +532,7 @@ func TestUnknownServiceIsOneAnswer(t *testing.T) {
 			{"other kind", "tools", "alice"},
 			{"not admitted", "hello", "bob"},
 			{"anonymous caller", "hello", ""},
-			{"no hire scope", "hello", "enroller"},
+			{"no call scope", "hello", "enroller"},
 			{"invalid name", "Not_A_Name", "alice"},
 		} {
 			w := f.do(req{r.method, "/agents/" + c.svc + r.rest, r.body, v1(c.token)})
@@ -824,7 +824,7 @@ func TestRegister(t *testing.T) {
 			{"GET", svc, "", v1("alice")},
 			{"HEAD", svc + "/.well-known/agent-card.json", "", v1("alice")},
 			{"GET", svc + "/.well-known/agent-card.upstream.json", "", v1("alice")},
-			{"GET", strings.Replace(svc, "hello", "verified", 1) + "/.well-known/seller-jwks.json", "", v1("alice")},
+			{"GET", strings.Replace(svc, "hello", "verified", 1) + "/.well-known/service-jwks.json", "", v1("alice")},
 			{"POST", svc, rpc("GetTask", `{"id":"x"}`, 1), v1("alice")},
 			{"POST", svc + "/", rpc("GetTask", `{"id":"x"}`, 1), v1("alice")},
 			{"POST", svc + "/message:send", msg, v1("alice")},

@@ -2,7 +2,7 @@
 # test/tck/front-auth.Caddyfile, a loopback front that adds `Authorization: Bearer <key>` to every request, the key
 # minted by `kontra-gate enroll --api-key tck --prefix tck`. The TCK then runs as that key's principal, so the
 # gate's ListTasks and push configs and deliveries, which the anonymous principal is refused (D20), run through the
-# TCK too. A template that scripts/tck.sh fills (@LISTEN@, @PUBLIC_URL@, @POSTGRES@, @TEMPORAL@, @SELLER@):
+# TCK too. A template that scripts/tck.sh fills (@LISTEN@, @PUBLIC_URL@, @POSTGRES@, @TEMPORAL@, @SERVICE@):
 # `make tck VARIANT=auth`. public_url is the front's (plaintext on loopback): the served card names it.
 #
 # `tck` admits the tck keys only, not anonymous. push.allow_private as in gate-direct.yaml (D67).
@@ -18,6 +18,6 @@ push: { allow_private: true }
 services:
   tck:
     kind: a2a
-    backend: { a2a: { url: "@SELLER@", allow_private: true } }
+    backend: { a2a: { url: "@SERVICE@", allow_private: true } }
     allow: ["key:kk_tck_*"]
     task: { timeout: 10m, retries: 2 }

@@ -4,7 +4,7 @@
 // Two surfaces share one implementation of the write transaction:
 //
 //   - Store implements a2a-go's taskstore.Store for one service. Every query is scoped by
-//     (tenant_id, service, buyer_id) taken from the route and the authenticated principal, never from the
+//     (tenant_id, service, caller_id) taken from the route and the authenticated principal, never from the
 //     request body (PRD §12). It is what a2a-go's handler reads and writes.
 //   - Log is the unscoped internal API the lifecycle, push, the SSE writer and the work queue use.
 //

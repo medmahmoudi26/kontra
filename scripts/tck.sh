@@ -3,7 +3,7 @@
 # `make tck VARIANT=direct|tunnel|caddy|auth|local`, or scripts/tck.sh <variant>.
 #
 #   direct  the `tck` service on the direct backend, the TCK talking to the gate itself (tck_jsonrpc, tck_rest)
-#   tunnel  the same seller hosted through `kontra connect` (tck_jsonrpc, tck_rest on the tunnel backend)
+#   tunnel  the same service hosted through `kontra connect` (tck_jsonrpc, tck_rest on the tunnel backend)
 #   caddy   the direct backend behind examples/front/caddy, TLS terminated by Caddy (tck_behind_caddy)
 #   auth    the direct backend behind a loopback Caddy that adds `Authorization: Bearer <a tck API key>` to every
 #           request, so the TCK runs as an API key's principal and reaches ListTasks and push configs, which the
@@ -14,7 +14,7 @@
 # One run: the TCK's environment synced (uv sync --frozen, before anything starts); a fresh database on
 # $KONTRA_TEST_PG (a server where the user may create databases) or, when it is unset, a postgres:17-alpine
 # container; a Temporal development server from $KONTRA_TEMPORAL_CLI (the pinned CLI 1.9.1, Server 1.32) on free
-# loopback ports; kontra-gate, the seller (examples/sellers/tck) and, for tunnel, kontra (`kontra connect`, enrolled
+# loopback ports; kontra-gate, the service (examples/agents/tck) and, for tunnel, kontra (`kontra connect`, enrolled
 # with a service token) built from this checkout; Caddy ($KONTRA_CADDY, the pinned 2.11.7) for caddy and auth. Every
 # process runs from the run's directory and in a process group of its own. Then the self-tests of test/tck (the
 # plugins, the template fill, this script), and the TCK once per binding (--transport jsonrpc, then http_json), each
@@ -22,7 +22,7 @@
 # KONTRA_TCK_EXPECTED_FAILURES names another file, to try one) and test/tck/kontra_tck_ids.py giving each test fresh
 # TCK message ids (D291). $KONTRA_TCK_DIR is the a2a-tck checkout at the pinned commit, its tracked files
 # unmodified; the reports land in its reports/ directory: <variant>-<binding>.xml (JUnit), .html (pytest-html),
-# -compatibility.json/.html (the TCK's own), and <variant>-logs/ (the gate's, the seller's, the node's,
+# -compatibility.json/.html (the TCK's own), and <variant>-logs/ (the gate's, the service's, the node's,
 # Caddy's and Temporal's logs).
 #
 # The trap kills every process group the run started, drops the database (or removes the container) and removes
@@ -172,7 +172,7 @@ wait_for() {
 mkdir -p "$run/bin" "$reports"
 "$GO" build -o "$run/bin/kontra-gate" ./cmd/kontra-gate
 "$GO" build -o "$run/bin/kontra" ./cmd/kontra
-"$GO" build -o "$run/bin/tck" ./examples/sellers/tck
+"$GO" build -o "$run/bin/tck" ./examples/agents/tck
 ln -s "$(command -v "$KONTRA_TEMPORAL_CLI")" "$run/bin/temporal"
 [[ -n "$caddy" ]] && ln -s "$(command -v "$caddy")" "$run/bin/caddy"
 
@@ -206,10 +206,10 @@ start temporal "$run/bin/temporal" server start-dev --headless --ip 127.0.0.1 --
 wait_for "the Temporal development server on 127.0.0.1:$t_port" 60 "${pids[temporal]}" \
   "$run/bin/temporal" operator namespace describe --address "127.0.0.1:$t_port" --namespace kontra
 
-# --- the seller ---
-start seller "$run/bin/tck" --host 127.0.0.1 --port 0
-wait_for "the TCK seller" 20 "${pids[seller]}" grep -q '^http://' "$run/seller.out"
-seller="$(head -1 "$run/seller.out")"
+# --- the service ---
+start service "$run/bin/tck" --host 127.0.0.1 --port 0
+wait_for "the TCK service" 20 "${pids[service]}" grep -q '^http://' "$run/service.out"
+service="$(head -1 "$run/service.out")"
 
 # --- the gate, from its template (test/tck/gate-<variant>.yaml) ---
 read -r g_port f_port f_http <<<"$(free_ports 3)"
@@ -222,7 +222,7 @@ esac
 # Filled literally (test/tck/kontra_tck_config.py: the values from the environment, escaped for YAML's double-quoted
 # scalars; a database URL with several query parameters has '&', which a sed replacement would corrupt), mode 0600.
 KONTRA_TCK_FILL_LISTEN="127.0.0.1:$g_port" KONTRA_TCK_FILL_PUBLIC_URL="$public" KONTRA_TCK_FILL_POSTGRES="$postgres" \
-  KONTRA_TCK_FILL_TEMPORAL="127.0.0.1:$t_port" KONTRA_TCK_FILL_SELLER="$seller" \
+  KONTRA_TCK_FILL_TEMPORAL="127.0.0.1:$t_port" KONTRA_TCK_FILL_SERVICE="$service" \
   python3 test/tck/kontra_tck_config.py "test/tck/gate-$variant.yaml" "$run/kontra.yaml" ||
   die "test/tck/gate-$variant.yaml: could not fill it"
 "$run/bin/kontra-gate" migrate -f "$run/kontra.yaml" up >"$run/migrate.log" 2>&1 || { cat "$run/migrate.log" >&2; die "migrate failed"; }
@@ -238,7 +238,7 @@ if [[ "$variant" == tunnel ]]; then
   token="$("$run/bin/kontra-gate" enroll -f "$run/kontra.yaml" tck 2>>"$run/enroll.log")"
   mkdir -p "$run/node-home"
   HOME="$run/node-home" start node "$run/bin/kontra" connect --gate "$public" --name tck-node --log json \
-    --listen 127.0.0.1:0 --serve "a2a:tck=$seller" --enroll "$token"
+    --listen 127.0.0.1:0 --serve "a2a:tck=$service" --enroll "$token"
   unset token
   wait_for "kontra connect" 60 "${pids[node]}" grep -q '^kontra connect: connected to ' "$run/node.out"
 fi
@@ -269,7 +269,7 @@ sut="$public/agents/tck"
 wait_pid="${pids[caddy]:-${pids[gate]}}"
 wait_for "the card at $sut/.well-known/agent-card.json" 60 "$wait_pid" \
   curl -fsS "${curl_ca[@]}" -o /dev/null "$sut/.well-known/agent-card.json"
-echo "tck: $variant: the gate serves $sut (seller $seller, Temporal 127.0.0.1:$t_port)"
+echo "tck: $variant: the gate serves $sut (service $service, Temporal 127.0.0.1:$t_port)"
 
 # --- the TCK, in the environment synced above (D18), with the harness's plugins (test/tck): kontra_xfail enforces
 # the expected outcomes, kontra_tck_ids gives each test fresh TCK message ids (D291) ---

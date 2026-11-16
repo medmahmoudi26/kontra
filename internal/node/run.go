@@ -14,7 +14,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"kontra.sh/kontra/internal/hiring"
+	"kontra.sh/kontra/internal/calling"
 	"kontra.sh/kontra/internal/nodekey"
 	"kontra.sh/kontra/internal/obs"
 	"kontra.sh/kontra/internal/tunnel"
@@ -73,7 +73,7 @@ const (
 // keeps serving the streams the gate opens on it until the gate closes it, and is never redialed. So is a
 // session whose key another process has rotated (the new key's session is dialed at once, with rotate_from)
 // and one whose stream ids are nearly exhausted (§14: the node reconnects; yamux allows about 2³¹ opens per
-// side): the node watches both the ids it accepts and its own (hiring, the key set and blob fetches open streams
+// side): the node watches both the ids it accepts and its own (calling, the key set and blob fetches open streams
 // from the node since M3, session.open), and dials a new session before either side's run out, or as soon as an
 // open of its own is refused ErrStreamsExhausted.
 //
@@ -87,15 +87,15 @@ func (n *Node) Run(ctx context.Context) error {
 	tick := time.NewTicker(n.maintainEvery)
 	defer tick.Stop()
 
-	// Hiring (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
+	// Calling (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
 	// stops kontra connect at once; its requests wait for a session. --listen off binds nothing: a node that only
-	// hosts offers its hiring principal to no local process, and a second node on the host needs no port of its own
+	// hosts offers its calling principal to no local process, and a second node on the host needs no port of its own
 	// (D208).
-	if n.cfg.Listen == hiring.ListenOff {
-		fmt.Fprintln(n.out, "kontra connect: hiring is off (--listen off): this node only hosts")
-		n.logger.Info("hiring: off (--listen off)")
+	if n.cfg.Listen == calling.ListenOff {
+		fmt.Fprintln(n.out, "kontra connect: calling is off (--listen off): this node only hosts")
+		n.logger.Info("calling: off (--listen off)")
 	} else {
-		ln, err := hiring.Listen(n.cfg.Listen) // a loopback --listen on both loopback families (D262)
+		ln, err := calling.Listen(n.cfg.Listen) // a loopback --listen on both loopback families (D262)
 		if err != nil {
 			return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>, "+
 				"or --listen off for a node that only hosts)", n.cfg.Listen, err)
@@ -103,14 +103,14 @@ func (n *Node) Run(ctx context.Context) error {
 		hdone := make(chan struct{})
 		go func() {
 			defer close(hdone)
-			if err := n.hire.Serve(ctx, ln); err != nil {
-				n.logger.Error("the local hiring endpoint stopped", "err", err)
+			if err := n.call.Serve(ctx, ln); err != nil {
+				n.logger.Error("the local calling endpoint stopped", "err", err)
 			}
 		}()
 		defer func() { cancel(); <-hdone }()
 		_, port, _ := net.SplitHostPort(ln.Addr().String())
-		fmt.Fprintf(n.out, "kontra connect: hiring at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
-		n.logger.Info("hiring: serving local clients", "listen", ln.Addr().String())
+		fmt.Fprintf(n.out, "kontra connect: calling at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
+		n.logger.Info("calling: serving local clients", "listen", ln.Addr().String())
 	}
 
 	var wait time.Duration
@@ -155,8 +155,8 @@ func (n *Node) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Serve the current session until it closes, or a new one must be dialed while it goes on. Hiring
-		// streams go on it (OpenHire) until then.
+		// Serve the current session until it closes, or a new one must be dialed while it goes on. Calling
+		// streams go on it (OpenCall) until then.
 		n.setCurrent(s)
 	watch:
 		for {
@@ -333,7 +333,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 			if cred := n.credential(); len(cred.Key(kid).Enroll) > 0 || cred.APIKey != "" {
 				// The probe carried neither the tokens still waiting (given since the hello whose outcome was
 				// lost, or that hello's own when this welcome did not confirm them) nor the API key, the
-				// session's hiring principal: dial again at once with the full hello (this session is seconds
+				// session's calling principal: dial again at once with the full hello (this session is seconds
 				// old).
 				_ = d.WS.Close(websocket.StatusNormalClosure, "")
 				log.Info("the probe was welcomed; dialing again with the full hello")
@@ -376,8 +376,8 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		}
 		switch {
 		case herr.Code == tunnel.CodeUnknownKey && len(h.Services) == 0:
-			log.Error("the gate does not know this node's key: a node that only hires is admitted on an --api-key with "+
-				"the hire scope (spec/tunnel.md §9)", "message", herr.Message)
+			log.Error("the gate does not know this node's key: a node that only calls is admitted on an --api-key with "+
+				"the call scope (spec/tunnel.md §9)", "message", herr.Message)
 		case herr.Code == tunnel.CodeUnknownKey:
 			log.Error("the gate does not know this node's key: enroll it with --enroll <token> ("+tokenSource+")",
 				"message", herr.Message)
@@ -765,7 +765,7 @@ func (n *Node) startSession(ctx context.Context, d *Dialed, w *tunnel.Welcome, i
 	s.proxy.onControl = s.readControl
 	// The kontra-blob: parts of what the gate forwards are fetched on this session's own blob streams (§8.3):
 	// the gate serves a ref to the session one of whose attempts holds its task. They share the session's slots
-	// with hiring (§14).
+	// with calling (§14).
 	s.proxy.setBlobOpener(func(ctx context.Context) (net.Conn, error) { return s.open(ctx, nil) })
 	n.mu.Lock()
 	n.sessions[s] = struct{}{}
@@ -849,7 +849,7 @@ func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 // ceiling left from failures before that session.
 func (n *Node) retire(s *session, why string) {
 	s.retired.Store(true)
-	n.clearCurrent(s) // §13: no new hiring streams on a draining session
+	n.clearCurrent(s) // §13: no new calling streams on a draining session
 	n.backoff.SessionEnded(time.Since(s.opened))
 	s.log.Info(why)
 }
@@ -897,14 +897,14 @@ func (n *Node) keyRevoked(s *session) {
 }
 
 // authRevoked is {"t": "auth_revoked"} on a session's control stream (§12, §13): the gate revoked the API key the
-// session's hello carried, its hiring principal. The session's hiring requests are 401 from now on, and its
+// session's hello carried, its calling principal. The session's calling requests are 401 from now on, and its
 // hosting goes on. The key is dropped from this origin's credentials (when it is still the one stored) and so
 // from every later hello: otherwise the next handshake (a network blip, a replica's restart, the make-before-break
 // dial of a drain) would carry it and be refused auth_invalid, which §4 makes final, and kontra connect would stop
-// hosting. Later sessions hire as node:<key_id> (§9); a key that only hires is refused until its operator gives a
+// hosting. Later sessions call as node:<key_id> (§9); a key that only calls is refused until its operator gives a
 // new --api-key (enroll.Admit).
 func (n *Node) authRevoked(s *session) {
-	s.log.Error("the gate revoked the session's hiring API key (auth_revoked): hiring requests on this session are refused 401 "+
+	s.log.Error("the gate revoked the session's calling API key (auth_revoked): calling requests on this session are refused 401 "+
 		"and hosting goes on; the key is removed from the credentials file and no later hello carries it (spec/tunnel.md §12)",
 		"path", n.creds.Path())
 	if s.auth == "" {

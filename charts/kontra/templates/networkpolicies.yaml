@@ -2,7 +2,7 @@
 {{- $np := .Values.networkPolicy }}
 {{- $gate := include "kontra.selectorLabels" (dict "ctx" . "component" "gate") }}
 # The gate: reached on its public port from the front (Traefik by default) and on its metrics port from
-# whoever is listed; it reaches DNS, its Postgres and Temporal, the sellers listed, and public addresses on
+# whoever is listed; it reaches DNS, its Postgres and Temporal, the services listed, and public addresses on
 # the listed ports, never a private range there.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -86,7 +86,7 @@ spec:
       ports:
         - {protocol: TCP, port: {{ .Values.gate.peer.port }}}
     {{- end }}
-    {{- with $np.gate.sellers }}
+    {{- with $np.gate.services }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
     {{- if $np.gate.publicEgress.enabled }}

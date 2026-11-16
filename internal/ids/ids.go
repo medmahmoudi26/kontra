@@ -1,7 +1,7 @@
 // Package ids mints and parses the gate's identifiers (spec/relay.md §2.3, §4).
 //
 // Every id is minted in Go: task and context ids are UUIDv7 (Postgres before 18 has no uuidv7(), D49),
-// derived buyer ids are UUIDv5. Anything a caller sends as a task id is parsed here before any query,
+// derived caller ids are UUIDv5. Anything a caller sends as a task id is parsed here before any query,
 // so a malformed id is TaskNotFound and never a 500 (TCK CORE-GET-002).
 package ids
 
@@ -64,7 +64,7 @@ func ParseTaskID(s string) (uuid.UUID, error) {
 func notFound() error { return a2a.NewError(a2a.ErrTaskNotFound, "task not found") }
 
 // Namespace is the UUIDv5 namespace of every id the gate derives: UUIDv5(URL namespace,
-// "https://kontra.sh/ns/v1"). Fixed forever: a buyer id derived from it is stored in tasks.buyer_id.
+// "https://kontra.sh/ns/v1"). Fixed forever: a caller id derived from it is stored in tasks.caller_id.
 var Namespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://kontra.sh/ns/v1"))
 
 // Derive is UUIDv5(Namespace, name) where name encodes a kind and parts unambiguously as netstrings:
@@ -87,19 +87,19 @@ func netstrings(kind string, parts ...string) string {
 	return b.String()
 }
 
-// AnonymousBuyer is the buyer of the `anonymous` principal (spec §2.3, D20): on a team gate one fixed id
+// AnonymousCaller is the caller of the `anonymous` principal (spec §2.3, D20): on a team gate one fixed id
 // for every anonymous caller (pass uuid.Nil), on a multi-tenant gate UUIDv5(service tenant ‖ "anonymous").
-func AnonymousBuyer(serviceTenant uuid.UUID) (uuid.UUID, error) {
+func AnonymousCaller(serviceTenant uuid.UUID) (uuid.UUID, error) {
 	if serviceTenant == uuid.Nil {
 		return Derive("anonymous"), nil
 	}
 	return Derive("anonymous", serviceTenant.String()), nil
 }
 
-// OIDCBuyer is UUIDv5(issuer ‖ sub) for an `oidc:sub:` principal (spec §2.3).
-func OIDCBuyer(issuer, sub string) (uuid.UUID, error) {
+// OIDCCaller is UUIDv5(issuer ‖ sub) for an `oidc:sub:` principal (spec §2.3).
+func OIDCCaller(issuer, sub string) (uuid.UUID, error) {
 	if issuer == "" || sub == "" {
-		return uuid.Nil, fmt.Errorf("ids: an OIDC buyer needs an issuer and a subject")
+		return uuid.Nil, fmt.Errorf("ids: an OIDC caller needs an issuer and a subject")
 	}
 	return Derive("oidc", issuer, sub), nil
 }
@@ -107,14 +107,14 @@ func OIDCBuyer(issuer, sub string) (uuid.UUID, error) {
 // nodeKeyIDRE is a node key id (spec/tunnel.md §2.2; tunnel_keys.key_id's CHECK).
 var nodeKeyIDRE = regexp.MustCompile(`^k1_[a-z2-7]{26}$`)
 
-// NodeBuyer is UUIDv5(gate namespace ‖ key_id) for a node hiring without an API key (spec/relay.md §2.3): the
-// buyer of the principal node:<key_id> on the streams the node opens (spec/tunnel.md §9). gateNamespace is the
-// namespace of the gate's derived ids, Namespace; the name is encoded as Derive encodes it, so NodeBuyer(Namespace,
+// NodeCaller is UUIDv5(gate namespace ‖ key_id) for a node calling without an API key (spec/relay.md §2.3): the
+// caller of the principal node:<key_id> on the streams the node opens (spec/tunnel.md §9). gateNamespace is the
+// namespace of the gate's derived ids, Namespace; the name is encoded as Derive encodes it, so NodeCaller(Namespace,
 // k) equals Derive("node", k) and is the same in every process, replica and release. The key id must have the
 // shape §2.2 gives it.
-func NodeBuyer(gateNamespace uuid.UUID, keyID string) (uuid.UUID, error) {
+func NodeCaller(gateNamespace uuid.UUID, keyID string) (uuid.UUID, error) {
 	if gateNamespace == uuid.Nil {
-		return uuid.Nil, fmt.Errorf("ids: a node buyer needs the gate namespace")
+		return uuid.Nil, fmt.Errorf("ids: a node caller needs the gate namespace")
 	}
 	if !nodeKeyIDRE.MatchString(keyID) {
 		return uuid.Nil, fmt.Errorf("ids: %q is not a node key id (k1_ and 26 base32 characters)", keyID)

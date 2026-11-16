@@ -63,12 +63,12 @@ func TestQueueRacesOverTemporal(t *testing.T) {
 	t.Cleanup(w.Stop)
 	q := NewQueue(e.svc, e.log, lc, QueueOptions{Owner: ownerFrom, Push: fakeSaver{db: e.pool}, Hooks: HooksSnapshot{LifecycleQueue: QueueLifecycle}})
 	ctx := context.Background()
-	follower, _ := caller(false)
+	follower, _ := callerCtx(false)
 
 	// A second follow-up sent while the first one's turn is dispatched but has logged nothing yet is
 	// refused at once with UnsupportedOperationError (spec §7), not left to time out as a 503.
 	t.Run("concurrent second follow-up", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		holdA := make(chan struct{})
 		defer func() {
 			select {
@@ -108,7 +108,7 @@ func TestQueueRacesOverTemporal(t *testing.T) {
 	// applies once the dispatch returns) moves tasks.version, not the turn end: the follow-up waiting for
 	// the workflow to catch up is still accepted (spec §7, §13.3).
 	t.Run("metadata row while the workflow catches up", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		hold := make(chan struct{})
 		defer func() {
 			select {
@@ -154,7 +154,7 @@ func TestQueueRacesOverTemporal(t *testing.T) {
 	// A refused follow-up's inline push config is not kept (spec §7, §10.1): the caller was told the
 	// request was refused. An accepted one's is.
 	t.Run("refused follow-up keeps no push config", func(t *testing.T) {
-		cctx, pre := caller(true)
+		cctx, pre := callerCtx(true)
 		hold := make(chan struct{})
 		defer func() {
 			select {
@@ -222,7 +222,7 @@ func TestQueueRacesOverTemporal(t *testing.T) {
 				errs [2]error
 			)
 			for i := range 2 {
-				cctx, pre := caller(true)
+				cctx, pre := callerCtx(true)
 				d.set(pre, turn{state: a2a.TaskStateCompleted, outcome: DispatchTerminal})
 				wg.Add(1)
 				go func() {

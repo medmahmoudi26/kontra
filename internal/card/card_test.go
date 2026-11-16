@@ -84,9 +84,9 @@ func golden(t *testing.T, name string, got []byte) {
 	}
 }
 
-// A 1.0 card keeps every seller field byte for byte and in its place, and gets exactly the gate's fields
+// A 1.0 card keeps every service field byte for byte and in its place, and gets exactly the gate's fields
 // of §3 (acceptance: card golden tests).
-func TestRewriteV1KeepsSellerFields(t *testing.T) {
+func TestRewriteV1KeepsServiceFields(t *testing.T) {
 	up := read(t, "v1-vendor.json")
 	served, err := Rewrite(input(up))
 	if err != nil {
@@ -95,7 +95,7 @@ func TestRewriteV1KeepsSellerFields(t *testing.T) {
 	golden(t, "v1-vendor.served.json", served)
 	upO, srvO := members(t, up), members(t, served)
 
-	// Every seller member is there with the same bytes, in the same relative order.
+	// Every service member is there with the same bytes, in the same relative order.
 	var upKeys, srvKeys []string
 	for _, m := range upO {
 		if gateOwned[m.key] {
@@ -104,7 +104,7 @@ func TestRewriteV1KeepsSellerFields(t *testing.T) {
 		upKeys = append(upKeys, m.key)
 		got, ok := srvO.get(m.key)
 		if !ok || !bytes.Equal(got, m.val) {
-			t.Errorf("seller member %q: got %s, want %s", m.key, got, m.val)
+			t.Errorf("service member %q: got %s, want %s", m.key, got, m.val)
 		}
 	}
 	for _, m := range srvO {
@@ -113,7 +113,7 @@ func TestRewriteV1KeepsSellerFields(t *testing.T) {
 		}
 	}
 	if !reflect.DeepEqual(upKeys, srvKeys) {
-		t.Errorf("seller members %v, served %v", upKeys, srvKeys)
+		t.Errorf("service members %v, served %v", upKeys, srvKeys)
 	}
 	if srvO.has("signatures") {
 		t.Error("M1 serves no signatures")
@@ -138,8 +138,8 @@ func TestRewriteV1KeepsSellerFields(t *testing.T) {
 	for _, e := range c.Extensions {
 		uris = append(uris, e.URI)
 	}
-	// The seller's input-schema and own entries stay; its escrow entry is replaced by the operator's.
-	if strings.Join(uris, " ") != "https://kontra.sh/ext/input-schema/v1 https://example.com/ext/seller "+escrowURI {
+	// The service's input-schema and own entries stay; its escrow entry is replaced by the operator's.
+	if strings.Join(uris, " ") != "https://kontra.sh/ext/input-schema/v1 https://example.com/ext/service "+escrowURI {
 		t.Errorf("extensions %v", uris)
 	}
 	for _, e := range c.Extensions {
@@ -148,7 +148,7 @@ func TestRewriteV1KeepsSellerFields(t *testing.T) {
 		}
 	}
 	caps := members(t, mustGet(t, srvO, "capabilities"))
-	if got, _ := caps.get("x-cap"); string(got) != `"seller"` {
+	if got, _ := caps.get("x-cap"); string(got) != `"service"` {
 		t.Errorf("an unknown capability member was lost: %s", got)
 	}
 	schemes := string(mustGet(t, srvO, "securitySchemes"))
@@ -230,7 +230,7 @@ func TestCompatCards(t *testing.T) {
 		if err := json.Unmarshal(served, &card); err != nil || len(card.SupportedInterfaces) != 2 || card.Name == "" {
 			t.Errorf("%s: not a 1.0 card: %+v %v", tc.in, card, err)
 		}
-		// Normalize alone yields the 1.0 shape with the seller's interfaces, which dispatch reads.
+		// Normalize alone yields the 1.0 shape with the service's interfaces, which dispatch reads.
 		var n struct {
 			SupportedInterfaces []a2a.AgentInterface `json:"supportedInterfaces"`
 			Capabilities        map[string]any       `json:"capabilities"`
@@ -345,7 +345,7 @@ func backend(t *testing.T, cs *cardServer) upstream.Backend {
 	return b
 }
 
-// The card lifecycle: the first fetch is retried until the seller is up, a failed fetch keeps the last
+// The card lifecycle: the first fetch is retried until the service is up, a failed fetch keeps the last
 // good card, 30 minutes without a good fetch make the service unavailable, a card over 256 KiB is never
 // installed (service_unavailable).
 func TestKeeperLifecycle(t *testing.T) {
@@ -365,7 +365,7 @@ func TestKeeperLifecycle(t *testing.T) {
 	if _, _, err := k.Dispatch(); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("dispatch before any fetch: %v", err)
 	}
-	// Run retries the failing first fetch with backoff; the seller comes up after the first attempt.
+	// Run retries the failing first fetch with backoff; the service comes up after the first attempt.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go k.Run(ctx)
@@ -383,7 +383,7 @@ func TestKeeperLifecycle(t *testing.T) {
 	cancel()
 	s, err := k.Current()
 	if err != nil || s.Unavailable || !bytes.Contains(s.Body, []byte(`"Exec Agent"`)) || s.ETag != ETag(s.Body) {
-		t.Fatalf("after the seller came up: %+v %v", s, err)
+		t.Fatalf("after the service came up: %+v %v", s, err)
 	}
 	b, info, err := k.Dispatch()
 	if err != nil || b == nil || info.Binding != a2a.TransportProtocolHTTPJSON || !info.Streaming {
@@ -404,7 +404,7 @@ func TestKeeperLifecycle(t *testing.T) {
 		t.Errorf("an unchanged card: persisted %d, %v / %v", persisted.Load(), s.LastModified, first.LastModified)
 	}
 
-	// The seller fails: the last good card stays until 30 minutes after the last good fetch.
+	// The service fails: the last good card stays until 30 minutes after the last good fetch.
 	cs.set("", http.StatusBadGateway)
 	advance(29 * time.Minute)
 	if err := k.Refresh(context.Background()); err == nil {
@@ -440,7 +440,7 @@ func TestKeeperLifecycle(t *testing.T) {
 	}
 }
 
-// A 0.2.5 seller has no agent-card.json: the keeper falls back to agent.json and serves 1.0 (card_compat).
+// A 0.2.5 service has no agent-card.json: the keeper falls back to agent.json and serves 1.0 (card_compat).
 func TestKeeperLegacyCard(t *testing.T) {
 	cs := newCardServer(t, string(read(t, "v025-helloworld.json")))
 	cs.agent = true
@@ -470,9 +470,9 @@ func TestKeeperLegacyCard(t *testing.T) {
 	}
 }
 
-// A seller that accepts the card request and never answers does not hold the keeper: each fetch has a
+// A service that accepts the card request and never answers does not hold the keeper: each fetch has a
 // deadline of its own, a fetch that runs out of it is a failed fetch, and Run's backoff fetches again, so
-// the card arrives once the seller answers (spec §3).
+// the card arrives once the service answers (spec §3).
 func TestKeeperFetchTimeout(t *testing.T) {
 	card := read(t, "a2a-cli-exec.json")
 	var hang atomic.Bool
@@ -494,7 +494,7 @@ func TestKeeperFetchTimeout(t *testing.T) {
 	k := NewKeeper(b, Input{PublicURL: "http://localhost:8080", ServicePath: "/agents/hello"}, WithFetchTimeout(200*time.Millisecond))
 	start := time.Now()
 	if err := k.Refresh(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("a fetch the seller never answers: %v", err)
+		t.Fatalf("a fetch the service never answers: %v", err)
 	}
 	if took := time.Since(start); took > 3*time.Second {
 		t.Fatalf("the fetch returned after %v", took)
@@ -503,7 +503,7 @@ func TestKeeperFetchTimeout(t *testing.T) {
 		t.Fatalf("no card yet: %v", err)
 	}
 
-	// Run: the first fetch hangs and times out; the seller recovers; the backoff fetches the card.
+	// Run: the first fetch hangs and times out; the service recovers; the backoff fetches the card.
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() { defer close(stopped); k.Run(ctx) }()
@@ -520,7 +520,7 @@ func TestKeeperFetchTimeout(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("the keeper never fetched the card after the seller recovered (%d requests)", gets.Load())
+	t.Fatalf("the keeper never fetched the card after the service recovered (%d requests)", gets.Load())
 }
 
 // The persist hook records the card the keeper serves until a call succeeds: a failed call is made again
@@ -579,14 +579,14 @@ func TestKeeperPersistsUntilRecorded(t *testing.T) {
 	}
 }
 
-// combinedCard is the card a seller built on a2a-go v2 publishes when it also serves 0.3 clients
+// combinedCard is the card a service built on a2a-go v2 publishes when it also serves 0.3 clients
 // (a2av0.NewStaticAgentCardProducer): supportedInterfaces plus the 0.3 url, preferredTransport,
 // additionalInterfaces, protocolVersion, security and supportsAuthenticatedExtendedCard, all naming the
-// seller's own internal address and security.
+// service's own internal address and security.
 func combinedCard(t *testing.T) []byte {
 	t.Helper()
 	card := &a2a.AgentCard{
-		Name: "Seller", Description: "d", Version: "1",
+		Name: "Service", Description: "d", Version: "1",
 		SupportedInterfaces: []*a2a.AgentInterface{
 			{URL: "http://10.1.2.3:9999/rpc", ProtocolBinding: a2a.TransportProtocolJSONRPC, ProtocolVersion: "1.0"},
 			{URL: "http://10.1.2.3:9999/rest", ProtocolBinding: a2a.TransportProtocolHTTPJSON, ProtocolVersion: "1.0"},
@@ -594,11 +594,11 @@ func combinedCard(t *testing.T) []byte {
 			{URL: "http://10.1.2.3:9999/v03rest", ProtocolBinding: a2a.TransportProtocolHTTPJSON, ProtocolVersion: "0.3"},
 		},
 		Capabilities:         a2a.AgentCapabilities{Streaming: true, ExtendedAgentCard: true},
-		SecuritySchemes:      a2a.NamedSecuritySchemes{"seller": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}},
-		SecurityRequirements: a2a.SecurityRequirementsOptions{{"seller": {}}},
+		SecuritySchemes:      a2a.NamedSecuritySchemes{"service": a2a.HTTPAuthSecurityScheme{Scheme: "Bearer"}},
+		SecurityRequirements: a2a.SecurityRequirementsOptions{{"service": {}}},
 		DefaultInputModes:    []string{"text"}, DefaultOutputModes: []string{"text"},
 		Skills: []a2a.AgentSkill{{ID: "s", Name: "s", Description: "s", Tags: []string{"t"},
-			SecurityRequirements: a2a.SecurityRequirementsOptions{{"seller": {"fx"}}}}},
+			SecurityRequirements: a2a.SecurityRequirementsOptions{{"service": {"fx"}}}}},
 	}
 	p, ok := a2av0.NewStaticAgentCardProducer(card).(interface {
 		CardJSON(context.Context) ([]byte, error)
@@ -613,8 +613,8 @@ func combinedCard(t *testing.T) []byte {
 	return raw
 }
 
-// A card in both shapes is served as 1.0 only: none of its 0.x members, which name the seller's internal
-// address and security, survives, so a 0.3 client reading the served card never dials the seller past
+// A card in both shapes is served as 1.0 only: none of its 0.x members, which name the service's internal
+// address and security, survives, so a 0.3 client reading the served card never dials the service past
 // the gate (spec §3: supportedInterfaces is "never an upstream URL"; §2.4: 1.0 only downstream; D52).
 func TestCombinedCardServesNoUpstreamURL(t *testing.T) {
 	up := combinedCard(t)
@@ -632,7 +632,7 @@ func TestCombinedCardServesNoUpstreamURL(t *testing.T) {
 			t.Fatal(err)
 		}
 		if strings.Contains(string(served), "10.1.2.3") {
-			t.Errorf("anonymous %v: the served card names the seller's address: %s", anon, served)
+			t.Errorf("anonymous %v: the served card names the service's address: %s", anon, served)
 		}
 		o := members(t, served)
 		for _, gone := range v0Members {
@@ -653,7 +653,7 @@ func TestCombinedCardServesNoUpstreamURL(t *testing.T) {
 			t.Errorf("anonymous %v: skills %s", anon, mustGet(t, o, "skills"))
 		}
 	}
-	// Every other seller member keeps its bytes.
+	// Every other service member keeps its bytes.
 	norm, err := Normalize(up)
 	if err != nil {
 		t.Fatal(err)

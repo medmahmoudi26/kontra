@@ -24,11 +24,11 @@ const gateLogStaleView = "node revocations: re-read failed"
 // An 'ask' task waits at input-required on node N's session on replica A. The test then takes
 // kontra.tunnel_keys in access exclusive mode, in a transaction it holds open, so that no statement reading
 // the table returns: A's re-reads fail (A logs it, and its view is stale from then on) and so would the
-// stream's read. The follow-up, sent through B, opens no stream while the key cannot be read: the seller
+// stream's read. The follow-up, sent through B, opens no stream while the key cannot be read: the service
 // never receives it, and the refused stream is a lost session, so the task waits for its node (spec §6.4's
 // reconnect wait, D340) at input-required, its attempt open, nothing logged. Once the lock is released, the
 // node's session (never closed: a refused stream does not close it) is a candidate again, the turn resumes on
-// it and the follow-up reaches the seller once and completes the task; a new task completes on the same session.
+// it and the follow-up reaches the service once and completes the task; a new task completes on the same session.
 //
 // The handoff proposed pausing all of A's Postgres (Options.PostgresProxy, Blackhole). With every statement
 // of A waiting, though, the follow-up's dispatch stops at its own first read of the task (relay.Dispatcher's
@@ -79,12 +79,12 @@ func TestTunnelStaleRevocationView(t *testing.T) {
 	answered := make(chan answer, 1)
 	sent := time.Now()
 	go func() {
-		res, err := h.BuyerA().Client(t, b, "").SendMessage(ctx, req)
+		res, err := h.CallerA().Client(t, b, "").SendMessage(ctx, req)
 		answered <- answer{res, err}
 	}()
 	time.Sleep(8 * time.Second)
 	if requestWith(h.Upstream, req.Message.ID) != nil {
-		t.Fatal("the follow-up reached the seller while the key could not be read: a stream was opened")
+		t.Fatal("the follow-up reached the service while the key could not be read: a stream was opened")
 	}
 	if as, err := h.Attempts(ctx, waiting.ID); err != nil || len(as) != 1 || as[0].EndedAt != nil {
 		t.Fatalf("the task's attempts %+v %v while it waits: want its one attempt open", as, err)
@@ -114,7 +114,7 @@ func TestTunnelStaleRevocationView(t *testing.T) {
 		}
 	}
 	if sends != 1 {
-		t.Fatalf("the seller received the follow-up %d times, want once", sends)
+		t.Fatalf("the service received the follow-up %d times, want once", sends)
 	}
 	if a := endedAttempt(t, ctx, h, waiting.ID); a.Outcome != "completed" || a.TunnelSession != sess {
 		t.Fatalf("the task's attempt %+v: want its one attempt, resumed on %s, completed", a, sess)
@@ -122,7 +122,7 @@ func TestTunnelStaleRevocationView(t *testing.T) {
 	checkHistory(t, h, waiting.ID, "e2e_reconnect_stale_revocation_view", tunnelForbidden(h)...)
 
 	// The session was kept: a new task completes on it.
-	res, err := h.BuyerA().Client(t, b, "").SendMessage(ctx, newMessage("once the key can be read"))
+	res, err := h.CallerA().Client(t, b, "").SendMessage(ctx, newMessage("once the key can be read"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -81,7 +81,7 @@ func issuer(t *testing.T, v *Verifier, cfg IssuerConfig) *Issuer {
 var mcpAud = CanonicalURI(gateURL, "")
 
 // §12.1, D276: ES256, RS256 and EdDSA tokens from the issuer, for the route's canonical URI, are accepted; the
-// principal is oidc:sub:<sub> with buyer UUIDv5(issuer ‖ sub), no tenant, via mcp.
+// principal is oidc:sub:<sub> with caller UUIDv5(issuer ‖ sub), no tenant, via mcp.
 func TestVerifyAccepts(t *testing.T) {
 	as := newAS(t, oidctest.Config{})
 	v := verifier(t, as, realClock())
@@ -117,13 +117,13 @@ func TestVerifyAccepts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	buyer, _ := ids.OIDCBuyer(as.Issuer(), "alice")
-	if p.Kind != auth.KindOIDC || p.ID != "oidc:sub:alice" || p.BuyerID != buyer || p.Via != auth.ViaMCP || p.TenantID != nil ||
-		p.Scopes != nil || !p.MayHire() {
+	caller, _ := ids.OIDCCaller(as.Issuer(), "alice")
+	if p.Kind != auth.KindOIDC || p.ID != "oidc:sub:alice" || p.CallerID != caller || p.Via != auth.ViaMCP || p.TenantID != nil ||
+		p.Scopes != nil || !p.MayCall() {
 		t.Errorf("principal %+v", p)
 	}
-	if BuyerID(as.Issuer(), "alice") != buyer || BuyerID(as.Issuer(), "bob") == buyer || BuyerID("", "alice").String() != "00000000-0000-0000-0000-000000000000" {
-		t.Error("BuyerID is not UUIDv5(issuer ‖ sub)")
+	if CallerID(as.Issuer(), "alice") != caller || CallerID(as.Issuer(), "bob") == caller || CallerID("", "alice").String() != "00000000-0000-0000-0000-000000000000" {
+		t.Error("CallerID is not UUIDv5(issuer ‖ sub)")
 	}
 }
 

@@ -30,8 +30,8 @@ type env struct {
 }
 
 var (
-	buyerA = Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: ViaAPIKey}
-	buyerB = Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: ViaAPIKey}
+	callerA = Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: ViaAPIKey}
+	callerB = Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: ViaAPIKey}
 )
 
 func newEnv(t testing.TB) *env {

@@ -49,7 +49,7 @@ func (l *countingListener) port() string {
 	return p
 }
 
-// fakeResolver answers from a table, like DNS a seller or a caller controls.
+// fakeResolver answers from a table, like DNS a service or a caller controls.
 type fakeResolver map[string][]string
 
 func (r fakeResolver) LookupNetIP(_ context.Context, _, host string) ([]netip.Addr, error) {

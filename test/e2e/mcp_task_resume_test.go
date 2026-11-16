@@ -133,7 +133,7 @@ func testResumeLegacy(t *testing.T, killTunnel bool) {
 
 // tasksResultOn asks tasks/result on g with the client's session and returns the answer. With reinit, when g answers
 // that session 404 (its row was closed with the tunnel of the killed replica, §11.2), the client initializes again on
-// g, as a client does, and asks with the new session (the task is the buyer's, §11.6); without it, a 404 fails the
+// g, as a client does, and asks with the new session (the task is the caller's, §11.6); without it, a 404 fails the
 // test (the killed replica held only the client's connection, so the session must outlive it).
 func tasksResultOn(t *testing.T, ctx context.Context, h *Harness, mc *MCPClient, g *Gate, taskID string, since time.Time, reinit bool) map[string]any {
 	t.Helper()

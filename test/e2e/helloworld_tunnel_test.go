@@ -21,7 +21,7 @@ import (
 	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
-// The helloworld seller (examples/sellers/helloworld, WP-07): a2a-samples' samples/python/agents/helloworld at
+// The helloworld service (examples/agents/helloworld, WP-07): a2a-samples' samples/python/agents/helloworld at
 // this commit, run unmodified by run.sh with its pinned Python toolchain.
 const (
 	samplesPin    = "6603ba3f2c31a7ef33e70b9d8b5b5f8be42ac9a3"
@@ -32,7 +32,7 @@ const (
 	SamplesEnv = "KONTRA_A2A_SAMPLES"
 	// RequireHelloworldEnv, set (CI's e2e job sets it), turns the test's skips into failures: without uv, the
 	// checkout or a free 127.0.0.1:9999 the run would otherwise pass without the hard rule it checks, that
-	// hello-world runs unmodified behind the tunnel (M2 review, robustness-2). examples/sellers/helloworld's
+	// hello-world runs unmodified behind the tunnel (M2 review, robustness-2). examples/agents/helloworld's
 	// tests read it too.
 	RequireHelloworldEnv = "KONTRA_REQUIRE_HELLOWORLD"
 	// helloAddr is where the sample listens: its __main__.py fixes it.
@@ -105,16 +105,16 @@ func sampleChanges(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// startSeller runs examples/sellers/helloworld/run.sh in its own process group, carrying the harness's
+// startService runs examples/agents/helloworld/run.sh in its own process group, carrying the harness's
 // environment (so scripts/test_e2e.sh sees a leftover), and stops it with the harness.
-func startSeller(t *testing.T, h *Harness, uv, checkout string) {
+func startService(t *testing.T, h *Harness, uv, checkout string) {
 	t.Helper()
-	logPath := filepath.Join(h.Dir, "seller.log")
+	logPath := filepath.Join(h.Dir, "service.log")
 	f, err := os.Create(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	script, err := filepath.Abs(filepath.Join("..", "..", "examples", "sellers", "helloworld", "run.sh"))
+	script, err := filepath.Abs(filepath.Join("..", "..", "examples", "agents", "helloworld", "run.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,33 +141,33 @@ func startSeller(t *testing.T, h *Harness, uv, checkout string) {
 	})
 	t.Cleanup(func() {
 		if t.Failed() {
-			t.Logf("seller log:\n%s", tail(logPath, 30))
+			t.Logf("service log:\n%s", tail(logPath, 30))
 		}
 	})
 	deadline := time.Now().Add(3 * time.Minute) // uv may resolve and download the pinned requirements first
 	for status(context.Background(), http.MethodGet, "http://"+helloAddr+"/.well-known/agent-card.json", "") != http.StatusOK {
 		select {
 		case <-done:
-			t.Fatalf("the helloworld seller exited:\n%s", tail(logPath, 30))
+			t.Fatalf("the helloworld service exited:\n%s", tail(logPath, 30))
 		case <-time.After(250 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the helloworld seller does not answer on %s within 3 minutes:\n%s", helloAddr, tail(logPath, 30))
+			t.Fatalf("the helloworld service does not answer on %s within 3 minutes:\n%s", helloAddr, tail(logPath, 30))
 		}
 	}
 }
 
 // TestHelloworldTunnel is the helloworld example through the tunnel (PRD §14's M2 deliverable; WP-07's
-// examples/sellers/helloworld): the a2a-samples helloworld seller at 6603ba3, unmodified, run by run.sh
+// examples/agents/helloworld): the a2a-samples helloworld service at 6603ba3, unmodified, run by run.sh
 // with its pinned toolchain on 127.0.0.1:9999, hosted as tunnel service `hello` by `kontra connect --serve
 // a2a:hello=http://127.0.0.1:9999 --enroll <kontra-gate enroll hello>`.
 //
-// The node starts before its seller, as a compose or systemd sidecar does: its first card fetch fails
+// The node starts before its service, as a compose or systemd sidecar does: its first card fetch fails
 // (Kontra-Node: target_unreachable), the session is a candidate anyway, and the card arrives on the keeper's
-// retry once the seller is up (M2 plan audit, gap 3; the test waits on services.card before the card GETs
-// and the first task). Both replicas serve the seller's card (name "Hello World Agent") with only the
-// gate's interfaces at public_url, and services.upstream_card holds the seller's own bytes. a2a-go's
-// SendMessage returns a completed task whose artifact is the seller's answer, "Hello, World! I have
+// retry once the service is up (M2 plan audit, gap 3; the test waits on services.card before the card GETs
+// and the first task). Both replicas serve the service's card (name "Hello World Agent") with only the
+// gate's interfaces at public_url, and services.upstream_card holds the service's own bytes. a2a-go's
+// SendMessage returns a completed task whose artifact is the service's answer, "Hello, World! I have
 // received your request (hi)", and a stream shows working, then the artifact, then completed. The checkout
 // is still unmodified, and the node refused no preamble.
 //
@@ -176,11 +176,11 @@ func startSeller(t *testing.T, h *Harness, uv, checkout string) {
 // is set, as in CI.
 func TestHelloworldTunnel(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e: needs Postgres, the temporal CLI, two gate replicas and the Python seller; skipped under -short")
+		t.Skip("e2e: needs Postgres, the temporal CLI, two gate replicas and the Python service; skipped under -short")
 	}
 	uv, err := exec.LookPath("uv")
 	if err != nil {
-		skipOrFail(t, "the helloworld seller needs uv (https://docs.astral.sh/uv/), which is not on PATH")
+		skipOrFail(t, "the helloworld service needs uv (https://docs.astral.sh/uv/), which is not on PATH")
 	}
 	if l, err := net.Listen("tcp", helloAddr); err != nil {
 		skipOrFail(t, "%s is taken (the sample listens there and only there): %v", helloAddr, err)
@@ -201,15 +201,15 @@ func TestHelloworldTunnel(t *testing.T) {
 	})
 	ctx := ctxFor(t, 8*time.Minute)
 
-	// The node first, then its seller.
+	// The node first, then its service.
 	n, _ := startNode(t, ctx, h, "hello", map[string]string{"hello": "http://" + helloAddr})
-	startSeller(t, h, uv, checkout)
+	startService(t, h, uv, checkout)
 	if err := h.WaitCard(ctx, "hello", 2*time.Minute); err != nil {
 		t.Fatal(err)
 	}
 
-	// The cards: the seller's, served with the gate's interfaces only, on both replicas.
-	resp, err := http.Get("http://" + helloAddr + "/.well-known/agent-card.json") // the test, not the gate, reads the seller
+	// The cards: the service's, served with the gate's interfaces only, on both replicas.
+	resp, err := http.Get("http://" + helloAddr + "/.well-known/agent-card.json") // the test, not the gate, reads the service
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +223,7 @@ func TestHelloworldTunnel(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(stored, direct) {
-		t.Fatalf("services.upstream_card is not the seller's card byte for byte:\n got %s\nwant %s", stored, direct)
+		t.Fatalf("services.upstream_card is not the service's card byte for byte:\n got %s\nwant %s", stored, direct)
 	}
 	svc := h.Front.URL + "/agents/hello"
 	for _, g := range h.Gates {
@@ -236,20 +236,20 @@ func TestHelloworldTunnel(t *testing.T) {
 			t.Fatal(err)
 		}
 		if c.Name != "Hello World Agent" || len(c.SupportedInterfaces) != 2 {
-			t.Fatalf("%s serves %s, want the seller's card with the gate's two interfaces", g.Name, served)
+			t.Fatalf("%s serves %s, want the service's card with the gate's two interfaces", g.Name, served)
 		}
 		for _, i := range c.SupportedInterfaces {
 			if i.URL != svc || i.ProtocolVersion != a2a.Version {
 				t.Fatalf("%s: a served interface %+v, want the gate's %s at %s", g.Name, i, svc, a2a.Version)
 			}
 		}
-		if namesSeller(served) {
-			t.Fatalf("%s's served card names the seller's address: %s", g.Name, served)
+		if namesService(served) {
+			t.Fatalf("%s's served card names the service's address: %s", g.Name, served)
 		}
 	}
 
 	// SendMessage (blocking), with a2a-go's client.
-	res, err := h.BuyerA().Client(t, h.Gates[1], "hello").SendMessage(ctx, newMessage("hi"))
+	res, err := h.CallerA().Client(t, h.Gates[1], "hello").SendMessage(ctx, newMessage("hi"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestHelloworldTunnel(t *testing.T) {
 	checkHistory(t, h, task.ID, "e2e_helloworld_tunnel", h.APIKey, h.APIKeyB, helloAnswer)
 
 	// SendStreamingMessage: working, then the artifact, then completed.
-	s, err := h.BuyerA().SendStreaming(ctx, h.Gates[0], newMessage("hi"), Call{Service: "hello"})
+	s, err := h.CallerA().SendStreaming(ctx, h.Gates[0], newMessage("hi"), Call{Service: "hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,23 +300,23 @@ func TestHelloworldTunnel(t *testing.T) {
 	if changes, err := sampleChanges(checkout); err != nil || changes != "" {
 		t.Fatalf("the sample was modified by the run: %v\n%s", err, changes)
 	}
-	// The node's refusals (internal/node proxy.go); its target_unreachable answers before the seller was up
+	// The node's refusals (internal/node proxy.go); its target_unreachable answers before the service was up
 	// are not refusals of a preamble.
 	for _, line := range append(n.Log("tunnel exchange refused"), n.Log("tunnel stream refused")...) {
 		t.Fatalf("the node refused a preamble: %s", line)
 	}
 }
 
-// sellerAddrs are the forms the seller's own address takes in a card: the sample's card names
+// serviceAddrs are the forms the service's own address takes in a card: the sample's card names
 // http://127.0.0.1:9999 (its __main__.py), and localhost or [::1] would be the same listener.
-var sellerAddrs = []string{helloAddr, "localhost:9999", "[::1]:9999"}
+var serviceAddrs = []string{helloAddr, "localhost:9999", "[::1]:9999"}
 
-// namesSeller reports whether a card the gate serves names the seller's own address. It looks for the
+// namesService reports whether a card the gate serves names the service's own address. It looks for the
 // address, never the bare port: every served interface names public_url, the Front, whose ephemeral port
 // may hold 9999 (39999, 49999, 59999), and the interface loop already checks each URL is the Front's (M2
 // review of WP-08).
-func namesSeller(card []byte) bool {
-	for _, a := range sellerAddrs {
+func namesService(card []byte) bool {
+	for _, a := range serviceAddrs {
 		if bytes.Contains(card, []byte(a)) {
 			return true
 		}

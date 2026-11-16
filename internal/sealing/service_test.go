@@ -22,12 +22,12 @@ import (
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// D221 (ext-sealed.md §3, §5, §6): every header names the hired service as the gate's URL path names it. The hosting
+// D221 (ext-sealed.md §3, §5, §6): every header names the called service as the gate's URL path names it. The hosting
 // node refuses a request whose service is not the one the preamble names, as its welcome named it ("acme/echo" on a
 // multi-tenant gate, "echo" otherwise), or that names none (wrong_job), and seals its replies with that service.
 func TestHostingChecksTheService(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-0000000002a1", "ctx-2a1"
 	sealedFor := func(service, msg string) []byte {
 		hd := f.reqHeader(b, "", ctx, msg, 0, 1)
@@ -49,7 +49,7 @@ func TestHostingChecksTheService(t *testing.T) {
 	}
 	_, x, r := f.request(pre(task, ctx), sealedFor("acme/echo", "m6"))
 	if r != "" {
-		t.Fatalf("the hired service: %q", r)
+		t.Fatalf("the called service: %q", r)
 	}
 	out := readAll(t, f.answer(x, 200, taskAnswer("up-1", "upctx-1", "TASK_STATE_COMPLETED", "the answer", "")))
 	n := 0
@@ -85,13 +85,13 @@ func TestHostingChecksTheService(t *testing.T) {
 	}
 }
 
-// D221: the hiring node seals every request with the service it hires (the path's {svc} without /agents/ or /mcp/),
-// and refuses a reply that names another: the gate delivered the buyer's request to another service of the same node,
+// D221: the calling node seals every request with the service it calls (the path's {svc} without /agents/ or /mcp/),
+// and refuses a reply that names another: the gate delivered the caller's request to another service of the same node,
 // which opened it and answered with a valid auth. A2A: the part is dropped and the local client gets a failed status
 // with sealed_rejected; MCP: a sealed_rejected error, nothing of the result.
-func TestHiringChecksTheService(t *testing.T) {
+func TestCallingChecksTheService(t *testing.T) {
 	f := newFixture(t)
-	hr := newHirer(t, f, pins.Options{})
+	hr := newCallingNode(t, f, pins.Options{})
 	path, body := localSend("jsonrpc", "MARKER-request")
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -171,7 +171,7 @@ func TestHiringChecksTheService(t *testing.T) {
 // service recorded without taking its lock.
 func TestHostingServicesLockedApart(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const ctx = "ctx-locks"
 	first := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "for echo")))
 	_, x, r := f.request(pre("0193c0de-0000-7000-8000-0000000003a1", ctx), first)
@@ -198,8 +198,8 @@ func TestHostingServicesLockedApart(t *testing.T) {
 		}()
 		return out
 	}
-	// Another service's first message, sealed for it, with another buyer's key: served while echo's lock is held.
-	other := newBuyer(t)
+	// Another service's first message, sealed for it, with another caller's key: served while echo's lock is held.
+	other := newCaller(t)
 	hd := f.reqHeader(other, "", ctx, "m2", 0, 1)
 	hd.Service = "other"
 	p := pre("0193c0de-0000-7000-8000-0000000003a3", ctx)
@@ -241,7 +241,7 @@ func TestHostingServicesLockedApart(t *testing.T) {
 func TestHostingNodeWideMCPCallIsClaimedOnce(t *testing.T) {
 	f := newFixture(t)
 	for i := 0; i < 5; i++ {
-		b := newBuyer(t)
+		b := newCaller(t)
 		s := sessionHash(fmt.Sprintf("gate-session-race-%d", i))
 		var arrived atomic.Int32
 		both := make(chan struct{})
@@ -310,7 +310,7 @@ func TestHostingNodeWideMCPCallIsClaimedOnce(t *testing.T) {
 func TestHostingNodeWideReplyToIsClaimedOnce(t *testing.T) {
 	f := newFixture(t)
 	for i := 0; i < 20; i++ {
-		b := newBuyer(t)
+		b := newCaller(t)
 		ctx := fmt.Sprintf("ctx-race-%d", i)
 		results := make(chan sealed.Reject, 2)
 		var xs [2]*Exchange

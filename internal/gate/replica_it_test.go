@@ -37,9 +37,9 @@ import (
 	"kontra.sh/kontra/internal/version"
 )
 
-// seller is an a2a-go v2.7.0 agent behind a base path: "hi" completes at once with Hello World; any other
+// service is an a2a-go v2.7.0 agent behind a base path: "hi" completes at once with Hello World; any other
 // text works until the test releases it (or the gate cancels it), then completes with an artifact.
-type seller struct {
+type service struct {
 	mu       sync.Mutex
 	gates    map[string]chan struct{}
 	cancels  int
@@ -48,9 +48,9 @@ type seller struct {
 	cardJSON string
 }
 
-func newSeller(t *testing.T) *seller {
+func newService(t *testing.T) *service {
 	t.Helper()
-	s := &seller{gates: map[string]chan struct{}{}}
+	s := &service{gates: map[string]chan struct{}{}}
 	rpc := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(s))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/base/.well-known/agent-card.json", func(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +82,7 @@ func newSeller(t *testing.T) *seller {
 	return s
 }
 
-func (s *seller) gate(text string) chan struct{} {
+func (s *service) gate(text string) chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.gates[text]
@@ -93,9 +93,9 @@ func (s *seller) gate(text string) chan struct{} {
 	return g
 }
 
-func (s *seller) release(text string) { close(s.gate(text)) }
+func (s *service) release(text string) { close(s.gate(text)) }
 
-func (s *seller) releaseAll() {
+func (s *service) releaseAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, g := range s.gates {
@@ -108,7 +108,7 @@ func (s *seller) releaseAll() {
 	}
 }
 
-func (s *seller) count(method string) int {
+func (s *service) count(method string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0
@@ -120,7 +120,7 @@ func (s *seller) count(method string) int {
 	return n
 }
 
-func (s *seller) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *service) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		text := ec.Message.Parts[0].Text()
 		if ec.StoredTask == nil && !yield(a2a.NewSubmittedTask(ec, ec.Message), nil) {
@@ -146,7 +146,7 @@ func (s *seller) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.S
 	}
 }
 
-func (s *seller) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *service) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	s.mu.Lock()
 	s.cancels++
 	s.mu.Unlock()
@@ -190,20 +190,20 @@ func (l lockedWriter) Write(p []byte) (int, error) {
 	return l.w.Write(p)
 }
 
-// gateEnv is one database, one Temporal namespace and a seller; replicas started on it share them.
+// gateEnv is one database, one Temporal namespace and a service; replicas started on it share them.
 type gateEnv struct {
 	t        *testing.T
 	dsn      string
 	temporal string
 	pool     *pgxpool.Pool
-	seller   *seller
+	service  *service
 }
 
 func newGateEnv(t *testing.T) *gateEnv {
 	t.Helper()
 	e := &gateEnv{t: t, temporal: temporaltest.Address(t), dsn: pgtest.Migrated(t)}
 	e.pool = pgtest.Pool(t, e.dsn)
-	e.seller = newSeller(t)
+	e.service = newService(t)
 	return e
 }
 
@@ -232,7 +232,7 @@ func (e *gateEnv) helloService(allow string) string {
 	return `services:
   hello:
     kind: a2a
-    backend: { a2a: { url: "` + e.seller.srv.URL + `/base", allow_private: true } }
+    backend: { a2a: { url: "` + e.service.srv.URL + `/base", allow_private: true } }
     allow: ["` + allow + `"]
     task: { timeout: 10m, retries: 1 }
 `
@@ -402,7 +402,7 @@ func attemptReplica(t *testing.T, pool *pgxpool.Pool, id a2a.TaskID) string {
 
 // A replica on Postgres and Temporal (spec §2.1, §13.5, §14.3; spec/tunnel.md §11): it refuses a database
 // not at the embedded version; it registers in gate_replicas, beats, and reaps replicas silent for more than
-// 30 s (closing their MCP sessions); /healthz and /metrics answer; a task reaches the seller through the
+// 30 s (closing their MCP sessions); /healthz and /metrics answer; a task reaches the service through the
 // polling-free streaming path and completes; SIGHUP applies a changed allow: list and a removed service
 // without restart. Then SIGTERM drains it: draining_at, /healthz 503, kontra-direct takes no new dispatch,
 // the dispatch in flight finishes while the replica still answers callers, and Run returns after it; the
@@ -419,7 +419,7 @@ func TestReplicaServesReloadsAndDrains(t *testing.T) {
 		('alive-0000000b', 'old', now())`, stale); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, buyer_id, principal, via, protocol_version, replica_id)
+	if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, caller_id, principal, via, protocol_version, replica_id)
 		values (sha256($1), $2, 'anonymous', 'anonymous', '2025-11-25', $3)`, []byte(sess.String()), uuid.New(), stale); err != nil {
 		t.Fatal(err)
 	}
@@ -464,7 +464,7 @@ func TestReplicaServesReloadsAndDrains(t *testing.T) {
 		t.Fatalf("/healthz on the metrics listener = %d", code)
 	}
 
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	c := a2aClient(t, run.url, key)
 	done := send(t, c, "hi", false)
 	if done.Status.State != a2a.TaskStateCompleted || done.Status.Message == nil || done.Status.Message.Parts[0].Text() != "Hello World" {
@@ -537,7 +537,7 @@ func TestReplicaServesReloadsAndDrains(t *testing.T) {
 		t.Fatalf("GetTask during the drain: %s", st)
 	}
 	// The dispatch in flight finishes and its result is recorded; then the replica exits.
-	e.seller.release("slow")
+	e.service.release("slow")
 	if err := run.wait(t, 30*time.Second); err != nil {
 		t.Fatalf("Run after the drain: %v", err)
 	}
@@ -575,18 +575,18 @@ func parseConfigDSN(t *testing.T, dsn string) *config.Config {
 
 // On a gate of one replica, a cancel still works during a drain (spec §14.3, D76; the audit's single-replica
 // drain test): kontra-lifecycle accepts the kontra.cancel Update, forward_cancel reaches this replica's
-// kontra-ctl queue, the seller receives CancelTask, the task ends canceled with no completed after, and
+// kontra-ctl queue, the service receives CancelTask, the task ends canceled with no completed after, and
 // the replica exits once that dispatch has ended.
 func TestDrainServesCancelOnOneReplica(t *testing.T) {
 	e := newGateEnv(t)
 	run := e.start("solo", e.replicaConfig(freePort(t), time.Minute, ""), fastTiming)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	c := a2aClient(t, run.url, key)
 	slow := send(t, c, "slow-cancel", true)
 	eventually(t, 20*time.Second, "the dispatch runs", func() bool {
 		return run.r.InFlight() == 1 && attemptReplica(t, e.pool, slow.ID) == run.r.ID()
 	})
-	eventually(t, 10*time.Second, "the seller task is working", func() bool {
+	eventually(t, 10*time.Second, "the service task is working", func() bool {
 		return getTask(t, c, slow.ID).Status.State == a2a.TaskStateWorking
 	})
 	run.drain()
@@ -601,13 +601,13 @@ func TestDrainServesCancelOnOneReplica(t *testing.T) {
 	if got.Status.State != a2a.TaskStateCanceled {
 		t.Fatalf("CancelTask answered %s", got.Status.State)
 	}
-	if e.seller.count("CancelTask") != 1 {
-		t.Fatalf("the seller received %d CancelTask", e.seller.count("CancelTask"))
+	if e.service.count("CancelTask") != 1 {
+		t.Fatalf("the service received %d CancelTask", e.service.count("CancelTask"))
 	}
 	if err := run.wait(t, 30*time.Second); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	e.seller.release("slow-cancel") // a seller that ignored the cancel would now complete: nothing may follow
+	e.service.release("slow-cancel") // a service that ignored the cancel would now complete: nothing may follow
 	time.Sleep(500 * time.Millisecond)
 	var states []string
 	rows, err := e.pool.Query(context.Background(), `select payload::text from kontra.task_events where task_id = $1 and kind = 'status' order by seq`, string(slow.ID))
@@ -638,7 +638,7 @@ func TestDrainServesCancelOnOneReplica(t *testing.T) {
 func TestDrainTimeoutReattachesElsewhere(t *testing.T) {
 	e := newGateEnv(t)
 	a := e.start("a", e.replicaConfig(freePort(t), 2*time.Second, ""), fastTiming)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	ca := a2aClient(t, a.url, key)
 	slow := send(t, ca, "slow-reattach", true)
 	eventually(t, 20*time.Second, "the dispatch runs on a", func() bool {
@@ -651,12 +651,12 @@ func TestDrainTimeoutReattachesElsewhere(t *testing.T) {
 	}
 	cb := a2aClient(t, b.url, key)
 	eventually(t, 60*time.Second, "b re-attaches the dispatch", func() bool { return attemptReplica(t, e.pool, slow.ID) == b.r.ID() })
-	e.seller.release("slow-reattach")
+	e.service.release("slow-reattach")
 	eventually(t, 30*time.Second, "the task completes on b", func() bool {
 		return getTask(t, cb, slow.ID).Status.State == a2a.TaskStateCompleted
 	})
-	if n := e.seller.count("SendStreamingMessage") + e.seller.count("SendMessage"); n != 1 {
-		t.Fatalf("the seller received the message %d times; a re-attach never sends it again", n)
+	if n := e.service.count("SendStreamingMessage") + e.service.count("SendMessage"); n != 1 {
+		t.Fatalf("the service received the message %d times; a re-attach never sends it again", n)
 	}
 }
 
@@ -752,7 +752,7 @@ func TestBodyLimitIsTheConfiguredOne(t *testing.T) {
 	e := newGateEnv(t)
 	path := e.replicaConfig(freePort(t), time.Minute, "limits: { body: 8MiB }\n"+e.helloService("org:default"))
 	run := e.start("body", path, fastTiming)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	body := func(size int, rpc bool) string {
 		pad := strings.Repeat("x", size)
 		msg := `{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"hi"}],"metadata":{"pad":"` + pad + `"}}}`
@@ -845,7 +845,7 @@ func TestReplicaTunnelSessions(t *testing.T) {
 	rowOn := func(n *tunnelNode, replica string) bool {
 		return scalar[int](t, e.pool, `select count(*) from kontra.tunnels where session_id = $1 and replica_id = $2`, n.session, replica) == 1
 	}
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 
 	// A node on A: admitted, registered, its card fetched through the session and served by both replicas.
 	n1, err := dialNode(t, a.url, newNodeIdentity(t), echoCard, token(), "echo")
@@ -1004,7 +1004,7 @@ func TestDrainTellsTunnelsAfterDrainingAtCommits(t *testing.T) {
 	}
 
 	// A: a dispatch in flight keeps the drain going while draining_at cannot be written.
-	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, fmt.Sprintf(services, e.seller.srv.URL)), timing)
+	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, fmt.Sprintf(services, e.service.srv.URL)), timing)
 	n1, err := dialNode(t, a.url, newNodeIdentity(t), echoCard, token(), "echo")
 	if err != nil {
 		t.Fatal(err)
@@ -1012,7 +1012,7 @@ func TestDrainTellsTunnelsAfterDrainingAtCommits(t *testing.T) {
 	eventually(t, 15*time.Second, "the node's tunnels row on A", func() bool {
 		return scalar[int](t, e.pool, `select count(*) from kontra.tunnels where session_id = $1`, n1.session) == 1
 	})
-	c := a2aClient(t, a.url, e.mintKey("buyer"))
+	c := a2aClient(t, a.url, e.mintKey("caller"))
 	slow := send(t, c, "slow", true)
 	eventually(t, 20*time.Second, "the slow task's dispatch runs on A", func() bool { return a.r.InFlight() == 1 })
 	release := lockReplicaRow(t, e.pool, a.r.ID())
@@ -1035,7 +1035,7 @@ func TestDrainTellsTunnelsAfterDrainingAtCommits(t *testing.T) {
 	if n1.closed(0) {
 		t.Fatal("the drain closed the session before the workers drained")
 	}
-	e.seller.release("slow")
+	e.service.release("slow")
 	if err := a.wait(t, 60*time.Second); err != nil {
 		t.Fatalf("A's Run after the drain: %v", err)
 	}
@@ -1048,7 +1048,7 @@ func TestDrainTellsTunnelsAfterDrainingAtCommits(t *testing.T) {
 
 	// B: nothing in flight, so the workers drain at once while draining_at still cannot be written. The
 	// drain does not wait for the write: the session closes at CloseAll, the node never told.
-	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, fmt.Sprintf(services, e.seller.srv.URL)), timing)
+	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, fmt.Sprintf(services, e.service.srv.URL)), timing)
 	n2, err := dialNode(t, b.url, newNodeIdentity(t), echoCard, token(), "echo")
 	if err != nil {
 		t.Fatal(err)

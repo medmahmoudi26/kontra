@@ -27,15 +27,15 @@ func anonDecision(end time.Time) func(enroll.Request) (*enroll.Decision, error) 
 }
 
 // spec/tunnel.md §6.2, §14 (D182): an anonymous session's node-opened streams in flight are capped at
-// tunnel.anonymous's hiring_streams, not the gate's 32: the stream past it is 429 with Retry-After.
-func TestAnonymousHiringStreamsCap(t *testing.T) {
+// tunnel.anonymous's calling_streams, not the gate's 32: the stream past it is 429 with Retry-After.
+func TestAnonymousCallingStreamsCap(t *testing.T) {
 	who := &whoAmI{release: make(chan struct{}), entered: make(chan struct{}, 64)}
 	g := newTestGate(t, gateOpts{mod: func(c *HandlerConfig) {
-		c.NodeStreams = &NodeStreams{Hire: who}
-		c.AnonymousHiringStreams = 2
+		c.NodeStreams = &NodeStreams{Call: who}
+		c.AnonymousCallingStreams = 2
 	}})
 	g.adm.set(anonDecision(time.Now().Add(time.Hour)))
-	n := dialHiring(t, g)
+	n := dialCalling(t, g)
 	defer close(who.release)
 	var held []*yamux.Stream
 	for range 2 {

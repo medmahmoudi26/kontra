@@ -15,37 +15,37 @@ import (
 )
 
 // gate_mcp_modern (spec/relay.md §16; §12.5, §11.12; D24, D178, D269, D274, D295; the corrections' WP-05 rule).
-// Single tenant. 2026-07-28 requests (no session) to /mcp on alternating replicas; the sellers (the TCK seller, the
-// in-test seller's slow exec and booking) hosted by a node whose tunnel is on replica B. Asserted:
+// Single tenant. 2026-07-28 requests (no session) to /mcp on alternating replicas; the services (the TCK service, the
+// in-test service's slow exec and booking) hosted by a node whose tunnel is on replica B. Asserted:
 //
 //   - server/discover lists [2026-07-28, 2025-11-25, 2025-06-18] and the tasks extension; the modern tools/list has no
 //     execution; both, and a task's tasks/get, are byte-identical from either replica;
-//   - a hire declaring the tasks extension is answered in line (resultType complete) when the task ends within 2 s,
+//   - a send_message declaring the tasks extension is answered in line (resultType complete) when the task ends within 2 s,
 //     else with CreateTaskResult (resultType task, pollIntervalMs 1000);
 //   - booking's question, to a client declaring form elicitation, is input_required with exactly one inputRequests
 //     entry, keyed k.<task>.<seq>; tasks/update with keys that are not that one (a later seq, seq 0, a key that is no
 //     gate id) is the empty acknowledgement, forwards nothing and leaves the question outstanding; tasks/update answers
 //     it once: a second answer to the same key is acknowledged and ignored, and the task completes with the first;
 //   - tasks/result and tasks/list are 404 with -32601; a _meta protocolVersion that differs from the header is 400 with
-//     -32020; a legacy request without a session is 400 with -32000; a hire without the tasks extension is a plain
+//     -32020; a legacy request without a session is 400 with -32000; a send_message without the tasks extension is a plain
 //     call (a CallToolResult, never a CreateTaskResult);
 //   - a client that closes its stream during the wait gets no answer, and its task is canceled within 10 s with the
-//     seller receiving CancelTask;
+//     service receiving CancelTask;
 //   - no modern request writes an mcp_sessions row.
 func TestGateMCPModern(t *testing.T) {
-	seller := StartSeller(t)
+	service := StartService(t)
 	h := start(t, Options{Tunnel: map[string]TunnelService{"tck": {}, "booking": {}, "kinds": {}}})
 	ctx := ctxFor(t, 10*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
-	tck, err := h.StartExampleSeller(ctx, "tck")
+	tck, err := h.StartExampleService(ctx, "tck")
 	if err != nil {
 		t.Fatal(err)
 	}
-	booking, err := h.StartExampleSeller(ctx, "booking")
+	booking, err := h.StartExampleService(ctx, "booking")
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostOn(t, ctx, h, b, map[string]string{"tck": tck.URL, "booking": booking.URL, "kinds": seller.URL})
+	hostOn(t, ctx, h, b, map[string]string{"tck": tck.URL, "booking": booking.URL, "kinds": service.URL})
 	ca := NewGateModern(t, a, h.APIKey, CapsTasks)
 	cb := ca.On(b)
 
@@ -65,22 +65,22 @@ func TestGateMCPModern(t *testing.T) {
 		!strings.Contains(string(disc.Capabilities), `"io.modelcontextprotocol/tasks":{}`) {
 		t.Errorf("server/discover: %+v %s", disc.SupportedVersions, disc.Capabilities)
 	}
-	if tl := Answer(t, cb.Rpc("tools/list", "", "")); strings.Contains(string(tl.Result), "execution") || !strings.Contains(string(tl.Result), `"name":"hire"`) {
+	if tl := Answer(t, cb.Rpc("tools/list", "", "")); strings.Contains(string(tl.Result), "execution") || !strings.Contains(string(tl.Result), `"name":"send_message"`) {
 		t.Errorf("the modern tools/list: %s", tl.Result)
 	}
 
-	// A fast hire with the extension, in line.
+	// A fast send_message with the extension, in line.
 	began := time.Now()
-	r := Tool(t, ca.Tool("hire", `{"service":"tck","message":"hi"}`))
+	r := Tool(t, ca.Tool("send_message", `{"service":"tck","message":"hi"}`))
 	if r.IsError || r.ResultType != "complete" || r.State() != "TASK_STATE_COMPLETED" || !strings.HasPrefix(r.Text(), "Unhandled messageId prefix: ") ||
 		time.Since(began) > 15*time.Second {
-		t.Fatalf("a fast modern hire after %v: %+v", time.Since(began), r)
+		t.Fatalf("a fast modern send_message after %v: %+v", time.Since(began), r)
 	}
 	// A slow exec: CreateTaskResult after the 2 s wait; tasks/get the same from either replica.
 	began = time.Now()
-	slow := Task(t, cb.Tool("hire", `{"service":"kinds","message":"slow"}`))
+	slow := Task(t, cb.Tool("send_message", `{"service":"kinds","message":"slow"}`))
 	if took := time.Since(began); slow.ResultType != "task" || slow.Status != "working" || slow.PollIntervalMs != 1000 || slow.TaskID == "" || took < 2*time.Second {
-		t.Fatalf("a slow modern hire after %v: %+v", took, slow)
+		t.Fatalf("a slow modern send_message after %v: %+v", took, slow)
 	}
 	ga, gb := ca.Rpc("tasks/get", slow.TaskID, `"taskId":"`+slow.TaskID+`"`), cb.Rpc("tasks/get", slow.TaskID, `"taskId":"`+slow.TaskID+`"`)
 	if g := Task(t, ga); g.Status != "working" || string(Answer(t, ga).Result) != string(Answer(t, gb).Result) {
@@ -90,7 +90,7 @@ func TestGateMCPModern(t *testing.T) {
 
 	// booking's question, to a client declaring form elicitation: one gate-keyed input request, answered once.
 	cf := ca.With(CapsTasksForm)
-	ask := Task(t, cf.Tool("hire", `{"service":"booking","message":"a table"}`))
+	ask := Task(t, cf.Tool("send_message", `{"service":"booking","message":"a table"}`))
 	eventually(t, 30*time.Second, "booking asks", func() bool { return taskState(t, h, ask.TaskID) == "input-required" })
 	seq := scalar[int64](t, h, `select max(seq) from kontra.task_events where task_id::text = $1 and kind in ('task', 'status')`, ask.TaskID)
 	key := fmt.Sprintf("k.%s.%d", ask.TaskID, seq)
@@ -163,32 +163,32 @@ func TestGateMCPModern(t *testing.T) {
 			t.Errorf("a legacy request (version %q) without a session: %d %s", v, resp.StatusCode, body)
 		}
 	}
-	plain := Tool(t, ca.With(CapsNothing).Tool("hire", `{"service":"tck","message":"hi"}`))
+	plain := Tool(t, ca.With(CapsNothing).Tool("send_message", `{"service":"tck","message":"hi"}`))
 	if plain.IsError || plain.Task != nil || plain.ResultType != "complete" || plain.State() != "TASK_STATE_COMPLETED" {
-		t.Errorf("a hire without the extension: %+v, want a plain CallToolResult", plain)
+		t.Errorf("a send_message without the extension: %+v, want a plain CallToolResult", plain)
 	}
 
 	// A client that leaves during the wait: no answer, its task canceled within 10 s, CancelTask upstream.
 	leave := func(c *GateModern, args string, after time.Duration) string {
 		t.Helper()
-		before := count(t, h, `select count(*) from kontra.tasks where hired`)
+		before := count(t, h, `select count(*) from kontra.tasks where sent_by_mcp`)
 		lctx, cancel := context.WithTimeout(ctx, after)
 		defer cancel()
-		if r, err := c.Post(lctx, "tools/call", "hire", c.Body("tools/call", `"name":"hire","arguments":`+args), nil); err == nil {
+		if r, err := c.Post(lctx, "tools/call", "send_message", c.Body("tools/call", `"name":"send_message","arguments":`+args), nil); err == nil {
 			t.Fatalf("the client that left got an answer: %s", r.Text())
 		}
-		eventually(t, 15*time.Second, "the hire's task exists", func() bool {
-			return count(t, h, `select count(*) from kontra.tasks where hired`) == before+1
+		eventually(t, 15*time.Second, "the send_message's task exists", func() bool {
+			return count(t, h, `select count(*) from kontra.tasks where sent_by_mcp`) == before+1
 		})
-		return scalar[string](t, h, `select id::text from kontra.tasks where hired order by created_at desc limit 1`)
+		return scalar[string](t, h, `select id::text from kontra.tasks where sent_by_mcp order by created_at desc limit 1`)
 	}
 	for i, c := range []*GateModern{ca, ca.With(CapsNothing)} {
-		cancels := seller.Count("CancelTask")
+		cancels := service.Count("CancelTask")
 		id := leave(c, fmt.Sprintf(`{"service":"kinds","message":"slow","contextId":"leave-%d"}`, i), 1500*time.Millisecond)
 		left := time.Now()
 		eventually(t, 10*time.Second, "the task of the client that left is canceled", func() bool { return taskState(t, h, id) == "canceled" })
 		t.Logf("canceled %v after the client left", time.Since(left).Round(10*time.Millisecond))
-		eventually(t, 10*time.Second, "the seller received CancelTask", func() bool { return seller.Count("CancelTask") > cancels })
+		eventually(t, 10*time.Second, "the service received CancelTask", func() bool { return service.Count("CancelTask") > cancels })
 	}
 
 	if n := count(t, h, `select count(*) from kontra.mcp_sessions`); n != 0 {

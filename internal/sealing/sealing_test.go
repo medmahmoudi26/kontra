@@ -71,13 +71,13 @@ func (f *fixture) open(required ...string) {
 
 func (f *fixture) kid() string { return tunnel.KeyID(f.node.Recipient().String()) }
 
-// buyer is a hiring node's job: its per-job key (replyTo) and rk.
-type buyer struct {
+// caller is a calling node's job: its per-job key (replyTo) and rk.
+type caller struct {
 	key *age.X25519Identity
 	rk  []byte
 }
 
-func newBuyer(t *testing.T) buyer {
+func newCaller(t *testing.T) caller {
 	t.Helper()
 	k, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -87,13 +87,13 @@ func newBuyer(t *testing.T) buyer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return buyer{key: k, rk: rk}
+	return caller{key: k, rk: rk}
 }
 
-func (b buyer) replyTo() string { return b.key.Recipient().String() }
+func (b caller) replyTo() string { return b.key.Recipient().String() }
 
 // reqHeader is an A2A request header of b for part i of n.
-func (f *fixture) reqHeader(b buyer, task, ctx, msg string, i, n int) sealed.Header {
+func (f *fixture) reqHeader(b caller, task, ctx, msg string, i, n int) sealed.Header {
 	return sealed.Header{V: 1, Dir: sealed.DirRequest, Service: "echo", IAT: f.now.Unix(), TaskID: task, ContextID: ctx,
 		MessageID: msg, Part: i, Parts: n, Kind: sealed.KindText, Kids: []string{f.kid()}, ReplyTo: b.replyTo(),
 		RK: sealed.EncodeRK(b.rk)}
@@ -205,15 +205,15 @@ func taskAnswer(upTask, upCtx, state, statusText, artifactText string) string {
 	return string(b)
 }
 
-// opened is what a buyer reads of a sealed reply part.
+// opened is what a caller reads of a sealed reply part.
 type openedReply struct {
 	hd   sealed.Header
 	body string
 	raw  string
 }
 
-// openReplies opens every sealed part of a reply body with the buyer's key and checks its auth.
-func openReplies(t *testing.T, b buyer, body string) []openedReply {
+// openReplies opens every sealed part of a reply body with the caller's key and checks its auth.
+func openReplies(t *testing.T, b caller, body string) []openedReply {
 	t.Helper()
 	var out []openedReply
 	w := a2awire.Walker{Container: func(c *a2awire.Container) error {
@@ -227,7 +227,7 @@ func openReplies(t *testing.T, b buyer, body string) []openedReply {
 			}
 			hd, plain, err := sealed.Open([]age.Identity{b.key}, sp.Ciphertext)
 			if err != nil {
-				t.Fatalf("a reply part does not open with the buyer's key: %v", err)
+				t.Fatalf("a reply part does not open with the caller's key: %v", err)
 			}
 			if err := sealed.VerifyAuth(b.rk, hd, plain); err != nil {
 				t.Fatalf("auth: %v", err)
@@ -246,7 +246,7 @@ func openReplies(t *testing.T, b buyer, body string) []openedReply {
 // job's replyTo with the gate's ids, auth, and the same ciphertext when the gate polls an unchanged task.
 func TestHostingOpensAndSeals(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-000000000001", "ctx-1"
 	body := send("m1", "", "", b.replyTo(),
 		sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 2), "secret marker one")),
@@ -303,18 +303,18 @@ func TestHostingRules(t *testing.T) {
 	const task, ctx = "0193c0de-0000-7000-8000-000000000002", "ctx-2"
 	type tc struct {
 		name  string
-		setup func(f *fixture, b buyer) // runs before
-		body  func(f *fixture, b buyer) []byte
+		setup func(f *fixture, b caller) // runs before
+		body  func(f *fixture, b caller) []byte
 		pre   tunnel.Preamble
 		want  sealed.Reject
 	}
 	stranger, _ := age.GenerateX25519Identity()
-	one := func(f *fixture, b buyer, mutate func(*sealed.Header)) []byte {
+	one := func(f *fixture, b caller, mutate func(*sealed.Header)) []byte {
 		hd := f.reqHeader(b, "", ctx, "m1", 0, 1)
 		mutate(&hd)
 		return send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(hd, "body")))
 	}
-	opened := func(f *fixture, b buyer, upTask string) {
+	opened := func(f *fixture, b caller, upTask string) {
 		// Opens job task with b, accepted by the service, which answered upstream ids up-1 / upctx-1.
 		body := send("first", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "first", 0, 1), "x")))
 		_, x, reason := f.request(pre(task, ctx), body)
@@ -324,7 +324,7 @@ func TestHostingRules(t *testing.T) {
 		readAll(f.t, f.answer(x, 200, taskAnswer(upTask, "upctx-1", "TASK_STATE_INPUT_REQUIRED", "more?", "")))
 	}
 	cases := []tc{
-		{name: "undecryptable", want: sealed.RejectUndecryptable, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "undecryptable", want: sealed.RejectUndecryptable, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			hd := f.reqHeader(b, "", ctx, "m1", 0, 1)
 			hd.Kids = []string{tunnel.KeyID(stranger.Recipient().String())}
 			ct, err := sealed.Seal([]age.Recipient{stranger.Recipient()}, hd, []byte("x"))
@@ -333,81 +333,81 @@ func TestHostingRules(t *testing.T) {
 			}
 			return send("m1", "", "", b.replyTo(), sealedPartJSON(ct))
 		}},
-		{name: "bad_header non-canonical", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "bad_header non-canonical", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			hd := f.reqHeader(b, "", ctx, "m1", 0, 1)
 			c, _ := hd.Canonical()
 			spaced := bytes.Replace(c, []byte(`,"dir"`), []byte(`, "dir"`), 1)
 			return send("m1", "", "", b.replyTo(), sealedPartJSON(rawSeal(t, f.node.Recipient(), spaced, "x")))
 		}},
-		{name: "bad_header missing parts", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "bad_header missing parts", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 2), "x")))
 		}},
-		{name: "bad_header duplicated part index", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "bad_header duplicated part index", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			p := sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 2), "x"))
 			return send("m1", "", "", b.replyTo(), p, p)
 		}},
-		{name: "bad_header replyTo metadata differs", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
-			other := newBuyer(t)
+		{name: "bad_header replyTo metadata differs", want: sealed.RejectBadHeader, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
+			other := newCaller(t)
 			return send("m1", "", "", other.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x")))
 		}},
-		{name: "not_a_recipient", want: sealed.RejectNotRecipient, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "not_a_recipient", want: sealed.RejectNotRecipient, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			hd := f.reqHeader(b, "", ctx, "m1", 0, 1)
 			hd.Kids = []string{tunnel.KeyID(stranger.Recipient().String())}
 			c, _ := hd.Canonical()
 			return send("m1", "", "", b.replyTo(), sealedPartJSON(rawSeal(t, f.node.Recipient(), c, "x")))
 		}},
-		{name: "replayed iat too old", want: sealed.RejectReplayed, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "replayed iat too old", want: sealed.RejectReplayed, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return one(f, b, func(h *sealed.Header) { h.IAT = f.now.Add(-DefaultMaxAge - time.Minute).Unix() })
 		}},
-		{name: "replayed iat in the future", want: sealed.RejectReplayed, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "replayed iat in the future", want: sealed.RejectReplayed, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return one(f, b, func(h *sealed.Header) { h.IAT = f.now.Add(301 * time.Second).Unix() })
 		}},
 		{name: "replayed replyTo of another job", want: sealed.RejectReplayed, pre: pre("0193c0de-0000-7000-8000-0000000000ff", ctx),
-			setup: func(f *fixture, b buyer) { opened(f, b, "up-1") },
-			body: func(f *fixture, b buyer) []byte {
+			setup: func(f *fixture, b caller) { opened(f, b, "up-1") },
+			body: func(f *fixture, b caller) []byte {
 				return send("again", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "again", 0, 1), "x")))
 			}},
 		{name: "replayed pair", want: sealed.RejectReplayed, pre: pre(task, ctx),
-			setup: func(f *fixture, b buyer) { opened(f, b, "up-1") },
-			body: func(f *fixture, b buyer) []byte {
+			setup: func(f *fixture, b caller) { opened(f, b, "up-1") },
+			body: func(f *fixture, b caller) []byte {
 				return send("first", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "first", 0, 1), "x")))
 			}},
-		{name: "wrong_context header", want: sealed.RejectWrongContext, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "wrong_context header", want: sealed.RejectWrongContext, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return one(f, b, func(h *sealed.Header) { h.ContextID = "another" })
 		}},
-		{name: "wrong_context message", want: sealed.RejectWrongContext, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "wrong_context message", want: sealed.RejectWrongContext, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return send("m1", "upstream-ctx-of-nobody", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x")))
 		}},
-		{name: "wrong_message", want: sealed.RejectWrongMessage, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "wrong_message", want: sealed.RejectWrongMessage, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return send("m2", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x")))
 		}},
-		{name: "wrong_task first message naming a task", want: sealed.RejectWrongTask, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "wrong_task first message naming a task", want: sealed.RejectWrongTask, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return send("m1", ctx, "up-9", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x")))
 		}},
 		{name: "wrong_job header task is not the preamble's (a follow-up sent into another job)", want: sealed.RejectWrongJob, pre: pre(task, ctx),
-			setup: func(f *fixture, b buyer) { opened(f, b, "up-1") },
-			body: func(f *fixture, b buyer) []byte {
+			setup: func(f *fixture, b caller) { opened(f, b, "up-1") },
+			body: func(f *fixture, b caller) []byte {
 				return send("m3", "upctx-1", "up-1", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "0193c0de-0000-7000-8000-0000000000aa", ctx, "m3", 0, 1), "x")))
 			}},
 		{name: "wrong_task follow-up naming another upstream task", want: sealed.RejectWrongTask, pre: pre(task, ctx),
-			setup: func(f *fixture, b buyer) { opened(f, b, "up-1") },
-			body: func(f *fixture, b buyer) []byte {
+			setup: func(f *fixture, b caller) { opened(f, b, "up-1") },
+			body: func(f *fixture, b caller) []byte {
 				return send("m3", "upctx-1", "up-2", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, task, ctx, "m3", 0, 1), "x")))
 			}},
-		{name: "wrong_job follow-up of another buyer", want: sealed.RejectWrongJob, pre: pre(task, ctx),
-			setup: func(f *fixture, b buyer) { opened(f, b, "up-1") },
-			body: func(f *fixture, b buyer) []byte {
-				other := newBuyer(t)
+		{name: "wrong_job follow-up of another caller", want: sealed.RejectWrongJob, pre: pre(task, ctx),
+			setup: func(f *fixture, b caller) { opened(f, b, "up-1") },
+			body: func(f *fixture, b caller) []byte {
+				other := newCaller(t)
 				return send("m3", "upctx-1", "up-1", other.replyTo(), sealedPartJSON(f.seal(f.reqHeader(other, task, ctx, "m3", 0, 1), "x")))
 			}},
-		{name: "wrong_job follow-up of no job", want: sealed.RejectWrongJob, pre: pre(task, ctx), body: func(f *fixture, b buyer) []byte {
+		{name: "wrong_job follow-up of no job", want: sealed.RejectWrongJob, pre: pre(task, ctx), body: func(f *fixture, b caller) []byte {
 			return send("m3", "upctx-1", "up-1", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, task, ctx, "m3", 0, 1), "x")))
 		}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t)
-			b := newBuyer(t)
+			b := newCaller(t)
 			if c.setup != nil {
 				c.setup(f, b)
 			}
@@ -422,7 +422,7 @@ func TestHostingRules(t *testing.T) {
 // A follow-up of the job is accepted, and a rotated key's old line still opens (tunnel.md §12's overlap).
 func TestHostingFollowUpAndOldKey(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-000000000003", "ctx-3"
 	body := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "hi")))
 	_, x, reason := f.request(pre(task, ctx), body)
@@ -450,7 +450,7 @@ func TestHostingFollowUpAndOldKey(t *testing.T) {
 // it is accepted. Once the service accepted it, the same request is a replay.
 func TestHostingNodeAnswerOpensNoJob(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-000000000004", "ctx-4"
 	body := send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x")))
 	_, x, reason := f.request(pre(task, ctx), body)
@@ -493,7 +493,7 @@ func TestHostingSealedRequired(t *testing.T) {
 // task is wrong_task, and a reply naming it on an unsealed exchange is refused before anything of it is forwarded.
 func TestHostingGuardsSealedJobs(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-000000000006", "ctx-6"
 	_, x, _ := f.request(pre(task, ctx), send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x"))))
 	readAll(t, f.answer(x, 200, taskAnswer("up-6", "upctx-6", "TASK_STATE_WORKING", "secret status", "")))
@@ -541,7 +541,7 @@ func TestRejectAnswer(t *testing.T) {
 // ciphertext the gate holds and seals only what grew, as the next chunk.
 func TestHostingArtifactChunks(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-000000000007", "ctx-7"
 	stream, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "SendStreamingMessage",
 		"params": map[string]any{"message": map[string]any{"messageId": "m1", "role": "ROLE_USER",
@@ -602,7 +602,7 @@ func TestHostingArtifactChunks(t *testing.T) {
 // A service reply that is not an A2A answer with exact keys is refused, and nothing of it is forwarded (D172).
 func TestHostingRefusesAmbiguousReply(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-000000000008", "ctx-8"
 	_, x, _ := f.request(pre(task, ctx), send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x"))))
 	resp := f.answer(x, 200, `{"jsonrpc":"2.0","id":7,"result":{"task":{"id":"u","contextId":"c","status":{"state":"TASK_STATE_COMPLETED",`+
@@ -616,7 +616,7 @@ func TestHostingRefusesAmbiguousReply(t *testing.T) {
 // Sweep drops a job 7 days after its last exchange, and the replay sets past max_age.
 func TestHostingSweep(t *testing.T) {
 	f := newFixture(t)
-	b := newBuyer(t)
+	b := newCaller(t)
 	const task, ctx = "0193c0de-0000-7000-8000-000000000009", "ctx-9"
 	_, x, _ := f.request(pre(task, ctx), send("m1", "", "", b.replyTo(), sealedPartJSON(f.seal(f.reqHeader(b, "", ctx, "m1", 0, 1), "x"))))
 	readAll(t, f.answer(x, 200, taskAnswer("up-9", "upctx-9", "TASK_STATE_COMPLETED", "ok", "")))

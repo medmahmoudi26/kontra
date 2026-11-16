@@ -34,8 +34,8 @@ import (
 )
 
 var (
-	buyerA = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
-	buyerB = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: store.ViaAPIKey}
+	callerA = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
+	callerB = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: store.ViaAPIKey}
 )
 
 const replica = "replica-test-1"
@@ -215,7 +215,7 @@ func callContext(o store.Owner, extra map[string][]string) map[string]any {
 	}
 	return map[string]any{"callContext": map[string]any{
 		"svcParams": params,
-		"user": map[string]any{"name": o.BuyerID.String(), "authenticated": true,
+		"user": map[string]any{"name": o.CallerID.String(), "authenticated": true,
 			"attributes": map[string]any{AttrPrincipal: o.Principal, AttrVia: o.Via}},
 		"protocolVersion": "1.0",
 	}}
@@ -516,16 +516,16 @@ func sanitizeCallContext(cc map[string]any) map[string]any {
 	return out
 }
 
-// principal is the edge's authenticated caller for buyer o.
+// principal is the edge's authenticated caller for caller o.
 func principal(o store.Owner) auth.Principal {
-	return auth.Principal{Kind: auth.KindKey, ID: o.Principal, BuyerID: o.BuyerID, Via: auth.Via(o.Via), Scopes: []auth.Scope{auth.ScopeHire}}
+	return auth.Principal{Kind: auth.KindKey, ID: o.Principal, CallerID: o.CallerID, Via: auth.Via(o.Via), Scopes: []auth.Scope{auth.ScopeCall}}
 }
 
 func asCaller(o store.Owner) context.Context {
 	return auth.WithPrincipal(context.Background(), principal(o))
 }
 
-// upstreamAgent is an in-process a2a-go v2.7.0 seller (local mode) behind a recording HTTP handler.
+// upstreamAgent is an in-process a2a-go v2.7.0 service (local mode) behind a recording HTTP handler.
 type upstreamAgent struct {
 	srv      *httptest.Server
 	mu       sync.Mutex

@@ -21,7 +21,7 @@ import (
 func TestList(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
+	ctx := asOwner(context.Background(), callerA)
 	base := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
 	at := func(i int) *time.Time { ts := base.Add(time.Duration(i) * time.Minute); return &ts }
 
@@ -33,7 +33,7 @@ func TestList(t *testing.T) {
 		if i%2 == 0 {
 			ctxID = "ctx-1"
 		}
-		task, _ := e.newTaskAt(e.svc, buyerA, ctxID, "q", at(m))
+		task, _ := e.newTaskAt(e.svc, callerA, ctxID, "q", at(m))
 		tasks = append(tasks, task)
 	}
 	// One of them completes later, with an artifact and a longer history.
@@ -43,10 +43,10 @@ func TestList(t *testing.T) {
 	fin := status(done, a2a.TaskStateCompleted, "ok")
 	fin.Status.Timestamp = at(9)
 	mustApply(t, ctx, s, done.ID, fin)
-	// Another buyer's tasks and A's task on another service are out of scope.
-	e.newTaskAt(e.svc, buyerB, "ctx-1", "theirs", at(8))
+	// Another caller's tasks and A's task on another service are out of scope.
+	e.newTaskAt(e.svc, callerB, "ctx-1", "theirs", at(8))
 	other := e.service("other", 60, 60)
-	e.newTaskAt(other, buyerA, "ctx-1", "elsewhere", at(8))
+	e.newTaskAt(other, callerA, "ctx-1", "elsewhere", at(8))
 
 	// The expected order: status time desc, then id desc.
 	type key struct {
@@ -198,7 +198,7 @@ func TestList(t *testing.T) {
 		t.Errorf("submitted filter: %d", submitted.TotalSize)
 	}
 
-	if _, err := s.List(asOwner(context.Background(), Owner{BuyerID: buyerA.BuyerID, Principal: "anonymous", Via: ViaAnonymous}),
+	if _, err := s.List(asOwner(context.Background(), Owner{CallerID: callerA.CallerID, Principal: "anonymous", Via: ViaAnonymous}),
 		&a2a.ListTasksRequest{}); !errors.Is(err, a2a.ErrUnsupportedOperation) {
 		t.Errorf("anonymous List: %v", err)
 	}
@@ -216,13 +216,13 @@ func ptr[T any](v T) *T { return &v }
 func TestListByteBudget(t *testing.T) {
 	e := newEnv(t)
 	s := e.store(nil)
-	ctx := asOwner(context.Background(), buyerA)
+	ctx := asOwner(context.Background(), callerA)
 	base := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
 	const partBytes = 3 << 20
 	var want []a2a.TaskID // newest first
 	for i := range 4 {
 		at := base.Add(time.Duration(i) * time.Minute)
-		task, _ := e.newTaskAt(e.svc, buyerA, "", "q", &at)
+		task, _ := e.newTaskAt(e.svc, callerA, "", "q", &at)
 		text := strings.Repeat("a", partBytes) // compresses to almost nothing on disk
 		if i%2 == 1 {
 			b := make([]byte, partBytes/2)
@@ -233,7 +233,7 @@ func TestListByteBudget(t *testing.T) {
 		want = append([]a2a.TaskID{task.ID}, want...)
 	}
 	oldest := base.Add(-time.Minute)
-	small, _ := e.newTaskAt(e.svc, buyerA, "", "q", &oldest) // the oldest, and small
+	small, _ := e.newTaskAt(e.svc, callerA, "", "q", &oldest) // the oldest, and small
 	want = append(want, small.ID)
 
 	walk := func(name string, req a2a.ListTasksRequest) [][]a2a.TaskID {

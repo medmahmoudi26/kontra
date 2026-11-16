@@ -61,7 +61,7 @@ func TestSealedMCPService(t *testing.T) {
 	})
 	r := e.replica("a", replicaOpts{})
 	e.node(r, node, "fs")
-	key, _ := e.apiKey("buyer")
+	key, _ := e.apiKey("caller")
 	c := newClient(t, key)
 	init := c.initialize(r.url + "/mcp/fs")
 	var res struct {

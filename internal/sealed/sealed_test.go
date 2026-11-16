@@ -77,7 +77,7 @@ func TestSealOpen(t *testing.T) {
 			ids = append(ids, newID(t))
 		}
 		h := requestHeader(t, kidsOf(ids...))
-		body := []byte("the buyer's secret \x00 with a NUL inside")
+		body := []byte("the caller's secret \x00 with a NUL inside")
 		ct, err := Seal(recipientsOf(ids...), h, body)
 		if err != nil {
 			t.Fatal(err)
@@ -221,7 +221,7 @@ func TestHeaderRefusals(t *testing.T) {
 }
 
 // TestInputRequestHeaders: D175's headers round-trip canonically: an input request the hosting node seals like a
-// reply, and the hiring node's answer, sealed like a request, with the same session, tool and messageId.
+// reply, and the calling node's answer, sealed like a request, with the same session, tool and messageId.
 func TestInputRequestHeaders(t *testing.T) {
 	hosting, perJob := newID(t), newID(t)
 	session := strings.Repeat("ab", 32)

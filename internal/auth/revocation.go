@@ -126,7 +126,7 @@ func (c *RevocationCache) Run(ctx context.Context) error {
 }
 
 // Subscribe calls fn with the id of each API key revocation the cache learns, from a NOTIFY or a re-read, once
-// per revocation while the cache holds it (spec/tunnel.md §12: the replica tells the tunnel sessions hiring with
+// per revocation while the cache holds it (spec/tunnel.md §12: the replica tells the tunnel sessions calling with
 // the key {"t": "auth_revoked"}). fn runs on the goroutine that learned it (the LISTEN connection's, or Run's)
 // and must not wait on the network or the database. Subscribe before Run.
 func (c *RevocationCache) Subscribe(fn func(id uuid.UUID)) {

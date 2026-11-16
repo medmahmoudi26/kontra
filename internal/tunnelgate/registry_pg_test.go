@@ -444,7 +444,7 @@ func readsGone(t *testing.T, br *bufio.Reader, d time.Duration) {
 	}
 }
 
-// Add inserts the tunnels row (§11) with services = the welcome's, hire_principal and cli_version; the
+// Add inserts the tunnels row (§11) with services = the welcome's, caller_principal and cli_version; the
 // session is then a candidate (Get). last_ping_at moves once per LastPingEvery, not per ping, although the
 // ping loop runs ten times as often. Session.Close deletes the row and closes the node's session.
 func TestRegistryRowsAndLastPing(t *testing.T) {
@@ -455,18 +455,18 @@ func TestRegistryRowsAndLastPing(t *testing.T) {
 	n := e.enrollNode(t, a, id, newAgent(), "hello", "recon")
 
 	var (
-		key, replica, hire, cli string
+		key, replica, call, cli string
 		services                []string
 		tid                     uuid.UUID
 	)
-	if err := e.pool.QueryRow(context.Background(), `select key_id, tenant_id, replica_id, services, hire_principal, cli_version
-		from kontra.tunnels where session_id = $1`, n.session).Scan(&key, &tid, &replica, &services, &hire, &cli); err != nil {
+	if err := e.pool.QueryRow(context.Background(), `select key_id, tenant_id, replica_id, services, caller_principal, cli_version
+		from kontra.tunnels where session_id = $1`, n.session).Scan(&key, &tid, &replica, &services, &call, &cli); err != nil {
 		t.Fatal(err)
 	}
 	slices.Sort(services)
 	if key != id.KeyID() || tid != e.team || replica != a.id || !slices.Equal(services, []string{"hello", "recon"}) ||
-		hire != "node:"+id.KeyID() || cli != newHello().Agent {
-		t.Fatalf("row: key %s tenant %s replica %s services %v hire %q cli %q", key, tid, replica, services, hire, cli)
+		call != "node:"+id.KeyID() || cli != newHello().Agent {
+		t.Fatalf("row: key %s tenant %s replica %s services %v call %q cli %q", key, tid, replica, services, call, cli)
 	}
 	s := a.held(t, n)
 	if got := s.Served(); !slices.Equal(got, []string{"hello", "recon"}) {
@@ -862,7 +862,7 @@ func TestBindingRevocation(t *testing.T) {
 	n := e.enrollNode(t, a, id, ag, "hello", "recon")
 	s := a.held(t, n)
 	for _, svc := range []string{"hello", "recon"} {
-		if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, buyer_id, principal, via,
+		if _, err := e.pool.Exec(ctx, `insert into kontra.mcp_sessions (client_sid_hash, tenant_id, service, caller_id, principal, via,
 			tunnel_session, replica_id, protocol_version) values (sha256($1::bytea), $2, $3, $2, 'key:x', 'api_key', $4, $5, '2025-11-25')`,
 			[]byte(svc), e.team, svc, n.session, a.id); err != nil {
 			t.Fatal(err)

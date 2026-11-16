@@ -22,7 +22,7 @@ import (
 	"kontra.sh/kontra/internal/tenant"
 )
 
-// localMCP posts one message to a hiring node's /mcp/{svc} as a stock client does (no credential: the node hires as
+// localMCP posts one message to a calling node's /mcp/{svc} as a stock client does (no credential: the node calls as
 // its session's principal) and returns the response, its body read unless it is an event stream.
 func localMCP(t *testing.T, endpoint, sid, body string) (*http.Response, string) {
 	t.Helper()
@@ -62,7 +62,7 @@ func lastData(t *testing.T, resp *http.Response, body string) string {
 	return last
 }
 
-// sealed_no_plaintext's MCP cases through a real gate (ext-sealed.md §2, §3, §9; D62, D175): between a hiring node and
+// sealed_no_plaintext's MCP cases through a real gate (ext-sealed.md §2, §3, §9; D62, D175): between a calling node and
 // a hosting node, a sealed plain tools/call and a sealed durable task whose upstream asks one elicitation answer the
 // local client in plaintext, and the server gets plaintext arguments and answers, while Postgres holds no plaintext
 // of arguments, content, elicitation params, answers or statusMessage.
@@ -105,21 +105,21 @@ func TestSealedMCPThroughTheGate(t *testing.T) {
 	}
 	host := startNode(t, t.TempDir(), "--gate", a.url, "--name", "host", "--serve", "mcp:web="+srv+"/mcp", "--enroll", token)
 	host.local(t)
-	key := e.mintKey("buyer")
-	hirerHome := t.TempDir()
-	hirer := startNode(t, hirerHome, "--gate", a.url, "--name", "hirer", "--api-key", key)
-	endpoint := hirer.local(t) + "/mcp/web"
+	key := e.mintKey("caller")
+	callingNodeHome := t.TempDir()
+	callingNode := startNode(t, callingNodeHome, "--gate", a.url, "--name", "caller", "--api-key", key)
+	endpoint := callingNode.local(t) + "/mcp/web"
 
 	var resp *http.Response
 	var body string
-	eventually(t, 20*time.Second, "an initialize through the hiring node with the sealed capability", func() bool {
+	eventually(t, 20*time.Second, "an initialize through the calling node with the sealed capability", func() bool {
 		resp, body = localMCP(t, endpoint, "", `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25",`+
 			`"capabilities":{"elicitation":{}},"clientInfo":{"name":"c","version":"1"}}}`)
 		body = lastData(t, resp, body)
 		return resp.StatusCode == 200 && strings.Contains(body, mcpwire.MetaSealed)
 	})
 	sid := resp.Header.Get(mcpwire.HeaderSessionID)
-	// The gate states the service's session_idle_s (D224), and the hiring node passes the result on as it came.
+	// The gate states the service's session_idle_s (D224), and the calling node passes the result on as it came.
 	if !strings.Contains(body, `"sh.kontra/session_idle_s":3600`) {
 		t.Fatalf("the initialize result does not state session_idle_s: %s", body)
 	}
@@ -134,9 +134,9 @@ func TestSealedMCPThroughTheGate(t *testing.T) {
 		t.Fatal("the server did not get the call")
 	}
 	// The session's per-job key is kept for the session_idle_s the gate stated (D224).
-	jobs, _ := filepath.Glob(filepath.Join(hirerHome, ".kontra", "jobs", "*", "mcp-*.json"))
+	jobs, _ := filepath.Glob(filepath.Join(callingNodeHome, ".kontra", "jobs", "*", "mcp-*.json"))
 	if len(jobs) != 1 {
-		t.Fatalf("the hiring node's session jobs: %v", jobs)
+		t.Fatalf("the calling node's session jobs: %v", jobs)
 	}
 	if b, err := os.ReadFile(jobs[0]); err != nil || !bytes.Contains(b, []byte(`"idle_s":3600`)) {
 		t.Fatalf("the session job does not keep the gate's session_idle_s: %s %v", b, err)
@@ -211,7 +211,7 @@ func TestSealedMCPThroughTheGate(t *testing.T) {
 			t.Fatalf("plaintext in Postgres: %s", q)
 		}
 	}
-	for _, l := range []string{host.logs.String(), hirer.logs.String()} {
+	for _, l := range []string{host.logs.String(), callingNode.logs.String()} {
 		if strings.Contains(l, "MARKER") {
 			t.Fatal("a plaintext reached a node's log")
 		}

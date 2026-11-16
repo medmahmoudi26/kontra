@@ -32,7 +32,7 @@ import (
 //
 // A key of an anonymous tenant, live or ended, is not rotated (spec/tunnel.md §6.1, §12; D304): enroll_invalid. A
 // rotation would admit the new key into the anonymous tenant through §5's rules, without the anonymous session's
-// decision (no welcome.anonymous, no end clock, the full hiring-stream cap) and without opening a tenant, so a chain of
+// decision (no welcome.anonymous, no end clock, the full calling-stream cap) and without opening a tenant, so a chain of
 // rotations would hold any number of sessions of one anonymous tenant at once, uncounted by §6.2. The node then sends
 // its hello again without rotate_from: with no credential it asks for an anonymous session of its own (D285), which
 // §6.2's limits count, and its tokens or an API key enroll the new key as for any new key.

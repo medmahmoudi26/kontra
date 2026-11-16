@@ -89,7 +89,7 @@ for f in list((ROOT / "spec").glob("*.md")) + list((ROOT / "migrations").glob("*
 for n in sorted(cited - entries, key=int):
     problems.append(f"D{n} is cited but has no entry in docs/decisions.md")
 
-# 5. relay.md §2.3's derived buyer ids (D319) are what Python's uuid.uuid5 computes from the names it writes: an
+# 5. relay.md §2.3's derived caller ids (D319) are what Python's uuid.uuid5 computes from the names it writes: an
 #    operator computes them in its own language.
 import uuid  # noqa: E402
 
@@ -103,15 +103,15 @@ def derive(kind, *parts):
 
 for what, value in [
     ("the namespace", NS),
-    ("the node buyer", derive("node", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa")),
-    ("the oidc buyer", derive("oidc", "https://api.kontra.sh", "alice")),
-    ("the team gate's anonymous buyer", derive("anonymous")),
-    ("a tenant's anonymous buyer", derive("anonymous", "01900000-0000-7000-8000-000000000001")),
+    ("the node caller", derive("node", "k1_aaaaaaaaaaaaaaaaaaaaaaaaaa")),
+    ("the oidc caller", derive("oidc", "https://api.kontra.sh", "alice")),
+    ("the team gate's anonymous caller", derive("anonymous")),
+    ("a tenant's anonymous caller", derive("anonymous", "01900000-0000-7000-8000-000000000001")),
 ]:
     if f"`{value}`" not in relay:
         problems.append(f"spec/relay.md §2.3: {what} is {value}, which it does not write")
 
-# 6. The A2UI example's fixtures (examples/sellers/a2ui/testdata) against the A2UI v0.9.1 schemas vendored beside them,
+# 6. The A2UI example's fixtures (examples/agents/a2ui/testdata) against the A2UI v0.9.1 schemas vendored beside them,
 #    each file pinned by SHA256SUMS: the agent's form and a renderer's action, a client's capabilities and the card's
 #    A2UI params. A file under invalid/ must not validate. The A2UI schemas name the catalog `catalog.json` relative to
 #    their $ids: the basic catalog is served under that name too, as A2UI's own test runner does. Formats are asserted,
@@ -119,7 +119,7 @@ for what, value in [
 #    only with rfc3339-validator installed (`make check-specs` installs it; without it, this fails).
 import hashlib  # noqa: E402
 
-A2UI = ROOT / "examples" / "sellers" / "a2ui" / "testdata"
+A2UI = ROOT / "examples" / "agents" / "a2ui" / "testdata"
 VENDORED = A2UI / "a2ui-v0.9.1"
 for line in (VENDORED / "SHA256SUMS").read_text().splitlines():
     digest, name = line.split(None, 1)

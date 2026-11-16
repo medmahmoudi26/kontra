@@ -91,7 +91,7 @@ func taskRequest() AdmitRequest {
 	return AdmitRequest{
 		Operation: OpTask, TaskID: "0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11",
 		Service:   Service{TenantID: "0199a3b2-0000-7000-8000-000000000001", Tenant: "default", Name: "hello", Kind: "a2a"},
-		Principal: Principal{Kind: "key", ID: "key:kk_test", BuyerID: "0199a3b2-0000-7000-8000-0000000000bb", Via: "api_key"},
+		Principal: Principal{Kind: "key", ID: "key:kk_test", CallerID: "0199a3b2-0000-7000-8000-0000000000bb", Via: "api_key"},
 		Protocol:  "a2a", ContextID: "ctx-1",
 		Message: &MessageInfo{MessageID: "m-1", Parts: []PartInfo{{MediaType: "text/plain", Size: 2}}},
 	}
@@ -126,7 +126,7 @@ func TestRemoteAdmissionDecisions(t *testing.T) {
 	svc, _ := sent["service"].(map[string]any)
 	pr, _ := sent["principal"].(map[string]any)
 	if sent["operation"] != "task" || sent["taskId"] != "0199a3b2-7c4e-7d10-8f00-2b9a6e1c0d11" || sent["protocol"] != "a2a" ||
-		svc["tenantId"] != "0199a3b2-0000-7000-8000-000000000001" || pr["buyerId"] != "0199a3b2-0000-7000-8000-0000000000bb" ||
+		svc["tenantId"] != "0199a3b2-0000-7000-8000-000000000001" || pr["callerId"] != "0199a3b2-0000-7000-8000-0000000000bb" ||
 		pr["via"] != "api_key" || sent["contextId"] != "ctx-1" {
 		t.Errorf("the hook was sent %s", got.body)
 	}

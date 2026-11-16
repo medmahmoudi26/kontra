@@ -36,15 +36,15 @@ const agentCard = `{"name":"echo","description":"echoes","version":"1.0.0",
 "supportedInterfaces":[{"url":"http://127.0.0.1:9999/rpc","protocolBinding":"JSONRPC","protocolVersion":"1.0"}],
 "capabilities":{"streaming":true},"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],"skills":[]}`
 
-// agentSeller is the node's agent, an a2a-go v2.7.0 seller: "hi" completes with Hello World; "ask" asks for
+// agentService is the node's agent, an a2a-go v2.7.0 service: "hi" completes with Hello World; "ask" asks for
 // input and completes with the answer; "slow" works until the test releases it (or a cancel).
-type agentSeller struct {
+type agentService struct {
 	mu      sync.Mutex
 	release map[string]chan struct{}
 	cancels int
 }
 
-func (s *agentSeller) gate(text string) chan struct{} {
+func (s *agentService) gate(text string) chan struct{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.release == nil {
@@ -56,7 +56,7 @@ func (s *agentSeller) gate(text string) chan struct{} {
 	return s.release[text]
 }
 
-func (s *agentSeller) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *agentService) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	return func(yield func(a2a.Event, error) bool) {
 		text := ec.Message.Parts[0].Text()
 		if ec.StoredTask != nil { // a follow-up of "ask"
@@ -85,7 +85,7 @@ func (s *agentSeller) Execute(ctx context.Context, ec *a2asrv.ExecutorContext) i
 	}
 }
 
-func (s *agentSeller) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
+func (s *agentService) Cancel(_ context.Context, ec *a2asrv.ExecutorContext) iter.Seq2[a2a.Event, error] {
 	s.mu.Lock()
 	s.cancels++
 	s.mu.Unlock()
@@ -125,7 +125,7 @@ func (n *agentNode) answerItself(method string, reason tunnel.NodeReason) {
 	n.itself[method] = reason
 }
 
-func dialAgentNode(t *testing.T, base string, id *nodekey.Identity, tokens []string, a *agentSeller) *agentNode {
+func dialAgentNode(t *testing.T, base string, id *nodekey.Identity, tokens []string, a *agentService) *agentNode {
 	t.Helper()
 	u, err := url.Parse(base)
 	if err != nil {
@@ -407,12 +407,12 @@ func TestDispatchThroughTheTunnel(t *testing.T) {
 		}
 		return []string{tok}
 	}
-	agent := &agentSeller{}
+	agent := &agentService{}
 	n1 := dialAgentNode(t, b.url, newNodeIdentity(t), token(), agent)
 	eventually(t, 15*time.Second, "the node's tunnels row on B", func() bool {
 		return scalar[int](t, e.pool, `select count(*) from kontra.tunnels where session_id = $1 and replica_id = $2`, n1.session, b.r.ID()) == 1
 	})
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	eventually(t, 15*time.Second, "A serves the card", func() bool {
 		status, _ := cardRoute(t, a.url, key, "echo")
 		return status == http.StatusOK

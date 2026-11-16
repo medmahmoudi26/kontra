@@ -21,15 +21,15 @@ import (
 	"kontra.sh/kontra/test/e2e/slowagent"
 )
 
-// card_passthrough (spec/relay.md §3, §16; D13, D166): an A2A seller whose card carries the seller's ES256
-// signature, behind a direct service configured with seller_keys holding that key, served by two replicas that
+// card_passthrough (spec/relay.md §3, §16; D13, D166): an A2A service whose card carries the service's ES256
+// signature, behind a direct service configured with service_keys holding that key, served by two replicas that
 // share one signing key. From either replica: the served card has exactly one signature, the gate's, which
 // a2a-go's verifier accepts through its jku (the public URL's JWKS); its protected header's kontra.upstream.sha256
 // is the SHA-256 of the upstream card's JCS, its url the upstream route, and verified is true; the upstream route
-// serves the seller's card byte for byte, its signature included; the seller's fields are byte-identical under JCS;
+// serves the service's card byte for byte, its signature included; the service's fields are byte-identical under JCS;
 // both replicas sign with the same key and publish the same JWKS.
 func TestCardPassthrough(t *testing.T) {
-	seller, err := jws.EphemeralKeySet()
+	service, err := jws.EphemeralKeySet()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestCardPassthrough(t *testing.T) {
 	)
 	sign := func(card []byte) []byte {
 		once.Do(func() {
-			sig, err := seller.Sign(card, "https://seller.example/.well-known/jwks.json", nil)
+			sig, err := service.Sign(card, "https://service.example/.well-known/jwks.json", nil)
 			if err != nil {
 				panic(err)
 			}
@@ -53,13 +53,13 @@ func TestCardPassthrough(t *testing.T) {
 		})
 		return signed
 	}
-	sellerJWKS, err := seller.JWKS()
+	serviceJWKS, err := service.JWKS()
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := start(t, Options{
-		Services:   map[string]slowagent.Config{"sold": {CardHook: sign}},
-		SellerKeys: map[string]string{"sold": string(sellerJWKS)},
+		Services:    map[string]slowagent.Config{"sold": {CardHook: sign}},
+		ServiceKeys: map[string]string{"sold": string(serviceJWKS)},
 	})
 	ctx := ctxFor(t, 3*time.Minute)
 	jku := h.Front.URL + jws.JWKSPath
@@ -98,10 +98,10 @@ func TestCardPassthrough(t *testing.T) {
 		}
 		kids = append(kids, header.Kid)
 		if up := getCard(t, ctx, g.Svc("sold")+"/.well-known/agent-card.upstream.json", h.APIKey); string(up) != string(signed) {
-			t.Fatalf("%s: the upstream card is not the seller's byte for byte:\n%s\n%s", g.Name, up, signed)
+			t.Fatalf("%s: the upstream card is not the service's byte for byte:\n%s\n%s", g.Name, up, signed)
 		}
 		if strip(t, served) != strip(t, signed) {
-			t.Fatalf("%s: the seller's fields differ under JCS:\n%s\n%s", g.Name, strip(t, served), strip(t, signed))
+			t.Fatalf("%s: the service's fields differ under JCS:\n%s\n%s", g.Name, strip(t, served), strip(t, signed))
 		}
 		b, st := getBody(ctx, g.URL+jws.JWKSPath, "")
 		if st != http.StatusOK {
@@ -118,7 +118,7 @@ func TestCardPassthrough(t *testing.T) {
 }
 
 // strip is the JCS of a card without the members the gate writes (its interfaces, security, capabilities and
-// signatures): the seller's fields.
+// signatures): the service's fields.
 func strip(t *testing.T, card []byte) string {
 	t.Helper()
 	m, err := strictjson.Members(card)

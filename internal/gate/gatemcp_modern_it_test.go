@@ -161,8 +161,8 @@ func (a rpcAnswer) resultType() string {
 	return r.ResultType
 }
 
-func (e *gateEnv) modernServices(kinds, paid *hireSeller, hookURL string) string {
-	return e.hireServices(kinds, `  paid:
+func (e *gateEnv) modernServices(kinds, paid *sendMessageService, hookURL string) string {
+	return e.sendMessageServices(kinds, `  paid:
     kind: a2a
     backend: { a2a: { url: "`+paid.srv.URL+`/base", allow_private: true } }
     allow: ["org:default"]
@@ -177,19 +177,19 @@ hooks:
 //
 //   - server/discover lists 2026-07-28, 2025-11-25 and 2025-06-18 and the tasks extension; the modern tools/list has
 //     no execution; both are byte-identical from either replica;
-//   - a hire declaring the tasks extension to a fast seller is answered in line (resultType complete); to a slow one
+//   - a send_message declaring the tasks extension to a fast service is answered in line (resultType complete); to a slow one
 //     with a CreateTaskResult (resultType task, pollIntervalMs 1000), whose tasks/get is the same from either replica,
-//     and whose tasks/cancel is acknowledged at once and cancels it within 10 s (the seller receives CancelTask);
-//   - the booking seller's question is input_required with exactly one inputRequests entry, k.<task>.<seq> of the event
+//     and whose tasks/cancel is acknowledged at once and cancels it within 10 s (the service receives CancelTask);
+//   - the booking service's question is input_required with exactly one inputRequests entry, k.<task>.<seq> of the event
 //     that asked; a wrong key is ignored; tasks/update answers it once and a second answer is ignored; the task
 //     completes with the first answer;
 //   - tasks/result and tasks/list are 404 with -32601; a _meta protocolVersion that differs from the header is 400 with
 //     -32020; tasks/get without the extension is 400 with -32021; a legacy request without a session is 400 with
-//     -32000 (rule 3's body); a hire without the extension is a plain call;
+//     -32000 (rule 3's body); a send_message without the extension is a plain call;
 //   - no modern request writes an mcp_sessions row (no virtual session), and /mcp writes no calls rows.
 func TestGateMCPModern(t *testing.T) {
 	e := newGateEnv(t)
-	kinds, paid := newHireSeller(t), newHireSeller(t)
+	kinds, paid := newSendMessageService(t), newSendMessageService(t)
 	hook := newHookServer(t)
 	hook.set(func(h *hookServer) { h.raw = `{"outcome":"allow"}` })
 	t.Setenv("KONTRA_TEST_ADMISSION_SECRET", "Hk4nW8qZ2xV6bM1tR9yL3pD7sF0gJ5cA")
@@ -198,7 +198,7 @@ func TestGateMCPModern(t *testing.T) {
 	timing.PlainWait = 4 * time.Second
 	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), timing)
 	b := e.start("b", e.replicaConfig(freePort(t), time.Minute, services), timing)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	ca := newModernClient(t, a.url, key, capsTasks)
 	cb := ca.on(b.url)
 
@@ -222,24 +222,24 @@ func TestGateMCPModern(t *testing.T) {
 		t.Errorf("server/discover: %s", ans.raw)
 	}
 	_, ans = cb.rpc("tools/list", "", "")
-	if strings.Contains(string(ans.Result), "execution") || !strings.Contains(string(ans.Result), `"name":"hire"`) ||
+	if strings.Contains(string(ans.Result), "execution") || !strings.Contains(string(ans.Result), `"name":"send_message"`) ||
 		!strings.Contains(string(ans.Result), `"cacheScope":"private"`) || ans.resultType() != "complete" {
 		t.Errorf("the modern tools/list: %s", ans.raw)
 	}
 
-	// A fast hire with the extension: in line.
-	_, ans = ca.call("hire", `{"service":"kinds","message":"hi"}`)
+	// A fast send_message with the extension: in line.
+	_, ans = ca.call("send_message", `{"service":"kinds","message":"hi"}`)
 	if r := ans.tool(t); r.IsError || r.text() != "Hello World" || r.Structured.State != "TASK_STATE_COMPLETED" || ans.resultType() != "complete" {
-		t.Fatalf("a fast modern hire: %s", ans.raw)
+		t.Fatalf("a fast modern send_message: %s", ans.raw)
 	}
 
 	// A slow one: CreateTaskResult; tasks/get the same on both replicas; tasks/cancel at once, canceled within 10 s.
 	began := time.Now()
-	_, ans = cb.call("hire", `{"service":"kinds","message":"slow"}`)
+	_, ans = cb.call("send_message", `{"service":"kinds","message":"slow"}`)
 	slow := ans.task(t)
 	if took := time.Since(began); slow.ResultType != "task" || slow.Status != "working" || slow.PollIntervalMs != 1000 || slow.TaskID == "" ||
 		slow.TTLMs == nil || took < 2*time.Second || took > 8*time.Second {
-		t.Fatalf("a slow modern hire after %v: %s", took, ans.raw)
+		t.Fatalf("a slow modern send_message after %v: %s", took, ans.raw)
 	}
 	_, getA := ca.rpc("tasks/get", slow.TaskID, `"taskId":"`+slow.TaskID+`"`)
 	_, getB := cb.rpc("tasks/get", slow.TaskID, `"taskId":"`+slow.TaskID+`"`)
@@ -254,19 +254,19 @@ func TestGateMCPModern(t *testing.T) {
 	eventually(t, 10*time.Second, "the cancelled task is canceled", func() bool {
 		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, slow.TaskID) == "canceled"
 	})
-	eventually(t, 10*time.Second, "the seller received CancelTask", func() bool { return kinds.count("CancelTask") >= 1 })
+	eventually(t, 10*time.Second, "the service received CancelTask", func() bool { return kinds.count("CancelTask") >= 1 })
 	_, ans = cb.rpc("tasks/get", slow.TaskID, `"taskId":"`+slow.TaskID+`"`)
 	if g := ans.task(t); g.Status != "cancelled" || g.Meta["sh.kontra/canceled"] != "client" {
 		t.Errorf("tasks/get of the cancelled task: %s", ans.raw)
 	}
 
-	if n := hook.count(); n != 2 { // the fast and the slow hire
+	if n := hook.count(); n != 2 { // the fast and the slow send_message
 		t.Errorf("Admission asked %d times, want 2", n)
 	}
 
-	// The booking seller's question, to a client declaring form elicitation.
+	// The booking service's question, to a client declaring form elicitation.
 	cf := ca.with(capsTasksForm)
-	_, ans = cf.call("hire", `{"service":"kinds","message":"ask"}`)
+	_, ans = cf.call("send_message", `{"service":"kinds","message":"ask"}`)
 	ask := ans.task(t)
 	eventually(t, 20*time.Second, "the question is asked", func() bool {
 		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, ask.TaskID) == "input-required"
@@ -319,7 +319,7 @@ func TestGateMCPModern(t *testing.T) {
 	}
 	time.Sleep(time.Second)
 	if turns := strings.Join(kinds.turnTexts(), ","); strings.Count(turns, "friday") != 1 || strings.Contains(turns, "saturday") || strings.Contains(turns, "monday") {
-		t.Errorf("the seller's turns %s: friday once, nothing else", turns)
+		t.Errorf("the service's turns %s: friday once, nothing else", turns)
 	}
 
 	// What the extension removes, header checks, and the legacy rule 3.
@@ -362,24 +362,24 @@ func TestGateMCPModern(t *testing.T) {
 		}
 	}
 
-	// A hire without the extension is a plain call: in line, and a slow one after the plain wait.
+	// A send_message without the extension is a plain call: in line, and a slow one after the plain wait.
 	plain := ca.with(`{}`)
-	_, ans = plain.call("hire", `{"service":"kinds","message":"hi"}`)
+	_, ans = plain.call("send_message", `{"service":"kinds","message":"hi"}`)
 	if r := ans.tool(t); r.IsError || r.text() != "Hello World" || ans.resultType() != "complete" || strings.Contains(string(ans.Result), `"resultType":"task"`) {
-		t.Errorf("a plain modern hire: %s", ans.raw)
+		t.Errorf("a plain modern send_message: %s", ans.raw)
 	}
 	began = time.Now()
-	_, ans = plain.call("hire", `{"service":"kinds","message":"slow"}`)
+	_, ans = plain.call("send_message", `{"service":"kinds","message":"slow"}`)
 	slowPlain := ans.tool(t)
 	if time.Since(began) < 3*time.Second || slowPlain.Structured.State != "TASK_STATE_WORKING" || !strings.Contains(slowPlain.text(), a.url+"/agents/kinds") {
-		t.Errorf("a slow plain modern hire after %v: %s", time.Since(began), ans.raw)
+		t.Errorf("a slow plain modern send_message after %v: %s", time.Since(began), ans.raw)
 	}
 	// Its client knows its id from the answer: tasks/cancel (declaring the extension) ends it.
 	_, ans = ca.rpc("tasks/cancel", slowPlain.Structured.TaskID, `"taskId":"`+slowPlain.Structured.TaskID+`"`)
 	if string(ans.Result) != `{"resultType":"complete"}` {
-		t.Errorf("tasks/cancel of the plain hire's task: %s", ans.raw)
+		t.Errorf("tasks/cancel of the plain send_message's task: %s", ans.raw)
 	}
-	eventually(t, 10*time.Second, "the plain hire's task is canceled", func() bool {
+	eventually(t, 10*time.Second, "the plain send_message's task is canceled", func() bool {
 		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, slowPlain.Structured.TaskID) == "canceled"
 	})
 	// A cancel of an ended task is acknowledged and changes nothing.
@@ -388,25 +388,25 @@ func TestGateMCPModern(t *testing.T) {
 		t.Errorf("tasks/cancel of a completed task: %s", ans.raw)
 	}
 
-	// No virtual session, no /mcp session, no calls rows; every task hire created is marked hired.
+	// No virtual session, no /mcp session, no calls rows; every task send_message created is marked sent_by_mcp.
 	if n := scalar[int64](t, e.pool, `select count(*) from kontra.mcp_sessions`); n != 0 {
 		t.Errorf("modern /mcp requests wrote %d mcp_sessions rows", n)
 	}
 	if n := scalar[int64](t, e.pool, `select count(*) from kontra.calls`); n != 0 {
 		t.Errorf("/mcp wrote %d calls rows", n)
 	}
-	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where not hired`); n != 0 {
-		t.Errorf("%d tasks hire created are not marked hired", n)
+	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where not sent_by_mcp`); n != 0 {
+		t.Errorf("%d tasks send_message created are not marked sent_by_mcp", n)
 	}
 }
 
-// A modern client that closes its response stream before its hire is answered has cancelled the request (2026-07-28
+// A modern client that closes its response stream before its send_message is answered has cancelled the request (2026-07-28
 // Streamable HTTP, "Cancellation"; §11.12 step 4, D178): it gets no answer, and the task it created ends canceled
-// within 10 s, the seller receiving CancelTask, whether it declared the tasks extension (the 2 s inline wait) or not
-// (the plain wait). A hire with an idempotencyKey is not cancelled (D338).
+// within 10 s, the service receiving CancelTask, whether it declared the tasks extension (the 2 s inline wait) or not
+// (the plain wait). A send_message with an idempotencyKey is not cancelled (D338).
 func TestGateMCPModernClientLeaves(t *testing.T) {
 	e := newGateEnv(t)
-	kinds, paid := newHireSeller(t), newHireSeller(t)
+	kinds, paid := newSendMessageService(t), newSendMessageService(t)
 	hook := newHookServer(t)
 	hook.set(func(h *hookServer) { h.raw = `{"outcome":"allow"}` })
 	t.Setenv("KONTRA_TEST_ADMISSION_SECRET", "Hk4nW8qZ2xV6bM1tR9yL3pD7sF0gJ5cA")
@@ -421,18 +421,18 @@ func TestGateMCPModernClientLeaves(t *testing.T) {
 	timing := fastTiming
 	timing.PlainWait = 10 * time.Second
 	a := e.start("a", e.replicaConfig(freePort(t), time.Minute, services), timing)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 
 	leave := func(c *modernClient, args string, after time.Duration) string {
 		t.Helper()
 		before := scalar[int64](t, e.pool, `select count(*) from kontra.tasks`)
 		ctx, cancel := context.WithTimeout(context.Background(), after)
 		defer cancel()
-		_, ans, err := c.post(ctx, "tools/call", "hire", c.body("tools/call", `"name":"hire","arguments":`+args), nil)
+		_, ans, err := c.post(ctx, "tools/call", "send_message", c.body("tools/call", `"name":"send_message","arguments":`+args), nil)
 		if err == nil {
 			t.Fatalf("the client that left got an answer: %s", ans.raw)
 		}
-		eventually(t, 10*time.Second, "the hire's task exists", func() bool {
+		eventually(t, 10*time.Second, "the send_message's task exists", func() bool {
 			return scalar[int64](t, e.pool, `select count(*) from kontra.tasks`) == before+1
 		})
 		return scalar[string](t, e.pool, `select id::text from kontra.tasks order by created_at desc limit 1`)
@@ -445,10 +445,10 @@ func TestGateMCPModernClientLeaves(t *testing.T) {
 			return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id) == "canceled"
 		})
 		t.Logf("canceled %v after the client left", time.Since(began))
-		eventually(t, 10*time.Second, "the seller received CancelTask", func() bool { return kinds.count("CancelTask") >= i+1 })
+		eventually(t, 10*time.Second, "the service received CancelTask", func() bool { return kinds.count("CancelTask") >= i+1 })
 	}
 
-	// A hire with an idempotencyKey whose client left is not cancelled (D338): the re-issued hire, with the same key,
+	// A send_message with an idempotencyKey whose client left is not cancelled (D338): the re-issued send_message, with the same key,
 	// answers the same task, still running; cancel ends it.
 	keyed := newModernClient(t, a.url, key, `{}`)
 	kargs := `{"service":"kinds","message":"slow","idempotencyKey":"leave-keyed"}`
@@ -458,47 +458,47 @@ func TestGateMCPModernClientLeaves(t *testing.T) {
 		t.Fatalf("the keyed task of a client that left is %s", st)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	_, reissued, err := keyed.post(ctx, "tools/call", "hire", keyed.body("tools/call", `"name":"hire","arguments":`+kargs), nil)
+	_, reissued, err := keyed.post(ctx, "tools/call", "send_message", keyed.body("tools/call", `"name":"send_message","arguments":`+kargs), nil)
 	cancel()
 	if err == nil {
-		t.Fatalf("the re-issued keyed hire answered before its wait: %s", reissued.raw)
+		t.Fatalf("the re-issued keyed send_message answered before its wait: %s", reissued.raw)
 	}
 	if n := scalar[int64](t, e.pool, `select count(*) from kontra.tasks where id::text <> $1 and first_message_id =
 		(select first_message_id from kontra.tasks where id::text = $1)`, kid); n != 0 {
-		t.Fatalf("the re-issued keyed hire made %d more tasks", n)
+		t.Fatalf("the re-issued keyed send_message made %d more tasks", n)
 	}
 	if st := scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, kid); st != "working" {
-		t.Fatalf("the keyed task after its re-issued hire left too: %s", st)
+		t.Fatalf("the keyed task after its re-issued send_message left too: %s", st)
 	}
 	if _, ans := keyed.call("cancel", `{"taskId":"`+kid+`"}`); !strings.Contains(string(ans.raw), "TASK_STATE_CANCELED") {
 		t.Fatalf("cancel of the keyed task: %s", ans.raw)
 	}
 
 	if hook.count() != 3 {
-		t.Errorf("Admission asked %d times, want 3 (the keyed hire's re-issue is a retry)", hook.count())
+		t.Errorf("Admission asked %d times, want 3 (the keyed send_message's re-issue is a retry)", hook.count())
 	}
 }
 
-// A drain that cuts a modern hire's wait (M4 WP-05 review; §12.5, D178): the replica's listener stops after its
-// workers drained, closing the stream of a modern plain hire whose task still runs; its client has left, so the task is
-// sent kontra.cancel, detached, and the drain awaits that cancel (gatemcp.HireTasks.Wait) before the replica closes its
+// A drain that cuts a modern send_message's wait (M4 WP-05 review; §12.5, D178): the replica's listener stops after its
+// workers drained, closing the stream of a modern plain send_message whose task still runs; its client has left, so the task is
+// sent kontra.cancel, detached, and the drain awaits that cancel (gatemcp.SendMessageTasks.Wait) before the replica closes its
 // Temporal client: when Run returns, the workflow has accepted it (another replica's kontra-lifecycle worker did; this
 // one's have stopped), so it is in the task's history and nothing of it hangs on the closed client. The task ends
-// canceled and the seller receives CancelTask.
-func TestGateMCPModernDrainCancelsTheTaskOfAHireItCut(t *testing.T) {
+// canceled and the service receives CancelTask.
+func TestGateMCPModernDrainCancelsTheTaskOfASendMessageItCut(t *testing.T) {
 	e := newGateEnv(t)
-	kinds := newHireSeller(t)
-	services := e.hireServices(kinds, "")
+	kinds := newSendMessageService(t)
+	services := e.sendMessageServices(kinds, "")
 	timing := fastTiming
 	timing.PlainWait = time.Minute
 	a := e.start("a", e.replicaConfig(freePort(t), 2*time.Second, services), timing)
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	c := newModernClient(t, a.url, key, `{}`)
 	answered := make(chan string, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		_, ans, err := c.post(ctx, "tools/call", "hire", c.body("tools/call", `"name":"hire","arguments":{"service":"kinds","message":"slow"}`), nil)
+		_, ans, err := c.post(ctx, "tools/call", "send_message", c.body("tools/call", `"name":"send_message","arguments":{"service":"kinds","message":"slow"}`), nil)
 		if err != nil {
 			answered <- ""
 			return
@@ -506,11 +506,11 @@ func TestGateMCPModernDrainCancelsTheTaskOfAHireItCut(t *testing.T) {
 		answered <- string(ans.raw)
 	}()
 	var id string
-	eventually(t, 20*time.Second, "the hire's task runs on a", func() bool {
-		if scalar[int64](t, e.pool, `select count(*) from kontra.tasks where hired`) != 1 {
+	eventually(t, 20*time.Second, "the send_message's task runs on a", func() bool {
+		if scalar[int64](t, e.pool, `select count(*) from kontra.tasks where sent_by_mcp`) != 1 {
 			return false
 		}
-		id = scalar[string](t, e.pool, `select id::text from kontra.tasks where hired`)
+		id = scalar[string](t, e.pool, `select id::text from kontra.tasks where sent_by_mcp`)
 		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id) == "working" &&
 			attemptReplica(t, e.pool, a2a.TaskID(id)) == a.r.ID()
 	})
@@ -528,12 +528,12 @@ func TestGateMCPModernDrainCancelsTheTaskOfAHireItCut(t *testing.T) {
 			t.Fatalf("the client whose stream the drain closed got an answer: %s", raw)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("the hire's stream is still open after the drain")
+		t.Fatal("the send_message's stream is still open after the drain")
 	}
-	eventually(t, 15*time.Second, "the task of the hire the drain cut is canceled", func() bool {
+	eventually(t, 15*time.Second, "the task of the send_message the drain cut is canceled", func() bool {
 		return scalar[string](t, e.pool, `select state from kontra.tasks where id = $1`, id) == "canceled"
 	})
-	eventually(t, 15*time.Second, "the seller received CancelTask", func() bool { return kinds.count("CancelTask") >= 1 })
+	eventually(t, 15*time.Second, "the service received CancelTask", func() bool { return kinds.count("CancelTask") >= 1 })
 }
 
 // cancelAccepted reports whether the task's workflow history holds an accepted kontra.cancel Update.

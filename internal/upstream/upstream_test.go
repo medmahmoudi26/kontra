@@ -43,7 +43,7 @@ func TestNewDirect(t *testing.T) {
 	if d.hostPort != "example.com:9999" {
 		t.Errorf("pinned host:port %s", d.hostPort)
 	}
-	if d2 := direct(t, "https://seller.example"); d2.hostPort != "seller.example:443" {
+	if d2 := direct(t, "https://service.example"); d2.hostPort != "service.example:443" {
 		t.Errorf("default https port: %s", d2.hostPort)
 	}
 	for _, bad := range []string{
@@ -54,7 +54,7 @@ func TestNewDirect(t *testing.T) {
 		}
 	}
 	// http:// needs allow_private (D67).
-	if _, err := NewDirect("http://seller.example/", false); !errors.Is(err, ssrf.ErrScheme) {
+	if _, err := NewDirect("http://service.example/", false); !errors.Is(err, ssrf.ErrScheme) {
 		t.Errorf("http without allow_private: %v", err)
 	}
 }
@@ -323,7 +323,7 @@ func TestClassify(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 		case "/rpcerr":
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `{"jsonrpc":"2.0","id":"1","error":{"code":-32602,"message":"bad thing from the seller"}}`)
+			io.WriteString(w, `{"jsonrpc":"2.0","id":"1","error":{"code":-32602,"message":"bad thing from the service"}}`)
 		case "/garbage":
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, `{"jsonrpc":`)
@@ -354,7 +354,7 @@ func TestClassify(t *testing.T) {
 		{srv.URL + "/503", Unreachable, 0, "503"},
 		{srv.URL + "/429", Throttled, 7 * time.Second, "429"},
 		{srv.URL + "/400", Protocol, 0, "400"},
-		{srv.URL + "/rpcerr", Protocol, 0, "bad thing from the seller"},
+		{srv.URL + "/rpcerr", Protocol, 0, "bad thing from the service"},
 		{srv.URL + "/garbage", Protocol, 0, "malformed"},
 	} {
 		ctx, err, ex := send(tc.base)

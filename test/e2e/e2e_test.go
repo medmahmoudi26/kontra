@@ -112,7 +112,7 @@ func checkStrictlyIncreasing(t *testing.T, what string, seqs []int64) {
 	}
 }
 
-// checkCarried fails unless the ids a buyer received are exactly the log's carried seqs: in order, no gap,
+// checkCarried fails unless the ids a caller received are exactly the log's carried seqs: in order, no gap,
 // no duplicate.
 func checkCarried(t *testing.T, h *Harness, taskID a2a.TaskID, got []int64) {
 	t.Helper()
@@ -120,19 +120,19 @@ func checkCarried(t *testing.T, h *Harness, taskID a2a.TaskID, got []int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkStrictlyIncreasing(t, "the buyer's ids", got)
+	checkStrictlyIncreasing(t, "the caller's ids", got)
 	// A new task's stream leads with the snapshot at its exposure, with that seq as its id (D362): the rows before it
 	// are in that snapshot, not sent one by one.
 	for len(got) > 0 && len(want) > 0 && want[0] < got[0] {
 		want = want[1:]
 	}
 	if !slices.Equal(got, want) {
-		t.Fatalf("the buyer's ids are not the log's carried seqs:\n got %v\nwant %v", got, want)
+		t.Fatalf("the caller's ids are not the log's carried seqs:\n got %v\nwant %v", got, want)
 	}
 }
 
-// taskOfMessage is the gate's record of a buyer's message, by its messageId: a new message's stream sends nothing
-// until the seller's first answer (D362), so a test that acts before that answer finds the record here.
+// taskOfMessage is the gate's record of a caller's message, by its messageId: a new message's stream sends nothing
+// until the service's first answer (D362), so a test that acts before that answer finds the record here.
 func taskOfMessage(t *testing.T, ctx context.Context, h *Harness, messageID string) a2a.TaskID {
 	t.Helper()
 	var id string
@@ -152,7 +152,7 @@ func canonical(t *testing.T, task *a2a.Task) string {
 	return string(b)
 }
 
-// fold is the buyer's own fold of the events it received (a2a-go's update rules): the first must be the
+// fold is the caller's own fold of the events it received (a2a-go's update rules): the first must be the
 // task.
 func fold(evs []Event) (*a2a.Task, error) {
 	if len(evs) == 0 {

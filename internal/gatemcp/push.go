@@ -11,7 +11,7 @@ import (
 )
 
 // PushConfigs is the store of the A2A push configs (*push.ConfigStore, spec §10.1), which the push tools of /mcp set,
-// list and delete for the principal's hire tasks (D337): the same rows, limits and rules as the A2A methods, the URL
+// list and delete for the principal's send_message tasks (D337): the same rows, limits and rules as the A2A methods, the URL
 // checked at set time (§10.3), and a config of a task that has ended stored and delivering nothing (D111). Delivery
 // stays the lifecycle's (§10.2): /mcp delivers nothing itself.
 type PushConfigs interface {
@@ -43,7 +43,7 @@ func pushEntry(c *a2a.PushConfig) PushEntry {
 	return e
 }
 
-// pushTool answers push_set, push_list and push_delete (§12.2, D337) for a hire task of the principal (the tools'
+// pushTool answers push_set, push_list and push_delete (§12.2, D337) for a send_message task of the principal (the tools'
 // scoping; anything else is UnknownTask): the A2A push config methods' store with the principal on the context, as the
 // A2A route calls it; an A2A refusal (a URL §10.3 refuses, a limit of §10.1, an invalid header value) is isError with
 // its message, and nothing is stored.

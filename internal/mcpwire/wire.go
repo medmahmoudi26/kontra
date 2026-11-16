@@ -75,7 +75,7 @@ const (
 	// the gate's own /mcp writes it, M4 WP-05).
 	MetaServerInfo = "io.modelcontextprotocol/serverInfo"
 	// MetaSessionIdle is the initialize result's _meta key in which the gate states the service's session_idle_s,
-	// the seconds an idle session is kept (spec/relay.md §11.2, D224): a hiring node keeps a sealed session's key
+	// the seconds an idle session is kept (spec/relay.md §11.2, D224): a calling node keeps a sealed session's key
 	// that long.
 	MetaSessionIdle = KontraPrefix + "session_idle_s"
 )

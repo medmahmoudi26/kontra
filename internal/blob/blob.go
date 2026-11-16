@@ -13,7 +13,7 @@
 // AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. An object's key is <prefix>/<tenant>/<task>/<ref>; retention
 // deletes a task's objects, by prefix, before its rows (spec/relay.md §5.4). A blob stream's ref is resolved
 // through the blobs table and checked against the session asking: a task one of its attempts serves, or a task
-// its hiring principal's buyer owns.
+// its calling principal's caller owns.
 //
 // The scheme is reserved (D181): a url part starting with kontra-blob: is refused from a caller (InvalidRequest)
 // and from a service (upstream_error), and every rendering resolves a ref through the blobs table for the task

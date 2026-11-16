@@ -108,7 +108,7 @@ services:
 			return scalar[string](t, e.pool, `select coalesce(peer_addr, '') from kontra.gate_replicas where replica_id = $1`, run.r.ID()) == run.r.PeerAddr()
 		})
 	}
-	key := e.mintKey("buyer")
+	key := e.mintKey("caller")
 	init := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{}}}`
 
 	// The direct service, from either replica.

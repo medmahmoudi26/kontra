@@ -26,7 +26,7 @@ import (
 // opens it, checks it and forwards the plaintext arguments. The job is the client's gate session (the preamble's
 // mcp_session, the session hash): its plain calls, and the tasks they create, whose upstream taskId is bound to it.
 // SPEC-CONFLICT (D218; ext-sealed.md §5 "Hosting node"): §5 keys a job "by the gate task id; for plain MCP calls, by
-// the session hash", while rule 4 holds one replyTo and rk per session and the hiring node keeps one per-job key per
+// the session hash", while rule 4 holds one replyTo and rk per session and the calling node keeps one per-job key per
 // MCP session, its plain calls and the tasks created in it (§4). The closest faithful behaviour: a durable task is
 // kept inside its session's job, with its gate task id and its input requests, so both keys find it.
 // The call's CallToolResult, and a bound task's tasks/result, are sealed into one kontra:sealed resource; a bound
@@ -264,9 +264,9 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 		_, opening := x.h.inFlight(jobKey)
 		_, held := x.sessionOwner(svc)
 		if job != nil || opening && x.jobID != "" || held {
-			// A sealed session is the hiring node's, which seals every call on it: an unsealed call is the gate's own,
-			// made in the upstream session the buyer's sealed calls set up (a login, an opened document), and its result
-			// would reach the gate in plaintext (§7, "cannot continue another buyer's job"; security review). An upstream
+			// A sealed session is the calling node's, which seals every call on it: an unsealed call is the gate's own,
+			// made in the upstream session the caller's sealed calls set up (a login, an opened document), and its result
+			// would reach the gate in plaintext (§7, "cannot continue another caller's job"; security review). An upstream
 			// session a sealed job held stays so after the job is swept, until the server says it is gone (D255).
 			return nil, reject(sealed.RejectBadHeader, "an unsealed tools/call on a session with a sealed job")
 		}
@@ -293,7 +293,7 @@ func (x *MCPExchange) toolsCall(svc *serviceState, job *jobState, body []byte, m
 	idStr := mcpID(m.ID)
 	switch {
 	case hd.Op != sealed.OpCall:
-		// D239: the buyer's sealed answer to an input request (server id N) sent as a tools/call with id N would run the
+		// D239: the caller's sealed answer to an input request (server id N) sent as a tools/call with id N would run the
 		// tool with the answer as its arguments.
 		return nil, reject(sealed.RejectWrongMessage, "the header is not a tools/call's (op)")
 	case hd.Tool != name || name == "":
@@ -523,7 +523,7 @@ func (x *MCPExchange) answer(svc *serviceState, job *jobState, body []byte, m *m
 // declined is a client's error answer to a sealed input request (a user who rejects a sampling request, a client
 // with no handler: MCP answers either with an error): it reaches the server with its code and fixed text, on an
 // exchange of the input request's session and task only and once, as a sealed answer would (D246). An error carries
-// no answer: the gate can deny the buyer's input request with one, as it can drop the request, never answer it.
+// no answer: the gate can deny the caller's input request with one, as it can drop the request, never answer it.
 func (x *MCPExchange) declined(ij *jobState, in *InputRequest, ikey string, body []byte, m *mcpwire.Message) ([]byte, error) {
 	switch {
 	case ij.ID != x.jobID || in.Gate != x.pre.Task:
@@ -552,7 +552,7 @@ func (x *MCPExchange) declined(ij *jobState, in *InputRequest, ikey string, body
 // SPEC-CONFLICT (D218; ext-sealed.md §3's table, MCP request column: taskId "—"; rule 4b): an answer to an input
 // request binds session, tool and messageId, and every durable task of a session has its own upstream session
 // (relay.md §11.5, D22), whose request ids start again, so one answer would match the request of another task of
-// the same tool: a gate could deliver the buyer's answer to one task's question as the answer to another's. The
+// the same tool: a gate could deliver the caller's answer to one task's question as the answer to another's. The
 // closest faithful behaviour, as the input request's own header already does (sealInput): the answer carries the
 // gate task id of the input request it answers (its header's taskId, "" when that had none), and the node requires
 // it; a tools/call still carries none.
@@ -1274,7 +1274,7 @@ func (x *MCPExchange) sealInput(svc *serviceState, job *jobState, in *InputReque
 	msgID := mcpID(m.ID)
 	// SPEC-CONFLICT (D218; ext-sealed.md §3's table): the MCP reply column names taskId only "for a durable task's
 	// result", and an input request is "sealed like a reply" with session, tool and messageId. The closest faithful
-	// header: a durable task's input request carries its gate task id too (as its result does), so that the hiring
+	// header: a durable task's input request carries its gate task id too (as its result does), so that the calling
 	// node can tell an input request replayed from another task of the same session and tool (rule 4, which it then
 	// checks), and its answer names it back (mcpRule1); a passthrough task's, or a plain call's, carries none.
 	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirReply, Service: x.h.servicePath(x.name), TaskID: in.Gate,

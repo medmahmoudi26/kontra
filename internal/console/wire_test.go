@@ -140,12 +140,12 @@ func TestContexts(t *testing.T) {
 		if len(list) != 1 || list[0]["context_id"] != "ctx-g" || list[0]["tasks"] != float64(2) {
 			t.Fatalf("%s: %v", base, list)
 		}
-		one := e.json("GET", fmt.Sprintf("%s/hello/%s/ctx-g", base, e.buyer), "", 200)
+		one := e.json("GET", fmt.Sprintf("%s/hello/%s/ctx-g", base, e.caller), "", 200)
 		if len(one["tasks"].([]any)) != 2 {
 			t.Errorf("%s one: %v", base, one)
 		}
 	}
-	tl := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/ctx-g/timeline", e.buyer), "", 200)
+	tl := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/ctx-g/timeline", e.caller), "", 200)
 	if tl["principal"] != "anonymous" { // the console labels the context's items by this name
 		t.Errorf("timeline principal %v", tl["principal"])
 	}
@@ -165,10 +165,10 @@ func TestContexts(t *testing.T) {
 	}
 	// Sent by the caller: assigned false.
 	e.taskWith("completed", "x", "mine", false, &store.Origin{Actor: "caller", Type: "SendMessage", ContextAssigned: &no})
-	if op := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/mine/timeline", e.buyer), "", 200)["opening"].(map[string]any); op["assigned"] != false {
+	if op := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/mine/timeline", e.caller), "", 200)["opening"].(map[string]any); op["assigned"] != false {
 		t.Errorf("caller's context: %v", op)
 	}
-	e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/nope/timeline", e.buyer), "", 404)
+	e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/nope/timeline", e.caller), "", 404)
 }
 
 // 6.3: the exchanges list filters by leg and context; one exchange with its bodies (validated), its frames, or none.
@@ -279,7 +279,7 @@ func TestMessageOnlyInteraction(t *testing.T) {
 			t.Fatal("the Tasks list shows a message-only interaction")
 		}
 	}
-	tl := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/c9/timeline", e.buyer), "", 200)
+	tl := e.json("GET", fmt.Sprintf("/v1/contexts/hello/%s/c9/timeline", e.caller), "", 200)
 	if ids, _ := tl["task_ids"].([]any); len(ids) != 0 {
 		t.Errorf("the context's tasks %v, want none", ids)
 	}

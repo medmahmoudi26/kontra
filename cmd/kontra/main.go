@@ -1,7 +1,7 @@
 // Command kontra is the node CLI: connect, login, seal, publish (note 2 §1; there is no local console, D164).
 //
 //	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
-//	               [--listen 127.0.0.1:7777] … (M2, M3; spec/tunnel.md; internal/node, internal/hiring,
+//	               [--listen 127.0.0.1:7777] … (M2, M3; spec/tunnel.md; internal/node, internal/calling,
 //	               internal/stdiobridge)
 //	kontra seal --service <service URL> [--api-key <key>] [--context <id>] [--task <id>] [file | -],
 //	kontra seal --open <part.json>
@@ -46,10 +46,10 @@ const usage = `usage:
   kontra publish [--gate <url>] [--control-plane <url>] [--version <n> | --replace] [--dry-run] [--no-browser] <listing.yaml>
   kontra version
 
-kontra connect hosts the services on this machine at a gate, and lets local clients hire the gate's services,
+kontra connect hosts the services on this machine at a gate, and lets local clients call the gate's services,
 through one outbound connection (spec/tunnel.md):
   --gate URL                 the gate's public URL (default https://gateway.kontra.sh); https:// except on localhost
-  --serve a2a:NAME=URL       an A2A agent to host, at its root URL; repeatable; none: hire only
+  --serve a2a:NAME=URL       an A2A agent to host, at its root URL; repeatable; none: call only
   --serve mcp:NAME=URL       an MCP server (Streamable HTTP) to host, at its endpoint URL, e.g. http://127.0.0.1:3001/mcp
   --serve 'mcp:NAME=stdio:CMD'
                              an MCP server over stdio: CMD is one argument (quote it), split into words and run without
@@ -67,23 +67,23 @@ through one outbound connection (spec/tunnel.md):
                              (Network, Add a node / Add a service), or kontra-gate enroll <service> on a self-hosted
                              gate; repeatable. It binds this node's key to the services it names; to add a service,
                              pass a token naming it and keep every --serve (the key keeps the others)
-  --api-key KEY|@FILE|-      an API key for this gate (kk_…): who this node hires as (else node:<key id>); a node that
-                             only hires is admitted on it, and only while it is valid. Never a Cloud account key
+  --api-key KEY|@FILE|-      an API key for this gate (kk_…): who this node calls as (else node:<key id>); a node that
+                             only calls is admitted on it, and only while it is valid. Never a Cloud account key
                              (kontra_sk_…), which is for Cloud's control plane
   --name NAME                the node's name in the operator's view (default the hostname)
   --rotate                   rotate the identity key (the old one stays decrypt-only for 24 h)
   --require-channel-binding  refuse a gate that offers no TLS channel binding
   --max-inflight N           requests in flight per session (default 64)
-  --listen ADDR|off          where local clients hire through the gate (default 127.0.0.1:7777): /agents/…, /mcp/…,
-                             /mcp and /.well-known/… are forwarded with this node's principal; off: no hiring, for a
+  --listen ADDR|off          where local clients call through the gate (default 127.0.0.1:7777): /agents/…, /mcp/…,
+                             /mcp and /.well-known/… are forwarded with this node's principal; off: no calling, for a
                              node that only hosts
   --local-token FILE         a token every local request must carry (Authorization: Bearer); required off loopback
   --allow-origin ORIGIN      a browser Origin allowed to call --listen; repeatable (default none)
   --sealed-max-age DURATION  how old a sealed request may be when it reaches a hosted service (default 25h; at least
                              the service's task.timeout, with margin)
   --sealed-required NAME     refuse an unsealed request to the hosted service NAME; repeatable
-  --pin-recipients           refuse any new recipient or seller key of a sealed service this node hires
-  --accept-change NAME       accept the recipient or seller key change a pin refused for service NAME, the one
+  --pin-recipients           refuse any new recipient or service key of a sealed service this node calls
+  --accept-change NAME       accept the recipient or service key change a pin refused for service NAME, the one
                              pending when this run first checks it (not a later one); repeatable
   --public NAME              on an anonymous session, let anyone call the hosted service NAME (no credential); repeatable
   --log json                 JSON logs on stderr (default text)
@@ -91,8 +91,8 @@ Credentials are kept per gate in ~/.kontra/credentials (0600) and sent to that g
 the gate and is given neither --enroll nor --api-key asks for an anonymous session, which a gate that opens them
 (Cloud's public gate) gives under an anon-<…> tenant for a limited time (spec/tunnel.md §6): kontra connect prints its
 URLs and when it ends, and exits 1 saying the anonymous session expired when it does. Sealed services
-(spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, a hired job's key under ~/.kontra/jobs,
-and the pins in ~/.kontra/pins; recipient key ids and seller key thumbprints (kid:<kid> for a seller signature that
+(spec/ext-sealed.md): a hosted job's state is kept under ~/.kontra/hosted, the key of a job this node calls under ~/.kontra/jobs,
+and the pins in ~/.kontra/pins; recipient key ids and service key thumbprints (kid:<kid> for a service signature that
 names its key only, D223) are printed on stderr on a first sight and on every change.
 
 kontra seal seals a file for a sealed service without a node (the escape hatch for scripting, ext-sealed.md §5.1):
@@ -103,7 +103,7 @@ follow-up of that task with its job's key. --api-key KEY|@FILE (never read from 
 the card answered 404 without it, never on the gate's key set.
 
 kontra login gets an API key for a gate (default https://gateway.kontra.sh) from the gate's sign-in and keeps it in
-~/.kontra/credentials for that gate only; kontra connect then hires as it, and an anonymous session's next handshake
+~/.kontra/credentials for that gate only; kontra connect then calls as it, and an anonymous session's next handshake
 with it becomes the account's (spec/tunnel.md §6.3). --no-browser prints the sign-in URL instead of opening it.
 
 kontra publish sends a listing file for an A2A agent (spec/schema/listing.json: visibility, sealing, task timeout; no

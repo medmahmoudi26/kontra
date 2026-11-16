@@ -112,7 +112,7 @@ func TestLocalProfile(t *testing.T) {
 	}
 
 	for _, key := range []string{"", "kk_bogus_00000000"} {
-		c := (&Buyer{Key: key}).Client(t, g, "hello")
+		c := (&Caller{Key: key}).Client(t, g, "hello")
 		res, err := c.SendMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("hi from a stock client"))})
 		if err != nil {
 			t.Fatalf("key %q: SendMessage: %v", key, err)
@@ -176,7 +176,7 @@ func TestLocalProfile(t *testing.T) {
 	if err := h.Pool.QueryRow(ctx, `select disabled_at is not null from kontra.services where name = 'hello'`).Scan(&disabled); err != nil || disabled {
 		t.Fatalf("hello after the node left: disabled %v (%v)", disabled, err)
 	}
-	c := (&Buyer{}).Client(t, g, "hello")
+	c := (&Caller{}).Client(t, g, "hello")
 	res, err := c.SendMessage(ctx, &a2a.SendMessageRequest{Message: a2a.NewMessage(a2a.MessageRoleUser, a2a.NewTextPart("anyone there?"))})
 	if err != nil {
 		t.Fatalf("SendMessage with no node: %v", err)

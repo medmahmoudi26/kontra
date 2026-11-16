@@ -29,9 +29,9 @@ import (
 )
 
 var (
-	buyerA = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
-	buyerB = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: store.ViaAPIKey}
-	anon   = store.Owner{BuyerID: uuid.MustParse("0192f0b4-0000-7000-8000-0000000000ff"), Principal: "anonymous", Via: store.ViaAnonymous}
+	callerA = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000a"), Principal: "key:kk_a_00000001", Via: store.ViaAPIKey}
+	callerB = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-00000000000b"), Principal: "key:kk_b_00000001", Via: store.ViaAPIKey}
+	anon    = store.Owner{CallerID: uuid.MustParse("0192f0b4-0000-7000-8000-0000000000ff"), Principal: "anonymous", Via: store.ViaAnonymous}
 )
 
 // Secrets the credential tests look for in logs, errors, columns and Temporal history.

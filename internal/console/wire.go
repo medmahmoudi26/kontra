@@ -350,10 +350,10 @@ func (c *Console) taskTimeline(w http.ResponseWriter, r *http.Request) {
 }
 
 // contextTasks are a context's task ids, oldest first.
-func (c *Console) contextTasks(ctx context.Context, service string, buyer uuid.UUID, contextID string) ([]uuid.UUID, error) {
+func (c *Console) contextTasks(ctx context.Context, service string, caller uuid.UUID, contextID string) ([]uuid.UUID, error) {
 	rows, err := c.d.DB.Query(ctx, `select t.id from kontra.tasks t
 		where t.tenant_id = (select id from kontra.tenants where slug = 'default') -- tasks_by_context
-		  and t.service = $1 and t.buyer_id = $2 and t.context_id = $3 order by t.id limit 1000`, service, buyer, contextID)
+		  and t.service = $1 and t.caller_id = $2 and t.context_id = $3 order by t.id limit 1000`, service, caller, contextID)
 	if err != nil {
 		return nil, err
 	}
@@ -364,13 +364,13 @@ func (c *Console) contextTasks(ctx context.Context, service string, buyer uuid.U
 func (c *Console) contextTimeline(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := readCtx(r)
 	defer cancel()
-	buyer, err := uuid.Parse(r.PathValue("caller"))
+	caller, err := uuid.Parse(r.PathValue("caller"))
 	if err != nil {
 		c.answer(w, r, nil, fail(http.StatusNotFound, "conversation_not_found", "no such context"))
 		return
 	}
 	contextID := r.PathValue("context")
-	tasks, err := c.contextTasks(ctx, r.PathValue("service"), buyer, contextID)
+	tasks, err := c.contextTasks(ctx, r.PathValue("service"), caller, contextID)
 	if err != nil {
 		c.answer(w, r, nil, err)
 		return
@@ -420,7 +420,7 @@ func (c *Console) contextTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 		cc.TaskIDs = kept
 	}
-	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": buyer.String(), "principal": principal, "context_id": contextID,
+	c.answer(w, r, map[string]any{"service": r.PathValue("service"), "caller": caller.String(), "principal": principal, "context_id": contextID,
 		"task_ids": ids, "opening": op, "callee_contexts": callee, "items": items, "more": more}, nil)
 }
 
@@ -570,7 +570,7 @@ var errNoExchange = fail(http.StatusNotFound, "exchange_not_found", "no such exc
 
 func isA2AMethod(m string) bool {
 	switch m {
-	case "card", "upstream_card", "seller_jwks", "unknown", "":
+	case "card", "upstream_card", "service_jwks", "unknown", "":
 		return false
 	}
 	return true

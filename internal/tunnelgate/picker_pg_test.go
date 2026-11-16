@@ -100,13 +100,13 @@ func (e *pickEnv) session(key, replica string, services ...string) uuid.UUID {
 	return id
 }
 
-// task creates a submitted task of buyer in the gate context.
-func (e *pickEnv) task(buyer uuid.UUID, contextID string) uuid.UUID {
+// task creates a submitted task of caller in the gate context.
+func (e *pickEnv) task(caller uuid.UUID, contextID string) uuid.UUID {
 	e.t.Helper()
 	id := uuid.Must(uuid.NewV7())
 	snap := &a2a.Task{ID: a2a.TaskID(id.String()), ContextID: contextID, Status: a2a.TaskStatus{State: a2a.TaskStateSubmitted}}
 	if _, err := e.log.CreateTask(context.Background(), nil, store.NewTask{ID: id, Service: e.svc, Protocol: store.ProtocolA2A,
-		Owner: store.Owner{BuyerID: buyer, Principal: "key:kk_test_0001", Via: store.ViaAPIKey}, ContextID: contextID,
+		Owner: store.Owner{CallerID: caller, Principal: "key:kk_test_0001", Via: store.ViaAPIKey}, ContextID: contextID,
 		State: store.StateSubmitted, Snapshot: snap}); err != nil {
 		e.t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestPickerCandidates(t *testing.T) {
 }
 
 // For a new task in a known context, the session of the context's previous task is chosen while it is a
-// candidate (relay.md §6.1, §7; PRD §7 best effort); another buyer's identical context string, or another
+// candidate (relay.md §6.1, §7; PRD §7 best effort); another caller's identical context string, or another
 // context, does not steer the choice; a session that is no longer a candidate, or the one a retry avoids,
 // falls back to round-robin.
 func TestPickerContextAffinity(t *testing.T) {
@@ -229,28 +229,28 @@ func TestPickerContextAffinity(t *testing.T) {
 	ra := e.replica("r-a")
 	k1, k2 := e.key("hello"), e.key("hello")
 	s1, s2 := e.session(k1, ra, "hello"), e.session(k2, ra, "hello")
-	buyer, other := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	caller, other := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 
-	first := e.task(buyer, "conv")
+	first := e.task(caller, "conv")
 	// The round-robin would answer s1 first; place the first task on s2.
 	if err := e.log.BeginAttempt(context.Background(), store.Attempt{TaskID: first, N: 1, Backend: store.BackendTunnel,
 		TunnelSession: &s2, KeyID: k2, ReplicaID: ra}); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 3 {
-		next := e.task(buyer, "conv")
-		p, err := e.pick(lifecycle.SessionRequest{TaskID: next, N: 1, BuyerID: buyer, ContextID: "conv"})
+		next := e.task(caller, "conv")
+		p, err := e.pick(lifecycle.SessionRequest{TaskID: next, N: 1, CallerID: caller, ContextID: "conv"})
 		if err != nil || p.SessionID != s2 {
 			t.Fatalf("task %d in the context: %+v %v, want the previous task's session s2", i, p, err)
 		}
 	}
-	// Another buyer with the same string, and another context, are round-robin: both sessions come up.
+	// Another caller with the same string, and another context, are round-robin: both sessions come up.
 	seen := map[uuid.UUID]bool{}
 	for _, req := range []lifecycle.SessionRequest{
-		{TaskID: e.task(other, "conv"), BuyerID: other, ContextID: "conv"},
-		{TaskID: e.task(other, "conv"), BuyerID: other, ContextID: "conv"},
-		{TaskID: e.task(buyer, "elsewhere"), BuyerID: buyer, ContextID: "elsewhere"},
-		{TaskID: e.task(buyer, "elsewhere"), BuyerID: buyer, ContextID: "elsewhere"},
+		{TaskID: e.task(other, "conv"), CallerID: other, ContextID: "conv"},
+		{TaskID: e.task(other, "conv"), CallerID: other, ContextID: "conv"},
+		{TaskID: e.task(caller, "elsewhere"), CallerID: caller, ContextID: "elsewhere"},
+		{TaskID: e.task(caller, "elsewhere"), CallerID: caller, ContextID: "elsewhere"},
 	} {
 		p, err := e.pick(req)
 		if err != nil {
@@ -262,13 +262,13 @@ func TestPickerContextAffinity(t *testing.T) {
 		t.Fatalf("round-robin outside the context: %v", seen)
 	}
 	// The retry of a task whose session was lost leaves it, even in its context.
-	next := e.task(buyer, "conv")
-	if p, err := e.pick(lifecycle.SessionRequest{TaskID: next, N: 2, BuyerID: buyer, ContextID: "conv", Avoid: &s2}); err != nil || p.SessionID != s1 {
+	next := e.task(caller, "conv")
+	if p, err := e.pick(lifecycle.SessionRequest{TaskID: next, N: 2, CallerID: caller, ContextID: "conv", Avoid: &s2}); err != nil || p.SessionID != s1 {
 		t.Fatalf("a retry avoiding the context's session: %+v %v", p, err)
 	}
 	// The previous session gone: the choice falls back to the candidates.
 	e.exec(`delete from kontra.tunnels where session_id = $1`, s2)
-	if p, err := e.pick(lifecycle.SessionRequest{TaskID: e.task(buyer, "conv"), N: 1, BuyerID: buyer, ContextID: "conv"}); err != nil || p.SessionID != s1 {
+	if p, err := e.pick(lifecycle.SessionRequest{TaskID: e.task(caller, "conv"), N: 1, CallerID: caller, ContextID: "conv"}); err != nil || p.SessionID != s1 {
 		t.Fatalf("the context's session gone: %+v %v", p, err)
 	}
 }
@@ -282,10 +282,10 @@ func TestPickerContextAffinity(t *testing.T) {
 func TestPrepareTunnel(t *testing.T) {
 	e := newPickEnv(t)
 	ctx := context.Background()
-	buyer := uuid.Must(uuid.NewV7())
+	caller := uuid.Must(uuid.NewV7())
 
 	// No candidate: attempt 1 is no_session, and nothing to dispatch.
-	lonely := e.task(buyer, "c-lonely")
+	lonely := e.task(caller, "c-lonely")
 	res := e.prepare(lonely, 1, "", "")
 	row, _ := e.log.Load(ctx, lonely)
 	if !res.NoSession || res.Queue != "" || res.SessionID != "" || res.Backend != "tunnel" || !res.Deadline.Equal(row.Deadline.UTC()) {
@@ -324,7 +324,7 @@ func TestPrepareTunnel(t *testing.T) {
 	queues := map[string]string{s1.String(): lifecycle.QueueTunnel(ra), s2.String(): lifecycle.QueueTunnel(rb)}
 	var placed []string
 	for i := range 4 {
-		id := e.task(buyer, fmt.Sprintf("c-%d", i))
+		id := e.task(caller, fmt.Sprintf("c-%d", i))
 		r := e.prepare(id, 1, "", "")
 		if r.Queue != queues[r.SessionID] {
 			t.Fatalf("task %d: %+v", i, r)
@@ -336,7 +336,7 @@ func TestPrepareTunnel(t *testing.T) {
 	}
 
 	// A retry after tunnel_lost leaves the lost session for the other.
-	lost := e.task(buyer, "c-lost")
+	lost := e.task(caller, "c-lost")
 	first := e.prepare(lost, 1, "", "")
 	if _, err := e.log.BeginDispatch(ctx, lost, 1, strings.TrimPrefix(first.Queue, "kontra-tunnel-")); err != nil {
 		t.Fatal(err)
@@ -353,7 +353,7 @@ func TestPrepareTunnel(t *testing.T) {
 
 	// Without a picker, a tunnel service is service_unavailable.
 	e.acts.Sessions = nil
-	if _, err := e.acts.Prepare(ctx, lifecycle.PrepareInput{TaskID: e.task(buyer, "c-x").String(), N: 1}); err == nil ||
+	if _, err := e.acts.Prepare(ctx, lifecycle.PrepareInput{TaskID: e.task(caller, "c-x").String(), N: 1}); err == nil ||
 		!strings.Contains(err.Error(), "places no tunnel attempts") {
 		t.Fatalf("prepare without a picker: %v", err)
 	}

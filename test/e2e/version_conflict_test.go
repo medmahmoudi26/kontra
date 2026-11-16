@@ -27,7 +27,7 @@ import (
 func TestVersionConflict(t *testing.T) {
 	h := start(t, Options{Upstream: slowagent.Config{Chunks: 1, Interval: 10 * time.Millisecond, Streaming: true}})
 	ctx := ctxFor(t, 3*time.Minute)
-	res, err := h.BuyerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" version_conflict"))
+	res, err := h.CallerA().Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" version_conflict"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,8 +40,8 @@ func TestVersionConflict(t *testing.T) {
 		tenantID uuid.UUID
 		owner    store.Owner
 	)
-	if err := h.Pool.QueryRow(ctx, `select tenant_id, buyer_id, principal, via from kontra.tasks where id = $1`, string(task.ID)).
-		Scan(&tenantID, &owner.BuyerID, &owner.Principal, &owner.Via); err != nil {
+	if err := h.Pool.QueryRow(ctx, `select tenant_id, caller_id, principal, via from kontra.tasks where id = $1`, string(task.ID)).
+		Scan(&tenantID, &owner.CallerID, &owner.Principal, &owner.Via); err != nil {
 		t.Fatal(err)
 	}
 	owner.TenantID = &tenantID
@@ -118,7 +118,7 @@ func TestVersionConflict(t *testing.T) {
 		t.Fatalf("the log has %d rows, the task is at version %d: seq = version", len(rows), version)
 	}
 	for _, g := range h.Gates {
-		got, err := h.BuyerA().Client(t, g, "").GetTask(ctx, &a2a.GetTaskRequest{ID: task.ID})
+		got, err := h.CallerA().Client(t, g, "").GetTask(ctx, &a2a.GetTaskRequest{ID: task.ID})
 		if err != nil {
 			t.Fatal(err)
 		}

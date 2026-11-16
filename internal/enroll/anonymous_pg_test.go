@@ -44,7 +44,7 @@ func anonHello(k *testKey, services ...tunnel.Service) *tunnel.Hello {
 
 // spec/tunnel.md §6, §6.1 (D285): a hello asking for an anonymous session (anonymous: true, neither enroll nor auth)
 // from an unknown key opens a tenant anon-<16 hex> from the client's /24: the declared services at the multi-tenant
-// URLs, welcome.anonymous.expires_at, the hiring principal node:<key_id>, allow [org:<slug>] plus anonymous for the
+// URLs, welcome.anonymous.expires_at, the calling principal node:<key_id>, allow [org:<slug>] plus anonymous for the
 // public names, and an audit row; the client's address is never stored.
 func TestAdmitAnonymousOpens(t *testing.T) {
 	e := newAnonEnv(t, nil)
@@ -58,7 +58,7 @@ func TestAdmitAnonymousOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	slug := d.Key.Tenant
-	if !anon.IsSlug(slug) || d.Key.KeyID != k.kid || d.HirePrincipal != "node:"+k.kid || d.Hire != nil || d.Anonymous == nil ||
+	if !anon.IsSlug(slug) || d.Key.KeyID != k.kid || d.CallerPrincipal != "node:"+k.kid || d.Call != nil || d.Anonymous == nil ||
 		d.Anonymous.Resumed || !slices.Equal(d.Anonymous.Public, []string{"hello"}) {
 		t.Fatalf("decision %+v %+v", d, d.Anonymous)
 	}
@@ -97,7 +97,7 @@ func TestAdmitAnonymousOpens(t *testing.T) {
 
 // spec/tunnel.md §6.1, §12 (D304): a key of an anonymous tenant is not rotated. A hello whose rotate_from names it is
 // enroll_invalid, whatever else it carries, and nothing is written: the new key is not admitted into the anonymous
-// tenant (which would give it a session without the anonymous decision: no end clock, the full hiring-stream cap, and
+// tenant (which would give it a session without the anonymous decision: no end clock, the full calling-stream cap, and
 // no tenant counted), the old key is not marked rotated. The new key's hello without rotate_from then opens an
 // anonymous session of its own, which §6.2 counts.
 func TestAnonymousKeyIsNotRotated(t *testing.T) {
@@ -200,8 +200,8 @@ func TestAdmitAnonymousRefusals(t *testing.T) {
 	})
 }
 
-// §6.1 (D285, D286): the same key before expiry gets its tenant back (with the field, or with a hire-only auth key
-// as its hiring principal, nothing converted); a probe from it (no field, no tokens, no auth) is unknown_key; at the
+// §6.1 (D285, D286): the same key before expiry gets its tenant back (with the field, or with a call-only auth key
+// as its calling principal, nothing converted); a probe from it (no field, no tokens, no auth) is unknown_key; at the
 // end its bindings are revoked, not the key, and its next hello asking for a session opens a new tenant with a new
 // slug, while one that does not ask is unknown_key.
 func TestAdmitAnonymousResumeAndExpiry(t *testing.T) {
@@ -222,22 +222,22 @@ func TestAdmitAnonymousResumeAndExpiry(t *testing.T) {
 	_, err = e.admitFrom(k, hello(k, a2a("hello")), "203.0.113.7")
 	wantCode(t, "a probe from the anonymous key", err, tunnel.CodeUnknownKey)
 
-	hireOnly, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "hirer", Scopes: []auth.Scope{auth.ScopeHire}})
+	callOnly, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "caller", Scopes: []auth.Scope{auth.ScopeCall}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := hello(k, a2a("hello"))
-	h.Auth = hireOnly.Secret
+	h.Auth = callOnly.Secret
 	d3, err := e.admitFrom(k, h, "203.0.113.7")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d3.Key.TenantID != d1.Key.TenantID || d3.Anonymous == nil || d3.Hire == nil || d3.HirePrincipal != d3.Hire.ID ||
-		!strings.HasPrefix(d3.HirePrincipal, "key:") {
-		t.Fatalf("hire-only auth: %+v %+v", d3.Key, d3.Hire)
+	if d3.Key.TenantID != d1.Key.TenantID || d3.Anonymous == nil || d3.Call == nil || d3.CallerPrincipal != d3.Call.ID ||
+		!strings.HasPrefix(d3.CallerPrincipal, "key:") {
+		t.Fatalf("call-only auth: %+v %+v", d3.Key, d3.Call)
 	}
 	if n := e.count(`select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, k.kid, d1.Key.TenantID); n != 1 {
-		t.Fatal("a hire-only auth moved the key")
+		t.Fatal("a call-only auth moved the key")
 	}
 
 	e.exec(`update kontra.tenants set expires_at = now() - interval '1 second' where id = $1`, d1.Key.TenantID)
@@ -325,7 +325,7 @@ func TestAnonymousSlugIsReserved(t *testing.T) {
 // §2.4, §6 (D285; M4 WP-03 review): on a gate without tunnel.anonymous (the operator turned it off), a key of a
 // still-live anonymous tenant is no anonymous session's: a hello asking for one is anonymous_unavailable; any other is
 // §5's, as a new key's. So the probe (no field, no tokens, no auth) is unknown_key, which tells the node nothing
-// committed; a hire-only auth key with no service is admitted hire-only, the key moved into the API key's tenant and
+// committed; a call-only auth key with no service is admitted call-only, the key moved into the API key's tenant and
 // the anonymous tenant ended (D286's "converted"); one declaring services that nothing enrolls is unknown_key.
 func TestAdmitAnonymousKeyOnAGateWithoutAnonymous(t *testing.T) {
 	e := newAnonEnv(t, nil)
@@ -345,26 +345,26 @@ func TestAdmitAnonymousKeyOnAGateWithoutAnonymous(t *testing.T) {
 	_, err = admitOff(anonHello(k, a2a("hello")))
 	wantCode(t, "a hello asking for a session", err, tunnel.CodeAnonymousUnavailable)
 
-	hireOnly, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "hirer", Scopes: []auth.Scope{auth.ScopeHire}})
+	callOnly, err := e.keys.Mint(ctx, auth.MintRequest{TenantID: e.team, Name: "caller", Scopes: []auth.Scope{auth.ScopeCall}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	withServices := hello(k, a2a("hello"))
-	withServices.Auth = hireOnly.Secret
+	withServices.Auth = callOnly.Secret
 	_, err = admitOff(withServices)
-	wantCode(t, "a hire-only auth key declaring services", err, tunnel.CodeUnknownKey)
+	wantCode(t, "a call-only auth key declaring services", err, tunnel.CodeUnknownKey)
 	if n := e.count(`select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, k.kid, d1.Key.TenantID); n != 1 {
 		t.Fatal("a refused hello moved the key")
 	}
 
 	h := hello(k)
-	h.Auth = hireOnly.Secret
+	h.Auth = callOnly.Secret
 	d, err := admitOff(h)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Anonymous != nil || d.Key.TenantID != e.team || d.Hire == nil || d.HirePrincipal != d.Hire.ID || len(d.Served) != 0 {
-		t.Fatalf("hire-only: %+v %+v", d.Key, d.Hire)
+	if d.Anonymous != nil || d.Key.TenantID != e.team || d.Call == nil || d.CallerPrincipal != d.Call.ID || len(d.Served) != 0 {
+		t.Fatalf("call-only: %+v %+v", d.Key, d.Call)
 	}
 	if n := e.count(`select count(*) from kontra.tunnel_keys where key_id = $1 and tenant_id = $2`, k.kid, e.team); n != 1 {
 		t.Fatal("the key did not move into the API key's tenant")

@@ -242,7 +242,7 @@ func topPairs(raw []byte) ([]pair, error) {
 }
 
 // MCPEnvelope is `_meta["sh.kontra/sealed"]` of a sealed tools/call (whose arguments are then {}), of the
-// params of a sealed upstream elicitation/create or sampling/createMessage, and of the hiring node's sealed
+// params of a sealed upstream elicitation/create or sampling/createMessage, and of the calling node's sealed
 // answer to one (spec/ext-sealed.md §3, D62). The gate's scrub of Kontra's keys keeps it exactly there, on a
 // sealed service, when it has these two members and no other (spec/relay.md §2.5, D174).
 type MCPEnvelope struct {

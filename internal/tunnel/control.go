@@ -18,7 +18,7 @@ type ControlType string
 const (
 	CtlDrain       ControlType = "drain"        // this replica is shutting down: dial a new session at once (make-before-break)
 	CtlRevoked     ControlType = "revoked"      // the key (no Service) or one binding (Service) was revoked (§12)
-	CtlAuthRevoked ControlType = "auth_revoked" // the session's hiring API key was revoked; hosting goes on
+	CtlAuthRevoked ControlType = "auth_revoked" // the session's calling API key was revoked; hosting goes on
 	CtlEnrolled    ControlType = "enrolled"     // another key was enrolled for a service this node hosts (§5)
 	CtlExpiring    ControlType = "expiring"     // an anonymous session ends at At (§6, M4)
 )

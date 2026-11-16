@@ -24,21 +24,21 @@ import (
 // structuredContent of an isError result too. The service free is hosted by a node. For each client, read from
 // structuredContent alone:
 //
-//   - tools/list gives hire, reply and cancel the outputSchema of spec/schema/mcp-tools.json's hireResult (the tools
+//   - tools/list gives send_message, reply and cancel the outputSchema of spec/schema/mcp-tools.json's sendMessageResult (the tools
 //     that follow a task their own), and the client's own validator accepts every shape of its fixtures
-//     (examples/mcp-tools.hireResult.*.json) and refuses bad ones;
-//   - a hire of the seller's artifact kinds: the answer's text, data and file links; a failing one is isError with the
+//     (examples/mcp-tools.sendMessageResult.*.json) and refuses bad ones;
+//   - a send_message of the service's artifact kinds: the answer's text, data and file links; a failing one is isError with the
 //     failure's text; a question is its text with the reply-tool hint, and reply's answer is the follow-up's text.
 func TestGateMCPStockClient(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e: skipped under -short")
 	}
 	node24 := Node24(t)
-	seller := StartSeller(t)
+	service := StartService(t)
 	h := start(t, Options{Tunnel: map[string]TunnelService{"free": {}}})
 	ctx := ctxFor(t, 10*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
-	hostOn(t, ctx, h, b, map[string]string{"free": seller.URL})
+	hostOn(t, ctx, h, b, map[string]string{"free": service.URL})
 	v2 := installed(t, "test/e2e/testdata/mcp-client-2", "@modelcontextprotocol/client@2.4.0")
 	v1 := installed(t, "examples/mcp/everything", "@modelcontextprotocol/sdk@1.32.2")
 	nodeBin, err := exec.LookPath("node")
@@ -46,12 +46,12 @@ func TestGateMCPStockClient(t *testing.T) {
 		t.Fatalf("node: %v", err)
 	}
 	var schema map[string]any
-	if err := json.Unmarshal(mcpToolsDef(t, "hireResult"), &schema); err != nil {
+	if err := json.Unmarshal(mcpToolsDef(t, "sendMessageResult"), &schema); err != nil {
 		t.Fatal(err)
 	}
-	fixtures, err := filepath.Glob(filepath.Join(repoRoot, "spec", "schema", "examples", "mcp-tools.hireResult.*.json"))
+	fixtures, err := filepath.Glob(filepath.Join(repoRoot, "spec", "schema", "examples", "mcp-tools.sendMessageResult.*.json"))
 	if err != nil || len(fixtures) < 7 {
-		t.Fatalf("the hireResult fixtures: %v %v", fixtures, err)
+		t.Fatalf("the sendMessageResult fixtures: %v %v", fixtures, err)
 	}
 	var good []json.RawMessage
 	for _, f := range fixtures {
@@ -80,7 +80,7 @@ func TestGateMCPStockClient(t *testing.T) {
 			t.Helper()
 			lines := h.runStockClient(t, ctx, c.node, c.dir, c.sdk, a.URL+gatemcp.Path, `{"calls":`+calls+`,"check":`+check+`}`)
 			// The control: the client's own validator, the one each call went through, accepts every shape of
-			// spec/schema/examples/mcp-tools.hireResult.*.json and refuses the bad ones.
+			// spec/schema/examples/mcp-tools.sendMessageResult.*.json and refuses the bad ones.
 			last := lines[len(lines)-1]
 			if last.Check == nil || len(last.Check.Good) != goods || len(last.Check.Bad) != bads ||
 				strings.Contains(fmt.Sprint(last.Check.Good), "false") || strings.Contains(fmt.Sprint(last.Check.Bad), "true") {
@@ -88,16 +88,16 @@ func TestGateMCPStockClient(t *testing.T) {
 			}
 			return lines[:len(lines)-1]
 		}
-		lines := run(`[{"tool":"hire","arguments":{"service":"free","message":"kinds"}},
-			{"tool":"hire","arguments":{"service":"free","message":"fail"}},
-			{"tool":"hire","arguments":{"service":"free","message":"ask"}},
+		lines := run(`[{"tool":"send_message","arguments":{"service":"free","message":"kinds"}},
+			{"tool":"send_message","arguments":{"service":"free","message":"fail"}},
+			{"tool":"send_message","arguments":{"service":"free","message":"ask"}},
 			{"tool":"reply","arguments":{"taskId":"$taskId","message":"friday"}}]`)
 		if len(lines) != 5 || lines[0].Tools == nil {
 			t.Fatalf("%s: %d lines: %+v", c.name, len(lines), lines)
 		}
-		// hire, reply and cancel declare hireResult; the tools that follow a task their own (D332..D337); search and
+		// send_message, reply and cancel declare sendMessageResult; the tools that follow a task their own (D332..D337); search and
 		// describe none.
-		outDefs := map[string]string{"hire": "hireResult", "reply": "hireResult", "cancel": "hireResult", "status": "statusResult",
+		outDefs := map[string]string{"send_message": "sendMessageResult", "reply": "sendMessageResult", "cancel": "sendMessageResult", "status": "statusResult",
 			"tasks": "tasksResult", "artifact": "artifactResult", "push_set": "pushResult", "push_list": "pushResult",
 			"push_delete": "pushResult"}
 		for _, tool := range lines[0].Tools {
@@ -119,10 +119,10 @@ func TestGateMCPStockClient(t *testing.T) {
 		}
 		if f := lines[1].structured(t); f.State != "TASK_STATE_COMPLETED" || f.Text != "done\nGenerated text content" ||
 			fmt.Sprint(f.Data) != "[map[total:4] map[count:42 key:value]]" || len(f.Files) != 2 {
-			t.Errorf("%s: a hire's structuredContent %+v", c.name, f)
+			t.Errorf("%s: a send_message's structuredContent %+v", c.name, f)
 		}
 		if f := lines[2].structured(t); !lines[2].Result.IsError || f.State != "TASK_STATE_FAILED" || f.Text != "the exec failed: exit status 1" {
-			t.Errorf("%s: a failing hire: %+v", c.name, f)
+			t.Errorf("%s: a failing send_message: %+v", c.name, f)
 		}
 		ask := lines[3].structured(t)
 		if ask.State != "TASK_STATE_INPUT_REQUIRED" || ask.Text != "Which date? (answer with the reply tool, taskId "+ask.TaskID+")" {
@@ -153,9 +153,9 @@ type stockLine struct {
 }
 
 // structured is the line's structuredContent, read with exact keys: what a client that shows nothing else sees.
-func (l stockLine) structured(t *testing.T) gatemcp.HireResult {
+func (l stockLine) structured(t *testing.T) gatemcp.SendMessageResult {
 	t.Helper()
-	var hr gatemcp.HireResult
+	var hr gatemcp.SendMessageResult
 	if l.Result == nil || len(l.Result.StructuredContent) == 0 {
 		t.Fatalf("no structuredContent: %+v", l)
 	}

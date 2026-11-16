@@ -283,7 +283,7 @@ func TestCancelAnswer(t *testing.T) {
 		{`{"status":"failed"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelNotCancelable, UpstreamState: "TASK_STATE_FAILED"}},
 		{`{"status":"working"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues, UpstreamState: "TASK_STATE_WORKING"}},
 		{`{"status":"input_required"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues, UpstreamState: "TASK_STATE_INPUT_REQUIRED"}},
-		{`{"status":"` + strings.Repeat("any text of the seller's ", 4096) + `"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
+		{`{"status":"` + strings.Repeat("any text of the service's ", 4096) + `"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
 		{`{"status":"canceled"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
 		{`{"status":7}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},
 		{`{"Status":"cancelled"}`, lifecycle.ForwardCancelResult{Outcome: lifecycle.CancelContinues}},

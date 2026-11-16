@@ -17,7 +17,7 @@ import (
 // The reasons a gate refuses a blob stream (spec/tunnel.md §8.3, D181).
 const (
 	ReasonNotFound  = "not_found" // no blobs row for the ref, or no object behind it
-	ReasonForbidden = "forbidden" // the row's task is neither served on nor hired by the asking session
+	ReasonForbidden = "forbidden" // the row's task is neither served on nor called by the asking session
 	ReasonTooLarge  = "too_large" // an object over MaxObject
 )
 

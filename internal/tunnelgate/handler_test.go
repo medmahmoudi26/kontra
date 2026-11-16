@@ -72,9 +72,9 @@ func admitAll(req enroll.Request) *enroll.Decision {
 		served = append(served, tunnel.WelcomeService{Kind: s.Kind, Name: s.Name, URL: "https://gate.example/agents/" + s.Name})
 	}
 	return &enroll.Decision{
-		Key:           enroll.Key{KeyID: req.Hello.KID, TenantID: testTenantID, Tenant: "team", PubKey: req.PubKey},
-		Served:        served,
-		HirePrincipal: "node:" + req.Hello.KID,
+		Key:             enroll.Key{KeyID: req.Hello.KID, TenantID: testTenantID, Tenant: "team", PubKey: req.PubKey},
+		Served:          served,
+		CallerPrincipal: "node:" + req.Hello.KID,
 	}
 }
 
@@ -526,7 +526,7 @@ func TestHandshakeWelcome(t *testing.T) {
 	// The registered session.
 	s := g.sink.next(t)
 	if s.ID != sid || s.KeyID != id.KeyID() || s.TenantID != testTenantID || s.Tenant != "team" ||
-		s.HirePrincipal != "node:"+id.KeyID() || s.NodeName != "build-box-3" || s.CLIVersion != hello.Agent {
+		s.CallerPrincipal != "node:"+id.KeyID() || s.NodeName != "build-box-3" || s.CLIVersion != hello.Agent {
 		t.Fatalf("session %+v", s)
 	}
 	if s.served["hello"] != tunnel.KindA2A || s.served["booking"] != tunnel.KindA2A || len(s.served) != 2 {
@@ -571,7 +571,7 @@ func TestHandshakeWelcome(t *testing.T) {
 		t.Fatalf("second gate-opened stream %v, %v", st2, err)
 	}
 
-	// A node-opened stream (odd) is accepted promptly and served (§9): without a hiring router, 404, then the
+	// A node-opened stream (odd) is accepted promptly and served (§9): without a calling router, 404, then the
 	// gate closes it.
 	ns, err := nodeMux.OpenStream()
 	if err != nil {
@@ -587,7 +587,7 @@ func TestHandshakeWelcome(t *testing.T) {
 	_ = ns.SetReadDeadline(time.Now().Add(5 * time.Second))
 	nbr := bufio.NewReader(ns)
 	if res, err := http.ReadResponse(nbr, nil); err != nil || res.StatusCode != http.StatusNotFound {
-		t.Fatalf("node-opened stream: %v %v; want 404 (no hiring router)", res, err)
+		t.Fatalf("node-opened stream: %v %v; want 404 (no calling router)", res, err)
 	}
 	if n, err := nbr.Read(make([]byte, 1)); n != 0 || err != io.EOF {
 		t.Fatalf("node-opened stream: read %d, %v; want the gate to close it (EOF)", n, err)

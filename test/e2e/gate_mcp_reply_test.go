@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-// gate_mcp_reply (spec/relay.md §16; §12.4; D272, D274). Single tenant. The booking seller (examples/sellers/booking,
-// one question, then the booking) and the in-test seller (a slow exec) are hosted by a node whose tunnel is on
+// gate_mcp_reply (spec/relay.md §16; §12.4; D272, D274). Single tenant. The booking service (examples/agents/booking,
+// one question, then the booking) and the in-test service (a slow exec) are hosted by a node whose tunnel is on
 // replica B; the sessions are on replica A: F declared form elicitation, R did not. Asserted:
 //
-//   - F's task-augmented hire of booking is input_required on tasks/get, with the question as statusMessage; tasks/result
+//   - F's task-augmented send_message of booking is input_required on tasks/get, with the question as statusMessage; tasks/result
 //     sends one elicitation/create {mode form, message = the question, requestedSchema {type object, properties {reply:
 //     {type string}}, required [reply]}} with the id k.<task>.<seq> of the event that asked and the related-task _meta;
 //   - decline leaves the task input-required and sends nothing upstream; on a new tasks/result the same question comes
@@ -24,29 +24,29 @@ import (
 //     within the 25 s wait;
 //   - reply to a completed task and to a working one is isError and forwards nothing.
 func TestGateMCPReply(t *testing.T) {
-	seller := StartSeller(t)
+	service := StartService(t)
 	h := start(t, Options{Tunnel: map[string]TunnelService{"booking": {}, "work": {}}})
 	ctx := ctxFor(t, 10*time.Minute)
 	a, b := h.Gates[0], h.Gates[1]
-	booking, err := h.StartExampleSeller(ctx, "booking")
+	booking, err := h.StartExampleService(ctx, "booking")
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostOn(t, ctx, h, b, map[string]string{"booking": booking.URL, "work": seller.URL})
+	hostOn(t, ctx, h, b, map[string]string{"booking": booking.URL, "work": service.URL})
 
 	f := OpenGateSession(t, ctx, a, h.APIKey, CapsFormOnly)
 	r := OpenGateSession(t, ctx, a, h.APIKey, `{}`)
-	hire := func(s *GateSession, what string) string {
+	send := func(s *GateSession, what string) string {
 		t.Helper()
-		ct := Tool(t, s.ToolTask("hire", `{"service":"booking","message":"`+what+`"}`))
+		ct := Tool(t, s.ToolTask("send_message", `{"service":"booking","message":"`+what+`"}`))
 		if ct.Task == nil || ct.Task.TaskID == "" {
-			t.Fatalf("a task-augmented hire of booking: %+v", ct)
+			t.Fatalf("a task-augmented send_message of booking: %+v", ct)
 		}
 		id := ct.Task.TaskID
 		eventually(t, 30*time.Second, "booking asks its question", func() bool { return taskState(t, h, id) == "input-required" })
 		return id
 	}
-	ft, rt := hire(f, "a table for two"), hire(r, "a room")
+	ft, rt := send(f, "a table for two"), send(r, "a room")
 	question := `For which date shall I book "a table for two"? Reply with the date as YYYY-MM-DD.`
 	upstreamTasks := func(id string) int64 {
 		return count(t, h, `select count(distinct upstream_task_id) from kontra.attempts where task_id::text = $1 and upstream_task_id is not null`, id)
@@ -131,10 +131,10 @@ func TestGateMCPReply(t *testing.T) {
 	}
 
 	// reply to a completed task and to a working one: isError, nothing forwarded.
-	ct := Tool(t, r.ToolTask("hire", `{"service":"work","message":"slow"}`))
+	ct := Tool(t, r.ToolTask("send_message", `{"service":"work","message":"slow"}`))
 	working := ct.Task.TaskID
 	eventually(t, 30*time.Second, "the slow task works", func() bool { return taskState(t, h, working) == "working" })
-	turns := len(seller.Turns())
+	turns := len(service.Turns())
 	for _, id := range []string{ft, working} {
 		before := workItems(id)
 		x := Tool(t, r.Tool("reply", `{"taskId":"`+id+`","message":"2026-11-04"}`))
@@ -146,8 +146,8 @@ func TestGateMCPReply(t *testing.T) {
 		}
 	}
 	time.Sleep(time.Second)
-	if n := len(seller.Turns()); n != turns {
-		t.Errorf("reply to a working task reached the seller: %d turns, was %d", n, turns)
+	if n := len(service.Turns()); n != turns {
+		t.Errorf("reply to a working task reached the service: %d turns, was %d", n, turns)
 	}
 	_ = r.Rpc("tasks/cancel", `{"taskId":"`+working+`"}`)
 }

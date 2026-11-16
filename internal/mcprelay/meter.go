@@ -15,7 +15,7 @@ type Call struct {
 	TenantID   uuid.UUID
 	Service    string
 	Tool       string
-	BuyerID    uuid.UUID
+	CallerID   uuid.UUID
 	Principal  string
 	MCPSession *[32]byte  // the session's hash; a virtual one for a modern client (D160)
 	TaskID     *uuid.UUID // a gate-owned task's
@@ -67,10 +67,10 @@ func (m *Meter) Record(ctx context.Context, c Call) error {
 	if ms > 1<<31-1 {
 		ms = 1<<31 - 1
 	}
-	_, err = m.pool.Exec(ctx, `insert into kontra.calls (id, tenant_id, service, tool, buyer_id, principal, mcp_session,
+	_, err = m.pool.Exec(ctx, `insert into kontra.calls (id, tenant_id, service, tool, caller_id, principal, mcp_session,
 			task_id, bytes_in, bytes_out, duration_ms, is_error)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-		id, c.TenantID, c.Service, tool, c.BuyerID, c.Principal, session, c.TaskID, max(c.BytesIn, 0), max(c.BytesOut, 0),
+		id, c.TenantID, c.Service, tool, c.CallerID, c.Principal, session, c.TaskID, max(c.BytesIn, 0), max(c.BytesOut, 0),
 		int32(ms), c.IsError)
 	if err != nil {
 		return fmt.Errorf("mcprelay: record a call: %w", err)
