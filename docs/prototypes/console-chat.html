@@ -1,0 +1,1879 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>Kontra console: chat prototype</title>
+<!--
+  Prototype for docs/console-chat.md. One file, no build step, no network: open it in a browser.
+  Every agent, task, artifact, node and MCP server in it is mock data, and every reply is a scripted stream.
+  Add ?theme=light for the light theme. The console's own tokens (web/static/console.css) are copied below.
+-->
+<style>
+html,body{height:100%}
+#app{height:100%}
+body{margin:0}
+a{color:#0b7fa4}a:hover{color:#075c78}
+.kc{--paper:#eef1f6;--surface:#ffffff;--surface-2:#e7eaf1;--surface-3:#dde1ec;--ink:#0e131b;--ink-2:#434b5e;--ink-3:#5d6579;--line:#d6dbe6;--line-2:#c1c8d7;--brand:#0b7fa4;--brand-ink:#075c78;--brand-soft:#e1f4fa;--brand-line:#b4e4f0;--ok:#136f43;--ok-soft:#ddefe5;--warn:#8a5d07;--warn-soft:#f7ecd3;--bad:#a52419;--bad-soft:#f9e2df;--on-brand:#ffffff}
+.kc.dark{--paper:#090b10;--surface:#11141c;--surface-2:#181c26;--surface-3:#222734;--ink:#eaecf3;--ink-2:#a9afc1;--ink-3:#8b93a7;--line:#242a36;--line-2:#333a4b;--brand:#67e3f9;--brand-ink:#a6eeff;--brand-soft:#0b2c37;--brand-line:#15576b;--ok:#49cc8b;--ok-soft:#0f251b;--warn:#e0b14a;--warn-soft:#291f11;--bad:#ff7568;--bad-soft:#2d1513;--on-brand:#04222b}
+.kc button{font:inherit;cursor:pointer}
+.kc :focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+.kc button:disabled{opacity:.5;cursor:not-allowed}
+.kc .caret{display:inline-block;width:7px;height:1em;margin-left:2px;vertical-align:text-bottom;background:var(--brand);animation:kcblink 1s steps(2,start) infinite}
+.kc .pulse{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;animation:kcpulse 1.2s ease-in-out infinite}
+@keyframes kcblink{to{visibility:hidden}}
+@keyframes kcpulse{0%,100%{opacity:1}50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.kc .caret,.kc .pulse{animation:none}}
+.kc a{color:var(--brand-ink)}
+.kc .rail{max-height:100%}
+.kc .side{flex:0 1 420px;min-width:0;max-height:100%}
+@media (max-width:1300px){.kc .side{position:absolute;top:0;right:0;bottom:0;width:min(460px,100%);max-height:none;z-index:5;box-shadow:-18px 0 40px -24px rgba(0,0,0,.7)}}
+@media (max-width:720px){.kc .rail{max-height:236px}.kc .crumbs{display:none}}
+</style>
+</head>
+<body>
+<noscript><p>This prototype needs JavaScript.</p></noscript>
+<div id="app"></div>
+
+<template id="tpl">
+<div class="kc {{themeClass}}" style="height: 100vh; min-height: 640px; display: flex; flex-direction: column; background: var(--paper); color: var(--ink); font-family: Archivo, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; line-height: 1.45">
+
+  <header style="flex: 0 0 auto; min-height: 56px; display: flex; align-items: center; gap: 14px; padding: 0 18px; background: var(--surface); border-bottom: 1px solid var(--line)">
+    <a href="#top" aria-label="Kontra home" style="display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none">
+      <svg viewBox="0 0 40 48" width="20" height="24" aria-hidden="true"><path opacity="0.5" d="M0 14.5265V33.4739L17.8947 21.2301V2.28271L0 14.5265Z" fill="#67E3F9"/><path opacity="0.5" d="M0 33.4738V14.5264L17.8947 26.7702V45.7175L0 33.4738Z" fill="#088AB2"/><path opacity="0.5" d="M40 14.5262V33.4736L22.1053 21.2298V2.28247L40 14.5262Z" fill="#67E3F9"/><path opacity="0.5" d="M40 33.4738V14.5264L22.1053 26.7702V45.7175L40 33.4738Z" fill="#088AB2"/></svg>
+      <b style="font-size: 17px; font-weight: 700; letter-spacing: -0.03em">kontra</b>
+    </a>
+    <nav aria-label="Sections" style="display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto">
+      <sc-for list="{{navs}}" as="nv" hint-placeholder-count="7"><button type="button" aria-current="{{nv.current}}" onClick="{{nv.pick}}" style="min-height: 44px; border: 0; border-radius: 7px; padding: 0 11px; font-size: 13px; white-space: nowrap; background: {{nv.bg}}; color: {{nv.fg}}; font-weight: {{nv.weight}}">{{nv.label}}</button></sc-for>
+    </nav>
+  </header>
+
+  <div id="top" style="display: {{d.chat}}; flex: 1 1 auto; min-height: 0; flex-wrap: wrap; align-content: stretch; position: relative">
+
+    <aside class="rail" aria-label="Conversations" style="flex: 1 1 290px; min-width: 0; min-height: 0; overflow-y: auto; background: var(--surface); border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 16px 12px; display: flex; flex-direction: column; gap: 14px; box-sizing: border-box">
+      <button type="button" onClick="{{newChat}}" style="display: flex; align-items: center; justify-content: center; gap: 7px; width: 100%; min-height: 44px; background: var(--brand); border: 1px solid var(--brand); border-radius: 9px; font-size: 13px; font-weight: 600; color: var(--on-brand)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        New chat
+      </button>
+
+      <div style="display: flex; flex-direction: column; gap: 9px">
+        <h2 style="margin: 0; font-size: 10px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-3); padding: 0 4px">Conversations</h2>
+        <div role="group" aria-label="Show" style="display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px">
+          <sc-for list="{{filters}}" as="f" hint-placeholder-count="3">
+            <button type="button" aria-pressed="{{f.pressed}}" onClick="{{f.pick}}" style="flex: 1 1 0; min-height: 38px; border: 0; border-radius: 7px; padding: 6px 8px; font-size: 12px; white-space: nowrap; background: {{f.bg}}; color: {{f.fg}}; font-weight: {{f.weight}}">{{f.label}}</button>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <sc-for list="{{convs}}" as="c" hint-placeholder-count="5">
+          <button type="button" aria-pressed="{{c.selected}}" onClick="{{c.pick}}" style="text-align: left; width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 10px 10px; border-radius: 10px; border: 1px solid {{c.rowLine}}; background: {{c.rowBg}}; color: var(--ink); min-width: 0">
+            <span style="display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%">
+              <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0">{{c.caller}}</span>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; color: var(--ink-3)"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+              <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0">{{c.callee}}</span>
+              <span style="margin-left: auto; flex: 0 0 auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: var(--ink-3)">{{c.ago}}</span>
+            </span>
+            <span style="font-size: 12.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%">{{c.preview}}</span>
+            <span style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+              <sc-if value="{{c.hasState}}" hint-placeholder-val="{{true}}"><span style="font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: {{c.stateBg}}; color: {{c.stateFg}}">{{c.state}}</span></sc-if>
+              <span style="font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; border: 1px solid var(--line-2); color: var(--ink-2)">{{c.kindLabel}}</span>
+              <sc-if value="{{c.sealed}}" hint-placeholder-val="{{false}}">
+                <span style="font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 5px; background: var(--warn-soft); color: var(--warn)">sealed</span>
+              </sc-if>
+            </span>
+          </button>
+        </sc-for>
+      </div>
+    </aside>
+
+    <main style="flex: 999 1 560px; min-width: 0; min-height: 0; max-height: 100%; display: flex; flex-direction: column; background: var(--paper)">
+
+      <div style="flex: 0 0 auto; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 22px; background: var(--surface); border-bottom: 1px solid var(--line)">
+        <div style="display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap">
+          <span aria-hidden="true" style="width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 10px; font-weight: 700; background: {{cur.callerAvBg}}; color: {{cur.callerAvFg}}">{{cur.callerAv}}</span>
+          <h1 style="margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.02em; overflow-wrap: anywhere">{{cur.caller}}</h1>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="to" style="color: var(--ink-3)"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          <span aria-hidden="true" style="width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; font-size: 10px; font-weight: 700; background: var(--ok-soft); color: var(--ok)">{{cur.calleeAv}}</span>
+          <span style="font-size: 15px; font-weight: 700; letter-spacing: -0.02em; overflow-wrap: anywhere">{{cur.callee}}</span>
+        </div>
+        <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-left: auto">
+          <sc-if value="{{cur.hasState}}" hint-placeholder-val="{{true}}"><span style="display: inline-flex; align-items: baseline; gap: 6px; background: {{cur.stateBg}}; color: {{cur.stateFg}}; border-radius: 999px; padding: 4px 10px; font-size: 11px; font-weight: 600">{{cur.state}}</span></sc-if>
+          <span style="display: inline-flex; align-items: baseline; gap: 6px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; font-size: 11.5px"><b style="color: var(--ink-3); font-weight: 500; font-size: 10px; letter-spacing: 0.03em; text-transform: uppercase">context</b><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace">{{cur.contextId}}</span></span>
+          <sc-for list="{{cur.tabs}}" as="tb" hint-placeholder-count="2"><button type="button" aria-pressed="{{tb.pressed}}" onClick="{{tb.pick}}" style="min-height: 36px; border: 1px solid {{tb.line}}; background: {{tb.bg}}; color: {{tb.fg}}; border-radius: 7px; padding: 4px 11px; font-size: 12px; font-weight: 600; white-space: nowrap">{{tb.label}}</button></sc-for>
+        </div>
+      </div>
+
+      <div id="kc-scroll" style="flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 22px 22px 32px">
+        <div style="max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px">
+
+          <sc-if value="{{cur.observed}}" hint-placeholder-val="{{false}}">
+            <div style="background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 13px; font-size: 12.5px; color: var(--ink-2); display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+              <span>{{cur.observedText}}</span>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{cur.sealed}}" hint-placeholder-val="{{false}}">
+            <div style="background: var(--warn-soft); border-radius: 10px; padding: 11px 13px; font-size: 12.5px; color: var(--warn); display: flex; gap: 10px; align-items: flex-start">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 2px"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+              <span>Sealed to the node's key. The gate stores ciphertext, so this transcript shows who sent what and when, not the content.</span>
+            </div>
+          </sc-if>
+
+<sc-if value="{{cur.empty}}" hint-placeholder-val="{{false}}">
+  <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 13px; padding: 18px; display: flex; flex-direction: column; gap: 12px">
+    <h2 style="margin: 0; font-size: 16px; font-weight: 700; letter-spacing: -0.02em">New chat</h2>
+    <div role="group" aria-label="Agent" style="display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; max-width: 100%; overflow-x: auto">
+  <sc-for list="{{cur.agentChoices}}" as="ag" hint-placeholder-count="2">
+    <button type="button" aria-pressed="{{ag.pressed}}" onClick="{{ag.pick}}" style="flex: 1 0 auto; min-height: 38px; border: 0; border-radius: 7px; padding: 6px 12px; font-size: 12px; white-space: nowrap; background: {{ag.bg}}; color: {{ag.fg}}; font-weight: {{ag.weight}}">{{ag.label}}</button>
+  </sc-for>
+</div>
+    <p style="margin: 0; font-size: 13px; color: var(--ink-2)">{{cur.description}}</p>
+    <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Examples from the agent's card</span>
+    <div style="display: flex; flex-direction: column; gap: 8px">
+      <sc-for list="{{cur.examples}}" as="ex" hint-placeholder-count="3">
+        <button type="button" onClick="{{ex.pick}}" style="display: flex; align-items: center; gap: 10px; min-height: 44px; text-align: left; background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px; color: var(--ink); font-size: 13px">
+          <span style="flex: 0 0 auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--line-2); color: var(--ink-2)">{{ex.tag}}</span>
+          <span style="min-width: 0; overflow-wrap: anywhere">{{ex.label}}</span>
+        </button>
+      </sc-for>
+    </div>
+  </div>
+</sc-if>
+<sc-for list="{{cur.items}}" as="it" hint-placeholder-count="3">
+<div style="display: flex; flex-direction: column">
+
+  <sc-if value="{{it.isMsg}}" hint-placeholder-val="{{true}}">
+    <div style="display: flex; flex-direction: column; gap: 6px; max-width: 86%; min-width: 0; align-self: {{it.align}}; align-items: {{it.align}}">
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--ink-3)">
+        <span aria-hidden="true" style="width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; font-size: 9px; font-weight: 700; background: {{it.avBg}}; color: {{it.avFg}}">{{it.av}}</span>
+        <b style="color: var(--ink-2); font-weight: 600; font-size: 11.5px">{{it.who}}</b>
+        <sc-if value="{{it.showKind}}" hint-placeholder-val="{{false}}">
+          <span style="font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--line-2); color: var(--ink-2)">Message</span>
+        </sc-if>
+        <time style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px">{{it.time}}</time>
+        <sc-if value="{{it.canRaw}}" hint-placeholder-val="{{true}}">
+          <button type="button" aria-pressed="{{it.rawOpen}}" onClick="{{it.toggleRaw}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">{{it.rawLabel}}</button>
+        </sc-if>
+      </div>
+      <sc-for list="{{it.parts}}" as="p" hint-placeholder-count="1">
+        <div style="display: flex; flex-direction: column; min-width: 0; max-width: 100%">
+          <sc-if value="{{p.isText}}" hint-placeholder-val="{{true}}">
+            <div style="background: {{p.bubbleBg}}; border: 1px solid {{p.bubbleLine}}; border-radius: {{p.radius}}; padding: 10px 14px; font-size: 13.5px; color: var(--ink); white-space: pre-line; overflow-wrap: anywhere">{{p.text}}<sc-if value="{{p.streaming}}" hint-placeholder-val="{{false}}"><span class="caret" aria-hidden="true"></span></sc-if></div>
+          </sc-if>
+          <sc-if value="{{p.isData}}" hint-placeholder-val="{{false}}">
+            <div style="background: {{p.bubbleBg}}; border: 1px solid {{p.bubbleLine}}; border-radius: {{p.radius}}; padding: 10px 12px; min-width: min(420px, 100%); box-sizing: border-box"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{p.json.label}}</span>
+    <button type="button" onClick="{{p.json.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{p.json.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{p.json.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></div>
+          </sc-if>
+          <sc-if value="{{p.isFile}}" hint-placeholder-val="{{false}}">
+            <div style="display: flex; align-items: center; gap: 9px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font-size: 12px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color: var(--ink-3)"><path d="M21 12.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.9-8.9a3.7 3.7 0 0 1 5.2 5.2l-8.8 8.8a1.8 1.8 0 0 1-2.6-2.6l8-8"/></svg>
+              <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600; overflow-wrap: anywhere">{{p.name}}</span>
+              <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3)">{{p.mediaType}}</span>
+            </div>
+          </sc-if>
+          <sc-if value="{{p.isSealed}}" hint-placeholder-val="{{false}}">
+            <div style="border: 1px dashed var(--line-2); border-radius: {{p.radius}}; padding: 9px 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2)">{{p.text}}</div>
+          </sc-if>
+        </div>
+      </sc-for>
+      <sc-if value="{{it.rawOpen}}" hint-placeholder-val="{{false}}">
+  <div style="width: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 10px 12px; box-sizing: border-box"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{it.raw.label}}</span>
+    <button type="button" onClick="{{it.raw.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{it.raw.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{it.raw.rows}}" as="rr" hint-placeholder-count="3">
+      <div style="padding-left: {{rr.pad}}">
+        <sc-if value="{{rr.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{rr.open}}" onClick="{{rr.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{rr.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{rr.key}}</span><span>{{rr.text}}</span><span style="color: var(--ink-3)">{{rr.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{rr.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{rr.key}}</span><span style="color: {{rr.color}}">{{rr.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></div>
+</sc-if>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{it.isTask}}" hint-placeholder-val="{{false}}">
+    <div style="align-self: flex-start; width: 100%; max-width: 680px; display: flex; flex-direction: column; gap: 6px">
+      <section aria-label="Task" style="background: var(--surface); border: 1px solid var(--line-2); border-radius: 13px; overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.08)">
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px 8px 12px; background: var(--surface-2); border-bottom: 1px solid var(--line)">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color: var(--ink-2)"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 4.5-5.5"/></svg>
+          <h3 style="margin: 0; font-size: 12.5px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase">Task</h3>
+          <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: var(--ink-2)">{{it.taskId}}</span>
+          <span style="display: inline-flex; align-items: center; gap: 6px; background: {{it.stateBg}}; color: {{it.stateFg}}; border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 600">
+            <sc-if value="{{it.working}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
+            {{it.state}}
+          </span>
+          <span style="margin-left: auto; display: flex; align-items: center; gap: 6px">
+            <sc-if value="{{it.canRaw}}" hint-placeholder-val="{{true}}">
+              <button type="button" aria-pressed="{{it.rawOpen}}" onClick="{{it.toggleRaw}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">{{it.rawLabel}}</button>
+            </sc-if>
+            <button type="button" aria-expanded="{{it.open}}" aria-label="{{it.toggleLabel}}" onClick="{{it.toggle}}" style="width: 36px; height: 36px; display: grid; place-items: center; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; color: var(--ink-2)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: {{it.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            </button>
+          </span>
+        </div>
+
+        <sc-if value="{{it.open}}" hint-placeholder-val="{{true}}">
+          <div style="display: flex; flex-direction: column; gap: 12px; padding: 12px">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--ink-3)">
+              <b style="color: var(--ink-2); font-weight: 600; font-size: 11.5px">{{it.who}}</b>
+              <time style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px">{{it.time}}</time>
+            </div>
+
+            <sc-if value="{{it.sealed}}" hint-placeholder-val="{{false}}">
+              <div style="border: 1px dashed var(--line-2); border-radius: 10px; padding: 9px 12px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2)">{{it.sealedText}}</div>
+            </sc-if>
+
+            <sc-if value="{{it.hasUpdates}}" hint-placeholder-val="{{true}}">
+              <ol aria-label="Status updates" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px">
+                <sc-for list="{{it.updates}}" as="u" hint-placeholder-count="2">
+                  <li style="display: flex; align-items: flex-start; gap: 9px; font-size: 13px; color: var(--ink)">
+                    <span aria-hidden="true" style="flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; margin-top: 7px; background: var(--line-2)"></span>
+                    <span style="min-width: 0; overflow-wrap: anywhere">{{u.text}}<sc-if value="{{u.streaming}}" hint-placeholder-val="{{false}}"><span class="caret" aria-hidden="true"></span></sc-if></span>
+                    <time style="margin-left: auto; flex: 0 0 auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: var(--ink-3); padding-top: 3px">{{u.time}}</time>
+                  </li>
+                </sc-for>
+              </ol>
+            </sc-if>
+
+            <sc-for list="{{it.artifacts}}" as="a" hint-placeholder-count="1">
+              <div style="border: 1px solid var(--line); border-radius: 11px; overflow: hidden">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px 6px 11px; border-bottom: 1px solid var(--line)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="color: var(--ink-3)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg>
+                  <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Artifact</span>
+                  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600; overflow-wrap: anywhere">{{a.name}}</span>
+                  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3)">{{a.mediaType}}</span>
+                  <span style="margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{a.statusBg}}; color: {{a.statusFg}}">
+                    <sc-if value="{{a.streaming}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
+                    {{a.status}}
+                  </span>
+                  <sc-if value="{{a.canSrc}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{a.toggleSrc}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">{{a.srcLabel}}</button></sc-if>
+                  <button type="button" onClick="{{a.openSide}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Panel</button>
+                  <button type="button" aria-expanded="{{a.open}}" aria-label="{{a.toggleLabel}}" onClick="{{a.toggle}}" style="width: 36px; height: 36px; display: grid; place-items: center; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; color: var(--ink-2)">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: {{a.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+                  </button>
+                </div>
+                <sc-if value="{{a.open}}" hint-placeholder-val="{{true}}">
+                  <div style="padding: 10px 12px">
+                    <sc-if value="{{a.showMd}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 10px; font-size: 13.5px; line-height: 1.55; color: var(--ink); min-width: 0">
+<sc-for list="{{a.md.blocks}}" as="b" hint-placeholder-count="2">
+  <div style="min-width: 0">
+    <sc-if value="{{b.isH1}}" hint-placeholder-val="{{false}}"><h4 style="margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -0.02em; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h4></sc-if>
+    <sc-if value="{{b.isH2}}" hint-placeholder-val="{{false}}"><h5 style="margin: 4px 0 0; font-size: 14.5px; font-weight: 700; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h5></sc-if>
+    <sc-if value="{{b.isH3}}" hint-placeholder-val="{{false}}"><h6 style="margin: 2px 0 0; font-size: 13px; font-weight: 700; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h6></sc-if>
+    <sc-if value="{{b.isP}}" hint-placeholder-val="{{false}}"><p style="margin: 0; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></p></sc-if>
+    <sc-if value="{{b.isList}}" hint-placeholder-val="{{false}}"><ul style="margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px"><sc-for list="{{b.items}}" as="li" hint-placeholder-count="2"><li style="overflow-wrap: anywhere"><sc-for list="{{li.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></li></sc-for></ul></sc-if>
+    <sc-if value="{{b.isOList}}" hint-placeholder-val="{{false}}"><ol style="margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px"><sc-for list="{{b.items}}" as="li" hint-placeholder-count="2"><li style="overflow-wrap: anywhere"><sc-for list="{{li.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></li></sc-for></ol></sc-if>
+    <sc-if value="{{b.isCode}}" hint-placeholder-val="{{false}}"><pre style="margin: 0; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; overflow-x: auto; white-space: pre">{{b.text}}</pre></sc-if>
+  </div>
+</sc-for>
+</div></sc-if>
+<sc-if value="{{a.showSrc}}" hint-placeholder-val="{{false}}"><pre style="margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; color: var(--ink)">{{a.text}}</pre></sc-if>
+<sc-if value="{{a.showText}}" hint-placeholder-val="{{false}}"><div style="font-size: 13px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere">{{a.text}}</div></sc-if>
+<sc-if value="{{a.isJson}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{a.json.label}}</span>
+    <button type="button" onClick="{{a.json.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{a.json.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{a.json.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+<sc-if value="{{a.streaming}}" hint-placeholder-val="{{false}}"><div style="margin-top: 6px"><span class="caret" aria-hidden="true"></span></div></sc-if>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+
+            <sc-if value="{{it.hasUi}}" hint-placeholder-val="{{false}}">
+              <div style="border: 1px solid var(--brand-line); border-radius: 11px; overflow: hidden">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 8px 6px 11px; background: var(--brand-soft)">
+                  <span style="font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--brand-ink)">A2UI surface</span>
+                  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--brand-ink); overflow-wrap: anywhere">{{it.ui.surfaceId}}</span>
+                  <button type="button" aria-pressed="{{it.ui.rawOpen}}" onClick="{{it.ui.toggleRaw}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap; color: var(--brand-ink); border-color: var(--brand-line)">{{it.ui.rawLabel}}</button>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 12px; padding: 14px">
+                  <sc-for list="{{it.ui.comps}}" as="c" hint-placeholder-count="3">
+                    <div style="display: flex; flex-direction: column">
+                      <sc-if value="{{c.isHeading}}" hint-placeholder-val="{{false}}"><h4 style="margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em">{{c.text}}</h4></sc-if>
+                      <sc-if value="{{c.isText}}" hint-placeholder-val="{{true}}"><p style="margin: 0; font-size: 13px; color: var(--ink-2)">{{c.text}}</p></sc-if>
+                      <sc-if value="{{c.isChoice}}" hint-placeholder-val="{{false}}">
+                        <fieldset style="border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0">
+                          <legend style="padding: 0; margin-bottom: 6px; font-size: 12px; font-weight: 600; color: var(--ink-2)">{{c.label}}</legend>
+                          <sc-for list="{{c.options}}" as="o" hint-placeholder-count="2">
+                            <label style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 12px; border: 1px solid var(--line-2); border-radius: 9px; font-size: 13px; cursor: pointer">
+                              <input type="radio" name="{{o.name}}" checked="{{o.checked}}" disabled="{{o.disabled}}" onChange="{{o.pick}}" style="width: 16px; height: 16px; margin: 0; accent-color: var(--brand)">
+                              <span>{{o.label}}</span>
+                            </label>
+                          </sc-for>
+                        </fieldset>
+                      </sc-if>
+                      <sc-if value="{{c.isField}}" hint-placeholder-val="{{false}}">
+                        <div style="display: flex; flex-direction: column; gap: 6px">
+                          <label for="{{c.inputId}}" style="font-size: 12px; font-weight: 600; color: var(--ink-2)">{{c.label}}</label>
+                          <input id="{{c.inputId}}" type="text" value="{{c.value}}" disabled="{{c.disabled}}" onChange="{{c.onChange}}" autocomplete="off" style="min-height: 44px; box-sizing: border-box; background: var(--paper); color: var(--ink); border: 1px solid var(--line-2); border-radius: 9px; padding: 9px 12px; font: inherit; font-size: 14px">
+                        </div>
+                      </sc-if>
+                      <sc-if value="{{c.isButton}}" hint-placeholder-val="{{false}}">
+                        <button type="button" disabled="{{c.disabled}}" onClick="{{c.click}}" style="align-self: flex-start; min-height: 44px; border: 1px solid var(--brand); background: var(--brand); color: var(--on-brand); border-radius: 9px; padding: 8px 18px; font-size: 13px; font-weight: 600">{{c.label}}</button>
+                      </sc-if>
+                    </div>
+                  </sc-for>
+                  <sc-if value="{{it.ui.rawOpen}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{it.ui.raw.label}}</span>
+    <button type="button" onClick="{{it.ui.raw.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{it.ui.raw.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{it.ui.raw.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
+      </section>
+      <sc-if value="{{it.rawOpen}}" hint-placeholder-val="{{false}}">
+  <div style="width: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 10px 12px; box-sizing: border-box"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{it.raw.label}}</span>
+    <button type="button" onClick="{{it.raw.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{it.raw.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{it.raw.rows}}" as="rr" hint-placeholder-count="3">
+      <div style="padding-left: {{rr.pad}}">
+        <sc-if value="{{rr.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{rr.open}}" onClick="{{rr.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{rr.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{rr.key}}</span><span>{{rr.text}}</span><span style="color: var(--ink-3)">{{rr.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{rr.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{rr.key}}</span><span style="color: {{rr.color}}">{{rr.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></div>
+</sc-if>
+    </div>
+  </sc-if>
+
+</div>
+</sc-for>
+        </div>
+      </div>
+
+      <sc-if value="{{cur.canReply}}" hint-placeholder-val="{{true}}">
+        <form onSubmit="{{send}}" style="flex: 0 0 auto; padding: 10px 22px 14px; background: var(--surface); border-top: 1px solid var(--line)">
+          <div style="max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap">
+              <div role="group" aria-label="Message format" style="display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px">
+                <sc-for list="{{modes}}" as="m" hint-placeholder-count="2">
+                  <button type="button" aria-pressed="{{m.pressed}}" onClick="{{m.pick}}" style="min-height: 36px; border: 0; border-radius: 7px; padding: 5px 14px; font-size: 12px; background: {{m.bg}}; color: {{m.fg}}; font-weight: {{m.weight}}">{{m.label}}</button>
+                </sc-for>
+              </div>
+              <span aria-live="polite" style="font-size: 11.5px; color: {{hintColor}}; min-width: 0; overflow-wrap: anywhere">{{hint}}</span>
+            </div>
+            <div style="display: flex; gap: 10px; align-items: flex-end">
+              <label for="kc-draft" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%)">Message</label>
+              <textarea id="kc-draft" rows="{{rows}}" value="{{draft}}" onChange="{{onDraft}}" onKeyDown="{{onKey}}" placeholder="{{cur.placeholder}}" autocomplete="off" style="flex: 1 1 auto; min-width: 0; min-height: 44px; box-sizing: border-box; resize: vertical; background: var(--paper); color: var(--ink); border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 13px; font-family: {{draftFont}}; font-size: {{draftSize}}; line-height: 1.45"></textarea>
+              <button type="submit" disabled="{{sendDisabled}}" style="min-height: 44px; border: 1px solid var(--brand); background: var(--brand); color: var(--on-brand); border-radius: 9px; padding: 8px 18px; font-size: 13px; font-weight: 600; white-space: nowrap">{{sendLabel}}</button>
+            </div>
+          </div>
+        </form>
+      </sc-if>
+      <sc-if value="{{cur.readOnly}}" hint-placeholder-val="{{false}}">
+        <div style="flex: 0 0 auto; padding: 10px 22px 12px; background: var(--surface); border-top: 1px solid var(--line)">
+          <div style="max-width: 820px; margin: 0 auto; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2)">
+            <span>Read-only. This conversation is between two agents.</span>
+            <span style="margin-left: auto; display: flex; align-items: center; gap: 14px">
+              <sc-if value="{{cur.canReplay}}" hint-placeholder-val="{{false}}">
+                <button type="button" disabled="{{cur.busy}}" onClick="{{cur.replay}}" style="min-height: 44px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 9px; padding: 8px 14px; font-size: 12.5px; font-weight: 600">Replay stream</button>
+              </sc-if>
+              <a href="#top" style="font-size: 12.5px; font-weight: 600; padding: 12px 0">Open in Traffic</a>
+            </span>
+          </div>
+        </div>
+      </sc-if>
+    </main>
+
+    <aside class="side" aria-label="Tasks and artifacts of this conversation" style="display: {{side.display}}; flex-direction: column; min-height: 0; background: var(--surface); border-left: 1px solid var(--line); box-sizing: border-box">
+  <div style="flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line)">
+    <div role="group" aria-label="Panel" style="display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; max-width: 100%; overflow-x: auto">
+  <sc-for list="{{side.tabs}}" as="st" hint-placeholder-count="2">
+    <button type="button" aria-pressed="{{st.pressed}}" onClick="{{st.pick}}" style="flex: 1 0 auto; min-height: 38px; border: 0; border-radius: 7px; padding: 6px 12px; font-size: 12px; white-space: nowrap; background: {{st.bg}}; color: {{st.fg}}; font-weight: {{st.weight}}">{{st.label}}</button>
+  </sc-for>
+</div>
+    <button type="button" aria-label="Close panel" onClick="{{side.close}}" style="margin-left: auto; flex: 0 0 auto; width: 44px; height: 44px; display: grid; place-items: center; background: transparent; border: 1px solid var(--line-2); border-radius: 9px; color: var(--ink-2)">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div style="flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; background: var(--paper)">
+    <div style="display: {{side.tasksDisplay}}; flex-direction: column; gap: 10px">
+      <sc-if value="{{side.noTasks}}" hint-placeholder-val="{{false}}"><p style="margin: 0; font-size: 13px; color: var(--ink-2)">No task in this conversation. The agent answered with messages only.</p></sc-if>
+      <sc-for list="{{side.tasks}}" as="t" hint-placeholder-count="1"><div style="background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0">
+  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+    <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Task</span>
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600">{{t.taskId}}</span>
+    <span style="display: inline-flex; align-items: center; gap: 6px; background: {{t.stateBg}}; color: {{t.stateFg}}; border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 600">
+      <sc-if value="{{t.working}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
+      {{t.state}}
+    </span>
+    <time style="margin-left: auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: var(--ink-3)">{{t.time}}</time>
+  </div>
+  <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere">{{t.meta}}</div>
+  <sc-if value="{{t.hasLast}}" hint-placeholder-val="{{true}}"><div style="font-size: 13px; color: var(--ink); overflow-wrap: anywhere">{{t.last}}</div></sc-if>
+  <div style="display: flex; gap: 6px; flex-wrap: wrap">
+    <button type="button" disabled="{{t.statusBusy}}" onClick="{{t.getStatus}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap">{{t.statusLabel}}</button>
+    <button type="button" aria-pressed="{{t.subOpen}}" onClick="{{t.toggleSub}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap">{{t.subLabel}}</button>
+    <button type="button" disabled="{{t.cancelDisabled}}" onClick="{{t.cancel}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap; color: var(--bad)">Cancel</button>
+    <sc-if value="{{t.showOpen}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{t.openChat}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap">Open chat</button></sc-if>
+  </div>
+  <sc-if value="{{t.hasSub}}" hint-placeholder-val="{{false}}">
+    <div style="border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; min-width: 0">
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">SubscribeToTask</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{t.subBg}}; color: {{t.subFg}}">
+          <sc-if value="{{t.subLive}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
+          {{t.subState}}
+        </span>
+      </div>
+      <sc-if value="{{t.hasEarlier}}" hint-placeholder-val="{{false}}"><div style="font-size: 11px; color: var(--ink-3)">{{t.earlier}}</div></sc-if>
+      <ol aria-label="Events" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px">
+        <sc-for list="{{t.events}}" as="ev" hint-placeholder-count="2">
+          <li style="display: flex; gap: 8px; align-items: flex-start; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.45">
+            <time style="flex: 0 0 auto; color: var(--ink-3)">{{ev.time}}</time>
+            <span style="min-width: 0; display: flex; flex-direction: column">
+              <span style="font-weight: 600; color: var(--ink-2)">{{ev.kind}}</span>
+              <span style="color: var(--ink); overflow-wrap: anywhere">{{ev.text}}</span>
+            </span>
+          </li>
+        </sc-for>
+      </ol>
+      <div style="font-size: 11.5px; color: {{t.subNoteColor}}; overflow-wrap: anywhere">{{t.subNote}}</div>
+    </div>
+  </sc-if>
+  <sc-if value="{{t.hasResult}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{t.result.label}}</span>
+    <button type="button" onClick="{{t.result.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{t.result.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{t.result.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+</div></sc-for>
+    </div>
+    <div style="display: {{side.artsDisplay}}; flex-direction: column; gap: 10px">
+      <sc-if value="{{side.noArts}}" hint-placeholder-val="{{false}}"><p style="margin: 0; font-size: 13px; color: var(--ink-2)">No artifact in this conversation yet.</p></sc-if>
+      <div style="display: flex; flex-direction: column; gap: 6px">
+        <sc-for list="{{side.arts}}" as="ar" hint-placeholder-count="2"><button type="button" aria-pressed="{{ar.selected}}" onClick="{{ar.pick}}" style="text-align: left; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; min-height: 44px; padding: 8px 10px; border-radius: 10px; border: 1px solid {{ar.rowLine}}; background: {{ar.rowBg}}; color: var(--ink); min-width: 0">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; color: var(--ink-3)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg>
+  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600; overflow-wrap: anywhere">{{ar.name}}</span>
+  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3)">{{ar.mediaType}}</span>
+  <span style="margin-left: auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-2); overflow-wrap: anywhere">{{ar.sub}}</span>
+</button></sc-for>
+      </div>
+      <sc-if value="{{side.hasSel}}" hint-placeholder-val="{{false}}"><div style="background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-width: 0">
+  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px 8px 12px; border-bottom: 1px solid var(--line)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; color: var(--ink-3)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg>
+    <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Artifact</span>
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere">{{side.sel.name}}</span>
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3)">{{side.sel.mediaType}}</span>
+    <span style="margin-left: auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{side.sel.statusBg}}; color: {{side.sel.statusFg}}">{{side.sel.status}}</span>
+      <sc-if value="{{side.sel.canSrc}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{side.sel.toggleSrc}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">{{side.sel.srcLabel}}</button></sc-if>
+      
+    </span>
+  </div>
+  <div style="padding: 6px 12px 0; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3); overflow-wrap: anywhere">{{side.sel.pair}} · {{side.sel.taskId}}</div>
+  <div style="padding: 10px 12px 12px"><sc-if value="{{side.sel.showMd}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 10px; font-size: 13.5px; line-height: 1.55; color: var(--ink); min-width: 0">
+<sc-for list="{{side.sel.md.blocks}}" as="b" hint-placeholder-count="2">
+  <div style="min-width: 0">
+    <sc-if value="{{b.isH1}}" hint-placeholder-val="{{false}}"><h4 style="margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -0.02em; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h4></sc-if>
+    <sc-if value="{{b.isH2}}" hint-placeholder-val="{{false}}"><h5 style="margin: 4px 0 0; font-size: 14.5px; font-weight: 700; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h5></sc-if>
+    <sc-if value="{{b.isH3}}" hint-placeholder-val="{{false}}"><h6 style="margin: 2px 0 0; font-size: 13px; font-weight: 700; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h6></sc-if>
+    <sc-if value="{{b.isP}}" hint-placeholder-val="{{false}}"><p style="margin: 0; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></p></sc-if>
+    <sc-if value="{{b.isList}}" hint-placeholder-val="{{false}}"><ul style="margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px"><sc-for list="{{b.items}}" as="li" hint-placeholder-count="2"><li style="overflow-wrap: anywhere"><sc-for list="{{li.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></li></sc-for></ul></sc-if>
+    <sc-if value="{{b.isOList}}" hint-placeholder-val="{{false}}"><ol style="margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px"><sc-for list="{{b.items}}" as="li" hint-placeholder-count="2"><li style="overflow-wrap: anywhere"><sc-for list="{{li.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></li></sc-for></ol></sc-if>
+    <sc-if value="{{b.isCode}}" hint-placeholder-val="{{false}}"><pre style="margin: 0; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; overflow-x: auto; white-space: pre">{{b.text}}</pre></sc-if>
+  </div>
+</sc-for>
+</div></sc-if>
+<sc-if value="{{side.sel.showSrc}}" hint-placeholder-val="{{false}}"><pre style="margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; color: var(--ink)">{{side.sel.text}}</pre></sc-if>
+<sc-if value="{{side.sel.showText}}" hint-placeholder-val="{{false}}"><div style="font-size: 13px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere">{{side.sel.text}}</div></sc-if>
+<sc-if value="{{side.sel.isJson}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{side.sel.json.label}}</span>
+    <button type="button" onClick="{{side.sel.json.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{side.sel.json.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{side.sel.json.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+<sc-if value="{{side.sel.streaming}}" hint-placeholder-val="{{false}}"><div style="margin-top: 6px"><span class="caret" aria-hidden="true"></span></div></sc-if></div>
+</div></sc-if>
+    </div>
+  </div>
+</aside>
+  </div>
+
+  <div style="display: {{d.nodes}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">Nodes</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px">Each node is one outbound connection to this gate. It hosts agents and MCP servers, and its agents can call others.</p>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 14px; align-items: start">
+  <sc-for list="{{pNodes}}" as="g" hint-placeholder-count="3">
+    <article style="background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0">
+      <div style="display: flex; align-items: flex-start; gap: 10px">
+        <div style="min-width: 0; flex: 1 1 auto">
+          <h2 style="margin: 0; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 14px; font-weight: 600; overflow-wrap: anywhere">{{g.name}}</h2>
+          <div style="font-size: 12px; color: var(--ink-2); margin-top: 3px">{{g.owner}} · {{g.since}}</div>
+        </div>
+        <span style="flex: 0 0 auto; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 999px; background: {{g.statusBg}}; color: {{g.statusFg}}">{{g.statusText}}</span>
+      </div>
+      <div style="border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px">
+        <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Services</span>
+        <sc-for list="{{g.services}}" as="sv" hint-placeholder-count="2">
+          <div style="display: flex; align-items: center; gap: 8px; font-size: 12.5px">
+            <span style="flex: 0 0 auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 5px; border: 1px solid var(--line-2); color: var(--ink-2)">{{sv.kind}}</span>
+            <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600; min-width: 0; overflow-wrap: anywhere">{{sv.svc}}</span>
+            <span style="margin-left: auto; font-size: 11px; font-weight: 600; color: {{sv.color}}">{{sv.state}}</span>
+          </div>
+        </sc-for>
+      </div>
+    </article>
+  </sc-for>
+</div>
+  </div>
+</div>
+  <div style="display: {{d.agents}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">Agents</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px">The A2A agents behind this gate, as their cards say.</p>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr)); gap: 14px; align-items: start">
+  <sc-for list="{{pAgents}}" as="g" hint-placeholder-count="2">
+    <article style="background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0">
+      <div style="display: flex; gap: 12px; align-items: flex-start">
+  <span aria-hidden="true" style="flex: 0 0 auto; width: 44px; height: 44px; border-radius: 11px; display: grid; place-items: center; font-size: 13px; font-weight: 700; background: var(--brand-soft); color: var(--brand-ink)">{{g.av}}</span>
+  <div style="min-width: 0; flex: 1 1 auto">
+    <h2 style="margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap">{{g.name}}<span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 500; color: var(--ink-2); border: 1px solid var(--line-2); padding: 1px 6px; border-radius: 5px">{{g.version}}</span></h2>
+    <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2); margin-top: 3px; overflow-wrap: anywhere">{{g.svc}}</div>
+  </div>
+  <span style="flex: 0 0 auto; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 999px; background: {{g.statusBg}}; color: {{g.statusFg}}">{{g.statusText}}</span>
+</div>
+      <p style="margin: 0; font-size: 13px; color: var(--ink-2); line-height: 1.55">{{g.description}}</p>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px">
+  <sc-for list="{{g.chips}}" as="ch" hint-placeholder-count="3">
+    <span style="display: inline-flex; align-items: baseline; gap: 6px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; font-size: 11.5px; max-width: 100%"><b style="color: var(--ink-3); font-weight: 500; font-size: 10px; letter-spacing: 0.03em; text-transform: uppercase">{{ch.k}}</b><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; overflow-wrap: anywhere">{{ch.v}}</span></span>
+  </sc-for>
+</div>
+      <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0">
+  <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">{{g.bindings}}</span>
+  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; overflow-wrap: anywhere">{{g.url}}</span>
+</div>
+      <sc-for list="{{g.skills}}" as="sk" hint-placeholder-count="1">
+        <div style="border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0">
+          <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Skill</span>
+          <div style="font-size: 13.5px; font-weight: 600">{{sk.name}}</div>
+          <div style="font-size: 12.5px; color: var(--ink-2)">{{sk.description}}</div>
+          <div style="display: flex; flex-wrap: wrap; gap: 6px">
+            <sc-for list="{{sk.tags}}" as="tg" hint-placeholder-count="2"><span style="font-size: 11px; color: var(--ink-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 2px 7px">{{tg.t}}</span></sc-for>
+          </div>
+          <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Examples</span>
+          <sc-for list="{{sk.examples}}" as="ex" hint-placeholder-count="2"><div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; overflow-wrap: anywhere">{{ex.text}}</div></sc-for>
+        </div>
+      </sc-for>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap">
+        <button type="button" disabled="{{g.chatDisabled}}" onClick="{{g.chat}}" style="min-height: 44px; border: 1px solid var(--brand); background: var(--brand); color: var(--on-brand); border-radius: 9px; padding: 8px 18px; font-size: 13px; font-weight: 600; white-space: nowrap">Chat</button>
+        <button type="button" aria-pressed="{{g.jsonOpen}}" onClick="{{g.toggleJson}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap; min-height: 44px">{{g.jsonLabel}}</button>
+      </div>
+      <sc-if value="{{g.jsonOpen}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{g.json.label}}</span>
+    <button type="button" onClick="{{g.json.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{g.json.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{g.json.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+    </article>
+  </sc-for>
+</div>
+  </div>
+</div>
+  <div style="display: {{d.mcp}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">MCP</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px">The MCP servers behind this gate. Each one is reached through its node; nothing listens on a public port.</p>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr)); gap: 14px; align-items: start">
+  <sc-for list="{{pMcp}}" as="g" hint-placeholder-count="2">
+    <article style="background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0">
+      <div style="display: flex; gap: 12px; align-items: flex-start">
+  <span aria-hidden="true" style="flex: 0 0 auto; width: 44px; height: 44px; border-radius: 11px; display: grid; place-items: center; font-size: 13px; font-weight: 700; background: var(--brand-soft); color: var(--brand-ink)">{{g.av}}</span>
+  <div style="min-width: 0; flex: 1 1 auto">
+    <h2 style="margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap">{{g.title}}</h2>
+    <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2); margin-top: 3px; overflow-wrap: anywhere">{{g.svc}}</div>
+  </div>
+  <span style="flex: 0 0 auto; font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 999px; background: {{g.statusBg}}; color: {{g.statusFg}}">{{g.statusText}}</span>
+</div>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px">
+  <sc-for list="{{g.chips}}" as="ch" hint-placeholder-count="3">
+    <span style="display: inline-flex; align-items: baseline; gap: 6px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; font-size: 11.5px; max-width: 100%"><b style="color: var(--ink-3); font-weight: 500; font-size: 10px; letter-spacing: 0.03em; text-transform: uppercase">{{ch.k}}</b><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; overflow-wrap: anywhere">{{ch.v}}</span></span>
+  </sc-for>
+</div>
+      <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0">
+  <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Streamable HTTP on the gate</span>
+  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; overflow-wrap: anywhere">{{g.url}}</span>
+</div>
+      <div style="border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0">
+        <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Tools</span>
+        <sc-for list="{{g.tools}}" as="tl" hint-placeholder-count="3">
+          <div style="display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12.5px">
+            <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-weight: 600">{{tl.name}}</span>
+            <span style="color: var(--ink-2); min-width: 0; overflow-wrap: anywhere">{{tl.description}}</span>
+            <sc-if value="{{tl.denied}}" hint-placeholder-val="{{false}}"><span style="margin-left: auto; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--warn-soft); color: var(--warn)">denied by the gate</span></sc-if>
+          </div>
+        </sc-for>
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap">
+        <button type="button" aria-pressed="{{g.jsonOpen}}" onClick="{{g.toggleJson}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap; min-height: 44px">{{g.jsonLabel}}</button>
+      </div>
+      <sc-if value="{{g.jsonOpen}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{g.json.label}}</span>
+    <button type="button" onClick="{{g.json.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{g.json.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{g.json.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+    </article>
+  </sc-for>
+</div>
+  </div>
+</div>
+  <div style="display: {{d.catalog}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">Catalog</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px">The public listing of community agents.</p>
+    </div>
+    <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0"><p style="margin: 0; font-size: 13px; color: var(--ink-2)">The catalog is not part of this prototype.</p></div>
+  </div>
+</div>
+  <div style="display: {{d.tasks}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">Tasks</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px">Every task your agents opened or received, across all conversations.</p>
+    </div>
+    <div role="group" aria-label="Show" style="display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; max-width: 100%; overflow-x: auto">
+  <sc-for list="{{pTasks.filters}}" as="tf" hint-placeholder-count="2">
+    <button type="button" aria-pressed="{{tf.pressed}}" onClick="{{tf.pick}}" style="flex: 1 0 auto; min-height: 38px; border: 0; border-radius: 7px; padding: 6px 12px; font-size: 12px; white-space: nowrap; background: {{tf.bg}}; color: {{tf.fg}}; font-weight: {{tf.weight}}">{{tf.label}}</button>
+  </sc-for>
+</div>
+<sc-if value="{{pTasks.none}}" hint-placeholder-val="{{false}}"><p style="margin: 0; font-size: 13px; color: var(--ink-2)">No task in this group.</p></sc-if>
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr)); gap: 14px; align-items: start">
+  <sc-for list="{{pTasks.tasks}}" as="t" hint-placeholder-count="3"><div style="background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0">
+  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+    <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Task</span>
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600">{{t.taskId}}</span>
+    <span style="display: inline-flex; align-items: center; gap: 6px; background: {{t.stateBg}}; color: {{t.stateFg}}; border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 600">
+      <sc-if value="{{t.working}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
+      {{t.state}}
+    </span>
+    <time style="margin-left: auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10px; color: var(--ink-3)">{{t.time}}</time>
+  </div>
+  <div style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: var(--ink-2); overflow-wrap: anywhere">{{t.meta}}</div>
+  <sc-if value="{{t.hasLast}}" hint-placeholder-val="{{true}}"><div style="font-size: 13px; color: var(--ink); overflow-wrap: anywhere">{{t.last}}</div></sc-if>
+  <div style="display: flex; gap: 6px; flex-wrap: wrap">
+    <button type="button" disabled="{{t.statusBusy}}" onClick="{{t.getStatus}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap">{{t.statusLabel}}</button>
+    <button type="button" aria-pressed="{{t.subOpen}}" onClick="{{t.toggleSub}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap">{{t.subLabel}}</button>
+    <button type="button" disabled="{{t.cancelDisabled}}" onClick="{{t.cancel}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap; color: var(--bad)">Cancel</button>
+    <sc-if value="{{t.showOpen}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{t.openChat}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap">Open chat</button></sc-if>
+  </div>
+  <sc-if value="{{t.hasSub}}" hint-placeholder-val="{{false}}">
+    <div style="border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; min-width: 0">
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">SubscribeToTask</span>
+        <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{t.subBg}}; color: {{t.subFg}}">
+          <sc-if value="{{t.subLive}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
+          {{t.subState}}
+        </span>
+      </div>
+      <sc-if value="{{t.hasEarlier}}" hint-placeholder-val="{{false}}"><div style="font-size: 11px; color: var(--ink-3)">{{t.earlier}}</div></sc-if>
+      <ol aria-label="Events" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px">
+        <sc-for list="{{t.events}}" as="ev" hint-placeholder-count="2">
+          <li style="display: flex; gap: 8px; align-items: flex-start; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.45">
+            <time style="flex: 0 0 auto; color: var(--ink-3)">{{ev.time}}</time>
+            <span style="min-width: 0; display: flex; flex-direction: column">
+              <span style="font-weight: 600; color: var(--ink-2)">{{ev.kind}}</span>
+              <span style="color: var(--ink); overflow-wrap: anywhere">{{ev.text}}</span>
+            </span>
+          </li>
+        </sc-for>
+      </ol>
+      <div style="font-size: 11.5px; color: {{t.subNoteColor}}; overflow-wrap: anywhere">{{t.subNote}}</div>
+    </div>
+  </sc-if>
+  <sc-if value="{{t.hasResult}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{t.result.label}}</span>
+    <button type="button" onClick="{{t.result.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{t.result.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{t.result.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+</div></sc-for>
+</div>
+  </div>
+</div>
+  <div style="display: {{d.artifacts}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">Artifacts</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px">Everything agents returned, across all conversations. Markdown is rendered; JSON opens as a tree.</p>
+    </div>
+    <div style="display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start">
+  <div style="flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+    <sc-for list="{{pArts.rows}}" as="ar" hint-placeholder-count="3"><button type="button" aria-pressed="{{ar.selected}}" onClick="{{ar.pick}}" style="text-align: left; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; min-height: 44px; padding: 8px 10px; border-radius: 10px; border: 1px solid {{ar.rowLine}}; background: {{ar.rowBg}}; color: var(--ink); min-width: 0">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; color: var(--ink-3)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg>
+  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600; overflow-wrap: anywhere">{{ar.name}}</span>
+  <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3)">{{ar.mediaType}}</span>
+  <span style="margin-left: auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-2); overflow-wrap: anywhere">{{ar.sub}}</span>
+</button></sc-for>
+  </div>
+  <div style="flex: 999 1 460px; min-width: 0">
+    <sc-if value="{{pArts.none}}" hint-placeholder-val="{{false}}"><p style="margin: 0; font-size: 13px; color: var(--ink-2)">No artifact yet.</p></sc-if>
+    <sc-if value="{{pArts.hasSel}}" hint-placeholder-val="{{true}}"><div style="background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-width: 0">
+  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px 8px 12px; border-bottom: 1px solid var(--line)">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; color: var(--ink-3)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z"/><path d="M14 3v5h5"/></svg>
+    <span style="font-size: 10px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3)">Artifact</span>
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere">{{pArts.sel.name}}</span>
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3)">{{pArts.sel.mediaType}}</span>
+    <span style="margin-left: auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+      <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{pArts.sel.statusBg}}; color: {{pArts.sel.statusFg}}">{{pArts.sel.status}}</span>
+      <sc-if value="{{pArts.sel.canSrc}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{pArts.sel.toggleSrc}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">{{pArts.sel.srcLabel}}</button></sc-if>
+      <button type="button" onClick="{{pArts.sel.openChat}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Open chat</button>
+    </span>
+  </div>
+  <div style="padding: 6px 12px 0; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; color: var(--ink-3); overflow-wrap: anywhere">{{pArts.sel.pair}} · {{pArts.sel.taskId}}</div>
+  <div style="padding: 10px 12px 12px"><sc-if value="{{pArts.sel.showMd}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 10px; font-size: 13.5px; line-height: 1.55; color: var(--ink); min-width: 0">
+<sc-for list="{{pArts.sel.md.blocks}}" as="b" hint-placeholder-count="2">
+  <div style="min-width: 0">
+    <sc-if value="{{b.isH1}}" hint-placeholder-val="{{false}}"><h4 style="margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -0.02em; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h4></sc-if>
+    <sc-if value="{{b.isH2}}" hint-placeholder-val="{{false}}"><h5 style="margin: 4px 0 0; font-size: 14.5px; font-weight: 700; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h5></sc-if>
+    <sc-if value="{{b.isH3}}" hint-placeholder-val="{{false}}"><h6 style="margin: 2px 0 0; font-size: 13px; font-weight: 700; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></h6></sc-if>
+    <sc-if value="{{b.isP}}" hint-placeholder-val="{{false}}"><p style="margin: 0; overflow-wrap: anywhere"><sc-for list="{{b.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></p></sc-if>
+    <sc-if value="{{b.isList}}" hint-placeholder-val="{{false}}"><ul style="margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px"><sc-for list="{{b.items}}" as="li" hint-placeholder-count="2"><li style="overflow-wrap: anywhere"><sc-for list="{{li.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></li></sc-for></ul></sc-if>
+    <sc-if value="{{b.isOList}}" hint-placeholder-val="{{false}}"><ol style="margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px"><sc-for list="{{b.items}}" as="li" hint-placeholder-count="2"><li style="overflow-wrap: anywhere"><sc-for list="{{li.segs}}" as="sg" hint-placeholder-count="1"><span style="font-weight: {{sg.weight}}; font-family: {{sg.font}}; font-size: {{sg.size}}; background: {{sg.bg}}; padding: {{sg.pad}}; border-radius: 4px">{{sg.text}}</span></sc-for></li></sc-for></ol></sc-if>
+    <sc-if value="{{b.isCode}}" hint-placeholder-val="{{false}}"><pre style="margin: 0; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; overflow-x: auto; white-space: pre">{{b.text}}</pre></sc-if>
+  </div>
+</sc-for>
+</div></sc-if>
+<sc-if value="{{pArts.sel.showSrc}}" hint-placeholder-val="{{false}}"><pre style="margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; color: var(--ink)">{{pArts.sel.text}}</pre></sc-if>
+<sc-if value="{{pArts.sel.showText}}" hint-placeholder-val="{{false}}"><div style="font-size: 13px; color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere">{{pArts.sel.text}}</div></sc-if>
+<sc-if value="{{pArts.sel.isJson}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
+  <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
+    <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">{{pArts.sel.json.label}}</span>
+    <button type="button" onClick="{{pArts.sel.json.expandAll}}" style="margin-left: auto; min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Expand all</button>
+    <button type="button" onClick="{{pArts.sel.json.collapseAll}}" style="min-height: 36px; background: transparent; border: 1px solid var(--line-2); border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 600; color: var(--ink-2); white-space: nowrap">Collapse all</button>
+  </div>
+  <div style="display: flex; flex-direction: column; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; line-height: 1.5; background: var(--paper); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; overflow-x: auto">
+    <sc-for list="{{pArts.sel.json.rows}}" as="r" hint-placeholder-count="3">
+      <div style="padding-left: {{r.pad}}">
+        <sc-if value="{{r.expandable}}" hint-placeholder-val="{{false}}">
+          <button type="button" aria-expanded="{{r.open}}" onClick="{{r.toggle}}" style="display: flex; align-items: flex-start; gap: 4px; width: 100%; text-align: left; background: none; border: 0; padding: 4px 0; min-height: 28px; color: var(--ink); font-family: inherit; font-size: inherit">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 3px; color: var(--ink-3); transform: {{r.rot}}"><path d="M9 6l6 6-6 6"/></svg>
+            <span style="min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span>{{r.text}}</span><span style="color: var(--ink-3)">{{r.summary}}</span></span>
+          </button>
+        </sc-if>
+        <sc-if value="{{r.leaf}}" hint-placeholder-val="{{true}}">
+          <div style="padding: 2px 0 2px 16px; min-width: 0; overflow-wrap: anywhere"><span style="color: var(--ink-2)">{{r.key}}</span><span style="color: {{r.color}}">{{r.text}}</span></div>
+        </sc-if>
+      </div>
+    </sc-for>
+  </div>
+</div></sc-if>
+<sc-if value="{{pArts.sel.streaming}}" hint-placeholder-val="{{false}}"><div style="margin-top: 6px"><span class="caret" aria-hidden="true"></span></div></sc-if></div>
+</div></sc-if>
+  </div>
+</div>
+  </div>
+</div>
+</div>
+</template>
+
+<script>
+// A small stand-in for the canvas runtime this prototype was drawn on: it reads the <template> below
+// ({{holes}}, <sc-for>, <sc-if>), asks the Component for its values and patches the page in place.
+// Prototype code only: none of this is the console's renderer.
+class DCLogic {
+  constructor(props) { this.props = props || {}; this.state = {}; }
+  setState(patch) { Object.assign(this.state, patch); DCLogic.schedule(); }
+  forceUpdate() { DCLogic.schedule(); }
+}
+(function () {
+  var HOLE = /\{\{\s*([\w.$]+)\s*\}\}/g, WHOLE = /^\{\{\s*([\w.$]+)\s*\}\}$/;
+  var EVENTS = ['click', 'input', 'change', 'keydown', 'submit'];
+  var comp, root, tpl, queued = false;
+  function lookup(path, scope) {
+    if (path === 'true') return true;
+    if (path === 'false') return false;
+    var parts = path.split('.'), s = scope, v;
+    while (s && !(parts[0] in s.vars)) s = s.parent;
+    v = s ? s.vars[parts[0]] : undefined;
+    for (var i = 1; i < parts.length && v != null; i += 1) v = v[parts[i]];
+    return v;
+  }
+  function fill(text, scope) { return text.replace(HOLE, function (_, p) { var v = lookup(p, scope); return v == null ? '' : String(v); }); }
+  function build(node, scope, out) {
+    if (node.nodeType === 3) { out.appendChild(document.createTextNode(fill(node.data, scope))); return; }
+    if (node.nodeType !== 1) return;
+    var tag = node.localName;
+    if (tag === 'helmet') return;
+    if (tag === 'sc-if') {
+      if (lookup(WHOLE.exec(node.getAttribute('value'))[1], scope)) node.childNodes.forEach(function (c) { build(c, scope, out); });
+      return;
+    }
+    if (tag === 'sc-for') {
+      var list = lookup(WHOLE.exec(node.getAttribute('list'))[1], scope) || [], as = node.getAttribute('as');
+      list.forEach(function (item, i) {
+        var vars = { $index: i }; vars[as] = item;
+        node.childNodes.forEach(function (c) { build(c, { vars: vars, parent: scope }, out); });
+      });
+      return;
+    }
+    var el = document.createElementNS(node.namespaceURI, tag);
+    el.__h = {}; el.__p = {};
+    Array.prototype.forEach.call(node.attributes, function (a) {
+      var name = a.name, m = WHOLE.exec(a.value);
+      if (name.indexOf('hint-') === 0) return;
+      if (!m) { el.setAttribute(name, fill(a.value, scope)); return; }
+      var v = lookup(m[1], scope);
+      if (name.indexOf('on') === 0) {
+        var ev = name.slice(2).toLowerCase();
+        if (ev === 'change' && (tag === 'textarea' || (tag === 'input' && node.getAttribute('type') !== 'radio'))) ev = 'input';
+        if (typeof v === 'function') el.__h[ev] = v;
+      }
+      else if (name === 'disabled' || name === 'checked') el.__p[name] = !!v;
+      else if (name === 'value') el.__p.value = v == null ? '' : String(v);
+      else if (name.indexOf('aria-') === 0) el.setAttribute(name, String(v));
+      else if (v != null && v !== false) el.setAttribute(name, String(v));
+    });
+    node.childNodes.forEach(function (c) { build(c, scope, el); });
+    out.appendChild(el);
+  }
+  function props(el, p) {
+    Object.keys(p).forEach(function (k) { if (el[k] !== p[k]) el[k] = p[k]; });
+    ['disabled', 'checked'].forEach(function (k) { if (!(k in p) && el[k] === true && el.__p && k in el.__p) el[k] = false; });
+  }
+  function morph(parent, next) {
+    var a = Array.prototype.slice.call(parent.childNodes), b = Array.prototype.slice.call(next.childNodes);
+    b.forEach(function (n, i) {
+      var o = a[i];
+      if (!o) { parent.appendChild(n); if (n.nodeType === 1) settle(n); return; }
+      if (o.nodeType !== n.nodeType || (n.nodeType === 1 && (o.localName !== n.localName || o.namespaceURI !== n.namespaceURI))) {
+        parent.replaceChild(n, o); if (n.nodeType === 1) settle(n); return;
+      }
+      if (n.nodeType === 3) { if (o.data !== n.data) o.data = n.data; return; }
+      Array.prototype.slice.call(o.attributes).forEach(function (x) { if (!n.hasAttribute(x.name)) o.removeAttribute(x.name); });
+      Array.prototype.forEach.call(n.attributes, function (x) { if (o.getAttribute(x.name) !== x.value) o.setAttribute(x.name, x.value); });
+      props(o, n.__p); o.__p = n.__p; o.__h = n.__h;
+      morph(o, n);
+    });
+    for (var i = a.length - 1; i >= b.length; i -= 1) parent.removeChild(a[i]);
+  }
+  function settle(el) { if (el.__p) props(el, el.__p); Array.prototype.forEach.call(el.children, settle); }
+  function render() {
+    queued = false;
+    var frag = document.createElement('div');
+    tpl.content.childNodes.forEach(function (c) { build(c, { vars: comp.renderVals(), parent: null }, frag); });
+    morph(root, frag);
+  }
+  DCLogic.schedule = function () { if (comp && !queued) { queued = true; requestAnimationFrame(render); } };
+  DCLogic.mount = function (Component, rootEl, template) {
+    root = rootEl; tpl = template;
+    comp = new Component({ dark: !/[?&]theme=light\b/.test(location.search) });
+    EVENTS.forEach(function (type) {
+      root.addEventListener(type, function (e) {
+        for (var n = e.target; n && n !== root; n = n.parentNode) if (n.__h && n.__h[type]) { n.__h[type](e); break; }
+      });
+    });
+    render();
+  };
+})();
+
+</script>
+<script>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.uid = 0;
+    this.openMap = {};
+    this.timers = [];
+    this.agents = this.agentsData();
+    this.mcps = this.mcpData();
+    this.convs = this.seed();
+    this.state = { view: 'chat', side: null, taskFilter: 'all', pageArt: null, sel: 'c1', filter: 'all', mode: 'text', draft: '', n: 0 };
+  }
+  componentWillUnmount() { this.dead = true; this.timers.forEach(clearTimeout); }
+  bump() { if (!this.dead) this.setState({ n: this.state.n + 1 }); }
+
+  // ---------- model ----------
+  nid(p) { this.uid += 1; return p + this.uid; }
+  now() { var d = new Date(), z = function (n) { return (n < 10 ? '0' : '') + n; }; return z(d.getHours()) + ':' + z(d.getMinutes()) + ':' + z(d.getSeconds()); }
+  msg(side, who, parts, time) { return { t: 'msg', id: this.nid('m'), side: side, who: who, time: time || this.now(), parts: parts, rawOpen: false }; }
+  text(s) { return { k: 'text', text: s, streaming: false }; }
+  data(v, mediaType) { return { k: 'data', id: this.nid('d'), data: v, mediaType: mediaType || 'application/json' }; }
+  file(name, mediaType) { return { k: 'file', name: name, mediaType: mediaType }; }
+  task(who, state, time) {
+    var id = this.nid('t');
+    var hex = ('00000000' + ((this.uid * 2654435761) >>> 0).toString(16)).slice(-8);
+    return { t: 'task', id: id, taskId: 'task-' + hex, who: who, time: time || this.now(), state: state, open: true, rawOpen: false, updates: [], artifacts: [], ui: null };
+  }
+  upd(task, text, time) { var u = { text: text, time: time || this.now(), streaming: false }; task.updates.push(u); return u; }
+  art(name, kind, mediaType, val) {
+    return { id: this.nid('a'), name: name, kind: kind, mediaType: mediaType, text: kind === 'text' ? (val || '') : '', data: kind === 'json' ? val : null, streaming: false, open: true };
+  }
+  reconForm(taskId) {
+    var sid = 'recon-' + taskId, v = 'v0.9';
+    return {
+      surfaceId: sid, done: false, rawOpen: false, version: v,
+      model: { recon: { archived: ['include'], exclude: '' } },
+      messages: [
+        { version: v, createSurface: { surfaceId: sid, catalogId: 'https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json' } },
+        { version: v, updateComponents: { surfaceId: sid, components: [
+          { id: 'root', component: 'Column', children: ['title', 'why', 'archived', 'exclude', 'go'] },
+          { id: 'title', component: 'Text', text: 'Include archived hosts?', variant: 'h3' },
+          { id: 'why', component: 'Text', text: 'Some hosts only appear in archived pages. They may no longer resolve.' },
+          { id: 'archived', component: 'ChoicePicker', label: 'Archived pages', variant: 'mutuallyExclusive',
+            options: [{ label: 'Include them', value: 'include' }, { label: 'Live sources only', value: 'skip' }], value: { path: '/recon/archived' } },
+          { id: 'exclude', component: 'TextField', label: 'Exclude hosts containing (optional)', value: { path: '/recon/exclude' } },
+          { id: 'go_label', component: 'Text', text: 'Continue' },
+          { id: 'go', component: 'Button', child: 'go_label', variant: 'primary',
+            action: { event: { name: 'continue', context: { archived: { path: '/recon/archived' }, exclude: { path: '/recon/exclude' } } } } }
+        ] } },
+        { version: v, updateDataModel: { surfaceId: sid, path: '/recon', value: { archived: ['include'], exclude: '' } } }
+      ]
+    };
+  }
+  seed() {
+    var self = this, R = 'R', L = 'L';
+    var c1 = { id: 'c1', kind: 'you', a: 'you', b: 'redteam/recon', ago: '4m', contextId: 'ctx-7f3a…c21e', items: [] };
+    c1.items.push(self.msg(R, 'you', [self.text('Passive recon on staging.example.com. No active scanning, no brute force.')], '14:02:11'));
+    var t1 = self.task('redteam/recon', 'input-required', '14:02:13');
+    t1.target = 'staging.example.com';
+    self.upd(t1, 'Querying certificate transparency logs for staging.example.com.', '14:02:14');
+    self.upd(t1, 'DNS history adds one more host.', '14:03:02');
+    self.upd(t1, 'Some hosts only appear in archived pages. I need your call before I read them.', '14:03:40');
+    t1.artifacts.push(self.art('hosts.json', 'json', 'application/json', { scope: 'staging.example.com', sources: ['crt.sh', 'dns-history'], hosts: [
+      { host: 'api.staging.example.com', source: 'crt.sh' }, { host: 'auth.staging.example.com', source: 'crt.sh' },
+      { host: 'cdn.staging.example.com', source: 'crt.sh' }, { host: 'old-admin.staging.example.com', source: 'dns-history' }] }));
+    t1.ui = self.reconForm(t1.taskId);
+    c1.items.push(t1);
+
+    var c2 = { id: 'c2', kind: 'agents', a: 'blue-team/triage', b: 'redteam/recon', ago: 'now', contextId: 'ctx-1b90…e4d7', seedState: 'working', live: true,
+      observedText: 'You are watching. blue-team/triage is your agent; it opened this conversation through the gate.', items: [] };
+    c2.seedItems = function () {
+      return [self.msg(R, 'blue-team/triage', [
+        self.text('New alert on api.example.com: an unkeyed header is reflected in a cached response. Confirm whether the cache can be poisoned.'),
+        self.data({ alert: { id: 'ALR-2291', host: 'api.example.com', header: 'X-Forwarded-Host', signal: 'reflected in cached response' },
+          constraints: { methods: ['GET', 'HEAD'], cache_buster: 'per-probe', siblings: ['app.example.com', 'cdn.example.com', 'static.example.com'] } })
+      ], '14:10:02')];
+    };
+    c2.items = c2.seedItems();
+
+    var c3 = { id: 'c3', kind: 'agents', a: 'claude-code@laptop', b: 'nora/js-analyst', ago: '22m', contextId: 'ctx-93c4…0aa1',
+      observedText: 'You are watching. claude-code@laptop is your agent; it called nora/js-analyst on the community gate.', items: [] };
+    c3.items.push(self.msg(R, 'claude-code@laptop', [self.text('List the API routes referenced in this bundle and flag any that take a URL parameter.'), self.file('app.4f1c.js', 'text/javascript')], '13:48:19'));
+    var t3 = self.task('nora/js-analyst', 'completed', '13:48:20');
+    self.upd(t3, 'Parsing app.4f1c.js.', '13:48:21');
+    self.upd(t3, 'Three routes found, one takes a URL.', '13:50:02');
+    t3.artifacts.push(self.art('routes.json', 'json', 'application/json', { bundle: 'app.4f1c.js', routes: [
+      { path: '/api/v2/session', method: 'POST', takes_url: false }, { path: '/api/v2/fetch', method: 'GET', takes_url: true, param: 'target' },
+      { path: '/api/v2/export', method: 'GET', takes_url: false }] }));
+    c3.items.push(t3);
+
+    var c4 = { id: 'c4', kind: 'agents', a: 'lab/orchestrator', b: 'you/cache-probe', ago: '1h', contextId: 'ctx-c05e…77b2', sealed: true,
+      observedText: 'You are watching. lab/orchestrator called your agent you/cache-probe.', items: [] };
+    c4.items.push(self.msg(R, 'lab/orchestrator', [{ k: 'sealed', text: 'sealed · 1 text part' }], '13:01:44'));
+    var t4 = self.task('you/cache-probe', 'completed', '13:01:45');
+    t4.sealedText = 'sealed · 2 status updates · 1 artifact with 1 file part';
+    c4.items.push(t4);
+
+    var c5 = { id: 'c5', kind: 'you', a: 'you', b: 'nora/js-analyst', ago: '2d', contextId: 'ctx-28d1…f630', items: [] };
+    c5.items.push(self.msg(R, 'you', [self.text('Does this bundle ship a source map reference?'), self.file('vendor.91ab.js', 'text/javascript')], '09:15:03'));
+    c5.items.push(self.msg(L, 'nora/js-analyst', [self.text('Yes. The last line points to vendor.91ab.js.map on the same origin.')], '09:15:20'));
+    return [c1, c2, c3, c4, c5];
+  }
+
+  // ---------- mock streaming ----------
+  follow(conv) {
+    if (conv.id !== this.state.sel || typeof document === 'undefined') return;
+    this.timers.push(setTimeout(function () { var el = document.getElementById('kc-scroll'); if (el) el.scrollTop = el.scrollHeight; }, 0));
+  }
+  play(conv, steps) {
+    var self = this, i = 0;
+    conv.run = (conv.run || 0) + 1;
+    var tok = conv.run;
+    conv.busy = true;
+    var next = function () {
+      if (self.dead || tok !== conv.run) return;
+      if (i >= steps.length) { conv.busy = false; self.bump(); return; }
+      var d = steps[i++]();
+      if (Array.isArray(d)) { steps.splice.apply(steps, [i, 0].concat(d)); d = 10; }
+      self.observe(conv);
+      self.bump();
+      self.follow(conv);
+      self.timers.push(setTimeout(next, d || 300));
+    };
+    next();
+  }
+  typing(get, field, text) {
+    return [function () {
+      var s = typeof text === 'function' ? text() : text;
+      var toks = s.match(/\S+\s*/g) || [], out = [];
+      for (var k = 0; k < toks.length; k += 2) {
+        (function (chunk) { out.push(function () { var o = get(); o.streaming = true; o[field] += chunk; return 55; }); })(toks.slice(k, k + 2).join(''));
+      }
+      out.push(function () { get().streaming = false; return 260; });
+      return out;
+    }];
+  }
+  say(conv, x, task, text) {
+    var self = this;
+    return [function () { x.u = self.upd(task(), ''); return 120; }].concat(self.typing(function () { return x.u; }, 'text', text));
+  }
+  sMessage(conv, text) {
+    var self = this, x = {};
+    return [function () { x.p = self.text(''); x.p.streaming = true; conv.items.push(self.msg('L', conv.b, [x.p])); return 350; }]
+      .concat(self.typing(function () { return x.p; }, 'text', text));
+  }
+  sReconStart(conv, target) {
+    var self = this, x = {}, T = function () { return x.t; }, S = [];
+    S.push(function () { x.t = self.task(conv.b, 'submitted'); x.t.target = target; conv.items.push(x.t); return 600; });
+    S.push(function () { x.t.state = 'working'; return 200; });
+    S = S.concat(self.say(conv, x, T, 'Querying certificate transparency logs for ' + target + '.'));
+    S.push(function () { x.a = self.art('hosts.json', 'json', 'application/json', { scope: target, sources: ['crt.sh'], hosts: [] }); x.a.streaming = true; x.t.artifacts.push(x.a); return 380; });
+    ['api', 'auth', 'cdn'].forEach(function (h) { S.push(function () { x.a.data.hosts.push({ host: h + '.' + target, source: 'crt.sh' }); return 340; }); });
+    S = S.concat(self.say(conv, x, T, 'DNS history adds one more host.'));
+    S.push(function () { x.a.data.sources.push('dns-history'); x.a.data.hosts.push({ host: 'old-admin.' + target, source: 'dns-history' }); return 340; });
+    S.push(function () { x.a.streaming = false; return 200; });
+    S = S.concat(self.say(conv, x, T, 'Some hosts only appear in archived pages. I need your call before I read them.'));
+    S.push(function () { x.t.state = 'input-required'; x.t.ui = self.reconForm(x.t.taskId); return 100; });
+    return S;
+  }
+  sReconResume(conv, t, ctx) {
+    var self = this, x = {}, T = function () { return t; }, S = [];
+    var target = t.target || 'example.com';
+    var include = (ctx.archived || [])[0] === 'include', skip = String(ctx.exclude || '').trim();
+    var a = t.artifacts.filter(function (r) { return r.name === 'hosts.json'; })[0];
+    S.push(function () { t.state = 'working'; return 300; });
+    if (include) {
+      S = S.concat(self.say(conv, x, T, 'Reading archived pages for ' + target + '.'));
+      S.push(function () { a.streaming = true; a.open = true; a.data.sources.push('archived-pages'); return 300; });
+      ['legacy', 'beta'].forEach(function (h) {
+        S.push(function () { var host = h + '.' + target; if (!skip || host.indexOf(skip) < 0) a.data.hosts.push({ host: host, source: 'archived-pages', archived: true }); return 380; });
+      });
+      S.push(function () { a.streaming = false; return 200; });
+    } else {
+      S = S.concat(self.say(conv, x, T, 'Skipping archived pages.'));
+    }
+    if (skip) {
+      S.push(function () { a.data.hosts = a.data.hosts.filter(function (h) { return h.host.indexOf(skip) < 0; }); return 250; });
+    }
+    S.push(function () { x.s = self.art('summary.md', 'text', 'text/markdown', ''); x.s.streaming = true; t.artifacts.push(x.s); return 300; });
+    S = S.concat(self.typing(function () { return x.s; }, 'text', function () {
+      var n = a.data.hosts.length, arch = a.data.hosts.filter(function (h) { return h.archived; }).length;
+      return '# Passive recon: ' + target + '\n\n**' + n + ' hosts** from ' + a.data.sources.length + ' sources. Nothing was sent to the target.\n\n## Sources\n' +
+        a.data.sources.map(function (x) { return '- `' + x + '`'; }).join('\n') + '\n\n## Notes\n' +
+        (arch ? '- ' + arch + ' hosts appear only in archived pages and are marked `"archived": true`.' : '- Archived pages were **not** read.') +
+        (skip ? '\n- Hosts containing `' + skip + '` were left out.' : '') + '\n- The full list is in `hosts.json`.';
+    }));
+    S = S.concat(self.say(conv, x, T, 'Done. Two artifacts attached.'));
+    S.push(function () { t.state = 'completed'; return 100; });
+    return S;
+  }
+  sTyped(conv, data) {
+    var self = this, x = {}, T = function () { return x.t; }, S = [];
+    var js = conv.b.indexOf('js-analyst') >= 0;
+    var target = (data && typeof data === 'object' && (data.target || data.bundle)) || (js ? 'bundle.js' : 'example.com');
+    var keys = data && typeof data === 'object' ? Object.keys(data).length : 1;
+    S.push(function () { x.t = self.task(conv.b, 'submitted'); conv.items.push(x.t); return 600; });
+    S.push(function () { x.t.state = 'working'; return 200; });
+    S = S.concat(self.say(conv, x, T, 'Typed request accepted: ' + keys + (keys === 1 ? ' field.' : ' fields.')));
+    var recon = conv.b.indexOf('recon') >= 0;
+    if (js) {
+      S.push(function () { x.a = self.art('routes.json', 'json', 'application/json', { bundle: String(target), routes: [] }); x.a.streaming = true; x.t.artifacts.push(x.a); return 350; });
+      [{ path: '/api/v2/session', method: 'POST', takes_url: false }, { path: '/api/v2/fetch', method: 'GET', takes_url: true, param: 'target' }].forEach(function (r) {
+        S.push(function () { x.a.data.routes.push(r); return 380; });
+      });
+    } else if (!recon) {
+      S.push(function () { x.a = self.art('result.json', 'json', 'application/json', { request: data, steps: [] }); x.a.streaming = true; x.t.artifacts.push(x.a); return 350; });
+      ['validate', 'run', 'report'].forEach(function (k) { S.push(function () { x.a.data.steps.push({ step: k, ok: true }); return 360; }); });
+    } else {
+      S.push(function () { x.a = self.art('hosts.json', 'json', 'application/json', { scope: String(target), request: data, hosts: [] }); x.a.streaming = true; x.t.artifacts.push(x.a); return 350; });
+      ['api', 'auth', 'cdn'].forEach(function (h) { S.push(function () { x.a.data.hosts.push({ host: h + '.' + target, source: 'crt.sh' }); return 340; }); });
+    }
+    S.push(function () { x.a.streaming = false; return 200; });
+    S.push(function () { x.s = self.art('summary.md', 'text', 'text/markdown', ''); x.s.streaming = true; x.t.artifacts.push(x.s); return 300; });
+    S = S.concat(self.typing(function () { return x.s; }, 'text', function () {
+      return '# Result\n\n**Request accepted** with ' + keys + (keys === 1 ? ' field' : ' fields') + '.\n\n- Output: `' + x.a.name + '`\n- Agent: `' + conv.b + '`\n\nThe typed request is kept with the task.';
+    }));
+    S = S.concat(self.say(conv, x, T, 'Done. Two artifacts attached.'));
+    S.push(function () { x.t.state = 'completed'; return 100; });
+    return S;
+  }
+  sLive(conv) {
+    var self = this, x = {}, T = function () { return x.t; }, S = [];
+    S.push(function () { conv.seedState = null; x.t = self.task(conv.b, 'submitted'); conv.items.push(x.t); return 700; });
+    S.push(function () { x.t.state = 'working'; return 200; });
+    S = S.concat(self.say(conv, x, T, 'Sending one probe per cache key to api.example.com.'));
+    S = S.concat(self.say(conv, x, T, 'X-Forwarded-Host is reflected into the canonical link.'));
+    S.push(function () { x.a = self.art('cache-probe-report.md', 'text', 'text/markdown', ''); x.a.streaming = true; x.t.artifacts.push(x.a); return 300; });
+    S = S.concat(self.typing(function () { return x.a; }, 'text', '# Cache probe: api.example.com\n\n**Result:** the cache can be poisoned through `X-Forwarded-Host`.\n\n## Observed\n- The header is reflected into the canonical link.\n- The response is stored for the bare path.\n- The header is **not** part of the cache key.\n\n## Probe\n```\nGET /?cb=7f3a HTTP/1.1\nHost: api.example.com\nX-Forwarded-Host: probe.invalid\n```\n\nEvery probe used its own cache buster, so no shared entry was written. `GET` and `HEAD` only.'));
+    S.push(function () { x.t.state = 'completed'; return 600; });
+    S.push(function () { conv.items.push(self.msg('R', conv.a, [self.text('Received. Check the same header on the sibling hosts from the alert.')])); return 800; });
+    S.push(function () { x.t = self.task(conv.b, 'working'); conv.items.push(x.t); return 400; });
+    S.push(function () { x.b = self.art('siblings.json', 'json', 'application/json', { header: 'X-Forwarded-Host', hosts: [] }); x.b.streaming = true; x.t.artifacts.push(x.b); return 200; });
+    [['app.example.com', true, true], ['cdn.example.com', false, false], ['static.example.com', true, false]].forEach(function (h, k) {
+      S = S.concat(self.say(conv, x, T, 'Probing sibling host ' + (k + 1) + ' of 3: ' + h[0] + '.'));
+      S.push(function () { x.b.data.hosts.push({ host: h[0], reflected: h[1], cached: h[2] }); return 350; });
+    });
+    S.push(function () { x.b.streaming = false; x.t.state = 'completed'; return 100; });
+    return S;
+  }
+  replay(conv) {
+    conv.items = conv.seedItems();
+    conv.seedState = 'working';
+    conv.played = true;
+    this.play(conv, this.sLive(conv));
+  }
+  replyText(conv) {
+    if (conv.b.indexOf('js-analyst') >= 0) return 'I read bundles statically: routes, parameters and source map references. Attach a bundle or send a typed request and I will open a task.';
+    if (conv.b.indexOf('recon') >= 0) return 'Certificate transparency logs, DNS history and archived pages. All passive: nothing is sent to the target. Give me a domain to start a task, as text or as a typed request in JSON.';
+    var a = this.agentOf(conv.b);
+    return (a ? a.card.description + ' ' : '') + 'Send a typed request in JSON and I will open a task.';
+  }
+  pendingForm(conv) {
+    return conv.items.filter(function (it) { return it.t === 'task' && it.ui && !it.ui.done; })[0];
+  }
+  dispatch(conv, p) {
+    var self = this;
+    if (p.data !== undefined) {
+      conv.items.push(self.msg('R', conv.a, [self.data(p.data)]));
+      self.play(conv, self.sTyped(conv, p.data));
+      return;
+    }
+    conv.items.push(self.msg('R', conv.a, [self.text(p.text)]));
+    if (self.pendingForm(conv)) { self.play(conv, self.sMessage(conv, 'I still need your answer on the form above before I continue.')); return; }
+    var dom = (p.text.match(/\b([a-z0-9-]+\.)+[a-z]{2,}\b/i) || [])[0];
+    var recon = conv.b.indexOf('recon') >= 0;
+    if (recon && (dom || /\b(recon|enumerate|scan|probe|hosts|subdomains)\b/i.test(p.text))) self.play(conv, self.sReconStart(conv, dom || 'example.com'));
+    else self.play(conv, self.sMessage(conv, self.replyText(conv)));
+  }
+  parseDraft() {
+    var raw = this.state.draft.trim();
+    if (!raw) return { empty: true };
+    var looks = /^[\[{]/.test(raw);
+    if (this.state.mode === 'json' || looks) {
+      try { return { data: JSON.parse(raw) }; }
+      catch (err) { if (this.state.mode === 'json') return { error: String(err && err.message || err) }; }
+    }
+    return { text: raw };
+  }
+  template(conv) {
+    var ex = this.examplesOf(conv ? conv.b : '').filter(function (x) { return x.send.data !== undefined; })[0];
+    return JSON.stringify(ex ? ex.send.data : { request: 'value' }, null, 2);
+  }
+
+  // ---------- JSON tree ----------
+  tree(pid, value, label) {
+    var self = this, O = this.openMap, rows = [], paths = [];
+    var isBox = function (v) { return v !== null && typeof v === 'object'; };
+    var walk = function (v, key, path, depth) {
+      var pad = (depth * 16) + 'px', k = key === null ? '' : '"' + key + '": ';
+      if (isBox(v)) {
+        var arr = Array.isArray(v), n = arr ? v.length : Object.keys(v).length;
+        if (!n) { rows.push({ leaf: true, expandable: false, pad: pad, key: k, text: arr ? '[]' : '{}', color: 'var(--ink)' }); return; }
+        var id = pid + '/' + path;
+        paths.push(id);
+        var open = (id in O) ? O[id] : depth < 2;
+        rows.push({ leaf: false, expandable: true, pad: pad, key: k, open: open, rot: open ? 'rotate(90deg)' : 'rotate(0deg)',
+          text: open ? (arr ? '[' : '{') : (arr ? '[…]' : '{…}'),
+          summary: open ? '' : '  ' + n + (arr ? (n === 1 ? ' item' : ' items') : (n === 1 ? ' key' : ' keys')),
+          toggle: function () { O[id] = !open; self.bump(); } });
+        if (open) {
+          if (arr) v.forEach(function (c, i) { walk(c, null, path + '/' + i, depth + 1); });
+          else Object.keys(v).forEach(function (c) { walk(v[c], c, path + '/' + c, depth + 1); });
+          rows.push({ leaf: true, expandable: false, pad: pad, key: '', text: arr ? ']' : '}', color: 'var(--ink)' });
+        }
+        return;
+      }
+      var t = JSON.stringify(v);
+      if (t === undefined) t = 'null';
+      if (t.length > 220) t = t.slice(0, 220) + '…"';
+      rows.push({ leaf: true, expandable: false, pad: pad, key: k, text: t,
+        color: typeof v === 'string' ? 'var(--ok)' : typeof v === 'number' ? 'var(--brand-ink)' : 'var(--warn)' });
+    };
+    walk(value, null, '', 0);
+    var all = function (to) {
+      return function () {
+        var seen = [];
+        var each = function (v, path) {
+          if (!isBox(v)) return;
+          seen.push(pid + '/' + path);
+          if (Array.isArray(v)) v.forEach(function (c, i) { each(c, path + '/' + i); });
+          else Object.keys(v).forEach(function (c) { each(v[c], path + '/' + c); });
+        };
+        each(value, '');
+        seen.forEach(function (id, i) { O[id] = to || i === 0; });
+        self.bump();
+      };
+    };
+    return { label: label || 'JSON', rows: rows, expandAll: all(true), collapseAll: all(false) };
+  }
+
+  // ---------- A2A raw objects ----------
+  rawPart(p) {
+    if (p.k === 'text') return { text: p.text };
+    if (p.k === 'data') return { data: p.data, mediaType: p.mediaType };
+    if (p.k === 'file') return { url: 'blob://' + p.name, filename: p.name, mediaType: p.mediaType };
+    return {};
+  }
+  rawMsg(conv, it) {
+    var self = this;
+    return { messageId: 'msg-' + it.id, contextId: conv.contextId, role: it.side === 'R' ? 'ROLE_USER' : 'ROLE_AGENT', parts: it.parts.map(function (p) { return self.rawPart(p); }) };
+  }
+  rawTask(conv, it) {
+    var o = { id: it.taskId, contextId: conv.contextId, status: { state: 'TASK_STATE_' + it.state.toUpperCase().replace('-', '_') } };
+    var last = it.updates[it.updates.length - 1];
+    if (last) {
+      var parts = [{ text: last.text }];
+      if (it.ui && !it.ui.done) parts.push({ data: it.ui.messages, mediaType: 'application/a2ui+json' });
+      o.status.message = { role: 'ROLE_AGENT', parts: parts };
+    }
+    if (it.artifacts.length) o.artifacts = it.artifacts.map(function (a) {
+      return { artifactId: a.id, name: a.name, parts: [a.kind === 'json' ? { data: a.data, mediaType: a.mediaType } : { text: a.text, mediaType: a.mediaType }] };
+    });
+    return o;
+  }
+
+  // ---------- A2UI: draw a surface from its messages ----------
+  uiView(conv, t) {
+    var self = this, ui = t.ui, byId = {}, comps = [];
+    var none = { surfaceId: '', comps: [], done: false, rawOpen: false, raw: self.tree('x', null), toggleRaw: function () {}, rawLabel: 'JSON' };
+    if (!ui) return none;
+    ui.messages.forEach(function (m) { if (m.updateComponents) m.updateComponents.components.forEach(function (c) { byId[c.id] = c; }); });
+    var get = function (path) { return path.split('/').filter(Boolean).reduce(function (o, k) { return o == null ? o : o[k]; }, ui.model); };
+    var set = function (path, v) { var ks = path.split('/').filter(Boolean), last = ks.pop(); var o = ks.reduce(function (p, k) { return p[k] = p[k] || {}; }, ui.model); o[last] = v; self.bump(); };
+    var locked = ui.done || conv.kind !== 'you';
+    ((byId.root || {}).children || []).forEach(function (id) {
+      var c = byId[id];
+      if (!c) return;
+      var base = { isHeading: false, isText: false, isChoice: false, isField: false, isButton: false, disabled: locked };
+      if (c.component === 'Text') { base[/^h/.test(c.variant || '') ? 'isHeading' : 'isText'] = true; base.text = c.text; }
+      else if (c.component === 'ChoicePicker') {
+        var cur = get(c.value.path) || [];
+        base.isChoice = true; base.label = c.label; base.name = ui.surfaceId + '-' + c.id;
+        base.options = c.options.map(function (o) { return { label: o.label, checked: cur.indexOf(o.value) >= 0, disabled: locked, name: base.name, pick: function () { if (!locked) set(c.value.path, [o.value]); } }; });
+      }
+      else if (c.component === 'TextField') {
+        base.isField = true; base.label = c.label; base.inputId = ui.surfaceId + '-' + c.id; base.value = get(c.value.path) || '';
+        base.onChange = function (e) { if (!locked) set(c.value.path, e.target.value); };
+      }
+      else if (c.component === 'Button') {
+        base.isButton = true; base.label = ui.done ? (t.state === 'canceled' ? 'Canceled' : 'Answered') : (byId[c.child] || {}).text || 'Submit';
+        base.click = function () {
+          if (locked || conv.busy) return;
+          var ctx = {}, src = (c.action.event.context) || {};
+          Object.keys(src).forEach(function (k) { ctx[k] = src[k] && src[k].path ? get(src[k].path) : src[k]; });
+          ui.done = true;
+          conv.items.push(self.msg('R', conv.a, [self.data({ version: ui.version, action: { name: c.action.event.name, surfaceId: ui.surfaceId, sourceComponentId: c.id, timestamp: new Date().toISOString(), context: ctx } }, 'application/a2ui+json')]));
+          self.play(conv, self.sReconResume(conv, t, ctx));
+        };
+      }
+      else return;
+      comps.push(base);
+    });
+    return { surfaceId: ui.surfaceId, comps: comps, done: ui.done, rawOpen: ui.rawOpen, rawLabel: ui.rawOpen ? 'Hide JSON' : 'JSON',
+      raw: ui.rawOpen ? self.tree('ui' + t.id, ui.messages, 'A2UI ' + ui.version + ' messages') : none.raw,
+      toggleRaw: function () { ui.rawOpen = !ui.rawOpen; self.bump(); } };
+  }
+
+  // ---------- view ----------
+  initials(name) {
+    var p = String(name).split(/[\/@\-]/).filter(Boolean);
+    return ((p[0] || '?')[0] + ((p[1] || '')[0] || '')).toUpperCase();
+  }
+  stateColors(s) {
+    if (s === 'completed') return ['var(--ok-soft)', 'var(--ok)'];
+    if (s === 'input-required') return ['var(--warn-soft)', 'var(--warn)'];
+    if (s === 'canceled' || s === 'failed') return ['var(--bad-soft)', 'var(--bad)'];
+    if (s === 'new' || s === 'submitted') return ['var(--surface-3)', 'var(--ink-2)'];
+    return ['var(--brand-soft)', 'var(--brand-ink)'];
+  }
+  convState(c) {
+    var tasks = c.items.filter(function (it) { return it.t === 'task'; });
+    if (c.seedState) return c.seedState;
+    if (tasks.length) return tasks[tasks.length - 1].state;
+    return c.items.length ? '' : 'new';
+  }
+  preview(c) {
+    if (c.sealed) return 'Sealed · metadata only';
+    var it = c.items[c.items.length - 1];
+    if (!it) return 'No message yet';
+    if (it.t === 'task') { var u = it.updates[it.updates.length - 1]; return u && u.text ? u.text : 'Task ' + it.state; }
+    var p = it.parts[0] || {};
+    return p.k === 'text' ? (p.text || '…') : p.k === 'data' ? 'JSON data' : p.k === 'file' ? p.name : p.text || '';
+  }
+  viewItem(conv, it) {
+    var self = this, empty = self.tree('x', null);
+    var base = { isMsg: false, isTask: false, rawOpen: it.rawOpen, canRaw: !conv.sealed, rawLabel: it.rawOpen ? 'Hide raw' : 'Raw', raw: empty,
+      toggleRaw: function () { it.rawOpen = !it.rawOpen; self.bump(); } };
+    if (it.t === 'msg') {
+      var right = it.side === 'R', you = it.who === 'you';
+      base.isMsg = true; base.who = it.who; base.time = it.time; base.av = self.initials(it.who);
+      base.align = right ? 'flex-end' : 'flex-start';
+      base.showKind = !right;
+      base.avBg = you ? 'var(--ink)' : right ? 'var(--brand-soft)' : 'var(--ok-soft)';
+      base.avFg = you ? 'var(--paper)' : right ? 'var(--brand-ink)' : 'var(--ok)';
+      base.parts = it.parts.map(function (p) {
+        return { isText: p.k === 'text', isData: p.k === 'data', isFile: p.k === 'file', isSealed: p.k === 'sealed',
+          text: p.text || '', streaming: !!p.streaming, name: p.name || '', mediaType: p.mediaType || '',
+          bubbleBg: right ? 'var(--brand-soft)' : 'var(--surface)', bubbleLine: right ? 'var(--brand-line)' : 'var(--line)',
+          radius: right ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+          json: p.k === 'data' ? self.tree(p.id, p.data, p.mediaType === 'application/a2ui+json' ? 'Data part · A2UI action' : 'Data part · JSON') : empty };
+      });
+      if (it.rawOpen) base.raw = self.tree('raw' + it.id, self.rawMsg(conv, it), 'A2A Message');
+      return base;
+    }
+    var sc = self.stateColors(it.state);
+    base.isTask = true; base.who = it.who; base.time = it.time; base.taskId = it.taskId; base.state = it.state;
+    base.stateBg = sc[0]; base.stateFg = sc[1]; base.working = it.state === 'working' || it.state === 'submitted';
+    base.open = it.open; base.rot = it.open ? 'rotate(90deg)' : 'rotate(0deg)'; base.toggleLabel = (it.open ? 'Collapse task ' : 'Expand task ') + it.taskId;
+    base.toggle = function () { it.open = !it.open; self.bump(); };
+    base.sealed = !!it.sealedText; base.sealedText = it.sealedText || '';
+    base.updates = it.updates.map(function (u) { return { text: u.text, time: u.time, streaming: !!u.streaming }; });
+    base.hasUpdates = it.updates.length > 0;
+    base.artifacts = it.artifacts.map(function (a) { return self.viewArt(conv, it, a); });
+    base.hasUi = !!it.ui; base.ui = self.uiView(conv, it);
+    if (it.rawOpen) base.raw = self.tree('raw' + it.id, self.rawTask(conv, it), 'A2A Task');
+    return base;
+  }
+  // ---------- directory: agents, MCP servers, nodes ----------
+  agentsData() {
+    var a2ui = [{ uri: 'https://a2ui.org/a2a-extension/a2ui/v0.9', description: 'Declarative UI surfaces (A2UI v0.9)' }];
+    var mk = function (svc, node, name, version, org, description, skill, opts) {
+      opts = opts || {};
+      var url = 'https://gateway.kontra.sh/agents/' + svc;
+      return { svc: svc, node: node, online: true, card: {
+        name: name, description: description, version: version, provider: { organization: org },
+        supportedInterfaces: [{ url: url, protocolBinding: 'JSONRPC', protocolVersion: '1.0' }, { url: url, protocolBinding: 'HTTP+JSON', protocolVersion: '1.0' }],
+        capabilities: { streaming: true, pushNotifications: !!opts.push, extensions: opts.a2ui ? a2ui : [] },
+        defaultInputModes: ['text/plain', 'application/json'], defaultOutputModes: ['text/plain', 'application/json', 'text/markdown'],
+        skills: [skill] } };
+    };
+    return [
+      mk('redteam/recon', 'redteam-vps', 'Recon', '1.4.0', 'redteam',
+        'Passive reconnaissance for a domain: certificate transparency, DNS history and archived pages. Nothing is sent to the target.',
+        { id: 'passive-recon', name: 'Passive recon', description: 'Lists the hosts of a domain from passive sources and asks before reading archived pages.', tags: ['recon', 'passive', 'dns'],
+          examples: ['Passive recon on example.com', 'Which sources do you use?', '{"target":"example.com","mode":"passive","sources":["crt.sh","dns-history"],"limits":{"max_hosts":50,"archived":false}}'] }, { a2ui: true }),
+      mk('nora/js-analyst', 'nora-home', 'JS analyst', '0.9.2', 'nora',
+        'Reads JavaScript bundles statically: routes, parameters and source map references.',
+        { id: 'bundle-routes', name: 'Bundle routes', description: 'Lists the API routes a bundle references and flags the ones that take a URL.', tags: ['javascript', 'static-analysis'],
+          examples: ['What can you find in a bundle?', '{"bundle":"app.4f1c.js","find":["routes","source-maps"],"flag":{"takes_url":true}}'] }),
+      mk('you/cache-probe', 'laptop', 'Cache probe', '0.3.0', 'you',
+        'Checks whether a request header is reflected and cached. One cache buster per probe, read-only methods.',
+        { id: 'cache-probe', name: 'Cache probe', description: 'Probes one host and one header, and reports whether the cache key covers it.', tags: ['web-cache', 'http'],
+          examples: ['How do you keep probes away from real users?', '{"host":"api.example.com","header":"X-Forwarded-Host","methods":["GET","HEAD"]}'] }, { push: true }),
+      mk('blue-team/triage', 'blue-team-k8s', 'Triage', '2.1.0', 'blue-team',
+        'Reads an alert, decides which specialist agent to call, and tracks the answer.',
+        { id: 'alert-triage', name: 'Alert triage', description: 'Takes an alert and returns the calls it made and what came back.', tags: ['blue-team', 'orchestration'],
+          examples: ['What do you do with a new alert?', '{"alert":{"id":"ALR-2291","host":"api.example.com"}}'] }, { push: true })
+    ];
+  }
+  mcpData() {
+    var str = { type: 'string' }, num = { type: 'number' };
+    var tool = function (name, description, props, required) { return { name: name, description: description, inputSchema: { type: 'object', properties: props, required: required || [] } }; };
+    return [
+      { svc: 'you/everything', title: 'Everything', node: 'laptop', online: true, origin: 'Streamable HTTP on the node', deny: [], tools: [
+        tool('echo', 'Echoes back the input.', { message: str }, ['message']),
+        tool('add', 'Adds two numbers.', { a: num, b: num }, ['a', 'b']),
+        tool('longRunningOperation', 'Runs for a set duration and reports progress.', { duration: num, steps: num }) ] },
+      { svc: 'you/fs', title: 'Filesystem', node: 'laptop', online: true, origin: 'stdio, one process per session', deny: ['write_file'], tools: [
+        tool('read_file', 'Reads a file under the allowed directory.', { path: str }, ['path']),
+        tool('list_directory', 'Lists a directory.', { path: str }, ['path']),
+        tool('search_files', 'Finds files by pattern.', { path: str, pattern: str }, ['path', 'pattern']),
+        tool('write_file', 'Writes a file.', { path: str, content: str }, ['path', 'content']) ] },
+      { svc: 'nora/notes', title: 'Notes', node: 'nora-home', online: false, origin: 'Streamable HTTP on the node', deny: [], tools: [
+        tool('search_notes', 'Searches notes by text.', { query: str }, ['query']) ] }
+    ];
+  }
+  nodesData() {
+    return [
+      { name: 'laptop', owner: 'you', online: true, since: 'connected 3 hours ago' },
+      { name: 'redteam-vps', owner: 'redteam', online: true, since: 'connected 6 days ago' },
+      { name: 'nora-home', owner: 'nora', online: true, since: 'connected 40 minutes ago' },
+      { name: 'blue-team-k8s', owner: 'blue-team', online: true, since: 'connected 2 days ago' }
+    ];
+  }
+  agentOf(svc) { return this.agents.filter(function (a) { return a.svc === svc; })[0]; }
+  examplesOf(svc) {
+    var a = this.agentOf(svc), out = [];
+    if (a) a.card.skills.forEach(function (s) { (s.examples || []).forEach(function (e) {
+      var data; try { if (/^[\[{]/.test(e)) data = JSON.parse(e); } catch (err) { data = undefined; }
+      out.push({ label: e.length > 64 ? e.slice(0, 64) + '…' : e, tag: data !== undefined ? 'JSON' : 'text', send: data !== undefined ? { data: data } : { text: e } });
+    }); });
+    return out;
+  }
+
+  // ---------- markdown ----------
+  inline(s) {
+    var mono = "'IBM Plex Mono', ui-monospace, monospace";
+    return String(s).split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(function (x) { return x !== ''; }).map(function (x) {
+      var bold = /^\*\*[^*]+\*\*$/.test(x), code = /^`[^`]+`$/.test(x);
+      return { text: bold ? x.slice(2, -2) : code ? x.slice(1, -1) : x, weight: bold ? 700 : 'inherit', font: code ? mono : 'inherit',
+        bg: code ? 'var(--surface-2)' : 'transparent', pad: code ? '1px 5px' : '0', size: code ? '0.9em' : 'inherit' };
+    });
+  }
+  md(text) {
+    var self = this, lines = String(text).split('\n'), blocks = [], i = 0, m;
+    var blank = function () { return { isH1: false, isH2: false, isH3: false, isP: false, isList: false, isOList: false, isCode: false, segs: [], items: [], text: '' }; };
+    var add = function (flag, more) { var b = blank(); b[flag] = true; Object.keys(more).forEach(function (k) { b[k] = more[k]; }); blocks.push(b); };
+    while (i < lines.length) {
+      var ln = lines[i];
+      if (/^```/.test(ln)) {
+        var code = []; i += 1;
+        while (i < lines.length && !/^```/.test(lines[i])) { code.push(lines[i]); i += 1; }
+        i += 1; add('isCode', { text: code.join('\n') }); continue;
+      }
+      if ((m = /^(#{1,3})\s+(.*)$/.exec(ln))) { add('isH' + m[1].length, { segs: self.inline(m[2]) }); i += 1; continue; }
+      if (/^\s*[-*]\s+/.test(ln) || /^\s*\d+\.\s+/.test(ln)) {
+        var ordered = /^\s*\d+\.\s+/.test(ln), re = ordered ? /^\s*\d+\.\s+(.*)$/ : /^\s*[-*]\s+(.*)$/, items = [];
+        while (i < lines.length && (m = re.exec(lines[i]))) { items.push({ segs: self.inline(m[1]) }); i += 1; }
+        add(ordered ? 'isOList' : 'isList', { items: items }); continue;
+      }
+      if (!ln.trim()) { i += 1; continue; }
+      var para = [];
+      while (i < lines.length && lines[i].trim() && !/^(```|#{1,3}\s|\s*[-*]\s+|\s*\d+\.\s+)/.test(lines[i])) { para.push(lines[i]); i += 1; }
+      add('isP', { segs: self.inline(para.join(' ')) });
+    }
+    return { blocks: blocks };
+  }
+
+  // ---------- artifacts and task operations ----------
+  noneArt() {
+    var noop = function () {};
+    return { id: '', name: '', mediaType: '', taskId: '', who: '', pair: '', status: '', statusBg: 'transparent', statusFg: 'inherit', streaming: false,
+      canSrc: false, srcLabel: '', toggleSrc: noop, showMd: false, showSrc: false, showText: false, isJson: false, text: '', md: { blocks: [] },
+      json: this.tree('x', null), open: false, rot: 'rotate(0deg)', toggleLabel: '', toggle: noop, openSide: noop, openChat: noop };
+  }
+  viewArt(conv, it, a) {
+    var self = this, isMd = a.kind === 'text' && /markdown/.test(a.mediaType);
+    return { id: a.id, name: a.name, mediaType: a.mediaType, taskId: it.taskId, who: it.who, pair: conv.a + ' → ' + conv.b,
+      status: a.streaming ? 'streaming' : 'complete', statusBg: a.streaming ? 'var(--brand-soft)' : 'var(--surface-2)', statusFg: a.streaming ? 'var(--brand-ink)' : 'var(--ink-2)',
+      streaming: !!a.streaming, isJson: a.kind === 'json', showMd: isMd && !a.src, showSrc: isMd && !!a.src, showText: a.kind === 'text' && !isMd,
+      canSrc: isMd, srcLabel: a.src ? 'Rendered' : 'Source', toggleSrc: function () { a.src = !a.src; self.bump(); },
+      text: a.text, md: isMd && !a.src ? self.md(a.text) : { blocks: [] },
+      json: a.kind === 'json' ? self.tree(a.id, a.data, a.mediaType) : self.tree('x', null),
+      open: a.open, rot: a.open ? 'rotate(90deg)' : 'rotate(0deg)', toggleLabel: (a.open ? 'Collapse ' : 'Expand ') + a.name,
+      toggle: function () { a.open = !a.open; self.bump(); },
+      openSide: function () { conv.selArt = a.id; self.setState({ side: 'artifacts' }); },
+      openChat: function () { conv.selArt = a.id; self.setState({ view: 'chat', sel: conv.id, side: 'artifacts', draft: '', mode: 'text' }); } };
+  }
+  terminal(s) { return s === 'completed' || s === 'canceled' || s === 'failed' || s === 'rejected'; }
+  snap(it) {
+    var arts = {};
+    it.artifacts.forEach(function (a) { arts[a.id] = { n: a.kind === 'json' ? JSON.stringify(a.data).length : a.text.length, s: !!a.streaming }; });
+    return { state: it.state, done: it.updates.filter(function (u) { return !u.streaming && u.text; }).length, arts: arts };
+  }
+  observe(conv) {
+    var self = this;
+    conv.items.forEach(function (it) {
+      if (it.t !== 'task' || !it.sub || !it.sub.open) return;
+      var a = it.sub.snap, b = self.snap(it);
+      var ev = function (kind, text) { it.sub.events.push({ time: self.now(), kind: kind, text: text }); };
+      var done = it.updates.filter(function (u) { return !u.streaming && u.text; });
+      for (var k = a.done; k < b.done; k += 1) ev('TaskStatusUpdateEvent', done[k].text.length > 70 ? done[k].text.slice(0, 70) + '…' : done[k].text);
+      it.artifacts.forEach(function (art) {
+        var p = a.arts[art.id], q = b.arts[art.id];
+        if (!p) { ev('TaskArtifactUpdateEvent', art.name + ' · first chunk'); return; }
+        var ended = p.s && !q.s;
+        if (ended || q.n - p.n >= (art.kind === 'json' ? 1 : 90)) ev('TaskArtifactUpdateEvent', art.name + (ended ? ' · lastChunk' : ' · append'));
+        else b.arts[art.id] = p;
+      });
+      if (b.state !== a.state) ev('TaskStatusUpdateEvent', 'state: ' + b.state);
+      if (self.terminal(b.state)) { it.sub.open = false; it.sub.closed = 'Stream closed: the task is ' + b.state + '.'; }
+      it.sub.snap = b;
+    });
+  }
+  getStatus(conv, it) {
+    var self = this, prev = it.q || {};
+    it.q = { loading: true, at: prev.at, snap: prev.snap };
+    self.bump();
+    self.timers.push(setTimeout(function () {
+      it.q = { loading: false, at: self.now(), snap: JSON.parse(JSON.stringify(self.rawTask(conv, it))) };
+      self.bump();
+    }, 450));
+  }
+  toggleSub(conv, it) {
+    if (it.sub && it.sub.open) { it.sub.open = false; it.sub.closed = 'Closed by the client.'; this.bump(); return; }
+    if (this.terminal(it.state)) it.sub = { open: false, events: [], error: 'UnsupportedOperationError: the task is in a terminal state (' + it.state + ').' };
+    else it.sub = { open: true, events: [{ time: this.now(), kind: 'Task', text: 'current state: ' + it.state }], snap: this.snap(it) };
+    this.bump();
+  }
+  cancel(conv, it) {
+    if (conv.kind !== 'you' || this.terminal(it.state)) return;
+    conv.run = (conv.run || 0) + 1;
+    conv.busy = false;
+    it.updates.forEach(function (u) { u.streaming = false; });
+    it.artifacts.forEach(function (a) { a.streaming = false; });
+    if (it.ui) it.ui.done = true;
+    this.upd(it, 'Canceled by the client.');
+    it.state = 'canceled';
+    this.observe(conv);
+    this.bump();
+  }
+  taskCard(conv, it, page) {
+    var self = this, sc = self.stateColors(it.state), q = it.q || {}, sub = it.sub;
+    var last = it.updates[it.updates.length - 1], n = it.artifacts.length, term = self.terminal(it.state);
+    var events = sub ? sub.events.slice(-12) : [];
+    var subState = !sub ? '' : sub.error ? 'refused' : sub.open ? 'open' : 'closed';
+    return {
+      taskId: it.taskId, state: it.state, stateBg: sc[0], stateFg: sc[1], working: it.state === 'working' || it.state === 'submitted', time: it.time,
+      meta: (page ? conv.a + ' → ' + conv.b : it.who) + ' · ' + n + (n === 1 ? ' artifact' : ' artifacts'),
+      last: it.sealedText || (last ? last.text : ''), hasLast: !!(it.sealedText || (last && last.text)),
+      statusLabel: q.loading ? 'Getting…' : 'Get status', statusBusy: !!q.loading, getStatus: function () { self.getStatus(conv, it); },
+      subLabel: sub && sub.open ? 'Unsubscribe' : 'Subscribe', subOpen: !!(sub && sub.open), toggleSub: function () { self.toggleSub(conv, it); },
+      cancelDisabled: conv.kind !== 'you' || term, cancel: function () { self.cancel(conv, it); },
+      showOpen: !!page, openChat: function () { self.setState({ view: 'chat', sel: conv.id, side: 'tasks', draft: '', mode: 'text' }); },
+      hasSub: !!sub, subState: subState, subBg: subState === 'open' ? 'var(--brand-soft)' : subState === 'refused' ? 'var(--bad-soft)' : 'var(--surface-2)',
+      subFg: subState === 'open' ? 'var(--brand-ink)' : subState === 'refused' ? 'var(--bad)' : 'var(--ink-2)', subLive: subState === 'open',
+      subNote: sub ? (sub.error || sub.closed || 'Listening for events.') : '', subNoteColor: sub && sub.error ? 'var(--bad)' : 'var(--ink-2)',
+      events: events, hasEarlier: !!sub && sub.events.length > events.length, earlier: sub ? (sub.events.length - events.length) + ' earlier events' : '',
+      hasResult: !!q.snap, resultAt: q.at || '', result: q.snap ? self.tree('q' + it.id, q.snap, 'GetTask response · ' + q.at) : self.tree('x', null)
+    };
+  }
+  eachTask(fn) { this.convs.forEach(function (c) { c.items.forEach(function (it) { if (it.t === 'task') fn(c, it); }); }); }
+
+  renderVals() {
+    var self = this, st = this.state, all = this.convs, noop = function () {};
+    var cur = all.filter(function (c) { return c.id === st.sel; })[0] || all[0];
+    var view = st.view, isChat = view === 'chat';
+    var seg = function (on) { return { pressed: on, bg: on ? 'var(--surface)' : 'transparent', fg: on ? 'var(--ink)' : 'var(--ink-2)', weight: on ? 600 : 400 }; };
+    var chipFor = function (on) { return { text: on ? 'online' : 'offline', bg: on ? 'var(--ok-soft)' : 'var(--bad-soft)', fg: on ? 'var(--ok)' : 'var(--bad)' }; };
+
+    var navs = [['chat', 'Chat'], ['nodes', 'Nodes'], ['agents', 'Agents'], ['mcp', 'MCP'], ['catalog', 'Catalog'], ['tasks', 'Tasks'], ['artifacts', 'Artifacts']].map(function (n) {
+      var on = view === n[0];
+      return { label: n[1], current: on ? 'page' : 'false', bg: on ? 'var(--surface-2)' : 'transparent', fg: on ? 'var(--ink)' : 'var(--ink-2)', weight: on ? 600 : 400,
+        pick: function () { self.setState({ view: n[0] }); } };
+    });
+    var d = {};
+    ['chat', 'nodes', 'agents', 'mcp', 'catalog', 'tasks', 'artifacts'].forEach(function (k) { d[k] = view === k ? (k === 'chat' ? 'flex' : 'block') : 'none'; });
+
+    // ----- chat: rail -----
+    var row = function (c) {
+      var s = self.convState(c), sc = self.stateColors(s), selected = c.id === cur.id, yours = c.kind === 'you';
+      return { caller: c.a, callee: c.b, ago: c.busy ? 'now' : c.ago, state: s, hasState: !!s, stateBg: sc[0], stateFg: sc[1], sealed: !!c.sealed,
+        kindLabel: yours ? 'you' : 'agent to agent', preview: self.preview(c), selected: selected,
+        rowBg: selected ? 'var(--surface-2)' : 'transparent', rowLine: selected ? 'var(--brand-line)' : 'var(--line)',
+        pick: function () {
+          self.setState({ sel: c.id, draft: '', mode: 'text' });
+          if (c.live && !c.played) self.replay(c);
+        } };
+    };
+    var shown = isChat ? all.filter(function (c) { return st.filter === 'all' || c.kind === st.filter; }) : [];
+    var count = function (k) { return all.filter(function (c) { return k === 'all' || c.kind === k; }).length; };
+    var filters = [['all', 'All'], ['you', 'Yours'], ['agents', 'Agents']].map(function (f) {
+      var o = seg(st.filter === f[0]); o.label = f[1] + ' ' + count(f[0]); o.pick = function () { self.setState({ filter: f[0] }); }; return o;
+    });
+
+    // ----- chat: current conversation -----
+    var yours = cur.kind === 'you', s = self.convState(cur), sc = self.stateColors(s);
+    var parsed = self.parseDraft(), json = st.mode === 'json';
+    var hint = parsed.empty ? (json ? 'Type a JSON value. It is sent as a data part.' : 'Enter sends. Text that parses as JSON is sent as a data part.')
+      : parsed.error ? 'Not valid JSON: ' + parsed.error
+      : parsed.data !== undefined ? 'Valid JSON. Sends a data part.' : 'Sends a text part.';
+    var send = function (e) {
+      if (e && e.preventDefault) e.preventDefault();
+      var p = self.parseDraft();
+      if (!yours || cur.busy || p.empty || p.error) return;
+      self.setState({ draft: '' });
+      self.dispatch(cur, p);
+    };
+    var modes = [['text', 'Text'], ['json', 'JSON']].map(function (m) {
+      var o = seg(st.mode === m[0]); o.label = m[1];
+      o.pick = function () { self.setState({ mode: m[0], draft: m[0] === 'json' && !st.draft.trim() ? self.template(cur) : st.draft }); };
+      return o;
+    });
+    var isEmpty = yours && cur.items.length === 0;
+    var examples = isEmpty ? self.examplesOf(cur.b).map(function (x) { return { label: x.label, tag: x.tag, pick: function () { if (!cur.busy) self.dispatch(cur, x.send); } }; }) : [];
+    var agentChoices = isEmpty ? self.agents.map(function (a) {
+      var o = seg(cur.b === a.svc); o.label = a.svc; o.pick = function () { cur.b = a.svc; self.setState({ draft: '', mode: 'text' }); }; return o;
+    }) : [];
+    var curTasks = cur.items.filter(function (it) { return it.t === 'task'; });
+    var curArts = [];
+    curTasks.forEach(function (it) { it.artifacts.forEach(function (a) { curArts.push([it, a]); }); });
+    var tabs = [['tasks', 'Tasks ' + curTasks.length], ['artifacts', 'Artifacts ' + curArts.length]].map(function (t) {
+      var on = st.side === t[0];
+      return { label: t[1], pressed: on, bg: on ? 'var(--brand-soft)' : 'var(--surface-2)', fg: on ? 'var(--brand-ink)' : 'var(--ink)', line: on ? 'var(--brand-line)' : 'var(--line)',
+        pick: function () { self.setState({ side: on ? null : t[0] }); } };
+    });
+    var card = (self.agentOf(cur.b) || { card: { description: '' } }).card;
+
+    // ----- chat: sidebar -----
+    var sideOpen = isChat && !!st.side, none = self.noneArt();
+    var selPair = curArts.filter(function (p) { return p[1].id === cur.selArt; })[0] || curArts[curArts.length - 1];
+    var side = {
+      display: sideOpen ? 'flex' : 'none',
+      tabs: [['tasks', 'Tasks ' + curTasks.length], ['artifacts', 'Artifacts ' + curArts.length]].map(function (t) {
+        var o = seg(st.side === t[0]); o.label = t[1]; o.pick = function () { self.setState({ side: t[0] }); }; return o;
+      }),
+      close: function () { self.setState({ side: null }); },
+      tasksDisplay: st.side === 'tasks' ? 'flex' : 'none', artsDisplay: st.side === 'artifacts' ? 'flex' : 'none',
+      tasks: sideOpen && st.side === 'tasks' ? curTasks.map(function (it) { return self.taskCard(cur, it, false); }) : [],
+      noTasks: curTasks.length === 0, noArts: curArts.length === 0,
+      arts: sideOpen && st.side === 'artifacts' ? curArts.map(function (p) {
+        var on = !!selPair && p[1].id === selPair[1].id;
+        return { name: p[1].name, mediaType: p[1].mediaType, sub: p[0].taskId, selected: on, rowBg: on ? 'var(--surface-2)' : 'transparent', rowLine: on ? 'var(--brand-line)' : 'var(--line)',
+          pick: function () { cur.selArt = p[1].id; self.bump(); } };
+      }) : [],
+      hasSel: sideOpen && st.side === 'artifacts' && !!selPair,
+      sel: sideOpen && st.side === 'artifacts' && selPair ? self.viewArt(cur, selPair[0], selPair[1]) : none
+    };
+
+    // ----- pages -----
+    var pTasks = { filters: [], tasks: [], none: false }, pArts = { rows: [], hasSel: false, sel: none, none: false };
+    var pAgents = [], pMcp = [], pNodes = [];
+    if (view === 'tasks') {
+      var groups = { all: function () { return true; }, active: function (x) { return !self.terminal(x); }, done: function (x) { return self.terminal(x); } };
+      var listed = [];
+      self.eachTask(function (c, it) { listed.push([c, it]); });
+      pTasks.filters = [['all', 'All'], ['active', 'Active'], ['done', 'Ended']].map(function (f) {
+        var o = seg(st.taskFilter === f[0]);
+        o.label = f[1] + ' ' + listed.filter(function (p) { return groups[f[0]](p[1].state); }).length;
+        o.pick = function () { self.setState({ taskFilter: f[0] }); };
+        return o;
+      });
+      pTasks.tasks = listed.filter(function (p) { return groups[st.taskFilter](p[1].state); }).map(function (p) { return self.taskCard(p[0], p[1], true); });
+      pTasks.none = pTasks.tasks.length === 0;
+    }
+    if (view === 'artifacts') {
+      var arts = [];
+      self.eachTask(function (c, it) { it.artifacts.forEach(function (a) { arts.push([c, it, a]); }); });
+      var pick = arts.filter(function (p) { return p[2].id === st.pageArt; })[0] || arts[0];
+      pArts.rows = arts.map(function (p) {
+        var on = !!pick && p[2].id === pick[2].id;
+        return { name: p[2].name, mediaType: p[2].mediaType, sub: p[0].a + ' → ' + p[0].b, selected: on, rowBg: on ? 'var(--surface-2)' : 'var(--surface)', rowLine: on ? 'var(--brand-line)' : 'var(--line)',
+          pick: function () { self.setState({ pageArt: p[2].id }); } };
+      });
+      pArts.hasSel = !!pick; pArts.none = !pick;
+      if (pick) pArts.sel = self.viewArt(pick[0], pick[1], pick[2]);
+    }
+    if (view === 'agents') {
+      pAgents = self.agents.map(function (a) {
+        var c = a.card, chip = chipFor(a.online), open = !!self.openMap['card:' + a.svc];
+        return { svc: a.svc, name: c.name, version: 'v' + c.version, av: self.initials(a.svc), description: c.description, statusText: chip.text, statusBg: chip.bg, statusFg: chip.fg,
+          chips: [{ k: 'node', v: a.node }, { k: 'provider', v: c.provider.organization }, { k: 'streaming', v: c.capabilities.streaming ? 'yes' : 'no' },
+            { k: 'push', v: c.capabilities.pushNotifications ? 'yes' : 'no' }].concat(c.capabilities.extensions.length ? [{ k: 'extension', v: 'A2UI v0.9' }] : []),
+          url: c.supportedInterfaces[0].url, bindings: c.supportedInterfaces.map(function (i) { return i.protocolBinding; }).join(', ') + ' · A2A ' + c.supportedInterfaces[0].protocolVersion,
+          skills: c.skills.map(function (k) { return { name: k.name, description: k.description, tags: k.tags.map(function (t) { return { t: t }; }), examples: (k.examples || []).map(function (e) { return { text: e }; }) }; }),
+          chatDisabled: !a.online, chat: function () { self.startChat(a.svc); },
+          jsonOpen: open, jsonLabel: open ? 'Hide card JSON' : 'Card JSON', toggleJson: function () { self.openMap['card:' + a.svc] = !open; self.bump(); },
+          json: open ? self.tree('card' + a.svc, c, 'Agent card') : self.tree('x', null) };
+      });
+    }
+    if (view === 'mcp') {
+      pMcp = self.mcps.map(function (m) {
+        var chip = chipFor(m.online), open = !!self.openMap['mcp:' + m.svc];
+        return { svc: m.svc, title: m.title, av: self.initials(m.svc), statusText: chip.text, statusBg: chip.bg, statusFg: chip.fg,
+          chips: [{ k: 'node', v: m.node }, { k: 'backend', v: m.origin }, { k: 'tools', v: String(m.tools.length) }],
+          url: 'https://gateway.kontra.sh/mcp/' + m.svc,
+          tools: m.tools.map(function (t) { return { name: t.name, description: t.description, denied: m.deny.indexOf(t.name) >= 0 }; }),
+          jsonOpen: open, jsonLabel: open ? 'Hide tools/list' : 'tools/list JSON', toggleJson: function () { self.openMap['mcp:' + m.svc] = !open; self.bump(); },
+          json: open ? self.tree('mcp' + m.svc, { tools: m.tools }, 'tools/list result') : self.tree('x', null) };
+      });
+    }
+    if (view === 'nodes') {
+      pNodes = self.nodesData().map(function (n) {
+        var chip = chipFor(n.online);
+        var services = self.agents.filter(function (a) { return a.node === n.name; }).map(function (a) { return { kind: 'A2A', svc: a.svc, state: 'online', color: 'var(--ok)' }; })
+          .concat(self.mcps.filter(function (m) { return m.node === n.name; }).map(function (m) { return { kind: 'MCP', svc: m.svc, state: m.online ? 'online' : 'offline', color: m.online ? 'var(--ok)' : 'var(--bad)' }; }));
+        return { name: n.name, owner: n.owner, since: n.since, statusText: chip.text, statusBg: chip.bg, statusFg: chip.fg, services: services };
+      });
+    }
+
+    return {
+      themeClass: (this.props.dark ?? true) ? 'dark' : '',
+      navs: navs, d: d,
+      filters: filters,
+      convs: shown.map(row),
+      cur: {
+        caller: cur.a, callee: cur.b, callerAv: self.initials(cur.a), calleeAv: self.initials(cur.b),
+        callerAvBg: yours ? 'var(--ink)' : 'var(--brand-soft)', callerAvFg: yours ? 'var(--paper)' : 'var(--brand-ink)',
+        state: s, hasState: !!s, stateBg: sc[0], stateFg: sc[1], contextId: cur.contextId, tabs: tabs,
+        observed: !yours, observedText: cur.observedText || '', sealed: !!cur.sealed,
+        empty: isEmpty, examples: examples, agentChoices: agentChoices, description: card.description,
+        canReply: yours, readOnly: !yours, canReplay: !!cur.live, busy: !!cur.busy,
+        placeholder: json ? '{ "target": "example.com" }' : 'Message ' + cur.b,
+        items: isChat ? cur.items.map(function (it) { return self.viewItem(cur, it); }) : [],
+        replay: function () { self.replay(cur); }
+      },
+      side: side, pTasks: pTasks, pArts: pArts, pAgents: pAgents, pMcp: pMcp, pNodes: pNodes,
+      draft: st.draft, modes: modes, hint: hint, hintColor: parsed.error ? 'var(--bad)' : parsed.data !== undefined ? 'var(--ok)' : 'var(--ink-3)',
+      rows: json ? 5 : 2, draftFont: json ? "'IBM Plex Mono', ui-monospace, monospace" : 'inherit', draftSize: json ? '12.5px' : '14px',
+      sendDisabled: !!cur.busy || !!parsed.empty || !!parsed.error, sendLabel: cur.busy ? 'Streaming…' : 'Send',
+      onDraft: function (e) { self.setState({ draft: e.target.value }); },
+      onKey: function (e) { if (e.key === 'Enter' && !e.shiftKey && (st.mode === 'text' || e.metaKey || e.ctrlKey)) send(e); },
+      send: send,
+      newChat: function () { self.startChat('redteam/recon'); }
+    };
+  }
+  startChat(svc) {
+    var id = this.nid('n');
+    this.convs.unshift({ id: id, kind: 'you', a: 'you', b: svc, ago: 'now', contextId: 'new context', items: [] });
+    this.setState({ view: 'chat', sel: id, filter: this.state.filter === 'agents' ? 'all' : this.state.filter, draft: '', mode: 'text' });
+  }
+}
+DCLogic.mount(Component, document.getElementById('app'), document.getElementById('tpl'));
+</script>
+</body>
+</html>
