@@ -65,6 +65,10 @@ this order:
    extension ([`ext-sealed.md`](spec/ext-sealed.md); the escrow extension is withdrawn, D351), with the schema in
    [`migrations/`](migrations/).
    Every place they depart from the documents above is numbered in [`docs/decisions.md`](docs/decisions.md).
+5. [`docs/console-chat.md`](docs/console-chat.md) — a draft (19 Nov 2026), not built: the console's chat, with every
+   conversation listed, agent-to-agent ones included, a side panel for a conversation's tasks and artifacts, and the
+   sections Chat, Nodes, Agents, MCP, Tasks and Artifacts. Its prototype opens in a browser:
+   [`docs/prototypes/console-chat.html`](docs/prototypes/console-chat.html).
 
 Where a note and the PRD disagree, the later document wins; `docs/README.md` has the section map.
 
@@ -180,6 +184,11 @@ go run ./cmd/kontra connect --gate http://127.0.0.1:8080 --listen off --serve a2
 
 [`docs/local.md`](docs/local.md) walks through it, with an example agent to try, how to keep history forever, and
 what the profile does not protect against (anything else on your machine can reach it: never use it for a team).
+
+The console's next shape is a draft: a chat that lists every conversation between agents and reads as one, tasks
+and artifacts in a side panel, JSON as a tree and markdown rendered. [`docs/console-chat.md`](docs/console-chat.md)
+specifies it and [`docs/prototypes/console-chat.html`](docs/prototypes/console-chat.html) is a prototype on mock data.
+None of it is built: the console the commands above open is today's.
 
 ## A team gate from source
 
@@ -394,6 +403,8 @@ local calling to the first node. Each node is its own row on Cloud's Network pag
 cmd/kontra/        the CLI: connect, login, seal, publish, version
 cmd/kontra-gate/   the gate: serve, migrate, enroll, health, version
 internal/          relay, tunnel, gatemcp (/mcp), anon, store (Postgres), lifecycle (Temporal), sealing, …
+web/               the console a gate serves in the local development profile (plain ES modules, embedded in kontra-gate)
+docs/              the PRD, the architecture notes, decisions.md, and the draft console chat spec with its prototype
 spec/              tunnel.md, relay.md, ext-sealed.md, schema/
 migrations/        0001_init.sql, 0002_m3.sql, 0003_m4.sql, 0004_m5.sql, 0005_mcp_tools.sql,
                    0006_local_console.sql, 0007_a2a_wire.sql (the gate's Postgres schema, embedded in kontra-gate)
@@ -406,6 +417,7 @@ scripts/           check_specs.py, the test runners, tck.sh, demo-clean-laptop.s
 test/              e2e/ (two replicas behind a front), pentest/, tck/, demo/ (the clean laptop), vps/
 ```
 
-There is no local console (D164): the task thread is Cloud's (`app.kontra.sh`, M5).
+A node serves no console (D164). A gate with `profile: local` serves one ([above](#local-development), D352);
+elsewhere the task thread is Cloud's (`app.kontra.sh`, M5).
 
 Apache-2.0.
