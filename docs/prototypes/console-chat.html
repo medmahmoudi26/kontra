@@ -45,7 +45,7 @@ a{color:#0b7fa4}a:hover{color:#075c78}
       <b style="font-size: 17px; font-weight: 700; letter-spacing: -0.03em">kontra</b>
     </a>
     <nav aria-label="Sections" style="display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto">
-      <sc-for list="{{navs}}" as="nv" hint-placeholder-count="7"><button type="button" aria-current="{{nv.current}}" onClick="{{nv.pick}}" style="min-height: 44px; border: 0; border-radius: 7px; padding: 0 11px; font-size: 13px; white-space: nowrap; background: {{nv.bg}}; color: {{nv.fg}}; font-weight: {{nv.weight}}">{{nv.label}}</button></sc-for>
+      <sc-for list="{{navs}}" as="nv" hint-placeholder-count="8"><button type="button" aria-current="{{nv.current}}" onClick="{{nv.pick}}" style="min-height: 44px; border: 0; border-radius: 7px; padding: 0 11px; font-size: 13px; white-space: nowrap; background: {{nv.bg}}; color: {{nv.fg}}; font-weight: {{nv.weight}}">{{nv.label}}</button></sc-for>
     </nav>
   </header>
 
@@ -118,7 +118,7 @@ a{color:#0b7fa4}a:hover{color:#075c78}
           <sc-if value="{{cur.sealed}}" hint-placeholder-val="{{false}}">
             <div style="background: var(--warn-soft); border-radius: 10px; padding: 11px 13px; font-size: 12.5px; color: var(--warn); display: flex; gap: 10px; align-items: flex-start">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: 0 0 auto; margin-top: 2px"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-              <span>Sealed to the node's key. The gate stores ciphertext, so this transcript shows who sent what and when, not the content.</span>
+              <span>{{cur.sealedText}}</span>
             </div>
           </sc-if>
 
@@ -453,7 +453,7 @@ a{color:#0b7fa4}a:hover{color:#075c78}
               <sc-if value="{{cur.canReplay}}" hint-placeholder-val="{{false}}">
                 <button type="button" disabled="{{cur.busy}}" onClick="{{cur.replay}}" style="min-height: 44px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 9px; padding: 8px 14px; font-size: 12.5px; font-weight: 600">Replay stream</button>
               </sc-if>
-              <a href="#top" style="font-size: 12.5px; font-weight: 600; padding: 12px 0">Open in Traffic</a>
+              <button type="button" onClick="{{cur.openTraffic}}" style="min-height: 44px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 9px; padding: 8px 14px; font-size: 12.5px; font-weight: 600">Open in Traffic</button>
             </span>
           </div>
         </div>
@@ -495,7 +495,7 @@ a{color:#0b7fa4}a:hover{color:#075c78}
   <sc-if value="{{t.hasSub}}" hint-placeholder-val="{{false}}">
     <div style="border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; min-width: 0">
       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
-        <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">SubscribeToTask</span>
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">Task events · the gate's record</span>
         <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{t.subBg}}; color: {{t.subFg}}">
           <sc-if value="{{t.subLive}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
           {{t.subState}}
@@ -680,6 +680,7 @@ a{color:#0b7fa4}a:hover{color:#075c78}
       <div style="display: flex; gap: 8px; flex-wrap: wrap">
         <button type="button" disabled="{{g.chatDisabled}}" onClick="{{g.chat}}" style="min-height: 44px; border: 1px solid var(--brand); background: var(--brand); color: var(--on-brand); border-radius: 9px; padding: 8px 18px; font-size: 13px; font-weight: 600; white-space: nowrap">Chat</button>
         <button type="button" aria-pressed="{{g.jsonOpen}}" onClick="{{g.toggleJson}}" style="min-height: 40px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap; min-height: 44px">{{g.jsonLabel}}</button>
+        <sc-if value="{{g.hasPlay}}" hint-placeholder-val="{{false}}"><button type="button" onClick="{{g.play}}" style="min-height: 44px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 12.5px; font-weight: 600; white-space: nowrap">Playground</button></sc-if>
       </div>
       <sc-if value="{{g.jsonOpen}}" hint-placeholder-val="{{false}}"><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%">
   <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
@@ -774,6 +775,56 @@ a{color:#0b7fa4}a:hover{color:#075c78}
 </div>
   </div>
 </div>
+  <div style="display: {{d.traffic}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">Traffic</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px">Every A2A call through this gate on both legs, refused ones included, and every MCP tool call, as they happen. A call shows once it ends.</p>
+    </div>
+    <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap">
+      <div role="group" aria-label="Protocol" style="display: flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; max-width: 100%; overflow-x: auto">
+        <sc-for list="{{pTraffic.filters}}" as="f" hint-placeholder-count="3">
+          <button type="button" aria-pressed="{{f.pressed}}" onClick="{{f.pick}}" style="flex: 1 0 auto; min-height: 38px; border: 0; border-radius: 7px; padding: 6px 12px; font-size: 12px; white-space: nowrap; background: {{f.bg}}; color: {{f.fg}}; font-weight: {{f.weight}}">{{f.label}}</button>
+        </sc-for>
+      </div>
+      <button type="button" aria-pressed="{{pTraffic.live}}" onClick="{{pTraffic.toggleLive}}" style="min-height: 44px; display: inline-flex; align-items: center; gap: 8px; border: 1px solid {{pTraffic.liveLine}}; background: {{pTraffic.liveBg}}; color: {{pTraffic.liveFg}}; border-radius: 9px; padding: 6px 14px; font-size: 12.5px; font-weight: 600; white-space: nowrap">
+        <sc-if value="{{pTraffic.live}}" hint-placeholder-val="{{true}}"><span class="pulse" aria-hidden="true"></span></sc-if>
+        {{pTraffic.liveLabel}}
+      </button>
+      <sc-if value="{{pTraffic.hasCtx}}" hint-placeholder-val="{{false}}">
+        <span style="display: inline-flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 2px 4px 2px 9px; font-size: 11.5px"><b style="color: var(--ink-3); font-weight: 500; font-size: 10px; letter-spacing: 0.03em; text-transform: uppercase">context</b><span style="font-family: 'IBM Plex Mono', ui-monospace, monospace">{{pTraffic.ctx}}</span><button type="button" aria-label="Show every context" onClick="{{pTraffic.clearCtx}}" style="min-height: 36px; min-width: 36px; border: 0; background: transparent; color: var(--ink-2); border-radius: 6px">&#x2715;</button></span>
+      </sc-if>
+    </div>
+    <ol aria-label="Calls" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px">
+      <sc-for list="{{pTraffic.rows}}" as="x" hint-placeholder-count="6">
+        <li style="background: var(--surface); border: 1px solid {{x.line}}; border-radius: 11px; padding: 9px 12px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; min-width: 0">
+          <time style="flex: 0 0 auto; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: var(--ink-3)">{{x.at}}</time>
+          <span style="flex: 0 0 auto; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 5px; background: {{x.protoBg}}; color: {{x.protoFg}}">{{x.proto}}</span>
+          <span style="flex: 1 1 260px; min-width: 0; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; font-weight: 600; overflow-wrap: anywhere">{{x.label}}</span>
+          <span style="flex: 0 1 auto; min-width: 0; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11.5px; color: var(--ink-2); overflow-wrap: anywhere">{{x.parties}}</span>
+          <span style="flex: 0 1 auto; min-width: 0; font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: var(--ink-3); overflow-wrap: anywhere">{{x.ctx}}</span>
+          <span style="margin-left: auto; flex: 0 0 auto; display: inline-flex; gap: 8px; align-items: baseline">
+            <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 11px; color: var(--ink-3)">{{x.dur}}</span>
+            <span style="font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{x.outBg}}; color: {{x.outFg}}">{{x.outcome}}</span>
+          </span>
+        </li>
+      </sc-for>
+    </ol>
+    <sc-if value="{{pTraffic.none}}" hint-placeholder-val="{{false}}"><p style="margin: 0; font-size: 13px; color: var(--ink-2)">No call recorded yet for this filter.</p></sc-if>
+  </div>
+</div>
+  <div style="display: {{d.play}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
+  <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
+    <div>
+      <h1 style="margin: 0; font-size: 25px; font-weight: 800; letter-spacing: -0.03em">Playground</h1>
+      <p style="margin: 5px 0 0; color: var(--ink-2); font-size: 14px; font-family: 'IBM Plex Mono', ui-monospace, monospace">{{playSvc}}</p>
+    </div>
+    <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0">
+      <p style="margin: 0; font-size: 13px; color: var(--ink-2)">Today's Playground, unchanged: any of A2A 1.0's methods sent by hand to this agent's route on the gate, as a stock client sends it, and recorded in Traffic. It is reached from the agent's card and is not drawn in this prototype.</p>
+      <div><button type="button" onClick="{{backToAgents}}" style="min-height: 44px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); border-radius: 9px; padding: 8px 14px; font-size: 12.5px; font-weight: 600">Back to Agents</button></div>
+    </div>
+  </div>
+</div>
   <div style="display: {{d.catalog}}; flex: 1 1 auto; min-height: 0; overflow-y: auto">
   <div style="max-width: 1160px; margin: 0 auto; padding: 28px 20px 60px; display: flex; flex-direction: column; gap: 18px">
     <div>
@@ -817,7 +868,7 @@ a{color:#0b7fa4}a:hover{color:#075c78}
   <sc-if value="{{t.hasSub}}" hint-placeholder-val="{{false}}">
     <div style="border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 7px; min-width: 0">
       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap">
-        <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">SubscribeToTask</span>
+        <span style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 10.5px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: var(--ink-3)">Task events · the gate's record</span>
         <span style="display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: {{t.subBg}}; color: {{t.subFg}}">
           <sc-if value="{{t.subLive}}" hint-placeholder-val="{{false}}"><span class="pulse" aria-hidden="true"></span></sc-if>
           {{t.subState}}
@@ -1051,7 +1102,11 @@ class Component extends DCLogic {
     this.agents = this.agentsData();
     this.mcps = this.mcpData();
     this.convs = this.seed();
-    this.state = { view: 'chat', side: null, taskFilter: 'all', pageArt: null, sel: 'c1', filter: 'all', mode: 'text', draft: '', n: 0 };
+    this.state = { view: 'chat', side: null, taskFilter: 'all', pageArt: null, sel: 'c1', filter: 'all', mode: 'text', draft: '', n: 0,
+      trafficFilter: 'all', trafficLive: true, trafficCtx: null, playSvc: '' };
+    this.traffic = this.trafficSeed();
+    this.trafficHeld = 0;
+    this.trafficTick();
   }
   componentWillUnmount() { this.dead = true; this.timers.forEach(clearTimeout); }
   bump() { if (!this.dead) this.setState({ n: this.state.n + 1 }); }
@@ -1096,8 +1151,8 @@ class Component extends DCLogic {
   }
   seed() {
     var self = this, R = 'R', L = 'L';
-    var c1 = { id: 'c1', kind: 'you', a: 'you', b: 'redteam/recon', ago: '4m', contextId: 'ctx-7f3a…c21e', items: [] };
-    c1.items.push(self.msg(R, 'you', [self.text('Passive recon on staging.example.com. No active scanning, no brute force.')], '14:02:11'));
+    var c1 = { id: 'c1', kind: 'you', a: 'acme', b: 'redteam/recon', ago: '4m', contextId: 'ctx-7f3a…c21e', items: [] };
+    c1.items.push(self.msg(R, 'acme', [self.text('Passive recon on staging.example.com. No active scanning, no brute force.')], '14:02:11'));
     var t1 = self.task('redteam/recon', 'input-required', '14:02:13');
     t1.target = 'staging.example.com';
     self.upd(t1, 'Querying certificate transparency logs for staging.example.com.', '14:02:14');
@@ -1109,10 +1164,10 @@ class Component extends DCLogic {
     t1.ui = self.reconForm(t1.taskId);
     c1.items.push(t1);
 
-    var c2 = { id: 'c2', kind: 'agents', a: 'blue-team/triage', b: 'redteam/recon', ago: 'now', contextId: 'ctx-1b90…e4d7', seedState: 'working', live: true,
-      observedText: 'You are watching. blue-team/triage is your agent; it opened this conversation through the gate.', items: [] };
+    var c2 = { id: 'c2', kind: 'agents', a: 'acme · node k8s', b: 'redteam/recon', ago: 'now', contextId: 'ctx-1b90…e4d7', seedState: 'working', live: true,
+      observedText: 'Watching. acme\'s node k8s opened this conversation through the gate; the agent that called is behind it.', items: [] };
     c2.seedItems = function () {
-      return [self.msg(R, 'blue-team/triage', [
+      return [self.msg(R, 'acme · node k8s', [
         self.text('New alert on api.example.com: an unkeyed header is reflected in a cached response. Confirm whether the cache can be poisoned.'),
         self.data({ alert: { id: 'ALR-2291', host: 'api.example.com', header: 'X-Forwarded-Host', signal: 'reflected in cached response' },
           constraints: { methods: ['GET', 'HEAD'], cache_buster: 'per-probe', siblings: ['app.example.com', 'cdn.example.com', 'static.example.com'] } })
@@ -1120,9 +1175,9 @@ class Component extends DCLogic {
     };
     c2.items = c2.seedItems();
 
-    var c3 = { id: 'c3', kind: 'agents', a: 'claude-code@laptop', b: 'nora/js-analyst', ago: '22m', contextId: 'ctx-93c4…0aa1',
-      observedText: 'You are watching. claude-code@laptop is your agent; it called nora/js-analyst on the community gate.', items: [] };
-    c3.items.push(self.msg(R, 'claude-code@laptop', [self.text('List the API routes referenced in this bundle and flag any that take a URL parameter.'), self.file('app.4f1c.js', 'text/javascript')], '13:48:19'));
+    var c3 = { id: 'c3', kind: 'agents', a: 'acme · node laptop', b: 'nora/js-analyst', ago: '22m', contextId: 'ctx-93c4…0aa1',
+      observedText: 'Watching. acme\'s node laptop called nora/js-analyst through the gate.', items: [] };
+    c3.items.push(self.msg(R, 'acme · node laptop', [self.text('List the API routes referenced in this bundle and flag any that take a URL parameter.'), self.file('app.4f1c.js', 'text/javascript')], '13:48:19'));
     var t3 = self.task('nora/js-analyst', 'completed', '13:48:20');
     self.upd(t3, 'Parsing app.4f1c.js.', '13:48:21');
     self.upd(t3, 'Three routes found, one takes a URL.', '13:50:02');
@@ -1131,15 +1186,15 @@ class Component extends DCLogic {
       { path: '/api/v2/export', method: 'GET', takes_url: false }] }));
     c3.items.push(t3);
 
-    var c4 = { id: 'c4', kind: 'agents', a: 'lab/orchestrator', b: 'you/cache-probe', ago: '1h', contextId: 'ctx-c05e…77b2', sealed: true,
-      observedText: 'You are watching. lab/orchestrator called your agent you/cache-probe.', items: [] };
-    c4.items.push(self.msg(R, 'lab/orchestrator', [{ k: 'sealed', text: 'sealed · 1 text part' }], '13:01:44'));
-    var t4 = self.task('you/cache-probe', 'completed', '13:01:45');
-    t4.sealedText = 'sealed · 2 status updates · 1 artifact with 1 file part';
+    var c4 = { id: 'c4', kind: 'agents', a: 'lab · node orchestrator', b: 'acme/cache-probe', ago: '1h', contextId: 'ctx-c05e…77b2', sealed: true,
+      observedText: 'Watching. lab\'s node orchestrator called acme/cache-probe, a service of acme.', items: [] };
+    c4.items.push(self.msg(R, 'lab · node orchestrator', [{ k: 'sealed', text: 'Message · content sealed' }], '13:01:44'));
+    var t4 = self.task('acme/cache-probe', 'completed', '13:01:45');
+    t4.sealedText = '13:01:45 TaskStatusUpdateEvent · 13:02:30 TaskArtifactUpdateEvent · 13:02:31 TaskStatusUpdateEvent. Content sealed.';
     c4.items.push(t4);
 
-    var c5 = { id: 'c5', kind: 'you', a: 'you', b: 'nora/js-analyst', ago: '2d', contextId: 'ctx-28d1…f630', items: [] };
-    c5.items.push(self.msg(R, 'you', [self.text('Does this bundle ship a source map reference?'), self.file('vendor.91ab.js', 'text/javascript')], '09:15:03'));
+    var c5 = { id: 'c5', kind: 'you', a: 'acme', b: 'nora/js-analyst', ago: '2d', contextId: 'ctx-28d1…f630', items: [] };
+    c5.items.push(self.msg(R, 'acme', [self.text('Does this bundle ship a source map reference?'), self.file('vendor.91ab.js', 'text/javascript')], '09:15:03'));
     c5.items.push(self.msg(L, 'nora/js-analyst', [self.text('Yes. The last line points to vendor.91ab.js.map on the same origin.')], '09:15:20'));
     return [c1, c2, c3, c4, c5];
   }
@@ -1440,7 +1495,7 @@ class Component extends DCLogic {
 
   // ---------- view ----------
   initials(name) {
-    var p = String(name).split(/[\/@\-]/).filter(Boolean);
+    var p = String(name).replace(' · node ', '/').split(/[\/@\-]/).filter(Boolean);
     return ((p[0] || '?')[0] + ((p[1] || '')[0] || '')).toUpperCase();
   }
   stateColors(s) {
@@ -1457,7 +1512,7 @@ class Component extends DCLogic {
     return c.items.length ? '' : 'new';
   }
   preview(c) {
-    if (c.sealed) return 'Sealed · metadata only';
+    if (c.sealed) return 'Sealed: kinds and times only';
     var it = c.items[c.items.length - 1];
     if (!it) return 'No message yet';
     if (it.t === 'task') { var u = it.updates[it.updates.length - 1]; return u && u.text ? u.text : 'Task ' + it.state; }
@@ -1469,7 +1524,7 @@ class Component extends DCLogic {
     var base = { isMsg: false, isTask: false, rawOpen: it.rawOpen, canRaw: !conv.sealed, rawLabel: it.rawOpen ? 'Hide raw' : 'Raw', raw: empty,
       toggleRaw: function () { it.rawOpen = !it.rawOpen; self.bump(); } };
     if (it.t === 'msg') {
-      var right = it.side === 'R', you = it.who === 'you';
+      var right = it.side === 'R', you = right && conv.kind === 'you';
       base.isMsg = true; base.who = it.who; base.time = it.time; base.av = self.initials(it.who);
       base.align = right ? 'flex-end' : 'flex-start';
       base.showKind = !right;
@@ -1520,13 +1575,13 @@ class Component extends DCLogic {
         'Reads JavaScript bundles statically: routes, parameters and source map references.',
         { id: 'bundle-routes', name: 'Bundle routes', description: 'Lists the API routes a bundle references and flags the ones that take a URL.', tags: ['javascript', 'static-analysis'],
           examples: ['What can you find in a bundle?', '{"bundle":"app.4f1c.js","find":["routes","source-maps"],"flag":{"takes_url":true}}'] }),
-      mk('you/cache-probe', 'laptop', 'Cache probe', '0.3.0', 'you',
+      mk('acme/cache-probe', 'laptop', 'Cache probe', '0.3.0', 'acme',
         'Checks whether a request header is reflected and cached. One cache buster per probe, read-only methods.',
         { id: 'cache-probe', name: 'Cache probe', description: 'Probes one host and one header, and reports whether the cache key covers it.', tags: ['web-cache', 'http'],
           examples: ['How do you keep probes away from real users?', '{"host":"api.example.com","header":"X-Forwarded-Host","methods":["GET","HEAD"]}'] }, { push: true }),
-      mk('blue-team/triage', 'blue-team-k8s', 'Triage', '2.1.0', 'blue-team',
+      mk('acme/triage', 'k8s', 'Triage', '2.1.0', 'acme',
         'Reads an alert, decides which specialist agent to call, and tracks the answer.',
-        { id: 'alert-triage', name: 'Alert triage', description: 'Takes an alert and returns the calls it made and what came back.', tags: ['blue-team', 'orchestration'],
+        { id: 'alert-triage', name: 'Alert triage', description: 'Takes an alert and returns the calls it made and what came back.', tags: ['triage', 'orchestration'],
           examples: ['What do you do with a new alert?', '{"alert":{"id":"ALR-2291","host":"api.example.com"}}'] }, { push: true })
     ];
   }
@@ -1534,11 +1589,11 @@ class Component extends DCLogic {
     var str = { type: 'string' }, num = { type: 'number' };
     var tool = function (name, description, props, required) { return { name: name, description: description, inputSchema: { type: 'object', properties: props, required: required || [] } }; };
     return [
-      { svc: 'you/everything', title: 'Everything', node: 'laptop', online: true, origin: 'Streamable HTTP on the node', deny: [], tools: [
+      { svc: 'acme/everything', title: 'Everything', node: 'laptop', online: true, origin: 'Streamable HTTP on the node', deny: [], tools: [
         tool('echo', 'Echoes back the input.', { message: str }, ['message']),
         tool('add', 'Adds two numbers.', { a: num, b: num }, ['a', 'b']),
         tool('longRunningOperation', 'Runs for a set duration and reports progress.', { duration: num, steps: num }) ] },
-      { svc: 'you/fs', title: 'Filesystem', node: 'laptop', online: true, origin: 'stdio, one process per session', deny: ['write_file'], tools: [
+      { svc: 'acme/fs', title: 'Filesystem', node: 'laptop', online: true, origin: 'stdio, one process per session', deny: ['write_file'], tools: [
         tool('read_file', 'Reads a file under the allowed directory.', { path: str }, ['path']),
         tool('list_directory', 'Lists a directory.', { path: str }, ['path']),
         tool('search_files', 'Finds files by pattern.', { path: str, pattern: str }, ['path', 'pattern']),
@@ -1549,10 +1604,10 @@ class Component extends DCLogic {
   }
   nodesData() {
     return [
-      { name: 'laptop', owner: 'you', online: true, since: 'connected 3 hours ago' },
+      { name: 'laptop', owner: 'acme', online: true, since: 'connected 3 hours ago' },
       { name: 'redteam-vps', owner: 'redteam', online: true, since: 'connected 6 days ago' },
       { name: 'nora-home', owner: 'nora', online: true, since: 'connected 40 minutes ago' },
-      { name: 'blue-team-k8s', owner: 'blue-team', online: true, since: 'connected 2 days ago' }
+      { name: 'k8s', owner: 'acme', online: true, since: 'connected 2 days ago' }
     ];
   }
   agentOf(svc) { return this.agents.filter(function (a) { return a.svc === svc; })[0]; }
@@ -1656,7 +1711,7 @@ class Component extends DCLogic {
   }
   toggleSub(conv, it) {
     if (it.sub && it.sub.open) { it.sub.open = false; it.sub.closed = 'Closed by the client.'; this.bump(); return; }
-    if (this.terminal(it.state)) it.sub = { open: false, events: [], error: 'UnsupportedOperationError: the task is in a terminal state (' + it.state + ').' };
+    if (this.terminal(it.state)) it.sub = { open: false, events: [{ time: this.now(), kind: 'end', text: 'state: ' + it.state }], closed: 'The task has ended: the stream sent its end event and closed. Its whole log is in the transcript.' };
     else it.sub = { open: true, events: [{ time: this.now(), kind: 'Task', text: 'current state: ' + it.state }], snap: this.snap(it) };
     this.bump();
   }
@@ -1689,8 +1744,70 @@ class Component extends DCLogic {
       subFg: subState === 'open' ? 'var(--brand-ink)' : subState === 'refused' ? 'var(--bad)' : 'var(--ink-2)', subLive: subState === 'open',
       subNote: sub ? (sub.error || sub.closed || 'Listening for events.') : '', subNoteColor: sub && sub.error ? 'var(--bad)' : 'var(--ink-2)',
       events: events, hasEarlier: !!sub && sub.events.length > events.length, earlier: sub ? (sub.events.length - events.length) + ' earlier events' : '',
-      hasResult: !!q.snap, resultAt: q.at || '', result: q.snap ? self.tree('q' + it.id, q.snap, 'GetTask response · ' + q.at) : self.tree('x', null)
+      hasResult: !!q.snap, resultAt: q.at || '', result: q.snap ? self.tree('q' + it.id, q.snap, 'Task · the gate\'s record at ' + q.at) : self.tree('x', null)
     };
+  }
+  // ---------- traffic (mock): the record of A2A exchanges and MCP tool calls, live ----------
+  trafficSeed() {
+    var c2 = 'ctx-1b90…e4d7', c1 = 'ctx-7f3a…c21e', c3 = 'ctx-93c4…0aa1';
+    var A = function (at, leg, method, svc, who, ctx, out, dur) { return { proto: 'A2A', at: at, leg: leg, method: method, svc: svc, who: who, ctx: ctx, out: out, dur: dur }; };
+    var M = function (at, tool, svc, who, out, dur) { return { proto: 'MCP', at: at, method: 'tools/call', tool: tool, svc: svc, who: who, ctx: '', out: out, dur: dur }; };
+    return [
+      A('14:10:04', 'callee', 'SendStreamingMessage', 'redteam/recon', 'redteam-vps', c2, '200', 'open'),
+      A('14:10:02', 'caller', 'SendStreamingMessage', 'redteam/recon', 'acme · node k8s', c2, '200', '41 s'),
+      M('14:06:51', 'read_file', 'acme/fs', 'acme · node laptop', 'ok', '38 ms'),
+      M('14:06:49', 'write_file', 'acme/fs', 'acme · node laptop', 'Unknown tool', '1 ms'),
+      A('14:03:41', 'caller', 'GetTask', 'redteam/recon', 'acme', c1, '200', '12 ms'),
+      A('14:02:12', 'callee', 'SendStreamingMessage', 'redteam/recon', 'redteam-vps', c1, '200', '88 s'),
+      A('14:02:11', 'caller', 'SendStreamingMessage', 'redteam/recon', 'acme', c1, '200', '89 s'),
+      A('13:50:03', 'caller', 'GetTask', 'nora/js-analyst', 'acme · node laptop', c3, '200', '9 ms'),
+      A('13:48:19', 'caller', 'SendMessage', 'nora/js-analyst', 'acme · node laptop', c3, '200', '1.2 s'),
+      A('13:47:02', 'caller', 'SendMessage', 'nora/notes', 'acme', '', '503 · no_session', '3 ms')
+    ];
+  }
+  trafficTick() {
+    var self = this, k = 0;
+    var cycle = [
+      function () { return { proto: 'A2A', leg: 'caller', method: 'GetTask', svc: 'redteam/recon', who: 'acme · node k8s', ctx: 'ctx-1b90…e4d7', out: '200', dur: '7 ms' }; },
+      function () { return { proto: 'MCP', method: 'tools/call', tool: 'list_directory', svc: 'acme/fs', who: 'acme · node laptop', ctx: '', out: 'ok', dur: '22 ms' }; },
+      function () { return { proto: 'A2A', leg: 'callee', method: 'GetTask', svc: 'redteam/recon', who: 'redteam-vps', ctx: 'ctx-1b90…e4d7', out: '200', dur: '15 ms' }; },
+      function () { return { proto: 'A2A', leg: 'caller', method: 'SendMessage', svc: 'acme/cache-probe', who: 'anonymous', ctx: '', out: '401', dur: '1 ms' }; },
+      function () { return { proto: 'MCP', method: 'tools/call', tool: 'echo', svc: 'acme/everything', who: 'acme', ctx: '', out: 'ok', dur: '4 ms' }; }
+    ];
+    var tick = function () {
+      if (self.dead) return;
+      var x = cycle[k++ % cycle.length]();
+      x.at = self.now();
+      self.traffic.unshift(x);
+      if (self.traffic.length > 200) self.traffic.length = 200;
+      if (!self.state.trafficLive) self.trafficHeld += 1;
+      else if (self.state.view === 'traffic') self.bump();
+      self.timers.push(setTimeout(tick, 2600));
+    };
+    self.timers.push(setTimeout(tick, 2600));
+  }
+  trafficView(seg) {
+    var self = this, st = this.state;
+    if (st.view !== 'traffic') return { filters: [], rows: [], none: false, live: true, hasCtx: false };
+    var held = st.trafficLive ? 0 : self.trafficHeld;
+    var all = self.traffic.slice(held).filter(function (x) { return !st.trafficCtx || x.ctx === st.trafficCtx; });
+    var by = function (f) { return function (x) { return f === 'all' || x.proto.toLowerCase() === f; }; };
+    var filters = [['all', 'All'], ['a2a', 'A2A'], ['mcp', 'MCP']].map(function (f) {
+      var o = seg(st.trafficFilter === f[0]); o.label = f[1] + ' ' + all.filter(by(f[0])).length;
+      o.pick = function () { self.setState({ trafficFilter: f[0] }); }; return o;
+    });
+    var rows = all.filter(by(st.trafficFilter)).slice(0, 60).map(function (x) {
+      var bad = !(x.out === '200' || x.out === 'ok');
+      var label = x.proto === 'MCP' ? 'Caller · tools/call ' + x.tool : (x.leg === 'callee' ? 'Gate → Callee · ' : 'Caller · ') + x.method;
+      return { at: x.at, proto: x.proto, protoBg: x.proto === 'MCP' ? 'var(--warn-soft)' : 'var(--brand-soft)', protoFg: x.proto === 'MCP' ? 'var(--warn)' : 'var(--brand-ink)',
+        label: label, parties: x.leg === 'callee' ? 'gate → ' + x.svc + ' on ' + x.who : x.who + ' → ' + x.svc, ctx: x.ctx, dur: x.dur, outcome: x.out,
+        outBg: bad ? 'var(--bad-soft)' : 'var(--ok-soft)', outFg: bad ? 'var(--bad)' : 'var(--ok)', line: bad ? 'var(--bad-soft)' : 'var(--line)' };
+    });
+    return { filters: filters, rows: rows, none: rows.length === 0, live: !!st.trafficLive,
+      liveLabel: st.trafficLive ? 'Live' : 'Paused' + (self.trafficHeld ? ' · ' + self.trafficHeld + ' new' : ''),
+      liveBg: st.trafficLive ? 'var(--brand-soft)' : 'var(--surface)', liveFg: st.trafficLive ? 'var(--brand-ink)' : 'var(--ink)', liveLine: st.trafficLive ? 'var(--brand-line)' : 'var(--line-2)',
+      toggleLive: function () { if (!st.trafficLive) self.trafficHeld = 0; self.setState({ trafficLive: !st.trafficLive }); },
+      hasCtx: !!st.trafficCtx, ctx: st.trafficCtx || '', clearCtx: function () { self.setState({ trafficCtx: null }); } };
   }
   eachTask(fn) { this.convs.forEach(function (c) { c.items.forEach(function (it) { if (it.t === 'task') fn(c, it); }); }); }
 
@@ -1701,19 +1818,19 @@ class Component extends DCLogic {
     var seg = function (on) { return { pressed: on, bg: on ? 'var(--surface)' : 'transparent', fg: on ? 'var(--ink)' : 'var(--ink-2)', weight: on ? 600 : 400 }; };
     var chipFor = function (on) { return { text: on ? 'online' : 'offline', bg: on ? 'var(--ok-soft)' : 'var(--bad-soft)', fg: on ? 'var(--ok)' : 'var(--bad)' }; };
 
-    var navs = [['chat', 'Chat'], ['nodes', 'Nodes'], ['agents', 'Agents'], ['mcp', 'MCP'], ['catalog', 'Catalog'], ['tasks', 'Tasks'], ['artifacts', 'Artifacts']].map(function (n) {
+    var navs = [['chat', 'Chat'], ['nodes', 'Nodes'], ['agents', 'Agents'], ['mcp', 'MCP'], ['catalog', 'Catalog'], ['tasks', 'Tasks'], ['artifacts', 'Artifacts'], ['traffic', 'Traffic']].map(function (n) {
       var on = view === n[0];
       return { label: n[1], current: on ? 'page' : 'false', bg: on ? 'var(--surface-2)' : 'transparent', fg: on ? 'var(--ink)' : 'var(--ink-2)', weight: on ? 600 : 400,
         pick: function () { self.setState({ view: n[0] }); } };
     });
     var d = {};
-    ['chat', 'nodes', 'agents', 'mcp', 'catalog', 'tasks', 'artifacts'].forEach(function (k) { d[k] = view === k ? (k === 'chat' ? 'flex' : 'block') : 'none'; });
+    ['chat', 'nodes', 'agents', 'mcp', 'catalog', 'tasks', 'artifacts', 'traffic', 'play'].forEach(function (k) { d[k] = view === k ? (k === 'chat' ? 'flex' : 'block') : 'none'; });
 
     // ----- chat: rail -----
     var row = function (c) {
       var s = self.convState(c), sc = self.stateColors(s), selected = c.id === cur.id, yours = c.kind === 'you';
       return { caller: c.a, callee: c.b, ago: c.busy ? 'now' : c.ago, state: s, hasState: !!s, stateBg: sc[0], stateFg: sc[1], sealed: !!c.sealed,
-        kindLabel: yours ? 'you' : 'agent to agent', preview: self.preview(c), selected: selected,
+        kindLabel: yours ? 'console' : 'agent to agent', preview: self.preview(c), selected: selected,
         rowBg: selected ? 'var(--surface-2)' : 'transparent', rowLine: selected ? 'var(--brand-line)' : 'var(--line)',
         pick: function () {
           self.setState({ sel: c.id, draft: '', mode: 'text' });
@@ -1722,7 +1839,7 @@ class Component extends DCLogic {
     };
     var shown = isChat ? all.filter(function (c) { return st.filter === 'all' || c.kind === st.filter; }) : [];
     var count = function (k) { return all.filter(function (c) { return k === 'all' || c.kind === k; }).length; };
-    var filters = [['all', 'All'], ['you', 'Yours'], ['agents', 'Agents']].map(function (f) {
+    var filters = [['all', 'All'], ['you', 'Console'], ['agents', 'Agents']].map(function (f) {
       var o = seg(st.filter === f[0]); o.label = f[1] + ' ' + count(f[0]); o.pick = function () { self.setState({ filter: f[0] }); }; return o;
     });
 
@@ -1817,6 +1934,7 @@ class Component extends DCLogic {
           url: c.supportedInterfaces[0].url, bindings: c.supportedInterfaces.map(function (i) { return i.protocolBinding; }).join(', ') + ' · A2A ' + c.supportedInterfaces[0].protocolVersion,
           skills: c.skills.map(function (k) { return { name: k.name, description: k.description, tags: k.tags.map(function (t) { return { t: t }; }), examples: (k.examples || []).map(function (e) { return { text: e }; }) }; }),
           chatDisabled: !a.online, chat: function () { self.startChat(a.svc); },
+          hasPlay: true, play: function () { self.setState({ view: 'play', playSvc: a.svc }); },
           jsonOpen: open, jsonLabel: open ? 'Hide card JSON' : 'Card JSON', toggleJson: function () { self.openMap['card:' + a.svc] = !open; self.bump(); },
           json: open ? self.tree('card' + a.svc, c, 'Agent card') : self.tree('x', null) };
       });
@@ -1851,13 +1969,16 @@ class Component extends DCLogic {
         callerAvBg: yours ? 'var(--ink)' : 'var(--brand-soft)', callerAvFg: yours ? 'var(--paper)' : 'var(--brand-ink)',
         state: s, hasState: !!s, stateBg: sc[0], stateFg: sc[1], contextId: cur.contextId, tabs: tabs,
         observed: !yours, observedText: cur.observedText || '', sealed: !!cur.sealed,
+        sealedText: 'Sealed end to end: only the two nodes can open it. The gate relays ciphertext, so the console is given each event\'s kind and time, never its content, and nothing here can be answered.',
+        openTraffic: function () { self.setState({ view: 'traffic', trafficCtx: cur.contextId }); },
         empty: isEmpty, examples: examples, agentChoices: agentChoices, description: card.description,
         canReply: yours, readOnly: !yours, canReplay: !!cur.live, busy: !!cur.busy,
         placeholder: json ? '{ "target": "example.com" }' : 'Message ' + cur.b,
         items: isChat ? cur.items.map(function (it) { return self.viewItem(cur, it); }) : [],
         replay: function () { self.replay(cur); }
       },
-      side: side, pTasks: pTasks, pArts: pArts, pAgents: pAgents, pMcp: pMcp, pNodes: pNodes,
+      side: side, pTasks: pTasks, pArts: pArts, pAgents: pAgents, pMcp: pMcp, pNodes: pNodes, pTraffic: self.trafficView(seg),
+      playSvc: st.playSvc || '', backToAgents: function () { self.setState({ view: 'agents' }); },
       draft: st.draft, modes: modes, hint: hint, hintColor: parsed.error ? 'var(--bad)' : parsed.data !== undefined ? 'var(--ok)' : 'var(--ink-3)',
       rows: json ? 5 : 2, draftFont: json ? "'IBM Plex Mono', ui-monospace, monospace" : 'inherit', draftSize: json ? '12.5px' : '14px',
       sendDisabled: !!cur.busy || !!parsed.empty || !!parsed.error, sendLabel: cur.busy ? 'Streaming…' : 'Send',
@@ -1869,7 +1990,7 @@ class Component extends DCLogic {
   }
   startChat(svc) {
     var id = this.nid('n');
-    this.convs.unshift({ id: id, kind: 'you', a: 'you', b: svc, ago: 'now', contextId: 'new context', items: [] });
+    this.convs.unshift({ id: id, kind: 'you', a: 'acme', b: svc, ago: 'now', contextId: 'new context', items: [] });
     this.setState({ view: 'chat', sel: id, filter: this.state.filter === 'agents' ? 'all' : this.state.filter, draft: '', mode: 'text' });
   }
 }

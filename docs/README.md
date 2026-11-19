@@ -21,12 +21,13 @@ spec wins once the owner has signed it, and the difference is a numbered entry i
 [`decisions.md`](decisions.md) with its reason and evidence. Each milestone's decisions are under its own heading
 there (M4's, D268 onward under the M4 headings, were numbered after M3's review had merged).
 
-## Console chat (draft, 19 Nov)
+## Console chat (draft, 19 Nov; open questions settled 20 Nov)
 
 [`console-chat.md`](console-chat.md) specifies the console's chat: every conversation listed, agent-to-agent ones
-included, a side panel for a conversation's tasks and artifacts, and the sections Chat, Nodes, Agents, MCP, Tasks and
-Artifacts. Its prototype is [`prototypes/console-chat.html`](prototypes/console-chat.html). It is a draft for the
-owner's review and nothing in it is built.
+included, a side panel for a conversation's tasks and artifacts, and the sections Chat, Nodes, Agents, MCP, Tasks,
+Artifacts and Traffic (live A2A and MCP traffic). Its prototype is
+[`prototypes/console-chat.html`](prototypes/console-chat.html). Its §9 records how the open questions were settled;
+nothing in it is built.
 
 ## Section map: what the notes change in the PRD
 
