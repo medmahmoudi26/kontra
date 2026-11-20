@@ -17,8 +17,9 @@ import (
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// Serve is one --serve kind:name=target (note 2 §1): a2a:<name>=<http(s) URL>, mcp:<name>=<http(s) URL> or
-// mcp:<name>=stdio:<command line> (spec/tunnel.md §10).
+// Serve is one --serve kind:name=target (note 2 §1): a2a:<name>=<http(s) URL>, mcp:<name>=<http(s) URL>,
+// mcp:<name>=stdio:<command line> (spec/tunnel.md §10), or http:<name>=<http(s) URL> (spike http-tunnel: a raw HTTP
+// service passed through unchanged, WebSocket upgrades included).
 type Serve struct {
 	Kind   string   // tunnel.KindA2A or tunnel.KindMCP
 	Name   string   // the service name at the gate (relay.md §2.1's pattern)
@@ -74,10 +75,8 @@ func parseServe(s, home string) (Serve, error) {
 	if !ok || kind == "" {
 		return Serve{}, errors.New("--serve: want kind:name=url, e.g. a2a:hello=http://127.0.0.1:9999")
 	}
-	switch kind {
-	case tunnel.KindA2A, tunnel.KindMCP:
-	default:
-		return Serve{}, fmt.Errorf("--serve: kind %q: want a2a or mcp", clipValue(kind))
+	if !tunnel.KnownKind(kind) {
+		return Serve{}, fmt.Errorf("--serve: kind %q: want a2a, mcp or http", clipValue(kind))
 	}
 	name, target, ok := strings.Cut(rest, "=")
 	if !ok {
@@ -102,10 +101,8 @@ func parseServe(s, home string) (Serve, error) {
 
 // checkServe is ParseServe's check of a Serve built by hand (New's).
 func checkServe(s Serve) error {
-	switch s.Kind {
-	case tunnel.KindA2A, tunnel.KindMCP:
-	default:
-		return fmt.Errorf("--serve: kind %q: want a2a or mcp", clipValue(s.Kind))
+	if !tunnel.KnownKind(s.Kind) {
+		return fmt.Errorf("--serve: kind %q: want a2a, mcp or http", clipValue(s.Kind))
 	}
 	if !serviceNameRE.MatchString(s.Name) {
 		return fmt.Errorf("--serve %s:%q: the name must match %s (relay.md §2.1)", s.Kind, clipValue(s.Name), serviceNameRE)

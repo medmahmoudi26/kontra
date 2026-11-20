@@ -90,4 +90,10 @@ const (
 const (
 	KindA2A = "a2a"
 	KindMCP = "mcp" // hosting MCP is M3
+	// KindHTTP is a raw HTTP service (spike, http-tunnel): the gate serves it at its own host,
+	// <name>.<gate host>, and passes every request through unchanged, WebSocket upgrades included.
+	KindHTTP = "http"
 )
+
+// KnownKind reports a service kind the tunnel carries.
+func KnownKind(k string) bool { return k == KindA2A || k == KindMCP || k == KindHTTP }

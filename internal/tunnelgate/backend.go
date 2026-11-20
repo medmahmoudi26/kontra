@@ -126,3 +126,18 @@ func (c *exchangeConn) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// HTTPExchange opens one exchange stream of an http service on session id (spike http-tunnel): the preamble
+// {"v": 1, "op": "http", "service", "kind": "http"}, then the caller writes one HTTP/1.1 request, which may switch
+// protocols (a WebSocket) and then carry the upgraded connection both ways. ErrSessionGone when this replica does not
+// hold the session, or it is another tenant's; Session.OpenExchange's checks and errors otherwise.
+func (r *Registry) HTTPExchange(ctx context.Context, id, tenantID uuid.UUID, service string) (net.Conn, error) {
+	s, ok := r.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("%w: this replica holds no session %s", ErrSessionGone, id)
+	}
+	if s.TenantID != tenantID {
+		return nil, fmt.Errorf("%w: session %s is another tenant's", ErrSessionGone, id)
+	}
+	return s.OpenExchange(ctx, tunnel.Preamble{Op: tunnel.OpHTTP, Service: service, Kind: tunnel.KindHTTP})
+}

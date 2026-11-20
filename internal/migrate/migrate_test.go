@@ -81,8 +81,8 @@ func TestUpOnEmptyDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 9 {
-		t.Fatalf("Up = %v, want 0001 to 0009 applied", res)
+	if len(res) != 10 {
+		t.Fatalf("Up = %v, want 0001 to 0010 applied", res)
 	}
 	for i, name := range []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql", "0009_caller_callee.sql"} {
 		r := res[i]

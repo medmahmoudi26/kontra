@@ -14,6 +14,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -380,8 +381,13 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		case r.Method == http.MethodTrace:
 			nodeAnswer(w, http.StatusBadRequest, "", "kontra connect refuses TRACE")
 			return
-		case wantsUpgrade(r.Header):
+		case wantsUpgrade(r.Header) && sv.Kind != tunnel.KindHTTP:
 			nodeAnswer(w, http.StatusBadRequest, "", "kontra connect refuses protocol upgrades")
+			return
+		}
+		if sv.Kind == tunnel.KindHTTP {
+			p.passthrough(w, r, sv, log)
+			log.Debug("tunnel exchange (http)", "method", r.Method, "duration_ms", time.Since(start).Milliseconds())
 			return
 		}
 		if sv.Kind == tunnel.KindMCP && sv.Command != nil {
@@ -534,6 +540,49 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		log.Debug("tunnel exchange", "method", r.Method, "path", out, "status", sw.status,
 			"duration_ms", time.Since(start).Milliseconds())
 	}
+}
+
+// passthrough serves an http service's exchange (spike http-tunnel): the request goes to the service's target as
+// the caller sent it, its path, query and Host kept, with the X-Forwarded-For, -Proto and -Host the gate set from what
+// it saw (the gate overwrites a caller's own); an Upgrade (WebSocket) is relayed both ways once the service answers
+// 101, over the stream, for as long as either side keeps it open.
+func (p *Proxy) passthrough(w http.ResponseWriter, r *http.Request, sv Serve, log *slog.Logger) {
+	target := sv.Target
+	rp := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme, pr.Out.URL.Host = target.Scheme, target.Host
+			if b := basePath(target); b != "" {
+				pr.Out.URL.Path, pr.Out.URL.RawPath = b+pr.In.URL.Path, ""
+			}
+			pr.Out.Host = pr.In.Host
+			for _, k := range []string{"X-Forwarded-For", "X-Forwarded-Proto", "X-Forwarded-Host"} {
+				if v := pr.In.Header.Values(k); len(v) > 0 {
+					pr.Out.Header[k] = slices.Clone(v)
+				}
+			}
+		},
+		Transport:     p.transports[sv.Name],
+		FlushInterval: -1,
+		ModifyResponse: func(res *http.Response) error {
+			stripNodeHeaders(res.Header)
+			if res.StatusCode == http.StatusSwitchingProtocols {
+				return nil // the body is the upgraded connection: the ReverseProxy relays it as it is
+			}
+			stripNodeHeaders(res.Trailer)
+			res.Body = &trailerStripper{ReadCloser: res.Body, res: res}
+			return nil
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if r.Context().Err() != nil {
+				log.Debug("tunnel exchange (http) ended by the gate before the service answered", "err", err)
+			} else {
+				log.Warn("tunnel exchange (http): the service did not answer", "target", origin(target), "err", err)
+			}
+			nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, "kontra connect: the service did not answer")
+		},
+		ErrorLog: p.errLog,
+	}
+	rp.ServeHTTP(w, r)
 }
 
 // inlineBody replaces the request's body with one whose kontra-blob: parts are inlined (§8.3, relay.md §10.4),

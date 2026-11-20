@@ -18,7 +18,7 @@ func TestEmbeddedMigrations(t *testing.T) {
 	if len(names) == 0 || names[0] != "0001_init.sql" {
 		t.Fatalf("embedded migrations = %v, want 0001_init.sql first", names)
 	}
-	want := []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql", "0009_caller_callee.sql"}
+	want := []string{"0001_init.sql", "0002_m3.sql", "0003_m4.sql", "0004_m5.sql", "0005_mcp_tools.sql", "0006_local_console.sql", "0007_a2a_wire.sql", "0008_exposed_tasks.sql", "0009_caller_callee.sql", "0010_http_kind.sql"}
 	if len(names) != len(want) {
 		t.Fatalf("embedded migrations = %v, want %v", names, want)
 	}

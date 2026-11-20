@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -267,6 +268,12 @@ func (s *Store) write(ctx context.Context, fn func(pgx.Tx) error) error {
 // serviceURL is a served service's gate URL (relay.md §2.1): {public_url}/agents/[{tenant}/]{name} for A2A
 // and {public_url}/mcp/[{tenant}/]{name} for MCP.
 func (s *Store) serviceURL(kind, tenantSlug, name string) string {
+	if kind == tunnel.KindHTTP {
+		// Spike (http-tunnel): an http service is served at its own host, <name>.<public_url host>.
+		if u, err := url.Parse(s.opts.PublicURL); err == nil && u.Host != "" {
+			return u.Scheme + "://" + name + "." + u.Host
+		}
+	}
 	root := "/agents/"
 	if kind == tunnel.KindMCP {
 		root = "/mcp/"

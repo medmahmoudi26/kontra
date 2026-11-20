@@ -614,10 +614,21 @@ func (c *Config) validateService(v *validator, name string, s Service) {
 	}
 	switch s.Kind {
 	case KindA2A, KindMCP:
+	case KindHTTP:
+		// Spike (http-tunnel): a raw HTTP service is served at <name>.<public_url host>, on a team gate, from a node.
+		if c.Tenancy == TenancyMulti {
+			v.add("%s.kind http: a team gate only (tenancy single) in this spike", at)
+		}
+		if s.Backend.Tunnel == nil {
+			v.add("%s.backend: an http service takes backend tunnel", at)
+		}
+		if s.Tools != nil || s.Tasks != "" || s.MaxSessionsPerPrincipal != nil || s.Sealed.Mode == SealedRequired || s.Sealed.Mode == SealedOptional {
+			v.add("%s: tools, tasks, max_sessions_per_principal and sealed are not for an http service", at)
+		}
 	case "":
-		v.add("%s.kind: required (a2a or mcp)", at)
+		v.add("%s.kind: required (a2a, mcp or http)", at)
 	default:
-		v.add("%s.kind %q: want a2a or mcp", at, s.Kind)
+		v.add("%s.kind %q: want a2a, mcp or http", at, s.Kind)
 	}
 
 	n := 0

@@ -442,8 +442,9 @@ func (s Service) SessionsPerPrincipal() int {
 
 // Kinds of service.
 const (
-	KindA2A = "a2a"
-	KindMCP = "mcp"
+	KindA2A  = "a2a"
+	KindMCP  = "mcp"
+	KindHTTP = "http" // spike (http-tunnel): raw HTTP at <name>.<public_url host>, backend tunnel only
 )
 
 // MCP task modes (spec §11.5). required is durable that refuses a plain tools/call: every call is a gate task (D322).

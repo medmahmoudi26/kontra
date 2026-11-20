@@ -426,8 +426,8 @@ func checkHello(h *Hello) *HandshakeError {
 	}
 	seen := make(map[string]bool, len(h.Services))
 	for _, s := range h.Services {
-		if s.Kind != KindA2A && s.Kind != KindMCP {
-			return Refuse(CodeServiceDenied, "hello: service %q: kind %q, want a2a or mcp", clip(s.Name), clip(s.Kind))
+		if !KnownKind(s.Kind) {
+			return Refuse(CodeServiceDenied, "hello: service %q: kind %q, want a2a, mcp or http", clip(s.Name), clip(s.Kind))
 		}
 		if !serviceNameRE.MatchString(s.Name) {
 			return Refuse(CodeServiceDenied, "hello: service name %q does not match %s", clip(s.Name), serviceNameRE)
@@ -584,7 +584,7 @@ func checkWelcome(w *Welcome) error {
 	}
 	for _, sv := range w.Services {
 		switch {
-		case sv.Kind != KindA2A && sv.Kind != KindMCP:
+		case !KnownKind(sv.Kind):
 			return fmt.Errorf("service kind %s", strconv.QuoteToASCII(sv.Kind))
 		case !serviceNameRE.MatchString(sv.Name):
 			return fmt.Errorf("service name %s", strconv.QuoteToASCII(sv.Name))

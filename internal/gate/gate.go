@@ -646,6 +646,9 @@ func (r *Replica) assemble() error {
 		return err
 	}
 	routes.Handle("GET "+tunnel.Path, th)
+	if err := r.mountHTTPServices(routes); err != nil {
+		return err
+	}
 	if r.server, err = edge.New(ecfg, routes); err != nil {
 		return err
 	}
