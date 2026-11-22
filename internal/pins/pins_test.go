@@ -25,7 +25,7 @@ func open(t *testing.T) (*Store, string) {
 	return s, p
 }
 
-// reopen opens the pins file p again: another run of kontra connect.
+// reopen opens the pins file p again: another run of kontrad.
 func reopen(t *testing.T, p string) *Store {
 	t.Helper()
 	s, err := Open(p)
@@ -244,7 +244,7 @@ func TestAcceptedChanges(t *testing.T) {
 	}
 }
 
-// TestConcurrentWriters: writers on separate opens of one file (as kontra connect per gate and kontra seal are)
+// TestConcurrentWriters: writers on separate opens of one file (as kontrad per gate and kontra seal are)
 // never lose each other's pins.
 func TestConcurrentWriters(t *testing.T) {
 	p := filepath.Join(t.TempDir(), FileName)

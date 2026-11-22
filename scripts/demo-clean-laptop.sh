@@ -5,11 +5,11 @@
 # builder, run on the default bridge (internet egress only) with no host mount and no secret. Inside it,
 # test/demo/laptop.sh runs README.md's block between <!-- demo:begin --> and <!-- demo:end --> (HEAD's README) as
 # written, one command at a time in one shell, with exactly these substitutions:
-#   (a) before the commit is on GitHub (the default, --source): `go install kontra.sh/kontra/cmd/kontra@latest` runs as
-#       `(cd /src && go install ./cmd/kontra)`, /src being `git archive HEAD`. With --published it runs as written, the
-#       image has no /src, and `kontra version` must name --expect <commit> (installed again, a minute apart, for up to
+#   (a) before the commit is on GitHub (the default, --source): `go install kontra.sh/kontra/cmd/kontrad@latest` runs as
+#       `(cd /src && go install ./cmd/kontrad)`, /src being `git archive HEAD`. With --published it runs as written, the
+#       image has no /src, and `kontrad version` must name --expect <commit> (installed again, a minute apart, for up to
 #       30 minutes while proxy.golang.org's @latest lags);
-#   (b) `anon-<…>` becomes the slug kontra connect printed, in the commands after it.
+#   (b) `anon-<…>` becomes the slug kontrad printed, in the commands after it.
 # The runner checks each command (laptop.sh's header lists what each client must print), then writes the slug to its
 # stdout and holds the node connected. This host then checks, with no credential, while the node is still connected:
 # the public card (GET …/agents/<slug>/<public service>/.well-known/agent-card.json names that URL) and a JSON-RPC
@@ -117,7 +117,7 @@ while IFS= read -r line; do
   fi
   cur=""
 done < <(sed -n '/^<!-- demo:begin -->$/,/^<!-- demo:end -->$/p' <<< "$text" | sed '1d;$d')
-install_line='go install kontra.sh/kontra/cmd/kontra@latest'
+install_line='go install kontra.sh/kontra/cmd/kontrad@latest'
 installs=0
 for c in "${commands[@]}"; do [ "$c" = "$install_line" ] && installs=$((installs + 1)); done
 if [ "$installs" != 1 ]; then
@@ -141,11 +141,11 @@ i=0
 for c in "${commands[@]}"; do i=$((i + 1)); printf '  %2d  %s\n' "$i" "$c"; done
 echo "substitutions:"
 if [ "$mode" = source ]; then
-  echo "  (a) $install_line  ->  (cd /src && go install ./cmd/kontra)"
+  echo "  (a) $install_line  ->  (cd /src && go install ./cmd/kontrad)"
 else
-  echo "  (a) none: $install_line runs as written; kontra version must name ${expect:-<--expect>}"
+  echo "  (a) none: $install_line runs as written; kontrad version must name ${expect:-<--expect>}"
 fi
-echo "  (b) anon-<…>  ->  the slug kontra connect prints"
+echo "  (b) anon-<…>  ->  the slug kontrad prints"
 echo "host checks, no credential, while the node is connected: GET $gate/agents/<slug>/$public/.well-known/agent-card.json;"
 echo "  JSON-RPC SendMessage \"hi\" to $gate/agents/<slug>/$public (Hello World)"
 if [ -n "$network$ca_file$resolve" ]; then

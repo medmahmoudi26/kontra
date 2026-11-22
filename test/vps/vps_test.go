@@ -192,7 +192,7 @@ case "$1" in
   create) echo cid ;;
   image) [ "$2" = inspect ] || [ "$2" = rm ] || exit 9 ;;
   cp) (cd "$2" && find . -exec stat -c '%a %n' {} +) > "$d/cp-modes" ;;
-  logs) echo "kontra connect: connected to https://` + runName + ` as nk_1 (tenant default, session s1)" ;;
+  logs) echo "kontrad: connected to https://` + runName + ` as nk_1 (tenant default, session s1)" ;;
   container) echo true ;;
   *) echo "docker stub: not expected: $*" >&2; exit 9 ;;
 esac`,

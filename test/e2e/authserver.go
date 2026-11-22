@@ -101,7 +101,7 @@ type LoginResult struct {
 // to the CLI's loopback port), and waits for it to exit. follow false leaves the URL unvisited (the login then waits
 // for its bound); a nil as visits nothing either.
 func (h *Harness) Login(ctx context.Context, as *AuthServer, gate, home, caFile string, follow bool) (*LoginResult, error) {
-	bin, err := nodeBinary()
+	bin, err := kontraBinary()
 	if err != nil {
 		return nil, err
 	}

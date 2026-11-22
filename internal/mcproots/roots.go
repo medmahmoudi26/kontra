@@ -5,7 +5,7 @@
 // (internal/stdiobridge) or mcp:<name>=<url> (internal/node's fixed-target proxy), the node is the server's only
 // source of roots:
 //
-//   - kontra connect --roots <name>=<dir> names one root of a service: an absolute path to a directory that
+//   - kontrad --roots <name>=<dir> names one root of a service: an absolute path to a directory that
 //     exists at start. The flag is repeatable, one directory per flag (--roots fs=/a --roots fs=/b), so a
 //     directory's name may hold a comma; a service's roots are those of every flag naming it, in order. None by
 //     default.
@@ -69,7 +69,7 @@ type Roots struct {
 func New(dirs ...string) *Roots { return &Roots{dirs: append([]string(nil), dirs...)} }
 
 // Parse reads every --roots value, each <name>=<dir> with one directory, and returns each service's roots with
-// its directories in flag order, refusing a relative path or a directory that does not exist. kontra connect
+// its directories in flag order, refusing a relative path or a directory that does not exist. kontrad
 // refuses a name that no --serve mcp: serves (a usage error). A directory named twice for one service is kept once,
 // at its first place.
 func Parse(flags []string) (map[string]*Roots, error) {

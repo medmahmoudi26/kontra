@@ -1,6 +1,6 @@
 # The console in a browser (`make test-browser`, test/browser): a gate in the local development profile, the example
 # agents a2ui and ap2-merchant, test/browser/echoagent and server-filesystem@1.0.0 (examples/mcp/fs-stdio's lock)
-# behind one `kontra connect` with no credential, a Temporal development server from the pinned CLI and Postgres 17;
+# behind one `kontrad` with no credential, a Temporal development server from the pinned CLI and Postgres 17;
 # Playwright 1.64.0's Chromium drives the console's page. On every pull request that changes the console, the gate or
 # these tests, nightly, and on demand.
 name: browser

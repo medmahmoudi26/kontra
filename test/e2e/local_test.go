@@ -89,7 +89,7 @@ func startLocal(t *testing.T, extra string) (*Harness, *Gate) {
 	return h, g
 }
 
-// The local development profile end to end (tasks.md 2.5): `kontra connect --gate http://127.0.0.1:<port> --serve
+// The local development profile end to end (tasks.md 2.5): `kontrad --gate http://127.0.0.1:<port> --serve
 // a2a:hello=<agent>` connects with no credential and serves the agent; a stock A2A client (a2a-go's), with no
 // credential and then with a bogus one, completes a task on it; the gate logs the profile's warning with the console's
 // URL; the console lists the task and its exchange; a request naming another Host is 421.

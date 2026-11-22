@@ -76,7 +76,7 @@ const (
 // caller, so kontra seal could seal for listed services only (and examples/sealing's flow, an allow: org:default
 // service, failed). It sends an API key given explicitly with --api-key (or @file), never one read from the
 // environment: a variable such as $KONTRA_API_KEY is tied to no gate, and the gate a --service names is not trusted
-// (§7), so a key exported for one gate would reach every other one sealed for. As kontra connect sends a key only to
+// (§7), so a key exported for one gate would reach every other one sealed for. As kontrad sends a key only to
 // the --gate it was given with, the key goes only to the --service's origin, and only where §2.1 needs a credential:
 // the service's card, after an unauthenticated GET of it was 404, and then its upstream card; never the gate's key set
 // (/.well-known/jwks.json is public), and never to a listed service, whose cards are public.
@@ -198,7 +198,7 @@ func sealCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	var ce *pins.ChangeError
 	switch {
 	case errors.As(err, &ce):
-		return errors.New(tunnel.Printable(ce.Detail(pins.Options{})) + " (kontra connect --accept-change records it)")
+		return errors.New(tunnel.Printable(ce.Detail(pins.Options{})) + " (kontrad --accept-change records it)")
 	case err != nil:
 		return err
 	case outcome.First:
@@ -385,7 +385,7 @@ func VerifyCard(ctx context.Context, card []byte, origin string, get func(ctx co
 //
 // The set comes from the gate, like the card, and is trusted on first use like every pin (§7): a gate that replaces
 // the card and its kid-only signature must replace the key set too, and the pinned thumbprint changes, which the pins
-// refuse (with --pin-recipients) or report until accepted, and which kontra connect prints for comparison out of
+// refuse (with --pin-recipients) or report until accepted, and which kontrad prints for comparison out of
 // band (D187). Only a gate that names no set leaves a kid-only signature pinned unverified, and a forged one naming
 // the pinned kid undetected; a pin that recorded kid:<kid> reports a service-key change once its gate names the set.
 func ServiceKeyIDs(upstream []byte, sha string, serviceKeys *jws.KeySetPublic) ([]string, error) {
@@ -470,7 +470,7 @@ func ServiceKeyIDs(upstream []byte, sha string, serviceKeys *jws.KeySetPublic) (
 }
 
 // ServiceKeySet fetches the service key set the gate names in kontra.upstream.jwks (D223), nil when it names none: a URL
-// on origin, the gate the card came from, fetched with get (through the tunnel for kontra connect), a JWK Set with an
+// on origin, the gate the card came from, fetched with get (through the tunnel for kontrad), a JWK Set with an
 // EC P-256 signing key. A named set that cannot be read makes the card unreadable: nothing is pinned from it.
 func ServiceKeySet(ctx context.Context, up *jws.Upstream, origin string, get func(ctx context.Context, u string) ([]byte, error)) (*jws.KeySetPublic, error) {
 	if up == nil || up.JWKS == "" {

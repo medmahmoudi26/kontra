@@ -1,6 +1,6 @@
 # mcp/everything
 
-`@modelcontextprotocol/server-everything@1.0.0 streamableHttp`, hosted through `kontra connect` (M3): an MCP
+`@modelcontextprotocol/server-everything@1.0.0 streamableHttp`, hosted through `kontrad` (M3): an MCP
 server over Streamable HTTP with 2025-11-25 tasks (`simulate-research-query`), elicitation, sampling and roots, the
 upstream of `mcp_task_resume`. The server is unmodified and imports nothing from Kontra; `package-lock.json` pins it
 and everything it depends on.
@@ -28,14 +28,14 @@ commands below run from the repository root.
 PORT=3001 examples/mcp/everything/run.sh &       # npm ci on first use; then http://127.0.0.1:3001/mcp
 
 docker compose -f compose.dev.yaml up -d --wait
-go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontrad ./cmd/kontrad
 ./kontra-gate migrate -f examples/mcp/everything/kontra.yaml
 export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/mcp/everything/kontra.yaml --api-key demo)"
 ./kontra-gate serve -f examples/mcp/everything/kontra.yaml &
 
-./kontra connect --gate http://localhost:8080 --serve mcp:everything=http://127.0.0.1:3001/mcp \
+./kontrad --gate http://localhost:8080 --serve mcp:everything=http://127.0.0.1:3001/mcp \
   --enroll "$(./kontra-gate enroll -f examples/mcp/everything/kontra.yaml everything)" &
-#  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
+#  kontrad: connected to http://localhost:8080 as k1_… (tenant default, session …)
 #    mcp everything  http://localhost:8080/mcp/everything
 ```
 

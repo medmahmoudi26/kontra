@@ -1,7 +1,7 @@
-# The TCK's gate, tunnel backend: tck_jsonrpc and tck_rest through `kontra connect` (spec/relay.md §16; D18,
+# The TCK's gate, tunnel backend: tck_jsonrpc and tck_rest through `kontrad` (spec/relay.md §16; D18,
 # D279). A template that scripts/tck.sh fills (@LISTEN@, @PUBLIC_URL@, @POSTGRES@, @TEMPORAL@) and runs from a
 # fresh database: `make tck VARIANT=tunnel`. The script mints a service token (`kontra-gate enroll tck`) and starts
-# `kontra connect --serve a2a:tck=<service> --enroll <token>`; the gate never dials the service. Plaintext on
+# `kontrad --serve a2a:tck=<service> --enroll <token>`; the gate never dials the service. Plaintext on
 # loopback, so the tunnel's channel binding is none (spec/tunnel.md §4).
 #
 # Anonymous and push.allow_private as in gate-direct.yaml (D18, D20, D67).

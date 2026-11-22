@@ -94,7 +94,7 @@ func (h *Handler) send(rq *request, args json.RawMessage, augmented bool) {
 		return
 	case svc.ref.Sealed == string(config.SealedRequired):
 		rq.result(errorResult("service "+ref.String()+" takes sealed messages only, and send_message cannot seal "+
-			"tool arguments. Send it A2A messages through a node (kontra connect seals them) at "+base+"/agents/"+ref.String()+".", nil))
+			"tool arguments. Send it A2A messages through a node (kontrad seals them) at "+base+"/agents/"+ref.String()+".", nil))
 		return
 	}
 	key, err := FirstRequest(ref, args)

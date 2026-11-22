@@ -53,7 +53,7 @@ func DialFakeNode(ctx context.Context, gate string, key *nodekey.Identity, servi
 }
 
 // FakeService is one service a FakeNode declares: its kind (a2a or mcp) and the target its exchanges are proxied
-// to (an MCP target's path is its endpoint: the gate's "/" goes to it, as kontra connect does).
+// to (an MCP target's path is its endpoint: the gate's "/" goes to it, as kontrad does).
 type FakeService struct {
 	Kind   string
 	Target string

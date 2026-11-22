@@ -7,12 +7,12 @@ tunnel, the gate is wrong, not the example.
 
 Since M2 the A2A services run behind the gate either way: as a direct backend, which the gate dials
 (`backend: { a2a: { url } }` in `kontra.yaml`), or hosted through the tunnel (`backend: { tunnel: {} }`, no URL at
-the gate), where `kontra connect --serve a2a:<name>=<url>`, running next to the service, dials the gate and forwards
+the gate), where `kontrad --serve a2a:<name>=<url>`, running next to the service, dials the gate and forwards
 the gate's requests to `<url>` and nowhere else. `--serve` names the service's root URL; M2 refuses a target with a
 path (D123 in [`../docs/decisions.md`](../docs/decisions.md)). Each built service's README gives the commands from
 an empty database: `hello-exec` both ways, `helloworld` and `booking` through the tunnel.
 
-Since M3 `kontra connect` also hosts MCP servers: `--serve mcp:<name>=<url>` names a Streamable HTTP server's
+Since M3 `kontrad` also hosts MCP servers: `--serve mcp:<name>=<url>` names a Streamable HTTP server's
 endpoint, path included, and `--serve 'mcp:<name>=stdio:<command line>'` runs a stdio server, one process per MCP
 session. For both, the node answers the server's `roots/list` itself from `--roots` and never passes on a client's
 roots (D173). The MCP examples run their servers from pinned `package-lock.json` files, on loopback, with nothing
@@ -20,18 +20,18 @@ to leak (D185).
 
 | Directory | What | Milestone |
 |---|---|---|
-| `agents/hello-exec` | `a2a server --exec 'echo Hello World'` (a2a-cli v0.3.1): the README demo service, as a direct backend (`kontra.yaml`) and through `kontra connect` (`kontra-tunnel.yaml`) | M1 (direct), M2 (tunnel): built |
-| `agents/helloworld` | a2a-samples helloworld at `6603ba3` (a2a-sdk 1.1.0, a 1.0 card), run unmodified by `run.sh` and hosted through `kontra connect`; `test/e2e` `TestHelloworldTunnel` runs it through two gate replicas. The 0.2.5 service at `08dde55c070f` that `card_compat` names is not built: `card_compat` runs against `slowagent`'s stand-in for it (D122, D154) | M2: built |
-| `agents/booking` | A small a2a-go v2.7.0 agent that asks for a date (`input-required`) and confirms, over JSON-RPC and HTTP+JSON: the `input-required` service (`input_required_sticky`), directly or through `kontra connect` | M2: built |
+| `agents/hello-exec` | `a2a server --exec 'echo Hello World'` (a2a-cli v0.3.1): the README demo service, as a direct backend (`kontra.yaml`) and through `kontrad` (`kontra-tunnel.yaml`) | M1 (direct), M2 (tunnel): built |
+| `agents/helloworld` | a2a-samples helloworld at `6603ba3` (a2a-sdk 1.1.0, a 1.0 card), run unmodified by `run.sh` and hosted through `kontrad`; `test/e2e` `TestHelloworldTunnel` runs it through two gate replicas. The 0.2.5 service at `08dde55c070f` that `card_compat` names is not built: `card_compat` runs against `slowagent`'s stand-in for it (D122, D154) | M2: built |
+| `agents/booking` | A small a2a-go v2.7.0 agent that asks for a date (`input-required`) and confirms, over JSON-RPC and HTTP+JSON: the `input-required` service (`input_required_sticky`), directly or through `kontrad` | M2: built |
 | `agents/a2ui` | A small a2a-go v2.7.0 agent (A2A 1.0, no LLM) that asks for a booking with an A2UI v0.9.1 form (basic catalog) and confirms the action's choices; its card declares A2UI and the input schema. The A2UI schemas are vendored under its `testdata`, against which `make check-specs` validates its messages; `test/e2e` `TestA2UIPassthrough` runs it through two gate replicas (spec/relay.md §2.6, D326 to D328) | built |
 | `agents/ap2-merchant` | A small a2a-go v2.7.0 agent (A2A 1.0, no LLM) in the AP2 v0.2.0 Merchant role: its card requires AP2 (`params.roles: [merchant]`); it answers an `ap2.checkout` holding a checkout JWT it signs with its own P-256 key, checks a Checkout Mandate's binding to it by hash and answers a signed Checkout Receipt. It takes no payment: the author wires a Credential Provider and a Merchant Payment Processor of their choice (D351). `test/e2e` `TestAP2Passthrough` runs it through the tunnel, plain and sealed (spec/relay.md §2.6) | built |
-| `agents/tck` | An a2a-go v2.7.0 service that implements the pinned TCK's Gherkin scenarios (keyed on `messageId` prefixes): the target of `make tck` (`tck_*`, D279), as a direct backend and through `kontra connect` | M4: built |
+| `agents/tck` | An a2a-go v2.7.0 service that implements the pinned TCK's Gherkin scenarios (keyed on `messageId` prefixes): the target of `make tck` (`tck_*`, D279), as a direct backend and through `kontrad` | M4: built |
 | `agents/temporal-harness` | An OpenAI Agents SDK agent in a Temporal workflow of the service's own, served as A2A (PRD §16: survives as an example, not core) | M4 |
 | `agents/adk` | A Google ADK agent served as A2A | M4 |
 | `agents/claude-cli` | A `summarize` agent that runs the `claude` CLI as a subprocess, served as A2A | M4 |
-| `mcp/fs-stdio` | `@modelcontextprotocol/server-filesystem@1.0.0` over stdio, bridged by `kontra connect` with its allowed directory on the command line and `--roots`; the write tools denied at the gate (`kontra.yaml`) | M3: built |
-| `mcp/everything` | `@modelcontextprotocol/server-everything@1.0.0 streamableHttp`, run on loopback with a minimal environment (`run.sh`) and hosted through `kontra connect`: an upstream with 2025-11-25 tasks, for `mcp_task_resume`; `get-env` and `gzip-file-as-resource` denied at the gate | M3: built |
-| `sealing` | End-to-end sealing between two `kontra connect` (`agents/hello-exec/kontra-sealed.yaml`, `agents/booking/kontra-sealed.yaml`), `kontra seal` and `--open`, and the age calls (Go `filippo.io/age`, Python `pyrage`) for sealing in-process ([`spec/ext-sealed.md`](../spec/ext-sealed.md)) | M3: built |
+| `mcp/fs-stdio` | `@modelcontextprotocol/server-filesystem@1.0.0` over stdio, bridged by `kontrad` with its allowed directory on the command line and `--roots`; the write tools denied at the gate (`kontra.yaml`) | M3: built |
+| `mcp/everything` | `@modelcontextprotocol/server-everything@1.0.0 streamableHttp`, run on loopback with a minimal environment (`run.sh`) and hosted through `kontrad`: an upstream with 2025-11-25 tasks, for `mcp_task_resume`; `get-env` and `gzip-file-as-resource` denied at the gate | M3: built |
+| `sealing` | End-to-end sealing between two `kontrad` (`agents/hello-exec/kontra-sealed.yaml`, `agents/booking/kontra-sealed.yaml`), `kontra seal` and `--open`, and the age calls (Go `filippo.io/age`, Python `pyrage`) for sealing in-process ([`spec/ext-sealed.md`](../spec/ext-sealed.md)) | M3: built |
 | `front/caddy` | Caddy 2.11.7 in front of a gate: TLS terminated by Caddy, the gate behind it with `tls.terminated_by_proxy` and `edge.client_ip: x_forwarded_for`; `make tck VARIANT=caddy` runs the TCK through it (`tck_behind_caddy`) | M4: built |
 | `front/agentgateway` | agentgateway as an optional front proxy | M4 |
 | `front/ingress` | Kubernetes ingress (ingress-nginx) with the WebSocket timeouts the tunnel needs | M4 |

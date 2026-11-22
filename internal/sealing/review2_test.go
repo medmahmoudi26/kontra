@@ -446,7 +446,7 @@ func TestReview2SweepPrunesAnsweredIndexEntries(t *testing.T) {
 func TestReview2CallingUnknownSessionGET(t *testing.T) {
 	_, hr, sid := sealedMCPSession(t)
 	_, _ = mcpLocal(t, hr, sid, `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"echo","arguments":{"message":"x"}}}`)
-	hr.open() // kontra connect restarts
+	hr.open() // kontrad restarts
 	get := httptest.NewRequest(http.MethodGet, "/mcp/fs", nil)
 	get.Header.Set(mcpwire.HeaderSessionID, sid)
 	get.Header.Set("Last-Event-ID", "stream-1-0")

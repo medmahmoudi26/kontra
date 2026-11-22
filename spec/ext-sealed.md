@@ -61,7 +61,7 @@ of its own (D261); and the `statusMessage` of a task the sealed call created (wh
 reaches only the tasks the hosting node bound to the job (D252). Not sealed: the tool name, `isError`, `_meta` outside
 `sh.kontra/sealed`, `tools/list`, task states, and every other method (`resources/*`, `prompts/*`, `completion/*`,
 `logging/*`, notifications), which the gate can send on a sealed session itself (§7, D256).
-Sealing applies only when **both ends run `kontra connect`**: a stock MCP client talking straight to the gate sees
+Sealing applies only when **both ends run `kontrad`**: a stock MCP client talking straight to the gate sees
 no envelope (note 1 §6). So the gate holds no plaintext of a sealed MCP call, plain or durable (D62). Envelope v1
 binds an MCP call to a 2025-11-25 session (§3, `session`), so a sealed MCP service is served to 2025-11-25 and
 2025-06-18 requests only: the gate answers a 2026-07-28 request to it as a legacy server would, and a dual-era
@@ -415,7 +415,7 @@ node's JSON-RPC error with HTTP `200`, the request's id and the session header, 
 
 ## 7. What sealing protects, and what it does not
 
-`kontra connect` keeps a **pin per (gate, service)** in `~/.kontra/pins`: whether the service is sealed, the recipient
+`kontrad` keeps a **pin per (gate, service)** in `~/.kontra/pins`: whether the service is sealed, the recipient
 key ids, the service key thumbprints that verified its upstream card, and whether the upstream card was signed. A
 service signature that carries its key (`jwk`) is verified, and its key's RFC 7638 thumbprint pinned; one that names
 its key by `kid` only is verified with the service key set the gate names in `kontra.upstream.jwks`
@@ -427,8 +427,8 @@ card unreadable (§5 rule 1). Only when the gate names no set is a `kid`-only si
 with no set named, none names its key only) is unsigned (D228). A change from sealed to unsealed, or from signed to
 unsigned, is always refused. With `--pin-recipients`, any new recipient, and any new or removed service key, is
 refused; without it, the change is refused too until the operator accepts it with `--accept-change <service>` (D228),
-which accepts the change pending at the service's first check in that run, never a later one (D248), and `kontra
-connect` names the change on stderr and in its log (there is no local console, D164). An enrollment that
+which accepts the change pending at the service's first check in that run, never a later one (D248), and
+`kontrad` names the change on stderr and in its log (there is no local console, D164). An enrollment that
 adds a recipient is announced to the service's other nodes ([`tunnel.md`](tunnel.md) §5).
 
 | Threat | Holds? |
@@ -444,7 +444,7 @@ adds a recipient is announced to the service's other nodes ([`tunnel.md`](tunnel
 | A gate's own sealed first message, under a new gate task, into a caller's gate context with that context's recorded upstream `contextId` | **No**: the hosting node cannot tell it from the caller's own next task in the context (each task has a fresh per-job key, and nothing in the header binds a context to its first job), and an agent that keeps a conversation per context answers it from the caller's sealed conversation, sealed to the gate's key. An unsealed one is refused (D227). A service that keeps no conversation per context is not exposed (D251) |
 | A gate's own unsealed requests other than `tools/call` on a sealed session (its preamble and `Mcp-Session-Id` are the gate's to choose): `resources/read`, `prompts/get`, `completion/complete`, `logging/setLevel` | **No**: §2 leaves them unsealed, so the server answers the gate from the session a sealed call set up (a document a sealed call opened, exposed as a resource), and a raised log level brings more of a sealed call's unsealed `notifications/message`. A `tools/call` there is refused unsealed (D217, D226), and a service that keeps no state per session is not exposed (D256) |
 | A gate declining a sealed input request (an error answer of its own) | Not prevented: an error carries no answer, so it denies the caller's input request as dropping the request would, and never answers it (D246) |
-| A gate that **substitutes recipients**, drops the extension, or strips the service's signature | **Only with pins**: the caller learns recipients from what the gate serves. Pins refuse a downgrade always (a card whose service signatures verify nothing is unsigned, D228), and a new recipient, or a new or removed service key, when `--pin-recipients` is set. `kontra connect` prints the recipient key ids and the service key thumbprints on stderr and in its log when it first sees a service and on every change, for out-of-band comparison (D164, D187). A service signature that names its key by `kid` only is verified with the key set the gate names and pinned by that key's thumbprint; with no set named it is pinned unverified, and a forged one naming the pinned `kid` is not detected (D223) |
+| A gate that **substitutes recipients**, drops the extension, or strips the service's signature | **Only with pins**: the caller learns recipients from what the gate serves. Pins refuse a downgrade always (a card whose service signatures verify nothing is unsigned, D228), and a new recipient, or a new or removed service key, when `--pin-recipients` is set. `kontrad` prints the recipient key ids and the service key thumbprints on stderr and in its log when it first sees a service and on every change, for out-of-band comparison (D164, D187). A service signature that names its key by `kid` only is verified with the key set the gate names and pinned by that key's thumbprint; with no set named it is pinned unverified, and a forged one naming the pinned `kid` is not detected (D223) |
 | An MCP task's input requests, answers and status messages | **Yes**, for a task a sealed call created, and the input requests and answers of a sealed plain call (§2, D219) |
 | A service's error text, or an artifact's name or description, quoting the sealed input | **Yes**: on a sealed job the hosting node keeps an error's code only and drops the name and description, and the gate keeps no sealed service's error text (§2, D195, D220) |
 | A stolen identity key | Revocation stops future use. Parts already sealed to it open for whoever holds the key and the ciphertext: age has no forward secrecy. Retention ([`relay.md`](relay.md) §5.4) bounds the exposure |

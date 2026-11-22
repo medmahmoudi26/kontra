@@ -45,7 +45,7 @@ type CallingConfig struct {
 	// the tunnel; tunnel.md §9), for the service's path {svc}.
 	Card func(ctx context.Context, svc string) (*Card, error)
 	// Out receives the pins' lines (D187: recipient key ids and service key thumbprints on a first sight and on every
-	// change); kontra connect's stderr. Nil writes them to the log only.
+	// change); kontrad's stderr. Nil writes them to the log only.
 	Out io.Writer
 	// Now is the node's clock (tests); nil is time.Now.
 	Now func() time.Time
@@ -322,7 +322,7 @@ func (h *Calling) info(ctx context.Context, svc string) (*serviceInfo, error) {
 	case <-rd.done:
 		return rd.si, rd.err
 	case <-ctx.Done():
-		return nil, local(http.StatusServiceUnavailable, "kontra connect: the request ended while the service's card was read")
+		return nil, local(http.StatusServiceUnavailable, "kontrad: the request ended while the service's card was read")
 	}
 }
 
@@ -342,7 +342,7 @@ func (si *serviceInfo) ttl() time.Duration {
 // readCard reads and records the service's card (info).
 func (h *Calling) readCard(ctx context.Context, svc string) (*serviceInfo, error) {
 	if h.cfg.Card == nil {
-		return nil, local(http.StatusBadGateway, "kontra connect cannot read the service's card")
+		return nil, local(http.StatusBadGateway, "kontrad cannot read the service's card")
 	}
 	c, err := h.cfg.Card(ctx, svc)
 	if err == nil {
@@ -351,10 +351,10 @@ func (h *Calling) readCard(ctx context.Context, svc string) (*serviceInfo, error
 	name := pinName(svc)
 	if errors.Is(err, context.Canceled) {
 		// Not the card's doing: nothing is recorded, and the next request reads it again.
-		return nil, local(http.StatusServiceUnavailable, "kontra connect: the service's card read was canceled")
+		return nil, local(http.StatusServiceUnavailable, "kontrad: the service's card read was canceled")
 	}
 	if pin, known, perr := h.cfg.Pins.Get(h.cfg.Gate, name); perr != nil || known && pin.Sealed {
-		return nil, local(http.StatusBadGateway, "kontra connect: the sealed service's card could not be read or verified: %v", err)
+		return nil, local(http.StatusBadGateway, "kontrad: the sealed service's card could not be read or verified: %v", err)
 	}
 	h.log.Warn("sealing: the service's card could not be read or verified; it is not known to be sealed, so the request goes as it came",
 		"service", name, "err", err)
@@ -370,7 +370,7 @@ func (h *Calling) readCard(ctx context.Context, svc string) (*serviceInfo, error
 func (h *Calling) CardSeen(svc string, c *Card) (*serviceInfo, error) {
 	ext, err := cardExtension(c.Body)
 	if err != nil {
-		return nil, local(http.StatusBadGateway, "kontra connect: the service's card: %v", err)
+		return nil, local(http.StatusBadGateway, "kontrad: the service's card: %v", err)
 	}
 	si, err := h.recordInfo(svc, pinName(svc), ext, c.ServiceKeys, c.Signed)
 	if err != nil {
@@ -388,7 +388,7 @@ func (h *Calling) recordInfo(key, name string, ext json.RawMessage, serviceKeys 
 	if ext != nil {
 		var err error
 		if si.recipients, si.kids, si.required, err = parseExtension(ext); err != nil {
-			return nil, local(http.StatusBadGateway, "kontra connect: the service's sealed extension: %v", err)
+			return nil, local(http.StatusBadGateway, "kontrad: the service's sealed extension: %v", err)
 		}
 		si.sealed = true
 	}
@@ -401,7 +401,7 @@ func (h *Calling) recordInfo(key, name string, ext json.RawMessage, serviceKeys 
 			"service", name)
 		return nil, &LocalError{Status: http.StatusBadGateway, Err: err}
 	case err != nil:
-		return nil, local(http.StatusBadGateway, "kontra connect: the pins file: %v", err)
+		return nil, local(http.StatusBadGateway, "kontrad: the pins file: %v", err)
 	case out.First:
 		h.say(fmt.Sprintf("pins: %s at %s first seen: sealed %v, recipients %s, service keys %s", name, h.cfg.Gate,
 			out.Pin.Sealed, list(out.Pin.Recipients), list(out.Pin.ServiceKeys)), "service", name)
@@ -419,7 +419,7 @@ func (h *Calling) recordInfo(key, name string, ext json.RawMessage, serviceKeys 
 // say writes a pins line on stderr and in the log (D187).
 func (h *Calling) say(line string, args ...any) {
 	if h.cfg.Out != nil {
-		fmt.Fprintln(h.cfg.Out, "kontra connect: "+tunnel.Printable(line))
+		fmt.Fprintln(h.cfg.Out, "kontrad: "+tunnel.Printable(line))
 	}
 	h.log.Warn(tunnel.Printable(line), args...)
 }
@@ -880,7 +880,7 @@ func (h *Calling) Request(ctx context.Context, service string, req *http.Request
 		b, err := io.ReadAll(io.LimitReader(req.Body, maxBody+1))
 		_ = req.Body.Close()
 		if err != nil || len(b) > maxBody {
-			return nil, nil, local(http.StatusRequestEntityTooLarge, "kontra connect: the request body could not be read")
+			return nil, nil, local(http.StatusRequestEntityTooLarge, "kontrad: the request body could not be read")
 		}
 		body = b
 	}
@@ -892,13 +892,13 @@ func (h *Calling) Request(ctx context.Context, service string, req *http.Request
 	x := &Exchange{}
 	o, err := x.classify(req, body)
 	if err != nil {
-		return nil, nil, local(http.StatusBadRequest, "kontra connect: %s", reasonText(err))
+		return nil, nil, local(http.StatusBadRequest, "kontrad: %s", reasonText(err))
 	}
 	j.jsonrpc, j.rpcID, j.opKind, j.stream = x.jsonrpc, x.rpcID, o.kind, o.stream
 	if x.jsonrpc && !o.known || o.unreadable {
 		// A request the node cannot read as one of A2A 1.0's (an A2A 0.3 message/send, a body that is not one JSON
 		// object) would reach the gate unsealed: nothing is sent in plaintext to a service known to be sealed.
-		return nil, nil, local(http.StatusBadRequest, "kontra connect: a request to a sealed service that is not one of A2A 1.0's (it cannot be sealed)")
+		return nil, nil, local(http.StatusBadRequest, "kontrad: a request to a sealed service that is not one of A2A 1.0's (it cannot be sealed)")
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -917,7 +917,7 @@ func (h *Calling) Request(ctx context.Context, service string, req *http.Request
 		}
 		hj, err := h.loadJob(id)
 		if err != nil {
-			return nil, nil, local(http.StatusInternalServerError, "kontra connect: the job's key: %v", err)
+			return nil, nil, local(http.StatusInternalServerError, "kontrad: the job's key: %v", err)
 		}
 		j.job = hj // nil: answers whose sealed parts this node cannot open are refused (rule 4)
 	default:
@@ -949,7 +949,7 @@ func restore(req *http.Request, body []byte) {
 // rk and a contextId when it has none; a follow-up uses its task's job. h.mu is held.
 func (h *Calling) sealSend(j *Job, body []byte) ([]byte, error) {
 	if len(j.info.recipients) == 0 {
-		return nil, local(http.StatusBadGateway, "kontra connect: the sealed service has no recipient (no node is enrolled for it)")
+		return nil, local(http.StatusBadGateway, "kontrad: the sealed service has no recipient (no node is enrolled for it)")
 	}
 	var lerr error
 	binding := a2awire.BindingHTTP
@@ -962,7 +962,7 @@ func (h *Calling) sealSend(j *Job, body []byte) ([]byte, error) {
 		}
 		msgID, _ := a2awire.String(c.Members, "messageId")
 		if msgID == "" {
-			lerr = local(http.StatusBadRequest, "kontra connect: a message to a sealed service needs a messageId")
+			lerr = local(http.StatusBadRequest, "kontrad: a message to a sealed service needs a messageId")
 			return lerr
 		}
 		taskID, _ := a2awire.String(c.Members, "taskId")
@@ -971,17 +971,17 @@ func (h *Calling) sealSend(j *Job, body []byte) ([]byte, error) {
 		if taskID != "" {
 			var err error
 			if job, err = h.loadJob(taskID); err != nil {
-				lerr = local(http.StatusInternalServerError, "kontra connect: the job's key: %v", err)
+				lerr = local(http.StatusInternalServerError, "kontrad: the job's key: %v", err)
 				return lerr
 			}
 			if job == nil {
-				lerr = &LocalError{Status: http.StatusBadRequest, Err: fmt.Errorf("kontra connect: %w (task %s)", ErrNoKey, taskID)}
+				lerr = &LocalError{Status: http.StatusBadRequest, Err: fmt.Errorf("kontrad: %w (task %s)", ErrNoKey, taskID)}
 				return lerr
 			}
 			if job.Service != j.service {
 				// A follow-up of a task another service's job holds: sealed to this service's recipients it would carry
 				// that job's replyTo and rk to this service (D259).
-				lerr = local(http.StatusBadRequest, "kontra connect: a follow-up of a task of another service (%s)", job.Service)
+				lerr = local(http.StatusBadRequest, "kontrad: a follow-up of a task of another service (%s)", job.Service)
 				return lerr
 			}
 			if ctxID == "" {
@@ -990,7 +990,7 @@ func (h *Calling) sealSend(j *Job, body []byte) ([]byte, error) {
 		} else {
 			var err error
 			if job, err = h.newJob("", j.service); err != nil {
-				lerr = local(http.StatusInternalServerError, "kontra connect: a per-job key could not be minted: %v", err)
+				lerr = local(http.StatusInternalServerError, "kontrad: a per-job key could not be minted: %v", err)
 				return lerr
 			}
 			j.newTask = true
@@ -999,7 +999,7 @@ func (h *Calling) sealSend(j *Job, body []byte) ([]byte, error) {
 			}
 			job.ContextID = ctxID
 			if err := h.saveJob(job); err != nil {
-				lerr = local(http.StatusInternalServerError, "kontra connect: the job's state: %v", err)
+				lerr = local(http.StatusInternalServerError, "kontrad: the job's state: %v", err)
 				return lerr
 			}
 			c.Set("contextId", a2awire.Quote(ctxID))
@@ -1012,19 +1012,19 @@ func (h *Calling) sealSend(j *Job, body []byte) ([]byte, error) {
 		out := make([]a2awire.Part, len(c.Parts))
 		for i, p := range c.Parts {
 			if _, claims, _ := sealed.ParseDeliveredPart(a2awire.Encode(p)); claims {
-				lerr = local(http.StatusBadRequest, "kontra connect: a part already has the sealed envelope type")
+				lerr = local(http.StatusBadRequest, "kontrad: a part already has the sealed envelope type")
 				return lerr
 			}
 			pl, err := plainOfPart(p)
 			if err != nil {
-				lerr = local(http.StatusBadRequest, "kontra connect: %s", reasonText(err))
+				lerr = local(http.StatusBadRequest, "kontrad: %s", reasonText(err))
 				return lerr
 			}
 			hd := base
 			hd.Part, hd.Parts, hd.Kind, hd.MediaType = i, len(c.Parts), pl.kind, pl.mediaType
 			ct, err := sealed.Seal(j.info.recipients, hd, pl.body)
 			if err != nil {
-				lerr = local(http.StatusInternalServerError, "kontra connect: sealing failed: %v", err)
+				lerr = local(http.StatusInternalServerError, "kontrad: sealing failed: %v", err)
 				return lerr
 			}
 			out[i] = sealedPartOf(ct, p, pl)
@@ -1047,10 +1047,10 @@ func (h *Calling) sealSend(j *Job, body []byte) ([]byte, error) {
 	}
 	if err != nil {
 		// The error is not quoted: it may hold a byte of the client's plaintext (a JSON syntax error).
-		return nil, local(http.StatusBadRequest, "kontra connect: not an A2A 1.0 send request with exact keys (D172)")
+		return nil, local(http.StatusBadRequest, "kontrad: not an A2A 1.0 send request with exact keys (D172)")
 	}
 	if j.job == nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: a send request without a message")
+		return nil, local(http.StatusBadRequest, "kontrad: a send request without a message")
 	}
 	return out, nil
 }
@@ -1742,7 +1742,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 		if j.info != nil && h.otherService(j.info, service) {
 			h.mu.Unlock()
 			return nil, nil, &LocalError{Status: http.StatusNotFound,
-				Err: errors.New("kontra connect: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
+				Err: errors.New("kontrad: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
 		}
 		if j.info != nil {
 			j.info.used = h.cfg.Now()
@@ -1755,7 +1755,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 			// for a sealed call it still waits for included, so it is answered here as a POST is: 404, and the client
 			// initializes again (round 2 sealing-fixes-4).
 			return nil, nil, &LocalError{Status: http.StatusNotFound,
-				Err: errors.New("kontra connect: an MCP session this node does not know: initialize again")}
+				Err: errors.New("kontrad: an MCP session this node does not know: initialize again")}
 		}
 		j.get = req.Method == http.MethodGet
 		return req, j, nil
@@ -1763,7 +1763,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 	b, err := io.ReadAll(io.LimitReader(req.Body, maxBody+1))
 	_ = req.Body.Close()
 	if err != nil || len(b) > maxBody {
-		return nil, nil, local(http.StatusRequestEntityTooLarge, "kontra connect: the request body could not be read")
+		return nil, nil, local(http.StatusRequestEntityTooLarge, "kontrad: the request body could not be read")
 	}
 	m, err := mcpwire.Parse(b, mcpwire.FromClient)
 	if err != nil {
@@ -1774,7 +1774,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 			if m != nil {
 				id = m.ID
 			}
-			const msg = "kontra connect: not one JSON-RPC message with exact keys, to a sealed service (D172)"
+			const msg = "kontrad: not one JSON-RPC message with exact keys, to a sealed service (D172)"
 			body, berr := mcpwire.ErrorBody(id, mcpwire.CodeInvalidRequest, msg, nil)
 			if berr != nil {
 				body, _ = mcpwire.ErrorBody(nil, mcpwire.CodeInvalidRequest, msg, nil)
@@ -1796,7 +1796,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 		// answered here as a legacy server answers it (relay.md §11.12 rule 3), so that the client falls back to
 		// initialize: nothing of it, Mcp-Param-* headers included, reaches the gate in plaintext (ext-sealed.md §2).
 		return nil, nil, &LocalError{Status: http.StatusBadRequest, Body: mcpwire.LegacyNoSessionBody,
-			Err: errors.New("kontra connect: a request without a session to a sealed MCP service: initialize first")}
+			Err: errors.New("kontrad: a request without a session to a sealed MCP service: initialize first")}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1805,7 +1805,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 		if j.sid != "" {
 			// A session this node did not see initialized (it restarted): its sealing is unknown, so nothing is sent;
 			// the client re-initializes on 404 (MCP's rule for an unknown session).
-			return nil, nil, &LocalError{Status: http.StatusNotFound, Err: errors.New("kontra connect: an MCP session this node does not know: initialize again")}
+			return nil, nil, &LocalError{Status: http.StatusNotFound, Err: errors.New("kontrad: an MCP session this node does not know: initialize again")}
 		}
 		restore(req, b)
 		return req, nil, nil
@@ -1814,7 +1814,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 		// The gate chooses the session id a client uses (a stock client adopts the one an answer names): a session is
 		// the service's it was initialized for, and an unsealed one is never used for a service pinned sealed (D260).
 		return nil, nil, &LocalError{Status: http.StatusNotFound,
-			Err: errors.New("kontra connect: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
+			Err: errors.New("kontrad: an MCP session of another service, or an unsealed one of a sealed service: initialize again")}
 	}
 	j.info = si
 	si.used = h.cfg.Now()
@@ -1834,7 +1834,7 @@ func (h *Calling) mcpRequest(ctx context.Context, service string, req *http.Requ
 		if hj, err := h.loadJob("mcp-" + j.session); err == nil && hj != nil {
 			for _, k := range mcpwire.AnswerKeys(m.ID) {
 				if hj.calls[k] != nil {
-					return nil, nil, local(http.StatusBadRequest, "kontra connect: a request that reuses the id of a sealed request of the session")
+					return nil, nil, local(http.StatusBadRequest, "kontrad: a request that reuses the id of a sealed request of the session")
 				}
 			}
 		}
@@ -1918,14 +1918,14 @@ func (h *Calling) sessionJob(j *Job) (*callJob, error) {
 // params._meta["sh.kontra/sealed"].
 func (h *Calling) sealCall(j *Job, b []byte, m *mcpwire.Message) ([]byte, error) {
 	if j.session == "" {
-		return nil, local(http.StatusBadRequest, "kontra connect: a sealed tools/call needs an MCP session")
+		return nil, local(http.StatusBadRequest, "kontrad: a sealed tools/call needs an MCP session")
 	}
 	if len(j.info.recipients) == 0 {
-		return nil, local(http.StatusBadGateway, "kontra connect: the sealed service has no recipient (no node is enrolled for it)")
+		return nil, local(http.StatusBadGateway, "kontrad: the sealed service has no recipient (no node is enrolled for it)")
 	}
 	params, err := strictjson.Members(m.Params)
 	if err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: a tools/call without params")
+		return nil, local(http.StatusBadRequest, "kontrad: a tools/call without params")
 	}
 	name, _ := a2awire.String(params, "name")
 	args := json.RawMessage("{}")
@@ -1934,11 +1934,11 @@ func (h *Calling) sealCall(j *Job, b []byte, m *mcpwire.Message) ([]byte, error)
 	}
 	body, err := jcs.Transform(args)
 	if err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: arguments with no canonical form")
+		return nil, local(http.StatusBadRequest, "kontrad: arguments with no canonical form")
 	}
 	hj, err := h.sessionJob(j)
 	if err != nil {
-		return nil, local(http.StatusInternalServerError, "kontra connect: a per-job key could not be minted: %v", err)
+		return nil, local(http.StatusInternalServerError, "kontrad: a per-job key could not be minted: %v", err)
 	}
 	msgID := mcpID(m.ID)
 	hd := sealed.Header{V: sealed.Version, Dir: sealed.DirRequest, Service: pinName(j.service), IAT: h.cfg.Now().Unix(),
@@ -1946,10 +1946,10 @@ func (h *Calling) sealCall(j *Job, b []byte, m *mcpwire.Message) ([]byte, error)
 		Kids: j.info.kids, ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
 	ct, err := sealed.Seal(j.info.recipients, hd, body)
 	if err != nil {
-		return nil, local(http.StatusInternalServerError, "kontra connect: sealing failed: %v", err)
+		return nil, local(http.StatusInternalServerError, "kontrad: sealing failed: %v", err)
 	}
 	if err := setEnvelope(params, ct); err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: %v", err)
+		return nil, local(http.StatusBadRequest, "kontrad: %v", err)
 	}
 	params["arguments"] = json.RawMessage("{}")
 	j.call = &sealedCall{tool: name, messageID: msgID}
@@ -1960,7 +1960,7 @@ func (h *Calling) sealCall(j *Job, b []byte, m *mcpwire.Message) ([]byte, error)
 	hj.track(m.ID, &heldCall{Tool: name, MessageID: msgID, task: asks})
 	out, err := mcpwire.SetMember(b, "params", a2awire.Encode(params))
 	if err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: %v", err)
+		return nil, local(http.StatusBadRequest, "kontrad: %v", err)
 	}
 	return out, nil
 }
@@ -1993,7 +1993,7 @@ func (h *Calling) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, erro
 	if j.session != "" {
 		var err error
 		if hj, err = h.loadJob("mcp-" + j.session); err != nil {
-			return nil, local(http.StatusInternalServerError, "kontra connect: the session's job: %v", err)
+			return nil, local(http.StatusInternalServerError, "kontrad: the session's job: %v", err)
 		}
 	}
 	var in *callInput
@@ -2003,13 +2003,13 @@ func (h *Calling) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, erro
 	if in == nil {
 		if hj != nil && hj.Answered[gid] {
 			// The answer to an input request the client answered already: the request was answered once (D243).
-			return nil, local(http.StatusBadRequest, "kontra connect: a second answer to a sealed input request")
+			return nil, local(http.StatusBadRequest, "kontrad: a second answer to a sealed input request")
 		}
 		if j.info == nil || !j.info.relayed[gid] {
 			// A response to no request the node relayed on this session: an answer to a sealed input request of another
 			// session (a client moved onto this one), or to a request the gate wrote itself, which the node never relays
 			// on a sealed session (D260).
-			return nil, local(http.StatusBadRequest, "kontra connect: a response to no request relayed on this sealed session")
+			return nil, local(http.StatusBadRequest, "kontrad: a response to no request relayed on this sealed session")
 		}
 		delete(j.info.relayed, gid)
 		return b, nil // the answer to a request the node relayed unopened (ping, roots/list)
@@ -2025,26 +2025,26 @@ func (h *Calling) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, erro
 		// D246), and the hosting node takes it for the answer.
 		nb, err := mcpwire.ErrorBody(m.ID, m.Error.Code, declinedText, nil)
 		if err != nil {
-			return nil, local(http.StatusBadRequest, "kontra connect: %v", err)
+			return nil, local(http.StatusBadRequest, "kontrad: %v", err)
 		}
 		if err := answered(); err != nil {
-			return nil, local(http.StatusInternalServerError, "kontra connect: %v", err)
+			return nil, local(http.StatusInternalServerError, "kontrad: %v", err)
 		}
 		return nb, nil
 	}
 	if m.Result == nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: an answer to a sealed input request with neither a result nor an error")
+		return nil, local(http.StatusBadRequest, "kontrad: an answer to a sealed input request with neither a result nor an error")
 	}
 	res, err := strictjson.Members(m.Result)
 	if err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: an answer that is not one object with exact keys")
+		return nil, local(http.StatusBadRequest, "kontrad: an answer that is not one object with exact keys")
 	}
 	for k := range res {
 		if strings.EqualFold(k, "task") {
 			// A CreateTaskResult: the answer would come later as the client's answer to the server's tasks/result, which
 			// the node never relays on a sealed session; the node opens input requests without their task, so a stock
 			// client answers at once (D261).
-			return nil, local(http.StatusBadRequest, "kontra connect: a task as the answer to a sealed input request")
+			return nil, local(http.StatusBadRequest, "kontrad: a task as the answer to a sealed input request")
 		}
 	}
 	var related json.RawMessage
@@ -2056,7 +2056,7 @@ func (h *Calling) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, erro
 	delete(res, "_meta")
 	body, err := jcs.Transform(a2awire.Encode(res))
 	if err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: an answer with no canonical form")
+		return nil, local(http.StatusBadRequest, "kontrad: an answer with no canonical form")
 	}
 	// The answer names the input request's gate task as its header did (sealing's mcpRule1 SPEC-CONFLICT), so that
 	// it cannot be delivered as another task's answer.
@@ -2065,7 +2065,7 @@ func (h *Calling) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, erro
 		Kind: sealed.KindData, Kids: j.info.kids, ReplyTo: hj.key.Recipient().String(), RK: hj.RK}
 	ct, err := sealed.Seal(j.info.recipients, hd, body)
 	if err != nil {
-		return nil, local(http.StatusInternalServerError, "kontra connect: sealing failed: %v", err)
+		return nil, local(http.StatusInternalServerError, "kontrad: sealing failed: %v", err)
 	}
 	out := map[string]json.RawMessage{}
 	if related != nil {
@@ -2076,10 +2076,10 @@ func (h *Calling) sealAnswer(j *Job, b []byte, m *mcpwire.Message) ([]byte, erro
 	}
 	nb, err := mcpwire.SetMember(b, "result", a2awire.Encode(out))
 	if err != nil {
-		return nil, local(http.StatusBadRequest, "kontra connect: %v", err)
+		return nil, local(http.StatusBadRequest, "kontrad: %v", err)
 	}
 	if err := answered(); err != nil {
-		return nil, local(http.StatusInternalServerError, "kontra connect: %v", err)
+		return nil, local(http.StatusInternalServerError, "kontrad: %v", err)
 	}
 	return nb, nil
 }
@@ -2449,7 +2449,7 @@ func (h *Calling) initResult(j *Job, data []byte, m *mcpwire.Message) ([]byte, e
 	}
 	if !sessionIDForm(j.sid) {
 		// MCP's form of a session id (visible ASCII), never one a path could be (D240).
-		return refuse("kontra connect refused the gate's session id: not an MCP session id")
+		return refuse("kontrad refused the gate's session id: not an MCP session id")
 	}
 	h.mu.Lock()
 	_, held := h.sessions[j.sid]
@@ -2458,7 +2458,7 @@ func (h *Calling) initResult(j *Job, data []byte, m *mcpwire.Message) ([]byte, e
 	if held || err != nil || hj != nil {
 		// A session id the node already holds: a second local client put into one sealed session would share its job,
 		// and its requests' ids would be the first client's (D245).
-		return refuse("kontra connect refused the gate's session id: a session it already holds")
+		return refuse("kontrad refused the gate's session id: a session it already holds")
 	}
 	var ext json.RawMessage
 	if caps, ok := mcpwire.Member(m.Result, "capabilities"); ok {
@@ -2471,7 +2471,7 @@ func (h *Calling) initResult(j *Job, data []byte, m *mcpwire.Message) ([]byte, e
 	si, err := h.recordInfo(j.sid, pinName(j.service), ext, nil, false)
 	if err != nil {
 		var le *LocalError
-		msg := "kontra connect refused the service's sealing (pins)"
+		msg := "kontrad refused the service's sealing (pins)"
 		if errors.As(err, &le) {
 			msg = le.Error()
 		}

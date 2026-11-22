@@ -1,5 +1,5 @@
 # A team gate on one machine, for the a2a-samples helloworld service hosted through the tunnel (M2): the gate
-# never dials the service; `kontra connect` on the service's machine does, and the gate sends it requests over
+# never dials the service; `kontrad` on the service's machine does, and the gate sends it requests over
 # that connection (spec/tunnel.md). Plaintext is allowed only because public_url is a localhost origin
 # (PRD §11); the tunnel's channel binding is then none (spec/tunnel.md §4, D69). Postgres and Temporal are the
 # repository's compose.dev.yaml.

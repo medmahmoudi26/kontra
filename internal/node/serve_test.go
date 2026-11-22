@@ -15,7 +15,7 @@ import (
 )
 
 // --serve mcp: (spec/tunnel.md §10): a URL target may name its endpoint path; a stdio command line is split with
-// POSIX word rules and a leading ~/ expanded with the HOME kontra connect was given; an A2A target keeps D123's
+// POSIX word rules and a leading ~/ expanded with the HOME kontrad was given; an A2A target keeps D123's
 // root-only rule.
 func TestParseServeMCP(t *testing.T) {
 	for _, c := range []struct {

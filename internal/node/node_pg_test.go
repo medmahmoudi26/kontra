@@ -396,7 +396,7 @@ func TestRealAdmissionRotationAfterOldKeyRevoked(t *testing.T) {
 	tn.stop()
 	tn.result(t, 10*time.Second)
 	oldKID := tn.n.cfgKeyID(t)
-	if _, err := nodekey.Rotate(cfg.KeyPath, time.Now()); err != nil { // kontra connect --rotate, offline
+	if _, err := nodekey.Rotate(cfg.KeyPath, time.Now()); err != nil { // kontrad --rotate, offline
 		t.Fatal(err)
 	}
 	if err := rg.store.RevokeKey(context.Background(), oldKID, "operator", "test"); err != nil {

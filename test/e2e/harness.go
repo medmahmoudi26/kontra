@@ -14,11 +14,11 @@
 // --api-key`. The caller is a minimal SSE client that keeps every `id:` line, because a2a-go's client
 // ignores them; unary calls use a2a-go's own client.
 //
-// Tunnel services (Options.Tunnel, backend tunnel) are hosted by nodes: `kontra connect` subprocesses of the
-// binary built once from ./cmd/kontra (node.go), each with its own HOME, dialing the Front. Two in-process
+// Tunnel services (Options.Tunnel, backend tunnel) are hosted by nodes: `kontrad` subprocesses of the
+// binary built once from ./cmd/kontrad (node.go), each with its own HOME, dialing the Front. Two in-process
 // doubles stand beside them: a FakeNode (fakenode.go) that completes the handshake with a node's key and
 // ignores the control stream, and a FakeGate (fakegate.go), the gate's tunnel handler with a fixed admission
-// and no Postgres or Temporal, which drives crafted streams at a real `kontra connect`.
+// and no Postgres or Temporal, which drives crafted streams at a real `kontrad`.
 //
 // Everything the harness starts it removes, including on failure; every process it starts (replicas,
 // Temporal, nodes, the helloworld service) carries KONTRA_E2E_RUN in its environment, and every file it writes
@@ -280,7 +280,7 @@ type Harness struct {
 	closeErr    error
 
 	mu      sync.Mutex
-	nodes   []*Node            // every `kontra connect` started, killed at Close
+	nodes   []*Node            // every `kontrad` started, killed at Close
 	cleanup []func() error     // what tests added (services, fake doubles), run at Close, last first
 	agents  []*slowagent.Agent // slowagents started for a test (Agent), closed at Close
 	pgids   []int              // process groups of the stock servers the harness started (CheckLoopback)

@@ -50,7 +50,7 @@ numbered in [`../docs/decisions.md`](../docs/decisions.md) and cited here as **D
 | Term | Meaning |
 |---|---|
 | **Gate** | The `kontra-gate` process. A2A server and MCP server toward callers; A2A client and MCP client toward services. Several replicas share one Postgres and one Temporal namespace. |
-| **Node** | A machine running `kontra connect`. Hosts services over the tunnel, and calls through the gate on its localhost. |
+| **Node** | A machine running `kontrad`. Hosts services over the tunnel, and calls through the gate on its localhost. |
 | **Service** | One A2A agent (`kind: a2a`) or one MCP server (`kind: mcp`) behind the gate, reached through a **backend**: `tunnel` (a node) or `a2a`/`mcp` `{url}` (direct, the operator's own network). |
 | **Tenant** | The owner of services and keys. A team gate has one; Cloud has one per account and one per anonymous session. |
 | **Principal** | Who a request is from, after authentication (§2.3). Every principal has a tenant (possibly none) and a stable `caller_id`. "Caller" and "callee" are hats per request, not identities. |
@@ -454,10 +454,10 @@ card (spec §8.4.3), so it is not copied into `signatures`; the upstream card is
   the reason. A failed fetch keeps the last verified card; the service becomes unavailable only when no fetch has
   succeeded for 30 minutes, on any replica (D89). Without keys, the gate does not verify and says so: `verified: false`. MCP services
   have no card and are never unavailable this way.
-- A verifier (`kontra connect` does this) checks the gate's signature with a `jku` equal to the origin it
+- A verifier (`kontrad` does this) checks the gate's signature with a `jku` equal to the origin it
   dialed, fetches the upstream card, checks the hash, and checks the service's signatures against keys it
   trusts for the service. A gate that strips the service's signatures cannot hide it from a verifier that
-  pinned the service's keys ([`ext-sealed.md`](ext-sealed.md) §7). `kontra connect` holds no service key set of its
+  pinned the service's keys ([`ext-sealed.md`](ext-sealed.md) §7). `kontrad` holds no service key set of its
   own: it verifies a signature that carries its key (`jwk`) and pins that key's thumbprint, and verifies one that
   names its key by `kid` only with the key set `kontra.upstream.jwks` names, fetched from the gate's origin (through
   its tunnel), and pins that key's thumbprint; with no `jwks` named, such a signature is pinned unverified (D223).

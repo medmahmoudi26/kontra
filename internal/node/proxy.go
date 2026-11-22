@@ -311,14 +311,14 @@ func (p *Proxy) ServeStream(ctx context.Context, stream net.Conn) {
 	pre, err := tunnel.ReadPreamble(br)
 	if err != nil {
 		p.logger.Debug("tunnel stream refused: no valid preamble", "err", err)
-		writeRaw400(stream, "kontra connect: the stream has no valid preamble (spec/tunnel.md §8.1)")
+		writeRaw400(stream, "kontrad: the stream has no valid preamble (spec/tunnel.md §8.1)")
 		return
 	}
 	_ = stream.SetReadDeadline(time.Time{})
 	switch pre.Op {
 	case tunnel.OpControl:
 		if p.onControl == nil {
-			writeRaw400(stream, "kontra connect: no control stream here")
+			writeRaw400(stream, "kontrad: no control stream here")
 			return
 		}
 		p.onControl(stream, br)
@@ -326,7 +326,7 @@ func (p *Proxy) ServeStream(ctx context.Context, stream net.Conn) {
 		p.serveExchange(ctx, &bufferedConn{Conn: stream, r: br}, pre)
 	default:
 		// Blob streams are node-opened (§8.3, M3): a gate never opens one.
-		writeRaw400(stream, "kontra connect: a gate-opened stream carries op http or control")
+		writeRaw400(stream, "kontrad: a gate-opened stream carries op http or control")
 	}
 }
 
@@ -359,36 +359,36 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 		switch {
 		case !ok:
 			log.Info("tunnel exchange refused: the service is not hosted on this session")
-			nodeAnswer(w, http.StatusNotFound, tunnel.NodeNotHosted, "kontra connect does not host this service on this session")
+			nodeAnswer(w, http.StatusNotFound, tunnel.NodeNotHosted, "kontrad does not host this service on this session")
 			return
 		case pre.Kind != sv.Kind:
 			log.Info("tunnel exchange refused: kind mismatch", "kind", pre.Kind, "hosted_kind", sv.Kind)
-			nodeAnswer(w, http.StatusNotFound, tunnel.NodeKindMismatch, "kontra connect hosts this service as another kind")
+			nodeAnswer(w, http.StatusNotFound, tunnel.NodeKindMismatch, "kontrad hosts this service as another kind")
 			return
 		}
 		n := p.inflight.Add(1)
 		defer p.inflight.Add(-1)
 		if n > int64(p.maxInflight) {
 			log.Warn("tunnel exchange refused: in-flight cap", "max_inflight", p.maxInflight)
-			nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, "kontra connect is at its in-flight cap (--max-inflight)")
+			nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, "kontrad is at its in-flight cap (--max-inflight)")
 			return
 		}
 		switch {
 		case r.Method == http.MethodConnect:
-			nodeAnswer(w, http.StatusBadRequest, "", "kontra connect is a fixed-target reverse proxy: no CONNECT")
+			nodeAnswer(w, http.StatusBadRequest, "", "kontrad is a fixed-target reverse proxy: no CONNECT")
 			return
 		case r.Method == http.MethodTrace:
-			nodeAnswer(w, http.StatusBadRequest, "", "kontra connect refuses TRACE")
+			nodeAnswer(w, http.StatusBadRequest, "", "kontrad refuses TRACE")
 			return
 		case wantsUpgrade(r.Header):
-			nodeAnswer(w, http.StatusBadRequest, "", "kontra connect refuses protocol upgrades")
+			nodeAnswer(w, http.StatusBadRequest, "", "kontrad refuses protocol upgrades")
 			return
 		}
 		if sv.Kind == tunnel.KindMCP && sv.Command != nil {
 			// A stdio MCP service: the bridge is the server's endpoint, whatever the path (§10); nothing is dialed.
 			b := p.bridges[sv.Name]
 			if b == nil {
-				nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, "kontra connect: the stdio service is not running")
+				nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, "kontrad: the stdio service is not running")
 				return
 			}
 			sw := &statusWriter{ResponseWriter: w} // the bridge's own Kontra-Node answers (full, target_unreachable) are kept
@@ -525,7 +525,7 @@ func (p *Proxy) exchange(pre tunnel.Preamble) http.HandlerFunc {
 				} else {
 					log.Warn("tunnel exchange: the service did not answer", "target", origin(target), "err", err)
 				}
-				nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, "kontra connect: the service did not answer")
+				nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, "kontrad: the service did not answer")
 			},
 			ErrorLog: p.errLog,
 		}
@@ -564,7 +564,7 @@ func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Log
 	}
 	b, err := io.ReadAll(io.LimitReader(r.Body, a2awire.MaxBody+1))
 	if err != nil {
-		nodeAnswer(w, http.StatusBadRequest, "", "kontra connect: the request's body could not be read")
+		nodeAnswer(w, http.StatusBadRequest, "", "kontrad: the request's body could not be read")
 		return nil, false
 	}
 	if len(b) > a2awire.MaxBody {
@@ -583,11 +583,11 @@ func (p *Proxy) inlineBody(w http.ResponseWriter, r *http.Request, log *slog.Log
 		if !inlineFinal(err) {
 			log.Warn("tunnel exchange refused for now: a kontra-blob: part could not be fetched; the gate retries it", "err", err)
 			nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull,
-				"kontra connect: a part of the request could not be fetched from the gate now; try again")
+				"kontrad: a part of the request could not be fetched from the gate now; try again")
 			return nil, false
 		}
 		log.Warn("tunnel exchange refused: a kontra-blob: part could not be fetched", "err", err)
-		nodeAnswer(w, http.StatusBadRequest, "", "kontra connect: a part of the request could not be fetched from the gate")
+		nodeAnswer(w, http.StatusBadRequest, "", "kontrad: a part of the request could not be fetched from the gate")
 		return nil, false
 	}
 	pr, pw := io.Pipe()

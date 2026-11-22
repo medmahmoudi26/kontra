@@ -139,7 +139,7 @@ func (s *session) readControl(stream net.Conn, br *bufio.Reader) {
 			s.noteExpiring(time.Since(s.opened))
 			s.log.Warn("the gate says this anonymous session ends soon", "at", c.At)
 			if c.At != nil {
-				fmt.Fprintf(s.n.out, "kontra connect: the anonymous session ends at %s (in %s)\n",
+				fmt.Fprintf(s.n.out, "kontrad: the anonymous session ends at %s (in %s)\n",
 					c.At.UTC().Format(time.RFC3339), time.Until(*c.At).Round(time.Second))
 			}
 		default:

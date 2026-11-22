@@ -546,7 +546,7 @@ Execute this at M0 so no agent keeps implementing the old plan. Close with a com
 - [ ] Who decides a dispute in v4: owner by hand in the console (default), or an automatic refund on any dispute until volume justifies triage?
 - [ ] Should the gate serve the authenticated extended card (`extendedAgentCard`) at all in v4? Default: no.
 - [ ] Company jurisdiction for the Connect platform account (France vs. Estonia was floated). Affects Stripe onboarding, not the code.
-- [ ] Name for the proxy subcommand: `kontra proxy` (default) or `kontra connect`.
+- [ ] Name for the proxy subcommand: `kontra proxy` (default) or `kontrad`.
 
 ## 18. Risks
 

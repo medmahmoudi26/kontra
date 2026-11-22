@@ -19,7 +19,7 @@
 #      and each service's last 40 log lines;
 #   5. from this host: GET /healthz; the certificate's issuer is Let's Encrypt; of 22, 80, 443, 5432, 7233, 8443 and
 #      9090 only 22 and 443 answer; over ssh, an API key and a token for hello (kontra-gate enroll); a team member's
-#      clean machine (a kontra-demo container on this host) runs a2a server --exec 'echo Hello World' and kontra connect
+#      clean machine (a kontra-demo container on this host) runs a2a server --exec 'echo Hello World' and kontrad
 #      --enroll; then SendMessage "hi" to /agents/hello with the key answers Hello World, and an MCP tools/call search on
 #      /mcp with the key lists hello; docker compose ps, the image digests, kontra-gate version and the timings are
 #      recorded.
@@ -45,7 +45,7 @@
 #   --teardown-only  reap what a run left (DNS records by comment, then droplets by tag)
 #   --host ADDR      steps 4 and 5 on a host you already have (root over ssh with the key; the name resolves to it):
 #                    nothing is created or deleted on DigitalOcean or Cloudflare, and the gate stays up
-#   --published      the team member installs kontra with `go install kontra.sh/kontra/cmd/kontra@<--expect>`
+#   --published      the team member installs kontrad with `go install kontra.sh/kontra/cmd/kontrad@<--expect>`
 #                    instead of from /src (after the commit is on GitHub)
 #   --record FILE    the run's record (default ./team-gate-vps-<UTC time>.log); keys and tokens are never written
 #   Rehearsal of --host against a local compose gate (test/vps, KONTRA_KIT_TESTS=1), never for the gate run:
@@ -577,8 +577,8 @@ if ! docker image inspect "kontra-demo:$sha" > /dev/null 2>&1; then
   fi
   built_image=1
 fi
-install='(cd /src && go install ./cmd/kontra)'
-[ "$published" = 1 ] && install="go install kontra.sh/kontra/cmd/kontra@$expect"
+install='(cd /src && go install ./cmd/kontrad)'
+[ "$published" = 1 ] && install="go install kontra.sh/kontra/cmd/kontrad@$expect"
 trust=":"
 if [ -n "$ca_file" ]; then
   # shellcheck disable=SC2016 # $HOME is the team member's, expanded in the container
@@ -593,9 +593,9 @@ $trust
 $install
 go install github.com/a2aproject/a2a-cli@v0.3.1 && mv "\$(go env GOPATH)/bin/a2a-cli" "\$(go env GOPATH)/bin/a2a"
 export PATH="\$PATH:\$(go env GOPATH)/bin"
-kontra version
+kontrad version
 a2a server --exec 'echo Hello World' --port 9999 &
-exec kontra connect --gate https://$name --enroll @/opt/kontra-teammate/token --serve a2a:hello=http://127.0.0.1:9999
+exec kontrad --gate https://$name --enroll @/opt/kontra-teammate/token --serve a2a:hello=http://127.0.0.1:9999
 EOF
 # docker cp keeps these modes (root becomes the owner) and the image runs as laptop (uid 1000): the files must be
 # world-readable whatever this host's umask. On this host the run's directory (0700) still keeps the token to its owner.

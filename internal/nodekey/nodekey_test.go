@@ -558,7 +558,7 @@ func TestPrune(t *testing.T) {
 }
 
 // Rotate, MarkRotated and Prune hold the file's lock from the read to the rename: run together (two
-// `kontra connect` processes on one key, §2.1), none loses another's change, and the key Rotate returns is
+// `kontrad` processes on one key, §2.1), none loses another's change, and the key Rotate returns is
 // the key in the file. flock(2) locks belong to the open file, so goroutines that each open the file
 // exclude each other as processes do.
 func TestRotatePruneConcurrent(t *testing.T) {

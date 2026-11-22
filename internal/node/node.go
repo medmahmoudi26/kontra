@@ -1,8 +1,8 @@
-// Package node is `kontra connect` (spec/tunnel.md; note 2 §1–§2): one outbound WebSocket to a gate the
+// Package node is `kontrad` (spec/tunnel.md; note 2 §1–§2): one outbound WebSocket to a gate the
 // node chose, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the
 // node sends local clients' requests to the gate (calling).
 //
-//	kontra connect [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
+//	kontrad [--gate URL] [--serve a2a:<name>=<url> | mcp:<name>=<url> | mcp:<name>=stdio:<cmd> …]
 //	               [--roots <name>=<dir> …] [--env NAME …] [--session-idle 1h] [--max-sessions 8]
 //	               [--key PATH] [--enroll TOKEN|@file|-]… [--api-key KEY|@file|-] [--name NAME] [--rotate]
 //	               [--require-channel-binding] [--max-inflight 64] [--listen 127.0.0.1:7777 | off]
@@ -43,9 +43,9 @@
 // The node holds no task state: after any close but `revoked` it redials with the same key, backing off from 1 s
 // to 60 s with full jitter, reset after a session that lived 60 s (§13).
 //
-// Environment. KONTRA_KEY (the key file, as --key, §2.1) is the only variable kontra connect reads, with
+// Environment. KONTRA_KEY (the key file, as --key, §2.1) is the only variable kontrad reads, with
 // HOME for ~/.kontra. The PRD's KONTRA_GATE, KONTRA_AGENT, KONTRA_TO and KONTRA_ENROLL (PRD §6) mirrored
-// the flags of `kontra tunnel`, which note 1 replaced with kontra connect; tunnel.md, the authority, names
+// the flags of `kontra tunnel`, which note 1 replaced with the node's command (kontrad since D364); tunnel.md, the authority, names
 // none of them, so they are not honoured (M2 plan audit, the PRD's environment mirrors): a container passes
 // flags, as note 2's compose sidecar does, and a secret as --enroll @/run/secrets/<file>.
 //
@@ -80,7 +80,7 @@ import (
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// Config is a parsed `kontra connect` command line.
+// Config is a parsed `kontrad` command line.
 type Config struct {
 	Gate                  *url.URL // --gate, default tunnel.DefaultGate; https:// except localhost (tunnel.CheckGateURL)
 	Serves                []Serve  // --serve, repeatable
@@ -145,7 +145,7 @@ func parseArgs(args []string, getenv func(string) string, stdin io.Reader) (Conf
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	fs := flag.NewFlagSet("kontra connect", flag.ContinueOnError)
+	fs := flag.NewFlagSet("kontrad", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
 		serves, enrolls, origins, roots, envs []string
@@ -395,7 +395,7 @@ func checkName(name string) error {
 	return nil
 }
 
-// Node is one running `kontra connect`.
+// Node is one running `kontrad`.
 type Node struct {
 	cfg    Config
 	logger *slog.Logger // component=node
@@ -570,10 +570,10 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 		case created:
 			return nil, fmt.Errorf("--rotate: %s was just created; there is no enrolled key to rotate", cfg.KeyPath)
 		case pending:
-			return nil, fmt.Errorf("--rotate: the previous rotation of %s is not confirmed by %s yet; run kontra connect "+
+			return nil, fmt.Errorf("--rotate: the previous rotation of %s is not confirmed by %s yet; run kontrad "+
 				"without --rotate first, so that the gate confirms it", cfg.KeyPath, origin)
 		case len(n.cred.Key(kid).Unconfirmed) > 0:
-			return nil, fmt.Errorf("--rotate: an enrollment at %s is not confirmed yet; run kontra connect without --rotate first", origin)
+			return nil, fmt.Errorf("--rotate: an enrollment at %s is not confirmed yet; run kontrad without --rotate first", origin)
 		}
 	}
 	for _, t := range cfg.Enroll {

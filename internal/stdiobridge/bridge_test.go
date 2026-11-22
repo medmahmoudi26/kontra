@@ -875,7 +875,7 @@ func TestRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	flags := func(f ...string) *mcproots.Roots {
-		m, err := mcproots.Parse(f) // as kontra connect reads --roots fs=<dir>, one directory per flag
+		m, err := mcproots.Parse(f) // as kontrad reads --roots fs=<dir>, one directory per flag
 		if err != nil {
 			t.Fatal(err)
 		}

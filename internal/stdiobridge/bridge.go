@@ -1,4 +1,4 @@
-// Package stdiobridge is kontra connect's bridge for --serve mcp:<name>=stdio:<command line>
+// Package stdiobridge is kontrad's bridge for --serve mcp:<name>=stdio:<command line>
 // (spec/tunnel.md §10, spec/relay.md §11.10): the node owns the server process and the gate sees a Streamable
 // HTTP target like any other. It is an in-process http.Handler on tunnel streams and listens on no port.
 //
@@ -107,10 +107,10 @@ type Config struct {
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // CheckEnvName refuses a --env value that is not a variable name (a NAME=value among them: the value always comes
-// from kontra connect's own environment).
+// from kontrad's own environment).
 func CheckEnvName(name string) error {
 	if !envNameRE.MatchString(name) {
-		return fmt.Errorf("--env %q: want a variable name (its value comes from kontra connect's environment)", clip(name))
+		return fmt.Errorf("--env %q: want a variable name (its value comes from kontrad's environment)", clip(name))
 	}
 	return nil
 }
@@ -317,7 +317,7 @@ func (b *Bridge) post(w http.ResponseWriter, r *http.Request, owner any, sid str
 func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, body []byte, m *mcpwire.Message) {
 	if !b.reserve(r.Context()) {
 		b.log.Warn("an initialize is refused: the service is at --max-sessions", "max_sessions", b.cfg.MaxSessions)
-		nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, m.ID, "kontra connect: the stdio service is at its --max-sessions")
+		nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, m.ID, "kontrad: the stdio service is at its --max-sessions")
 		return
 	}
 	id, err := newSessionID()
@@ -325,13 +325,13 @@ func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, b
 		b.mu.Lock()
 		b.reserved--
 		b.mu.Unlock()
-		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontra connect: no session id")
+		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontrad: no session id")
 		return
 	}
 	c, err := b.spawn(owner, id)
 	if err != nil {
 		b.log.Error("the stdio server did not start", "command", b.cfg.Command[0], "err", err)
-		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontra connect: the stdio server did not start")
+		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontrad: the stdio server did not start")
 		return
 	}
 	d, err := c.roots.FromClient(mcpwire.EraLegacy, body, m)
@@ -343,13 +343,13 @@ func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, b
 	st, err := c.register(m)
 	if err != nil {
 		c.shutdown("its initialize could not be forwarded")
-		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontra connect: the stdio server is gone")
+		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontrad: the stdio server is gone")
 		return
 	}
 	defer c.unregister(m, st)
 	if err := c.send(d.Body); err != nil {
 		c.shutdown("its initialize could not be written")
-		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontra connect: the stdio server is gone")
+		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontrad: the stdio server is gone")
 		return
 	}
 	resp, ok := st.await(r.Context())
@@ -359,7 +359,7 @@ func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, b
 			return
 		}
 		c.shutdown("it did not answer its initialize")
-		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontra connect: the stdio server did not answer the initialize")
+		nodeAnswer(w, http.StatusBadGateway, tunnel.NodeTargetUnreachable, m.ID, "kontrad: the stdio server did not answer the initialize")
 		return
 	}
 	if _, isErr := mcpwire.Member(resp, "error"); isErr {
@@ -369,7 +369,7 @@ func (b *Bridge) initialize(w http.ResponseWriter, r *http.Request, owner any, b
 	}
 	if !b.open(c) {
 		c.shutdown("the node is stopping")
-		nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, m.ID, "kontra connect is stopping")
+		nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, m.ID, "kontrad is stopping")
 		return
 	}
 	c.log.Info("stdio MCP session open: one child for it")
@@ -559,7 +559,7 @@ func (b *Bridge) Close() error {
 			return nil
 		}
 		for _, c := range all {
-			c.shutdown("kontra connect is stopping")
+			c.shutdown("kontrad is stopping")
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

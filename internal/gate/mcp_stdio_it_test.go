@@ -106,7 +106,7 @@ func toolText(t *testing.T, body string) (string, bool) {
 }
 
 // stdio_roots through the real gate (M3 WP-05; spec/tunnel.md §10, §16, D173): server-filesystem@1.0.0 over stdio,
-// started with <dirB> and served by an in-process `kontra connect` with --roots fs=<dirA>, behind a gate whose
+// started with <dirB> and served by an in-process `kontrad` with --roots fs=<dirA>, behind a gate whose
 // service denies the write tools. A client that declares roots gets its first tools/call answered in under 2 s;
 // list_allowed_directories names only <dirA>; a file in <dirA> reads; the node's ~/.kontra/identity.key does not;
 // write_file is refused at the gate. The test is skipped, saying why, when npm cannot install the pinned package.

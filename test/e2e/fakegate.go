@@ -26,7 +26,7 @@ import (
 // tunnelgate.Handler on a loopback listener, with an Admitter that admits every proven hello for a fixed set
 // of services and a SessionSink that hands each session to the test. The test then opens streams on the
 // session itself and writes whatever it likes on them: crafted preambles and raw HTTP/1.1 requests a real
-// gate would never send, to check what `kontra connect` does with them (spec/tunnel.md §8.1, §8.2).
+// gate would never send, to check what `kontrad` does with them (spec/tunnel.md §8.1, §8.2).
 type FakeGate struct {
 	URL  string // http://127.0.0.1:<port>: the node's --gate
 	Addr string

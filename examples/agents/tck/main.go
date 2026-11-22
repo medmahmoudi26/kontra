@@ -7,7 +7,7 @@
 //
 // It imports nothing from Kontra and has no Kontra-specific endpoint (examples/README.md). It serves its card at
 // /.well-known/agent-card.json, JSON-RPC at its root and HTTP+JSON under /rest, all under one root URL, so that
-// a gate reaches it as a direct backend (`backend: { a2a: { url } }`) or `kontra connect --serve
+// a gate reaches it as a direct backend (`backend: { a2a: { url } }`) or `kontrad --serve
 // a2a:tck=<root URL>` hosts it through the tunnel.
 //
 //	tck [--host 127.0.0.1] [--port 9996]

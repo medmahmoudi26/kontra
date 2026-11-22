@@ -1,6 +1,6 @@
 # agents/helloworld
 
-The a2a-samples helloworld service, **unmodified**, hosted at a gate through `kontra connect` (the tunnel, M2).
+The a2a-samples helloworld service, **unmodified**, hosted at a gate through `kontrad` (the tunnel, M2).
 It is PRD §18's test for every service-facing change ("can the helloworld sample still run unmodified?") and the
 PRD §14 M2 deliverable "helloworld example through the tunnel".
 
@@ -58,7 +58,7 @@ so a git config that hides untracked files (`status.showUntrackedFiles=no`) cann
 
 ## Through the tunnel (M2)
 
-The gate never connects to the service. `kontra connect`, running next to it, dials the gate once (outbound,
+The gate never connects to the service. `kontrad`, running next to it, dials the gate once (outbound,
 WebSocket), proves its identity key, and from then on the gate sends each request for `hello` over that
 connection; the node forwards it to `http://127.0.0.1:9999` and nowhere else (spec/tunnel.md §8.2).
 
@@ -79,7 +79,7 @@ From the repository root, with a2a-cli v0.3.1 as `a2a` (its install is in
 
 ```sh
 docker compose -f compose.dev.yaml up -d --wait           # Postgres and Temporal
-go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontrad ./cmd/kontrad
 
 ./kontra-gate migrate -f examples/agents/helloworld/kontra.yaml
 export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/agents/helloworld/kontra.yaml --api-key demo)"
@@ -88,9 +88,9 @@ export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/agents/helloworld/kont
 examples/agents/helloworld/run.sh &                                 # the service, on 127.0.0.1:9999
 
 # once the gate answers (curl localhost:8080/healthz): a one-time token for hello, then the node
-./kontra connect --gate http://localhost:8080 --serve a2a:hello=http://127.0.0.1:9999 \
+./kontrad --gate http://localhost:8080 --serve a2a:hello=http://127.0.0.1:9999 \
   --enroll "$(./kontra-gate enroll -f examples/agents/helloworld/kontra.yaml hello)" &
-#  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
+#  kontrad: connected to http://localhost:8080 as k1_… (tenant default, session …)
 #    a2a hello  http://localhost:8080/agents/hello
 
 a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "hi"
@@ -124,7 +124,7 @@ What happens:
   and bearer security added. Like every card of a service that is not `listed`, it needs the API key:
   `curl -H "Authorization: Bearer $KONTRA_API_KEY" http://localhost:8080/agents/hello/.well-known/agent-card.json`.
 - The service speaks only JSON-RPC; a caller may use either binding at the gate, which relays it as JSON-RPC.
-- The service keeps nothing for Kontra: no Kontra import, no extra endpoint, no changed file. `kontra connect`
+- The service keeps nothing for Kontra: no Kontra import, no extra endpoint, no changed file. `kontrad`
   rewrites `Host` to `127.0.0.1:9999` and strips `Origin` and `Forwarded`/`X-Forwarded-*`, so the sample sees a
   local client.
 

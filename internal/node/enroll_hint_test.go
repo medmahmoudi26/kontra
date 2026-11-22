@@ -169,17 +169,17 @@ func TestAddServiceHint(t *testing.T) {
 	}{
 		{[]string{"scanner"}, true, "to add scanner to this node, get an enrollment token that names it (Kontra Cloud: " +
 			"the console's Network page, the node's Add a service, or Add a node naming only scanner; a self-hosted gate: " +
-			"kontra-gate enroll scanner, once its services: has it), then run kontra connect again with --enroll <token> " +
+			"kontra-gate enroll scanner, once its services: has it), then run kontrad again with --enroll <token> " +
 			"and every --serve flag: the node's key keeps the services it is already enrolled for; until then, the same " +
 			"command without --serve scanner serves the others"},
 		{[]string{"scanner", "fs"}, true, "to add scanner and fs to this node, get an enrollment token that names them " +
 			"(Kontra Cloud: the console's Network page, the node's Add a service, or Add a node naming only scanner and fs; " +
-			"a self-hosted gate: kontra-gate enroll <service> for each, once its services: has them), then run kontra " +
-			"connect again with --enroll <token> and every --serve flag: the node's key keeps the services it is already " +
+			"a self-hosted gate: kontra-gate enroll <service> for each, once its services: has them), then run kontrad " +
+			"again with --enroll <token> and every --serve flag: the node's key keeps the services it is already " +
 			"enrolled for; until then, the same command without their --serve flags serves the others"},
 		{[]string{"scanner"}, false, "to add scanner to this node, get an enrollment token that names it (Kontra Cloud: " +
 			"the console's Network page, the node's Add a service, or Add a node naming only scanner; a self-hosted gate: " +
-			"kontra-gate enroll scanner, once its services: has it), then run kontra connect again with --enroll <token> " +
+			"kontra-gate enroll scanner, once its services: has it), then run kontrad again with --enroll <token> " +
 			"and every --serve flag: the node's key keeps the services it is already enrolled for"},
 	} {
 		if got := addServiceHint(c.names, c.others); got != c.want {

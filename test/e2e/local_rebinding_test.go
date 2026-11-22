@@ -16,7 +16,7 @@ import (
 	"kontra.sh/kontra/internal/mcprelay/mcptest"
 )
 
-// Calling at the binary level (spec/tunnel.md §9, §12; relay.md §2.3; D34, D56): kontra connect with --api-key on a
+// Calling at the binary level (spec/tunnel.md §9, §12; relay.md §2.3; D34, D56): kontrad with --api-key on a
 // loopback --listen, its calling session on replica B, the services hosted by another node on replica A.
 
 // callingSetup starts a host node serving echo (A2A, the echo service) and dbl (MCP, the Go double) on replica A, and

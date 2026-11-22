@@ -367,7 +367,7 @@ func (c *Config) validateBackends(v *validator) {
 // validateSigningKey checks signing_key (spec §3, D166): file:<path> of a PEM file of ECDSA P-256 private keys,
 // read at start (a KMS reference is Cloud's, M5). A gate whose public_url is not a loopback origin and that
 // serves A2A services from this file needs one: their cards are signed with it, and an unsigned card is one
-// `kontra connect` refuses to serve locally (spec/tunnel.md §9). On loopback the gate signs with a key minted
+// `kontrad` refuses to serve locally (spec/tunnel.md §9). On loopback the gate signs with a key minted
 // at start (one replica, development) and logs it. A gate that learns of A2A services only from rows its
 // operator writes (spec §13.5) leaves those rows out of its registry instead (internal/gate refusable).
 func (c *Config) validateSigningKey(v *validator, pub *url.URL) {

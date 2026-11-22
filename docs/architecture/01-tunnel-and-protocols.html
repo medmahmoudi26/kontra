@@ -80,7 +80,7 @@ a{color:var(--data)}
 <header class="top">
   <div class="eyebrow">Kontra · v4 architecture note · working draft</div>
   <h1>One tunnel for A2A agents and MCP servers</h1>
-  <p class="lede">A node runs <code>kontra connect</code>. It serves what is on its localhost to a gate it chose, and calls what others serve through the same gate. The gate adds durable tasks, identity, policy and sealing. Nothing on the node listens on a public port.</p>
+  <p class="lede">A node runs <code>kontrad</code>. It serves what is on its localhost to a gate it chose, and calls what others serve through the same gate. The gate adds durable tasks, identity, policy and sealing. Nothing on the node listens on a public port.</p>
   <div class="meta">
     <span><b>supersedes</b> v4 PRD §3–4 (roles, topology), §6 (tunnel target), §11 (two sidecars)</span>
     <span><b>unchanged</b> §5, §7–10, §12–13</span>
@@ -93,13 +93,13 @@ a{color:var(--data)}
 <h2>1. The gateway story</h2>
 <p>Three ideas, in the order they were settled.</p>
 <p><b>The gate is the product.</b> It is an A2A server (and, now, an MCP server) toward anyone who calls, and an A2A/MCP client toward the servers enrolled behind it. It owns the task record and the policy. It never executes code, never holds a key that opens a sealed part, never opens a connection to a node.</p>
-<p><b>One node type.</b> There is no caller sidecar and no service sidecar. Every node runs one <code>kontra connect</code>, which dials out to a gate and does two things over that single connection: forwards the gate's inbound requests to servers on its localhost (hosting), and exposes the gate's catalog on its localhost so local clients can call out (calling). A node that only calls has no <code>--serve</code>; a node that only hosts has local clients that never use port 7777. Same binary, same console, direction is a column.</p>
+<p><b>One node type.</b> There is no caller sidecar and no service sidecar. Every node runs one <code>kontrad</code>, which dials out to a gate and does two things over that single connection: forwards the gate's inbound requests to servers on its localhost (hosting), and exposes the gate's catalog on its localhost so local clients can call out (calling). A node that only calls has no <code>--serve</code>; a node that only hosts has local clients that never use port 7777. Same binary, same console, direction is a column.</p>
 <p><b>Membership is which gate you dial.</b> <code>gateway.kontra.sh</code> is the marketplace: the public, multi-tenant gate with a catalog and, in Cloud, escrow. A team's own gate is the same open-source binary with one tenant, no catalog and no money code. A node can hold several gate connections at once with one identity key enrolled at each.</p>
 </section>
 
 <figure>
 <div class="fig">
-<svg viewBox="0 0 1040 400" fill="currentColor" role="img" aria-label="Topology: two nodes each running kontra connect dial out to a gate; each node hosts A2A agents and MCP servers on localhost and exposes the gate's catalog on localhost:7777 for its own clients; the gate holds Postgres and Temporal; the public gate is the marketplace and a team gate is the same binary." style="color:var(--fg)">
+<svg viewBox="0 0 1040 400" fill="currentColor" role="img" aria-label="Topology: two nodes each running kontrad dial out to a gate; each node hosts A2A agents and MCP servers on localhost and exposes the gate's catalog on localhost:7777 for its own clients; the gate holds Postgres and Temporal; the public gate is the marketplace and a team gate is the same binary." style="color:var(--fg)">
 <defs>
 <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
 <marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--accent)"/></marker>
@@ -108,7 +108,7 @@ a{color:var(--data)}
 <rect x="20" y="40" width="300" height="320" rx="8" fill="none" stroke="currentColor" stroke-dasharray="4 4"/>
 <text x="32" y="62" font-weight="500">node A · a laptop</text>
 <rect x="40" y="80" width="260" height="56" rx="6" fill="var(--bg)" stroke="currentColor"/>
-<text x="52" y="102" font-weight="500">kontra connect</text>
+<text x="52" y="102" font-weight="500">kontrad</text>
 <text x="52" y="122" fill="var(--fg-2)">identity key · console · intercept</text>
 <rect x="40" y="160" width="120" height="48" rx="6" fill="var(--bg)" stroke="currentColor"/>
 <text x="52" y="180">A2A agent</text><text x="52" y="198" fill="var(--fg-2)">:9999</text>
@@ -142,7 +142,7 @@ a{color:var(--data)}
 <rect x="720" y="40" width="300" height="320" rx="8" fill="none" stroke="currentColor" stroke-dasharray="4 4"/>
 <text x="732" y="62" font-weight="500">node B · a VPS</text>
 <rect x="740" y="80" width="260" height="56" rx="6" fill="var(--bg)" stroke="currentColor"/>
-<text x="752" y="102" font-weight="500">kontra connect</text>
+<text x="752" y="102" font-weight="500">kontrad</text>
 <text x="752" y="122" fill="var(--fg-2)">same binary, same console</text>
 <rect x="740" y="160" width="260" height="48" rx="6" fill="var(--bg)" stroke="currentColor"/>
 <text x="752" y="180">MCP server</text><text x="752" y="198" fill="var(--fg-2)">:8000 streamable http</text>
@@ -184,7 +184,7 @@ a{color:var(--data)}
 <!-- lifelines -->
 <g font-weight="500">
 <text x="120" y="30" text-anchor="middle">localhost server</text>
-<text x="360" y="30" text-anchor="middle">kontra connect</text>
+<text x="360" y="30" text-anchor="middle">kontrad</text>
 <text x="680" y="30" text-anchor="middle">gate</text>
 <text x="920" y="30" text-anchor="middle">client</text>
 </g>
@@ -232,7 +232,7 @@ a{color:var(--data)}
 
 <section class="col">
 <h3>Identity</h3>
-<p>On first run <code>kontra connect</code> generates one X25519 key at <code>~/.kontra/identity.key</code> (0600). The same key proves possession in the handshake and is published as a sealing recipient for every service the node hosts. Enrollment binds a <code>key_id</code> to a service name at one gate, once, using a one-time token (<code>kontra enroll &lt;service&gt;</code> on a self-hosted gate) or the account's API key (Cloud). The binding lives in that gate's <code>tunnel_keys</code> table, so one key can be enrolled at several gates and revoked at each independently. When a node calls, it additionally mints a per-job X25519 key at send time; that key is what replies are sealed to, and it is deleted when the task is terminal plus any review window.</p>
+<p>On first run <code>kontrad</code> generates one X25519 key at <code>~/.kontra/identity.key</code> (0600). The same key proves possession in the handshake and is published as a sealing recipient for every service the node hosts. Enrollment binds a <code>key_id</code> to a service name at one gate, once, using a one-time token (<code>kontra enroll &lt;service&gt;</code> on a self-hosted gate) or the account's API key (Cloud). The binding lives in that gate's <code>tunnel_keys</code> table, so one key can be enrolled at several gates and revoked at each independently. When a node calls, it additionally mints a per-job X25519 key at send time; that key is what replies are sealed to, and it is deleted when the task is terminal plus any review window.</p>
 <h3>Several replicas, several nodes</h3>
 <p>Several nodes may enroll for one service (replicas). A new task picks a connected session round-robin and stays sticky to it for its life. Under several gate replicas, the replica holding the socket is the only one that can use it; Temporal routes the dispatch to that replica through a per-replica task queue (next section). If that socket dies mid-task, the task fails with <code>tunnel_lost</code> or retries per policy; the node never learns which tasks it was serving, because it holds no task state.</p>
 </section>
@@ -386,7 +386,7 @@ a{color:var(--data)}
 <rect x="80" y="328" width="200" height="36" rx="6" fill="var(--bg)" stroke="currentColor"/>
 <text x="180" y="351" text-anchor="middle">every Part · stock clients fine</text>
 <rect x="420" y="328" width="540" height="36" rx="6" fill="var(--bg)" stroke="currentColor" stroke-dasharray="3 3"/>
-<text x="690" y="351" text-anchor="middle" fill="var(--fg-2)">arguments and content · only when both ends run kontra connect (stock MCP clients see no envelope)</text>
+<text x="690" y="351" text-anchor="middle" fill="var(--fg-2)">arguments and content · only when both ends run kontrad (stock MCP clients see no envelope)</text>
 <!-- bottom -->
 <rect x="80" y="380" width="940" height="30" rx="6" fill="var(--accent-soft)" stroke="none"/>
 <text x="550" y="400" text-anchor="middle" fill="var(--accent-ink)" font-size="11">one tunnel · one yamux stream per HTTP exchange · the node forwards to a fixed localhost target in every column</text>
@@ -430,16 +430,16 @@ a{color:var(--data)}
 
 <h3>What a node runs</h3>
 <pre><code><span class="c"># host one A2A agent and one stdio MCP server, call through localhost:7777</span>
-kontra connect --gate https://gateway.kontra.sh \
+kontrad --gate https://gateway.kontra.sh \
   --serve a2a:hello=http://localhost:9999 \
   --serve mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem ~/docs \
   --console          <span class="c"># http://localhost:7778</span>
 
 <span class="c"># a second gate, same identity key, enrolled separately</span>
-kontra connect --gate https://gate.team.internal --serve mcp:fs=http://localhost:8000
+kontrad --gate https://gate.team.internal --serve mcp:fs=http://localhost:8000
 
 <span class="c"># only calling: no --serve; the catalog appears on localhost:7777</span>
-kontra connect --gate https://gateway.kontra.sh</code></pre>
+kontrad --gate https://gateway.kontra.sh</code></pre>
 
 <h3>What a gate operator writes</h3>
 <pre><code>listen: :8080
@@ -491,7 +491,7 @@ a2a send http://localhost:7777/agents/acme/hello "hi"
 <tr><td>§8 Sealing</td><td>Key table collapses to: one identity key per node (handshake + hosting recipient), one per-job key per job. Add the MCP sealing scope (<code>arguments</code>, <code>content</code>) and its both-ends-nodes condition.</td></tr>
 <tr><td>§9 Extensions</td><td>Add the MCP mirrors: escrow state under <code>_meta["kontra.escrow"]</code>; sealed as a declared server capability.</td></tr>
 <tr><td>§10 Data model</td><td><code>agents</code> → <code>services(kind, …)</code>; add <code>mcp_sessions(client_sid, upstream_sid, tunnel_session, service)</code>; <code>tasks.protocol</code> column.</td></tr>
-<tr><td>§11 CLI</td><td><code>kontra tunnel</code> and <code>kontra proxy</code> merge into <code>kontra connect</code>; <code>--console</code> on it; <code>kontra dev</code> unchanged.</td></tr>
+<tr><td>§11 CLI</td><td><code>kontra tunnel</code> and <code>kontra proxy</code> merge into <code>kontrad</code>; <code>--console</code> on it; <code>kontra dev</code> unchanged.</td></tr>
 <tr><td>§12 Security</td><td>Add tests: <code>mcp_session_cross_node</code> (session id from node A presented to node B's service → 404), <code>mcp_tool_denied</code> (denied tool absent from <code>tools/list</code>, call rejected before dispatch), <code>mcp_task_resume</code> (gate replica killed during a task-augmented call; <code>tasks/result</code> still returns).</td></tr>
 <tr><td>§13 OSS vs Cloud</td><td>MCP hosting is in both. Listings gain <code>kind</code>; escrow applies only to task-augmented MCP calls.</td></tr>
 <tr><td>§15 Acceptance</td><td>README demo adds one line: a stdio filesystem server hosted and called through the gate from a stock MCP client.</td></tr>
@@ -499,7 +499,7 @@ a2a send http://localhost:7777/agents/acme/hello "hi"
 
 <h2>8. Open questions</h2>
 <ul>
-<li>Name of the merged subcommand: <code>kontra connect</code> (used here) or <code>kontra node</code>.</li>
+<li>Name of the merged subcommand: <code>kontrad</code> (used here) or <code>kontra node</code>.</li>
 <li>Should the gate advertise MCP Tasks to clients when the upstream does not, running the task-augmented shape itself over a plain upstream call? It would make every tool call durable, at the cost of the gate holding results. Default here: no, mirror the upstream.</li>
 <li>Session affinity on tunnel loss: re-initialize (spec-correct, loses in-flight state) or hold the client session for a grace period while the node reconnects with the same key. Default here: 404, let the client re-initialize.</li>
 <li>Whether the per-tool <code>tools:</code> list belongs in <code>allow:</code> syntax (<code>key:team-*:tools/read_*</code>) or stays a sibling key as drawn.</li>

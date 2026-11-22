@@ -17,7 +17,7 @@ const shellOperators = "|&;<>()$`"
 //   - Blanks (space, tab, newline) separate words; a backslash-newline joins lines.
 //   - '…' keeps everything up to the next single quote as it is; "…" does too, except that a backslash before $, `,
 //     ", \ or a newline escapes it; outside quotes a backslash escapes the next character. "" is an empty word.
-//   - A word that starts with an unquoted ~/ starts with home instead of ~ (home is kontra connect's HOME).
+//   - A word that starts with an unquoted ~/ starts with home instead of ~ (home is kontrad's HOME).
 //   - Nothing else is expanded, and nothing runs a shell. An unquoted |, &, ;, <, >, (, ), $ or `, or a # at the
 //     start of a word, is refused rather than passed on literally: quote it, or run a script.
 //

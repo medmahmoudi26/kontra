@@ -276,7 +276,7 @@ func upstreamFailures(t *testing.T, h *Harness, task a2a.TaskID, n int, reason s
 // URL and --api-key the harness's caller A key (kontra seal reads no key from the environment), and returns its stdout.
 func kontraSeal(t *testing.T, h *Harness, home string, args ...string) []byte {
 	t.Helper()
-	bin, err := nodeBinary()
+	bin, err := kontraBinary()
 	if err != nil {
 		t.Fatal(err)
 	}

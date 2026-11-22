@@ -299,7 +299,7 @@ func TestDialHeaders(t *testing.T) {
 	if !strings.Contains(string(h.Raw), h.Enroll[0]) || !strings.Contains(string(h.Raw), h.Auth) {
 		t.Error("the credentials are not in the hello")
 	}
-	if UserAgent("4.0.0") != "kontra/4.0.0 ("+runtimeOSArch()+")" {
+	if UserAgent("4.0.0") != "kontrad/4.0.0 ("+runtimeOSArch()+")" {
 		t.Errorf("UserAgent = %q", UserAgent("4.0.0"))
 	}
 }

@@ -6,7 +6,7 @@ the two architecture notes correct it after the prototypes of 21–24 October 20
 | Document | Date | What it settles |
 |---|---|---|
 | [`prd-v4.md`](prd-v4.md) | 21 Oct | Kontra as a durable A2A gateway on a2a-go v2 and Temporal. Relay semantics (ids, attempts, stickiness, retries, cancel), sealing envelope, the three extensions, data model, security model, OSS vs Cloud, milestones M0–M5, acceptance tests, kill list for v3. |
-| [`architecture/01-tunnel-and-protocols.html`](architecture/01-tunnel-and-protocols.html) | 24 Oct | **One node type**: no caller sidecar and no service sidecar, one `kontra connect` that hosts and calls. **Membership is which gate you dial.** One identity key per node, enrolled per gate, plus per-job keys. **MCP servers tunnel next to A2A agents**: `/mcp/{name}`, session affinity for plain calls, the same `TaskLifecycle` for task-augmented calls (MCP Tasks, 2025-11-25). Per-tool allow lists. No Kontra wire protocol; standard bindings only. `services:` replaces `agents:`. |
+| [`architecture/01-tunnel-and-protocols.html`](architecture/01-tunnel-and-protocols.html) | 24 Oct | **One node type**: no caller sidecar and no service sidecar, one `kontrad` that hosts and calls. **Membership is which gate you dial.** One identity key per node, enrolled per gate, plus per-job keys. **MCP servers tunnel next to A2A agents**: `/mcp/{name}`, session affinity for plain calls, the same `TaskLifecycle` for task-augmented calls (MCP Tasks, 2025-11-25). Per-tool allow lists. No Kontra wire protocol; standard bindings only. `services:` replaces `agents:`. |
 | [`architecture/02-deployment-topology.html`](architecture/02-deployment-topology.html) | 24 Oct | **Only the CLI runs on a user's machine.** Gates are clusters: `gateway.kontra.sh` (Cloud) or a team's own (Helm or a three-container compose). `kontra dev` is deleted; anonymous ephemeral sessions on the public gate are how people try it. One Go module, two binaries: `kontra` and `kontra-gate`. |
 
 ## Specifications (M0, 25 Oct; amended by each milestone)
@@ -31,7 +31,7 @@ there (M4's, D268 onward under the M4 headings, were numbered after M3's review 
 | §8 Sealing | Key table collapses to identity key + per-job key; MCP scope (`arguments`, `content`), both-ends-nodes condition | — |
 | §9 Extensions | MCP mirrors: `_meta["kontra.escrow"]` (escrow withdrawn, D351), sealed as a server capability | — |
 | §10 Data model | `agents` → `services(kind, …)`; `mcp_sessions`; `tasks.protocol` | Embedded-Temporal paragraph and localhost-only rule removed; anonymous tenants with expiry |
-| §11 CLI | `kontra tunnel` + `kontra proxy` → `kontra connect`; `--console` on it | Two tables: `kontra` (connect, console, login, seal, publish) and `kontra-gate` (serve, enroll, migrate); `kontra dev` deleted |
+| §11 CLI | `kontra tunnel` + `kontra proxy` → `kontrad`; `--console` on it | Two tables: `kontra` (connect, console, login, seal, publish) and `kontra-gate` (serve, enroll, migrate); `kontra dev` deleted |
 | §12 Security | Tests `mcp_session_cross_node`, `mcp_tool_denied`, `mcp_task_resume` | Anonymous-session abuse controls, test `anon_limits` |
 | §13 OSS vs Cloud | MCP hosting in both; listings gain `kind`; escrow only on task-shaped MCP calls (MCP listings withdrawn, D350; escrow, D351) | Cloud gains anonymous and free tiers; OSS gains Helm/compose team gate |
 | §14 Milestones | — | M4 → anonymous sessions + team-gate compose (built: D268; the compose came with M3, D168) |

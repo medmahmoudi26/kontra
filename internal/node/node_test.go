@@ -307,7 +307,7 @@ func (tn *testNode) result(t *testing.T, d time.Duration) error {
 func (tn *testNode) welcomed(t *testing.T) {
 	t.Helper()
 	eventually(t, 10*time.Second, "the node's session open", func() bool {
-		return strings.Contains(tn.out.String(), "kontra connect: connected to")
+		return strings.Contains(tn.out.String(), "kontrad: connected to")
 	})
 }
 
@@ -703,7 +703,7 @@ func TestRunRequireChannelBinding(t *testing.T) {
 }
 
 // First run: ~/.kontra (0700) holds the new identity.key and the credentials file, both 0600. A key file
-// readable by others stops kontra connect, as does such a credentials file (§2.1, §2.4).
+// readable by others stops kontrad, as does such a credentials file (§2.1, §2.4).
 func TestNewFiles(t *testing.T) {
 	home := t.TempDir()
 	rec := newRecorder(t)
@@ -810,7 +810,7 @@ func TestCredentialsStayWithTheirOrigin(t *testing.T) {
 	}
 }
 
-// Two `kontra connect` with different keys under one HOME, at one gate (§11: several nodes serve one
+// Two `kontrad` with different keys under one HOME, at one gate (§11: several nodes serve one
 // service, each with its own key): a token given to A is never sent in B's hello, B's lost-welcome probe
 // confirms only B's own tokens, and neither erases the other's records (M2 WP-06 review: the waiting
 // tokens were the origin's, so B sent A's token, and B's probe recorded it consumed).
@@ -1084,7 +1084,7 @@ func TestRotate(t *testing.T) {
 	}
 }
 
-// `kontra connect --rotate --enroll <token>`: the token, kept under the key the node started with, is
+// `kontrad --rotate --enroll <token>`: the token, kept under the key the node started with, is
 // sent with the new key, alongside rotate_from (the tokens are the node's, by its key file, not a
 // replaced key's).
 func TestRotateWithEnroll(t *testing.T) {
@@ -1164,7 +1164,7 @@ func TestRotateLostWelcome(t *testing.T) {
 	})
 }
 
-// Another `kontra connect` (another gate) rotates the shared key file: the running node dials a session of
+// Another `kontrad` (another gate) rotates the shared key file: the running node dials a session of
 // the new key with rotate_from at once, while the old key's session keeps serving; when the gate ends the
 // old key's overlap ({"t": "revoked"} on that session), only that session closes.
 func TestRotationByAnotherProcess(t *testing.T) {
@@ -1220,7 +1220,7 @@ func TestRotatedKeyBindingRevocationKeepsTheNewKeysService(t *testing.T) {
 	tn.run(t)
 	g.adm.next(t)
 	s1 := g.session(t)
-	if _, err := nodekey.Rotate(cfg.KeyPath, time.Now()); err != nil { // another kontra connect rotated the key file
+	if _, err := nodekey.Rotate(cfg.KeyPath, time.Now()); err != nil { // another kontrad rotated the key file
 		t.Fatal(err)
 	}
 	if r := g.adm.next(t); r.Hello.RotateFrom == nil {
@@ -1254,7 +1254,7 @@ func TestRotatedKeyBindingRevocationKeepsTheNewKeysService(t *testing.T) {
 	g.session(t)
 }
 
-// Another `kontra connect` rotates the shared key file, and the gate revokes the old key before this process's
+// Another `kontrad` rotates the shared key file, and the gate revokes the old key before this process's
 // maintain tick has seen the rotation (rotate after a leak, then revoke the old key: D125, D128). The node
 // does not stop: it closes the old key's session and dials the new key's at once (M2 review, tunnel-spec-2:
 // it compared with the key of its last dial and ended Run with ErrRevoked).
@@ -1626,7 +1626,7 @@ func TestCredentialsFile(t *testing.T) {
 	}
 }
 
-// Two `kontra connect` with different keys under one HOME, at one gate (§11: several nodes serve one
+// Two `kontrad` with different keys under one HOME, at one gate (§11: several nodes serve one
 // service, each with its own key), each holding the copy it read at start: a change by one never erases
 // the other's (M2 WP-06 review). Before Update, Save wrote the caller's whole copy of the origin's entry, so
 // B's save of its stale copy erased A's Consumed record, and A's restart with the same --enroll then sent a
@@ -1656,7 +1656,7 @@ func TestCredentialsStaleCopiesAtOneOrigin(t *testing.T) {
 	}
 }
 
-// envCredsHelper makes the test binary a `kontra connect` stand-in for TestCredentialsTwoProcesses.
+// envCredsHelper makes the test binary a `kontrad` stand-in for TestCredentialsTwoProcesses.
 const envCredsHelper = "KONTRA_TEST_CREDENTIALS_HELPER"
 
 // Two processes change one origin's entry at once, each its own key's tokens and the shared Consumed list,
@@ -1768,18 +1768,18 @@ func TestRunSaysItReconnects(t *testing.T) {
 	if err := s1.Close("the test closes the session"); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, 15*time.Second, "the node back", func() bool { return strings.Contains(tn.out.String(), "kontra connect: back after") })
+	eventually(t, 15*time.Second, "the node back", func() bool { return strings.Contains(tn.out.String(), "kontrad: back after") })
 	out := tn.out.String()
 	for _, want := range []string{
-		"kontra connect: lost the gate " + g.url.Scheme + "://" + g.url.Host + "; reconnecting at once (tasks in flight wait for this node)\n",
-		"kontra connect: reconnect attempt 1 failed; next at once\n",
+		"kontrad: lost the gate " + g.url.Scheme + "://" + g.url.Host + "; reconnecting at once (tasks in flight wait for this node)\n",
+		"kontrad: reconnect attempt 1 failed; next at once\n",
 		"(attempt 2); tasks in flight resume\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("the node's output lacks %q:\n%s", want, out)
 		}
 	}
-	if n := strings.Count(out, "kontra connect: connected to"); n != 2 {
+	if n := strings.Count(out, "kontrad: connected to"); n != 2 {
 		t.Fatalf("%d welcome lines, want 2:\n%s", n, out)
 	}
 	if n := strings.Count(out, "a2a hello  https://gate.example/agents/hello"); n != 1 {

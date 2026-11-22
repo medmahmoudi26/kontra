@@ -99,7 +99,7 @@ ap2-merchant [--host 127.0.0.1] [--port 9993] [--key merchant.pem]
 ```
 
 It serves its card at `/.well-known/agent-card.json`, JSON-RPC at its root (`http://127.0.0.1:9993`) and HTTP+JSON
-under `/rest`, all under one root URL, which is what `kontra connect --serve` needs. `--key` is a PEM P-256 private
+under `/rest`, all under one root URL, which is what `kontrad --serve` needs. `--key` is a PEM P-256 private
 key, SEC 1 or PKCS #8 (`openssl ecparam -name prime256v1 -genkey -noout -out merchant.pem`). `--port 0` takes any
 free port; the first line on standard output is the root URL; `SIGINT` or `SIGTERM` stops it.
 
@@ -130,14 +130,14 @@ repository's `compose.dev.yaml`) with one tunnel service, `ap2-merchant`. From t
 
 ```sh
 docker compose -f compose.dev.yaml up -d --wait
-go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra && go build -o ap2-merchant ./examples/agents/ap2-merchant
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontrad ./cmd/kontrad && go build -o ap2-merchant ./examples/agents/ap2-merchant
 
 ./kontra-gate migrate -f examples/agents/ap2-merchant/kontra.yaml
 export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/agents/ap2-merchant/kontra.yaml --api-key demo)"
 ./kontra-gate serve -f examples/agents/ap2-merchant/kontra.yaml &
 
 ./ap2-merchant --key merchant.pem &                         # http://127.0.0.1:9993
-./kontra connect --gate http://localhost:8080 --serve a2a:ap2-merchant=http://127.0.0.1:9993 \
+./kontrad --gate http://localhost:8080 --serve a2a:ap2-merchant=http://127.0.0.1:9993 \
   --enroll "$(./kontra-gate enroll -f examples/agents/ap2-merchant/kontra.yaml ap2-merchant)" &
 #    a2a ap2-merchant  http://localhost:8080/agents/ap2-merchant
 ```
@@ -146,7 +146,7 @@ Then the same two calls as above against `http://localhost:8080/agents/ap2-merch
 `-H "Authorization: Bearer $KONTRA_API_KEY"`. The gate's card at `/agents/ap2-merchant/.well-known/agent-card.json`
 carries the AP2 entry as the merchant wrote it, `required` and `params.roles` included; the response echoes the
 activation in `A2A-Extensions`; the checkout and the mandate cross the gate unchanged. With `kontra-sealed.yaml`
-(and `kontra connect` on both sides, examples/sealing/README.md) every part, the mandate included, is sealed end to
+(and `kontrad` on both sides, examples/sealing/README.md) every part, the mandate included, is sealed end to
 end: the gate's task log holds only the sealed envelope.
 
 `/mcp`'s `send_message` cannot carry AP2: it activates no extension of the service's (D328), and this merchant's card

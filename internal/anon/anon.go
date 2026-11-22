@@ -6,7 +6,7 @@
 // transaction, under its row lock on the key. Open creates (or finds again, for the same key before expiry) a tenant
 // anon-<16 lowercase hex> of kind anonymous with expires_at and created_from (the client's IPv4 /24 or IPv6 /48,
 // never the address), and the declared services under it with allow [org:anon-…], plus anonymous for those the hello
-// lists in public (kontra connect --public). They are never listed and never in search. A key of an ended anonymous
+// lists in public (kontrad --public). They are never listed and never in search. A key of an ended anonymous
 // tenant opens a new tenant with a new slug: the key moves (MoveKey), it is never revoked by expiry.
 //
 // Ten minutes before the end the gate sends {"t": "expiring"} (internal/tunnelgate's per-session timer); at the end

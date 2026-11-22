@@ -37,7 +37,7 @@ booking [--host 127.0.0.1] [--port 9998] [--binding both|jsonrpc|http+json]
 ```
 
 It serves its card at `/.well-known/agent-card.json`, JSON-RPC at its root (`http://127.0.0.1:9998`) and
-HTTP+JSON under `/rest`, all under one root URL, which is what `kontra connect --serve` needs (an M2 node
+HTTP+JSON under `/rest`, all under one root URL, which is what `kontrad --serve` needs (an M2 node
 hosts an agent at its root URL only). `--binding` narrows both the routes and the card; with both, a gate uses
 JSON-RPC. `--port 0` takes any free port. The first line on standard output is the root URL; `SIGINT` or
 `SIGTERM` stops it. `--host 0.0.0.0` listens on every interface (in a container); the card then still names
@@ -74,16 +74,16 @@ and Temporal on `localhost:7233`, which the repository's `compose.dev.yaml` star
 
 ```sh
 docker compose -f compose.dev.yaml up -d --wait
-go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra && go build -o booking ./examples/agents/booking
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontrad ./cmd/kontrad && go build -o booking ./examples/agents/booking
 
 ./kontra-gate migrate -f examples/agents/booking/kontra.yaml
 export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/agents/booking/kontra.yaml --api-key demo)"
 ./kontra-gate serve -f examples/agents/booking/kontra.yaml &
 
 ./booking &                                                      # http://127.0.0.1:9998
-./kontra connect --gate http://localhost:8080 --serve a2a:booking=http://127.0.0.1:9998 \
+./kontrad --gate http://localhost:8080 --serve a2a:booking=http://127.0.0.1:9998 \
   --enroll "$(./kontra-gate enroll -f examples/agents/booking/kontra.yaml booking)" &
-#  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
+#  kontrad: connected to http://localhost:8080 as k1_… (tenant default, session …)
 #    a2a booking  http://localhost:8080/agents/booking
 
 a2a send -a http://localhost:8080/agents/booking --auth "Bearer $KONTRA_API_KEY" "a table for two"
@@ -107,8 +107,8 @@ A task waiting for its date has no dispatch running at the gate, so a cancel is 
 | The situation | `a2a task cancel -a http://localhost:8080/agents/booking --auth … <task id>` |
 |---|---|
 | node and agent up | The gate forwards `CancelTask` through the node; the task ends `canceled` |
-| `kontra connect` up, the agent stopped | `Error: … the service could not be reached to cancel the task` (`TaskNotCancelableError`). The node answered `502 target_unreachable`: the cancel was **not delivered**, and the task **stays `input-required`**, unchanged (spec/relay.md §8) |
-| `kontra connect` gone (killed, or its connection lost) | The task ends `failed` with `kontra.failure: tunnel_lost`: the session that holds the upstream task is gone, so nothing could reach it again (M2's resolution of spec/relay.md §8's "session gone" row) |
+| `kontrad` up, the agent stopped | `Error: … the service could not be reached to cancel the task` (`TaskNotCancelableError`). The node answered `502 target_unreachable`: the cancel was **not delivered**, and the task **stays `input-required`**, unchanged (spec/relay.md §8) |
+| `kontrad` gone (killed, or its connection lost) | The task ends `failed` with `kontra.failure: tunnel_lost`: the session that holds the upstream task is gone, so nothing could reach it again (M2's resolution of spec/relay.md §8's "session gone" row) |
 
 Only a lost session fails a task `tunnel_lost`; an agent that is down behind a live node does not. The same
 holds for a reply: with the session gone (the node killed, even if it has reconnected since with a new session),
@@ -116,7 +116,7 @@ the reply ends the task `failed: tunnel_lost` without reaching any agent. In thi
 forgets its tasks when it restarts, so a reply to a task it held before its restart ends `failed:
 upstream_error` ("task not found"): that is the agent's own answer, relayed.
 
-Restart `kontra connect` with the same command, `--enroll` included: the token was recorded as used in
+Restart `kontrad` with the same command, `--enroll` included: the token was recorded as used in
 `~/.kontra/credentials` and is not sent again. Keep that file next to `~/.kontra/identity.key` (the same
 persistent volume in a container).
 

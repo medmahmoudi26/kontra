@@ -157,7 +157,7 @@ func (c *Console) servedA2A(ctx context.Context, name string) (*served, error) {
 	}
 	if len(raw) == 0 {
 		return nil, fail(http.StatusServiceUnavailable, "service_unavailable",
-			"the gate has no card of this agent yet: is its node connected (kontra connect)?")
+			"the gate has no card of this agent yet: is its node connected (kontrad)?")
 	}
 	s.raw = raw
 	if err := json.Unmarshal(raw, &s.card); err != nil {

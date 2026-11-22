@@ -24,11 +24,11 @@ service it is sealed for, so a gate cannot deliver it to another service of the 
 
 The gate is `examples/agents/hello-exec/kontra-sealed.yaml` (`sealed: true` on a tunnel service; a sealed service
 needs a tunnel backend, D91, and an upstream card with an A2A 1.0 interface, D165). The service is hello-exec's. Two
-`kontra connect` processes play the two nodes; each has its own identity key, so each gets its own `HOME`.
+`kontrad` processes play the two nodes; each has its own identity key, so each gets its own `HOME`.
 
 ```sh
 docker compose -f compose.dev.yaml up -d --wait
-go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontrad ./cmd/kontrad && go build -o kontra ./cmd/kontra
 CFG=examples/agents/hello-exec/kontra-sealed.yaml
 ./kontra-gate migrate -f $CFG
 export KONTRA_API_KEY="$(./kontra-gate enroll -f $CFG --api-key demo)"
@@ -37,12 +37,12 @@ export KONTRA_API_KEY="$(./kontra-gate enroll -f $CFG --api-key demo)"
 examples/agents/hello-exec/run.sh &                        # the service on 127.0.0.1:9999
 
 # The hosting node: enrolled for hello, so its key is one of the service's recipients; it only hosts (--listen off).
-HOME=/tmp/service ./kontra connect --gate http://localhost:8080 --listen off \
+HOME=/tmp/service ./kontrad --gate http://localhost:8080 --listen off \
   --enroll "$(./kontra-gate enroll -f $CFG hello)" --serve a2a:hello=http://127.0.0.1:9999 &
 
 # The calling node: it calls with the API key, and seals for its local clients on 127.0.0.1:7777.
-HOME=/tmp/caller ./kontra connect --gate http://localhost:8080 --api-key "$KONTRA_API_KEY" &
-#  -> kontra connect: pins: hello at http://localhost:8080 first seen: sealed true, recipients k1_…, service keys none
+HOME=/tmp/caller ./kontrad --gate http://localhost:8080 --api-key "$KONTRA_API_KEY" &
+#  -> kontrad: pins: hello at http://localhost:8080 first seen: sealed true, recipients k1_…, service keys none
 
 a2a send -a http://localhost:7777/agents/hello "a secret"
 #  -> completed, "Hello World": the client never sees an envelope
@@ -64,7 +64,7 @@ service key set the gate names (`kontra.upstream.jwks`: the gate serves the publ
 `<gate>/agents/hello/.well-known/service-jwks.json`, D223); only when the gate names no set is such a signature pinned
 as the unverified `kid:<kid>`. A card whose service signatures verify nothing counts as unsigned (D228). A downgrade
 (sealed to unsealed, signed to unsigned) is always refused. A new recipient (a second hosting node enrolled for
-`hello`), or a new or removed service key, is refused until the operator accepts it: `kontra connect … --accept-change
+`hello`), or a new or removed service key, is refused until the operator accepts it: `kontrad … --accept-change
 hello`; `--pin-recipients` refuses every such change. Both print the recipient key ids and the service keys
 (thumbprints, or `kid:<kid>`) on stderr and in the log, for comparison out of band (D164, D187, D223).
 
@@ -75,7 +75,7 @@ which job, the pairs it forwarded, the input requests it sealed. It refuses a re
 it must cover the longest quote expiry plus `task.timeout`. `--sealed-required hello` makes the hosting node refuse
 an unsealed request even if a gate let one through.
 
-MCP works the same way between two `kontra connect`: a service with `sealed:` gets the extension in its
+MCP works the same way between two `kontrad`: a service with `sealed:` gets the extension in its
 `initialize` result under `capabilities.experimental["sh.kontra/sealed"]`, and the calling node seals `tools/call`
 arguments (`arguments: {}`, the envelope in `_meta["sh.kontra/sealed"]`). A stock MCP client talking straight to
 the gate sees no envelope, and a required sealed service refuses its calls. Sealed MCP services are served to
@@ -100,7 +100,7 @@ curl -s http://localhost:8080/agents/hello -H "Authorization: Bearer $KONTRA_API
 ```
 
 `kontra seal` verifies the gate's signature on the card (with the key set at `<gate>/.well-known/jwks.json`) and
-checks the pin, as `kontra connect` does; a card that does not verify is refused. It never reads an API key from the
+checks the pin, as `kontrad` does; a card that does not verify is refused. It never reads an API key from the
 environment: `--api-key` (or `--api-key @<file>`) names the key for the gate `--service` names, and it is sent only on
 that service's card, upstream card and service key set, after the card answered `404` without it (a listed service's
 cards are public), never on the key set. A key exported for one gate therefore never reaches another gate you seal

@@ -457,7 +457,7 @@ func TestHostingNodeAnswerOpensNoJob(t *testing.T) {
 	if reason != "" {
 		t.Fatal(reason)
 	}
-	f.answer(x, http.StatusBadGateway, "kontra connect: the service did not answer")
+	f.answer(x, http.StatusBadGateway, "kontrad: the service did not answer")
 	if _, err := os.Stat(filepath.Join(f.dir, "echo", "jobs", task+".json")); err == nil {
 		t.Fatal("a job was opened by a request the service never accepted")
 	}

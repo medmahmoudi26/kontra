@@ -3,7 +3,7 @@
 // (`AgentCardSignature{protected, signature, header?}`), and the JWK Set the gate publishes at
 // /.well-known/jwks.json.
 //
-// The same verification serves three readers: kontra connect and kontra seal verify the gate's signature with
+// The same verification serves three readers: kontrad and kontra seal verify the gate's signature with
 // a `jku` equal to the origin they dialed (spec/tunnel.md §9, spec/ext-sealed.md §5.1), and the gate verifies a
 // service's signatures on the upstream card against the keys the operator configured (spec/relay.md §3,
 // services.<name>.service_keys; internal/card ServiceKeys). The gate signs with its own code because a2a-go's

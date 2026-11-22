@@ -85,7 +85,7 @@ export async function showPlayground(service) {
   }
   if (!alive()) return () => {};
   if (!services.length) {
-    fill(root, [h("p", { class: "empty", text: "No A2A service yet: connect one with kontra connect." })]);
+    fill(root, [h("p", { class: "empty", text: "No A2A service yet: connect one with kontrad." })]);
     return () => {};
   }
   const svc = h("select", { id: "playservice", "aria-label": "Service" }, services.map((s) => h("option", { value: s.name, text: s.name })));

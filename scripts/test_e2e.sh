@@ -2,7 +2,7 @@
 # End-to-end tests: `go test -p 1` over test/e2e only (spec/relay.md §16, D80; the M2 tunnel tests,
 # spec/tunnel.md §16). The harness starts, per test, a Temporal development server from $KONTRA_TEMPORAL_CLI
 # (the pinned CLI 1.9.1, Server 1.32.0), two kontra-gate replicas as processes, the tunnel tests' nodes
-# (`kontra connect` processes of the binary built once from ./cmd/kontra) and, for TestHelloworldTunnel, the
+# (`kontrad` processes of the binary built once from ./cmd/kontrad) and, for TestHelloworldTunnel, the
 # a2a-samples helloworld service (examples/agents/helloworld/run.sh; $KONTRA_A2A_SAMPLES names its checkout,
 # else the test clones the pinned commit), and a database on $KONTRA_TEST_PG (a server where the user may
 # create databases) or a postgres:17-alpine container when it is unset; it removes all of them when the
@@ -11,7 +11,7 @@
 # session's id in its name, and every file it writes (the built gate and node; per test the kontra.yaml that
 # holds the Postgres URL and its password, the nodes' keys, and the logs) lives under
 # $TMPDIR/kontra-e2e-<session> (test/e2e TempRoot): after the run this script looks for all four, and for
-# any process still running a binary built there (a kontra connect or a gate, whatever its environment),
+# any process still running a binary built there (a kontrad or a gate, whatever its environment),
 # removes what it finds (a test binary that died, a go test -timeout panic or a crash, cannot clean up), and
 # fails the run if there was anything. M3 (D184, D185): the stock MCP servers the harness starts (npm, under
 # $TMPDIR/kontra-e2e-<session>) and the nodes' stdio children carry the run's marker variables too (a node passes them
@@ -58,7 +58,7 @@ what() {
   local cmd="$1"
   case "$cmd" in
     *kontra-gate\ serve*) echo "a gate replica" ;;
-    *kontra\ connect*) echo "a node (kontra connect)" ;;
+    */kontrad\ *|*/kontrad) echo "a node (kontrad)" ;;
     *server-everything*|*server-filesystem*|*node_modules*|*npm*) echo "a stock MCP server (npm) or a node's stdio child" ;;
     *stdioserver*) echo "a node's stdio child" ;;
     *helloworld*|*__main__.py*|*uv\ run*) echo "the helloworld service" ;;

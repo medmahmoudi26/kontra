@@ -25,7 +25,7 @@ func anonymousDecision(req enroll.Request, end time.Time) *enroll.Decision {
 	return d
 }
 
-// D285: kontra connect asks for an anonymous session (hello.anonymous, with --public's names in hello.public) only
+// D285: kontrad asks for an anonymous session (hello.anonymous, with --public's names in hello.public) only
 // when this origin's credentials hold no API key and no pending or consumed token and the command line gave neither
 // --enroll nor --api-key; otherwise the hello carries neither field, and --public is only warned about. A welcome
 // with anonymous prints the anonymous URLs, which ones are public, and the session's end (§6.1).
@@ -127,7 +127,7 @@ func TestAnonymousExpiryStops(t *testing.T) {
 		t.Fatalf("the gate's session: anonymous %v until %s", ok, at)
 	}
 	eventually(t, 5*time.Second, "expiring printed", func() bool {
-		return strings.Contains(tn.out.String(), "kontra connect: the anonymous session ends at "+end.Format(time.RFC3339))
+		return strings.Contains(tn.out.String(), "kontrad: the anonymous session ends at "+end.Format(time.RFC3339))
 	})
 	err := tn.result(t, 15*time.Second)
 	var ae *AnonymousExpiredError
@@ -278,7 +278,7 @@ func TestWelcomeIsOneWrite(t *testing.T) {
 	n.printWelcome(&tunnel.Welcome{Tenant: "anon-0123456789abcdef", Session: "s-1",
 		Services:  []tunnel.WelcomeService{{Kind: "a2a", Name: "site", URL: "https://gate.example/agents/anon-0123456789abcdef/site"}, {Kind: "mcp", Name: "fs", URL: "https://gate.example/mcp/anon-0123456789abcdef/fs"}},
 		Anonymous: &tunnel.AnonymousInfo{ExpiresAt: time.Now().Add(time.Hour)}}, id)
-	if len(w.n) != 1 || !strings.HasPrefix(w.n[0], "kontra connect: connected to https://gate.example as "+id.KeyID()) ||
+	if len(w.n) != 1 || !strings.HasPrefix(w.n[0], "kontrad: connected to https://gate.example as "+id.KeyID()) ||
 		!strings.Contains(w.n[0], "/site  (public: anyone may call it)\n") || !strings.Contains(w.n[0], "  mcp fs  ") ||
 		!strings.HasSuffix(w.n[0], "(kontra login keeps the services)\n") {
 		t.Fatalf("%d writes: %q", len(w.n), w.n)

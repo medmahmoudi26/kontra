@@ -5,8 +5,8 @@
 #
 #   target laptop      the laptop, for the run after the commit is on GitHub (the README's go install, unchanged);
 #   target laptop-src  the same with the repository at /src (root's, read-only for laptop), for the run before it is,
-#                      when the README's `go install kontra.sh/kontra/cmd/kontra@latest` becomes
-#                      `(cd /src && go install ./cmd/kontra)` (the script's one substitution of a command).
+#                      when the README's `go install kontra.sh/kontra/cmd/kontrad@latest` becomes
+#                      `(cd /src && go install ./cmd/kontrad)` (the script's one substitution of a command).
 #
 # GOPATH is the default ($HOME/go) and its bin is not on PATH, as on a laptop with a fresh Go install: the README's
 # `export PATH` line is needed and exercised.

@@ -14,7 +14,7 @@
 // It is an example service (examples/README.md): a plain A2A agent that imports nothing from Kontra and has no
 // Kontra-specific endpoint. It serves its card at /.well-known/agent-card.json, its public key at
 // /.well-known/jwks.json, JSON-RPC at its root and HTTP+JSON under /rest, all under one root URL, so that
-// `kontra connect --serve a2a:ap2-merchant=http://127.0.0.1:9993` can host it.
+// `kontrad --serve a2a:ap2-merchant=http://127.0.0.1:9993` can host it.
 //
 //	ap2-merchant [--host 127.0.0.1] [--port 9993] [--key merchant.pem]
 //

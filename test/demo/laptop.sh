@@ -3,10 +3,10 @@
 # block's commands, to /opt/kontra-demo before the container starts (never a mount). It runs the commands one at a time
 # in this one shell, as typed: `export` and `cd` carry over, a command ending in `&` runs in the background. It makes
 # exactly the substitutions the host script lists, and says so when it makes one:
-#   (a) KONTRA_DEMO_MODE=source: the command `go install kontra.sh/kontra/cmd/kontra@latest` is run as
-#       `(cd /src && go install ./cmd/kontra)`; KONTRA_DEMO_MODE=published runs it as written, again a minute apart
-#       for up to 30 minutes until `kontra version` names KONTRA_DEMO_EXPECT (proxy.golang.org's @latest may lag);
-#   (b) `anon-<…>` is the slug kontra connect printed; a command naming it waits until it did (3 minutes at most).
+#   (a) KONTRA_DEMO_MODE=source: the command `go install kontra.sh/kontra/cmd/kontrad@latest` is run as
+#       `(cd /src && go install ./cmd/kontrad)`; KONTRA_DEMO_MODE=published runs it as written, again a minute apart
+#       for up to 30 minutes until `kontrad version` names KONTRA_DEMO_EXPECT (proxy.golang.org's @latest may lag);
+#   (b) `anon-<…>` is the slug kontrad printed; a command naming it waits until it did (3 minutes at most).
 # Each command's output is captured and printed. Checked: every command exits 0, a background one is still running a
 # second later, and the clients answer what the README says (a client command is tried 3 times, 15 s apart, since
 # the first npx run of each package downloads it and the node starts server-filesystem through npx on first use):
@@ -26,7 +26,7 @@ here=/opt/kontra-demo
 work=/tmp/kontra-demo
 mode=${KONTRA_DEMO_MODE:-source}
 expect=${KONTRA_DEMO_EXPECT:-}
-install_line='go install kontra.sh/kontra/cmd/kontra@latest'
+install_line='go install kontra.sh/kontra/cmd/kontrad@latest'
 placeholder='anon-<…>'
 slug_re='/agents/(anon-[0-9a-f]{16})/'
 pids=()
@@ -64,21 +64,21 @@ slug=""
 connect_out=""
 connect_pid=""
 
-# wait_slug reads the slug from kontra connect's output, once it printed its welcome.
+# wait_slug reads the slug from kontrad's output, once it printed its welcome.
 wait_slug() {
   local i
-  [ -n "$connect_out" ] || fail "a command names anon-<…> before kontra connect ran"
+  [ -n "$connect_out" ] || fail "a command names anon-<…> before kontrad ran"
   for ((i = 0; i < 180; i++)); do
     if [[ "$(cat "$connect_out" 2>/dev/null)" =~ $slug_re ]]; then
       slug=${BASH_REMATCH[1]}
       say "slug $slug"
       return
     fi
-    kill -0 "$connect_pid" 2>/dev/null || { cat "$connect_out"; fail "kontra connect exited before printing a slug"; }
+    kill -0 "$connect_pid" 2>/dev/null || { cat "$connect_out"; fail "kontrad exited before printing a slug"; }
     sleep 1
   done
   cat "$connect_out"
-  fail "kontra connect printed no slug within 3 minutes"
+  fail "kontrad printed no slug within 3 minutes"
 }
 
 # expectation is what a client command must print (empty: only its exit status is checked).
@@ -92,11 +92,11 @@ expectation() {
   esac
 }
 
-# installed checks, in published mode, that kontra version names the expected commit.
+# installed checks, in published mode, that kontrad version names the expected commit.
 installed() {
   local v
-  v=$("$(go env GOPATH)/bin/kontra" version 2>&1)
-  say "kontra version: $v"
+  v=$("$(go env GOPATH)/bin/kontrad" version 2>&1)
+  say "kontrad version: $v"
   [ -z "$expect" ] || [[ "$v" == *"${expect:0:12}"* ]]
 }
 
@@ -106,7 +106,7 @@ for cmd in "${cmds[@]}"; do
   out="$work/out.$n"
   run=$cmd
   if [ "$cmd" = "$install_line" ] && [ "$mode" = source ]; then
-    run='(cd /src && go install ./cmd/kontra)'
+    run='(cd /src && go install ./cmd/kontrad)'
     say "substitution (a): $cmd  ->  $run"
   fi
   if [[ "$run" == *"$placeholder"* ]]; then
@@ -120,7 +120,7 @@ for cmd in "${cmds[@]}"; do
   if [[ "$run" =~ \&[[:space:]]*(#.*)?$ ]]; then
     eval "$run" > "$out" 2>&1
     pids+=("$!")
-    if [[ "$run" == "kontra connect "* ]]; then
+    if [[ "$run" == "kontrad "* ]]; then
       connect_out=$out
       connect_pid=$!
     fi
@@ -155,7 +155,7 @@ for cmd in "${cmds[@]}"; do
         if [ "$mode" = published ]; then
           deadline=$((SECONDS + 1800))
           until installed; do
-            [ "$SECONDS" -lt "$deadline" ] || fail "kontra version does not name $expect after 30 minutes"
+            [ "$SECONDS" -lt "$deadline" ] || fail "kontrad version does not name $expect after 30 minutes"
             say "@latest does not name $expect yet: installing again in a minute"
             sleep 60
             eval "$run" > "$out" 2>&1 || { cat "$out"; fail "command $n exited: $run"; }

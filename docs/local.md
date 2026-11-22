@@ -13,7 +13,7 @@ With Docker and Go, from a checkout of this repository:
 docker compose -f compose.dev.yaml up -d --wait                  # 1. Postgres and Temporal, on loopback
 go run ./cmd/kontra-gate migrate -f examples/local/kontra.yaml   # 2. the gate's schema
 go run ./cmd/kontra-gate serve -f examples/local/kontra.yaml &   # 3. the gate, on 127.0.0.1:8080
-go run ./cmd/kontra connect --gate http://127.0.0.1:8080 --listen off \
+go run ./cmd/kontrad --gate http://127.0.0.1:8080 --listen off \
   --serve a2a:booking=http://127.0.0.1:9995 &                     # 4. your agent, through a node
 open http://127.0.0.1:8080/                                       # 5. the console (xdg-open on Linux)
 ```

@@ -66,7 +66,7 @@ a2ui [--host 127.0.0.1] [--port 9995]
 ```
 
 It serves its card at `/.well-known/agent-card.json`, JSON-RPC at its root and HTTP+JSON under `/rest`, all under one
-root URL, as `kontra connect --serve` needs. The first line on standard output is the root URL; `SIGINT` or `SIGTERM`
+root URL, as `kontrad --serve` needs. The first line on standard output is the root URL; `SIGINT` or `SIGTERM`
 stops it.
 
 ## Talk to it directly
@@ -121,5 +121,4 @@ interprets no A2UI ([`spec/relay.md`](../../../spec/relay.md) §2.6):
   part's own `metadata` and `mediaType` do reach it, so `reply` with the form's action in a part marked
   `application/a2ui+json` books too.
 
-`test/e2e` `TestA2UIPassthrough` (`a2ui_passthrough`) runs this agent through two gate replicas, hosted by `kontra
-connect`.
+`test/e2e` `TestA2UIPassthrough` (`a2ui_passthrough`) runs this agent through two gate replicas, hosted by `kontrad`.

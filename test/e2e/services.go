@@ -42,7 +42,7 @@ import (
 //     bucket);
 //   - anything else: completed, echoing the text.
 //
-// It serves its card at /.well-known/agent-card.json and JSON-RPC at its root, as `kontra connect --serve
+// It serves its card at /.well-known/agent-card.json and JSON-RPC at its root, as `kontrad --serve
 // a2a:<name>=<root URL>` hosts an agent, and records the methods, turns and A2A-Extensions headers it receives.
 //
 // examples/agents/a2ui (an A2UI booking form, A2A 1.0) is started the same way by a2ui_passthrough (a2ui_test.go).

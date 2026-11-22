@@ -34,12 +34,12 @@ const maxCredentialsFile = 1 << 20
 // whose outcome the node did not learn (the connection ended after the proof, ErrNoOutcome) is listed in
 // Unconfirmed until a later handshake settles it (M2 plan audit, gap 1; see Node.Run).
 //
-// A token waiting for a welcome belongs to the key of the `kontra connect` it was given to (Keys, by key
-// id): several nodes may serve one service, each with its own key (§11), and two `kontra connect` with
+// A token waiting for a welcome belongs to the key of the `kontrad` it was given to (Keys, by key
+// id): several nodes may serve one service, each with its own key (§11), and two `kontrad` with
 // different --key under one HOME share this file, so a token given to one is never sent in the other's
 // hello, nor confirmed by the other's probe. The API key and Consumed are the origin's.
 //
-// Several `kontra connect` processes (one per gate, or one per key at a gate) share the file: Update
+// Several `kontrad` processes (one per gate, or one per key at a gate) share the file: Update
 // changes one origin's entry under an exclusive flock(2), applying the change to what the file holds at
 // that moment, so that no process's change is lost.
 type Credentials struct {

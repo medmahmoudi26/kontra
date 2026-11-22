@@ -325,7 +325,7 @@ func printResult(w io.Writer, r *goose.MigrationResult) {
 
 // enroll mints an API key (`--api-key <name>`, M1) or a service enrollment token (`<service>`, M2) and
 // prints it alone on stdout, so KONTRA_API_KEY="$(kontra-gate enroll -f kontra.yaml --api-key demo)" and
-// `kontra connect --enroll "$(kontra-gate enroll hello)"` work; what was minted is said on stderr. The key
+// `kontrad --enroll "$(kontra-gate enroll hello)"` work; what was minted is said on stderr. The key
 // goes to the team tenant, created when it does not exist yet (the README order is migrate, enroll, serve),
 // in the transaction that also appends its audit row. `--revoke <key_id>` revokes a node key, and with
 // `--service <name>` one of its bindings (spec/tunnel.md §12); it prints nothing on stdout.
