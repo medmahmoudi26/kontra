@@ -65,8 +65,8 @@ func requestWith(a *slowagent.Agent, messageID string) *slowagent.Request {
 }
 
 // TestInputRequiredSticky is input_required_sticky through the tunnel (spec/relay.md §7, §16; PRD §15):
-// two nodes host `slow`, N1 (service S1) on replica A and N2 (service S2) on replica B. They are two `kontra
-// connect` processes sharing one HOME, each with its own --key and its own service token (M2 WP-06: one
+// two nodes host `slow`, N1 (service S1) on replica A and N2 (service S2) on replica B. They are two `kontrad`
+// processes sharing one HOME, each with its own --key and its own service token (M2 WP-06: one
 // credentials file, a token per key). An 'ask' task waits at input-required on each node; each reply,
 // sent through the other replica, reaches the service holding the task, with that service's own upstream
 // task and context ids, never the other service; it runs on the same attempt, dispatched on the session's

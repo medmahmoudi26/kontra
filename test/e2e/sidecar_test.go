@@ -86,7 +86,7 @@ func startCanary(ip string) (*canary, error) {
 
 // TestSidecarNotAProxy is sidecar_not_a_proxy (spec/tunnel.md §8.1–§8.3, §15, §16; PRD §15), with no
 // Postgres or Temporal: the FakeGate (the gate's own tunnel handler, a fixed admission) admits the real
-// `kontra connect` binary for service hello, whose --serve target T records every request. Canary
+// `kontrad` binary for service hello, whose --serve target T records every request. Canary
 // listeners on 127.0.0.2 and on a second loopback port must never be dialed. Over streams the FakeGate
 // opens itself, the test sends what a hostile or broken gate could: a foreign Host, an absolute-form target,
 // '..', encoded and '//' paths, CONNECT, an Upgrade, TRACE, a JSON-RPC message whose part is a url at a
@@ -102,7 +102,7 @@ func startCanary(ip string) (*canary, error) {
 // node's only TCP sockets (its fds mapped to /proc/<pid>/net/tcp, M2 plan audit) are to the FakeGate and T.
 func TestSidecarNotAProxy(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e: runs the kontra connect binary; skipped under -short")
+		t.Skip("e2e: runs the kontrad binary; skipped under -short")
 	}
 	root, err := TempRoot()
 	if err != nil {
@@ -244,17 +244,17 @@ func TestSidecarNotAProxy(t *testing.T) {
 	if a, b := other.accepted.Load(), second.accepted.Load(); a != 0 || b != 0 {
 		t.Fatalf("the canaries accepted %d (127.0.0.2) and %d (second loopback port) connections, want none", a, b)
 	}
-	socks := checkNoListener(t, n.Pid(), "kontra connect")
+	socks := checkNoListener(t, n.Pid(), "kontrad")
 	for _, s := range socks {
 		if s.Remote != gate.Addr && s.Remote != target.Addr {
-			t.Fatalf("kontra connect holds a TCP socket to %s: its only peers may be the FakeGate (%s) and T (%s): %+v",
+			t.Fatalf("kontrad holds a TCP socket to %s: its only peers may be the FakeGate (%s) and T (%s): %+v",
 				s.Remote, gate.Addr, target.Addr, socks)
 		}
 	}
 	if len(socks) == 0 {
-		t.Fatal("kontra connect holds no TCP socket: the check above proved nothing")
+		t.Fatal("kontrad holds no TCP socket: the check above proved nothing")
 	}
-	t.Logf("kontra connect's TCP sockets: %+v", socks)
+	t.Logf("kontrad's TCP sockets: %+v", socks)
 }
 
 func port(addr string) string {

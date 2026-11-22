@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The hello-exec service: a2a-cli v0.3.1 exec mode (D15). Plain HTTP on loopback; the gate reaches it as a
-# direct backend with allow_private (M1) or through `kontra connect` (M2).
+# direct backend with allow_private (M1) or through `kontrad` (M2).
 #
 #   SERVICE_CMD    the command run once per message   (default: echo Hello World)
 #   SERVICE_HOST   bind address                       (default: 127.0.0.1; 0.0.0.0 in a container)

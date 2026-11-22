@@ -67,5 +67,8 @@ func Attach(ctx context.Context, x External) (h *Harness, err error) {
 	return h, nil
 }
 
-// KontraBinary is the kontra binary the harness builds once per test binary (the nodes' and kontra seal's).
-func KontraBinary() (string, error) { return nodeBinary() }
+// KontraBinary is the kontra binary the harness builds once per test binary (kontra seal's and kontra login's).
+func KontraBinary() (string, error) { return kontraBinary() }
+
+// KontradBinary is the kontrad binary the harness builds once per test binary: the nodes' (D364).
+func KontradBinary() (string, error) { return nodeBinary() }

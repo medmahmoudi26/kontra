@@ -341,7 +341,7 @@ func TestNodeRedialsWhenItsStreamIDsRunOut(t *testing.T) {
 
 // auth_revoked (spec/tunnel.md §12, §13): the node logs it, drops the revoked API key from its credentials and from
 // every later hello, and goes on hosting. A reconnect (a network blip, a drain) then carries no auth: with it, the
-// gate would refuse the hello auth_invalid, which §4 makes final, and kontra connect would stop hosting.
+// gate would refuse the hello auth_invalid, which §4 makes final, and kontrad would stop hosting.
 func TestNodeAuthRevokedDropsTheAPIKey(t *testing.T) {
 	const apiKey = "kontra_test_revoked_0123456789"
 	g := newTestGate(t, nil)
@@ -375,6 +375,6 @@ func TestNodeAuthRevokedDropsTheAPIKey(t *testing.T) {
 	}
 	g.session(t)
 	if !tn.running() {
-		t.Fatal("kontra connect stopped after auth_revoked and a reconnect")
+		t.Fatal("kontrad stopped after auth_revoked and a reconnect")
 	}
 }

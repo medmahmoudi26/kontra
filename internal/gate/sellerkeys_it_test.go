@@ -20,7 +20,7 @@ import (
 	"kontra.sh/kontra/internal/tunnel"
 )
 
-// D223 through a real gate and two in-process `kontra connect`: a sealed tunnel service whose service signs its card
+// D223 through a real gate and two in-process `kontrad`: a sealed tunnel service whose service signs its card
 // naming its key by kid only, and whose service_keys the gate holds. The gate's signature names the key set it verified
 // with (kontra.upstream.jwks) and serves it on its origin; the calling node fetches it through its tunnel, verifies the
 // kid-only signature with it, and pins the key's RFC 7638 thumbprint, never the unverified kid:<kid>.

@@ -24,7 +24,7 @@ import (
 const (
 	script      = "scripts/demo-clean-laptop.sh"
 	placeholder = "anon-<…>"
-	installLine = "go install kontra.sh/kontra/cmd/kontra@latest"
+	installLine = "go install kontra.sh/kontra/cmd/kontrad@latest"
 )
 
 func readme(t *testing.T) string {
@@ -98,8 +98,8 @@ func TestREADMEDemoBlock(t *testing.T) {
 			return strings.HasPrefix(c, "go install github.com/a2aproject/a2a-cli@v0.3.1 && mv ")
 		}},
 		{"a2a server --exec", func(c string) bool { return strings.HasPrefix(c, "a2a server --exec 'echo Hello World' --port 9999 &") }},
-		{"kontra connect --gate https://gateway.kontra.run … --public", func(c string) bool {
-			return strings.HasPrefix(c, "kontra connect --gate https://gateway.kontra.run ") && strings.Contains(c, " --public hello") &&
+		{"kontrad --gate https://gateway.kontra.run … --public", func(c string) bool {
+			return strings.HasPrefix(c, "kontrad --gate https://gateway.kontra.run ") && strings.Contains(c, " --public hello") &&
 				strings.Contains(c, "--serve a2a:hello=http://127.0.0.1:9999") &&
 				strings.Contains(c, "--serve 'mcp:fs=stdio:npx -y @modelcontextprotocol/server-filesystem@1.0.0 ~/docs'") &&
 				strings.HasSuffix(c, "&")
@@ -124,9 +124,9 @@ func TestREADMEDemoBlock(t *testing.T) {
 	if n := slices.IndexFunc(cmds, func(c string) bool { return c == installLine }); n != 0 {
 		t.Errorf("the kontra install is command %d, want the first", n+1)
 	}
-	if c := slices.IndexFunc(cmds, func(c string) bool { return strings.HasPrefix(c, "kontra connect ") }); c < 0 ||
+	if c := slices.IndexFunc(cmds, func(c string) bool { return strings.HasPrefix(c, "kontrad ") }); c < 0 ||
 		slices.ContainsFunc(cmds[:c], func(s string) bool { return strings.Contains(s, placeholder) }) {
-		t.Error("a command names the slug before kontra connect prints it")
+		t.Error("a command names the slug before kontrad prints it")
 	}
 	// The inspector is pinned to one version everywhere.
 	pins := regexp.MustCompile(`@modelcontextprotocol/inspector@(\S+)`).FindAllStringSubmatch(b, -1)
@@ -247,8 +247,8 @@ func TestDemoDryRun(t *testing.T) {
 	}
 	for _, want := range []string{
 		"teardown, in a trap on EXIT/INT/TERM: docker rm -f kontra-demo-" + sha + "; docker image rm kontra-demo:" + sha + ";",
-		"  (a) " + installLine + "  ->  (cd /src && go install ./cmd/kontra)",
-		"  (b) anon-<…>  ->  the slug kontra connect prints",
+		"  (a) " + installLine + "  ->  (cd /src && go install ./cmd/kontrad)",
+		"  (b) anon-<…>  ->  the slug kontrad prints",
 		"GET https://gateway.kontra.run/agents/<slug>/hello/.well-known/agent-card.json",
 		`JSON-RPC SendMessage "hi" to https://gateway.kontra.run/agents/<slug>/hello (Hello World)`,
 		"mode source (target laptop-src), gate https://gateway.kontra.run",
@@ -450,7 +450,7 @@ tunnel: { anonymous: true }
 	}
 	tr := string(b)
 	for _, want := range []string{
-		"kontra-demo: substitution (a): " + installLine + "  ->  (cd /src && go install ./cmd/kontra)",
+		"kontra-demo: substitution (a): " + installLine + "  ->  (cd /src && go install ./cmd/kontrad)",
 		"kontra-demo: substitution (b): anon-<…>  ->  anon-",
 		`kontra-demo: ok 7: "Hello World"`, `kontra-demo: ok 8: "read_file"`, `kontra-demo: ok 9: "Hello World"`,
 		"kontra-demo: ready", "demo-clean-laptop: host checks passed", "demo-clean-laptop: PASS (slug anon-",

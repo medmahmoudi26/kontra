@@ -2,7 +2,7 @@
 # The helloworld service: a2a-samples samples/python/agents/helloworld at 6603ba3, run unmodified (PRD §18:
 # "can the helloworld sample still run unmodified?"). It is a2a-sdk 1.1.0 with a 1.0 card, JSON-RPC at
 # http://127.0.0.1:9999; its __main__.py fixes that address, so it cannot be moved. The gate reaches it through
-# `kontra connect` (M2), never directly.
+# `kontrad` (M2), never directly.
 #
 #   A2A_SAMPLES   an a2a-samples checkout at 6603ba3 (default: a clone of that commit kept in
 #                 ${XDG_CACHE_HOME:-$HOME/.cache}/kontra/a2a-samples, made on first run)

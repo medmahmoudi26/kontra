@@ -380,7 +380,7 @@ func (e errVersion) Error() string { return fmt.Sprintf("v %d, this side speaks 
 // SPEC-CONFLICT: §4's closed list of codes has none for a hello of the wrong shape, and the gate must
 // close with one of them. Each refusal therefore takes the code of what it is about, and a shape error
 // that is about no listed subject is unsupported_version ("not a v1 hello this gate reads"), which the
-// node retries with backoff. `kontra connect` must therefore check --name (its default, the hostname, can
+// node retries with backoff. `kontrad` must therefore check --name (its default, the hostname, can
 // be longer than 64 characters) and --serve before it dials, so that a node of this version never sends
 // one. The owner may prefer a dedicated non-retryable code (a §4 amendment). The codes:
 //   - unsupported_version: over MaxHandshakeMessage, not a JSON object, t not hello, v not Version, a field

@@ -16,7 +16,7 @@ import (
 
 // spec/tunnel.md §6.3 (D278) with the real admission: a node that served an anonymous session, restarted once kontra
 // login stored an account's API key for the gate (here written as login writes it), sends that key as auth and no
-// anonymous field, and its session converts: the welcome is the account's, and kontra connect prints the account's
+// anonymous field, and its session converts: the welcome is the account's, and kontrad prints the account's
 // URLs, without the anonymous session's end or its public note.
 func TestRealAdmissionConvertsAfterLogin(t *testing.T) {
 	lim := anon.Defaults

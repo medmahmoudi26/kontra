@@ -7,7 +7,7 @@ import (
 )
 
 // The local development profile (Options.Local): a node with no token and no credential (its hello asks for an
-// anonymous session, as kontra connect's does) is enrolled on the team tenant for every service it declares; missing
+// anonymous session, as kontrad's does) is enrolled on the team tenant for every service it declares; missing
 // ones are created as tunnel services with allow [anonymous]; a configured service is served with its own settings;
 // another key may serve a service that already has one; a node that declares nothing is admitted to call agents.
 func TestLocalProfileEnrollsWithoutCredentials(t *testing.T) {
@@ -36,7 +36,7 @@ func TestLocalProfileEnrollsWithoutCredentials(t *testing.T) {
 		t.Fatalf("%d anonymous tenants, want none", n)
 	}
 
-	// The same key again (a restart of kontra connect), and a second key for the same service.
+	// The same key again (a restart of kontrad), and a second key for the same service.
 	e.mustAdmit(k, hello(k, a2a("hello")))
 	k2 := newTestKey(t)
 	if got := served(e.mustAdmit(k2, hello(k2, a2a("hello")))); len(got) != 1 {

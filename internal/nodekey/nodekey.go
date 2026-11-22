@@ -1,6 +1,6 @@
 // Package nodekey is the node's identity key file (spec/tunnel.md §2.1–§2.2, §12; D29).
 //
-// On first run `kontra connect` creates ~/.kontra/identity.key (file 0600, directory ~/.kontra 0700;
+// On first run `kontrad` creates ~/.kontra/identity.key (file 0600, directory ~/.kontra 0700;
 // `--key` or KONTRA_KEY overrides the path, e.g. a mounted secret). It is an age identity file, the format
 // age-keygen writes, so `age -d -i ~/.kontra/identity.key` opens a sealed part:
 //
@@ -18,7 +18,7 @@
 // Rotate leaves the file's leading notes at the top, and Prune keeps the notes of a key it drops.
 //
 // Rotate, MarkRotated and Prune rewrite the file under an exclusive flock(2), so that several processes on
-// one key (one `kontra connect` per gate, §2.1) never lose each other's change. A symbolic link (a key on a
+// one key (one `kontrad` per gate, §2.1) never lose each other's change. A symbolic link (a key on a
 // mounted volume) is resolved first and its target rewritten in place. The CLI refuses to start when the
 // file is readable or writable by group or others. One key per node, enrolled separately at each gate it
 // dials.
@@ -327,7 +327,7 @@ func MarkRotated(path, recipient, gate string, at time.Time) error {
 // SPEC-CONFLICT: §12 times the overlap from the commit of the rotation at the one gate the node
 // rotates at, and §2.1 enrolls one key at each gate a node dials. The file records the gates that
 // confirmed (MarkRotated), not the gates the key is enrolled at, so a gate that has not seen rotate_from
-// yet (one whose `kontra connect` has not redialed) is not waited for: once the last confirmation is
+// yet (one whose `kontrad` has not redialed) is not waited for: once the last confirmation is
 // 24 h old, the old key is dropped and that gate can no longer be shown rotate_from. Each node process
 // should therefore redial its gate with rotate_from (PendingRotation) soon after a rotation; waiting for
 // every enrolled gate needs the set of gates, which no spec gives the node.

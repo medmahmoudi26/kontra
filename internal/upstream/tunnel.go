@@ -189,7 +189,7 @@ func (t *Tunnel) Origin() *url.URL {
 }
 
 // Base implements Backend: "/" of Origin. The node prefixes its target's base path (§8.2; see the M2
-// plan's spec conflict on a non-root base, which kontra connect refuses until the owner decides).
+// plan's spec conflict on a non-root base, which kontrad refuses until the owner decides).
 func (t *Tunnel) Base() *url.URL {
 	u := t.Origin()
 	u.Path = "/"

@@ -1,4 +1,4 @@
-// Package pins is kontra connect's pin per (gate, service) in ~/.kontra/pins (spec/ext-sealed.md §7, D31,
+// Package pins is kontrad's pin per (gate, service) in ~/.kontra/pins (spec/ext-sealed.md §7, D31,
 // D164): whether the service is sealed, the key ids of its recipients, the thumbprints of the service keys that
 // verified its upstream card, and whether that card was signed.
 //
@@ -6,12 +6,12 @@
 // recipient, drop the extension or strip the service's signature. Pins make that visible and, where it matters,
 // refused: a downgrade (sealed to unsealed, signed to unsigned) is always refused; with --pin-recipients any new
 // recipient, and any new or removed service key, is refused; without it such a change is refused until the operator
-// runs kontra connect with --accept-change <service>, and is named on stderr and in the log (there is no local
+// runs kontrad with --accept-change <service>, and is named on stderr and in the log (there is no local
 // console, D164, D228).
 // kontra seal reads and writes the same file.
 //
 // The file is JSON, 0600, rewritten atomically under flock(2) like the credentials file, since one
-// kontra connect per gate and kontra seal may share it.
+// kontrad per gate and kontra seal may share it.
 //
 // Work package: M3 WP-01.
 package pins
@@ -103,7 +103,7 @@ type ChangeError struct {
 
 func (e *ChangeError) Error() string { return "pins: " + e.Service + " at " + e.Gate + " changed" }
 
-// Detail names the changes and what would accept them, for kontra connect's stderr and log (D164, D187).
+// Detail names the changes and what would accept them, for kontrad's stderr and log (D164, D187).
 func (e *ChangeError) Detail(opts Options) string {
 	var parts []string
 	for _, c := range e.Changes {
@@ -118,7 +118,7 @@ func (e *ChangeError) Detail(opts Options) string {
 	if opts.PinRecipients {
 		return msg + ": refused under --pin-recipients"
 	}
-	return msg + ": run kontra connect with --accept-change " + e.Service + " to accept it"
+	return msg + ": run kontrad with --accept-change " + e.Service + " to accept it"
 }
 
 // Options are the command line's pin policy.
@@ -127,7 +127,7 @@ type Options struct {
 	Accept        []string // --accept-change <service>, repeatable
 }
 
-// Outcome is what Check found and recorded, for kontra connect to print on stderr and in its log: the key ids
+// Outcome is what Check found and recorded, for kontrad to print on stderr and in its log: the key ids
 // and thumbprints on a first sight and on every change (D187).
 type Outcome struct {
 	First   bool     // no pin existed: Pin was recorded as seen (trust on first use)
@@ -155,7 +155,7 @@ type file struct {
 
 // Open opens path (absent is no pin), refusing a file readable or writable by group or others.
 //
-// An existing file is read once here, so that a bad file stops kontra connect at start; every Check reads it
+// An existing file is read once here, so that a bad file stops kontrad at start; every Check reads it
 // again under the lock.
 func Open(path string) (*Store, error) {
 	s := &Store{path: path, now: time.Now, checked: map[string]bool{}}
@@ -184,7 +184,7 @@ func Open(path string) (*Store, error) {
 // same change. Recipients and service keys are compared as sets
 // and recorded sorted; At is when the pin was recorded.
 //
-// The file is re-read, changed and rewritten atomically under an exclusive flock(2), so that two kontra connect
+// The file is re-read, changed and rewritten atomically under an exclusive flock(2), so that two kontrad
 // processes and kontra seal never lose each other's pins. Where flock(2) does not exist the file is never
 // rewritten (D153): a check that needs no write still answers, one that would record something is an error.
 func (s *Store) Check(gate, service string, now Pin, opts Options) (Outcome, error) {

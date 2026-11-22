@@ -159,7 +159,7 @@ func startService(t *testing.T, h *Harness, uv, checkout string) {
 
 // TestHelloworldTunnel is the helloworld example through the tunnel (PRD §14's M2 deliverable; WP-07's
 // examples/agents/helloworld): the a2a-samples helloworld service at 6603ba3, unmodified, run by run.sh
-// with its pinned toolchain on 127.0.0.1:9999, hosted as tunnel service `hello` by `kontra connect --serve
+// with its pinned toolchain on 127.0.0.1:9999, hosted as tunnel service `hello` by `kontrad --serve
 // a2a:hello=http://127.0.0.1:9999 --enroll <kontra-gate enroll hello>`.
 //
 // The node starts before its service, as a compose or systemd sidecar does: its first card fetch fails

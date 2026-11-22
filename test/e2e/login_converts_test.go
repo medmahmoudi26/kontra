@@ -23,7 +23,7 @@ import (
 //   - the redirect goes to http://127.0.0.1:<port>/callback only, and that listener is closed once login exits;
 //   - the kk_ key is stored 0600, under the gate's origin only;
 //   - an access token that is not an API key (a JWT) is refused: login exits 1 and the stored key is unchanged;
-//   - kontra connect restarted with it converts the tenant: its welcome names acme and the account's URL
+//   - kontrad restarted with it converts the tenant: its welcome names acme and the account's URL
 //     (/agents/acme/hello) with no anonymous session; the service has allow [org:acme] and the account no expiry; the
 //     anonymous URL answers 404 on both replicas; an audit row records the conversion (via the API key);
 //   - against a gate without auth.mcp_oauth, kontra login exits 1 naming --api-key and stores nothing for it.
@@ -147,7 +147,7 @@ func TestLoginConverts(t *testing.T) {
 		t.Errorf("the refused JWT changed the stored credentials:\n%s", rj.Stderr)
 	}
 
-	// kontra connect restarted with the key converts the tenant.
+	// kontrad restarted with the key converts the tenant.
 	if err := n.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestLoginConverts(t *testing.T) {
 		t.Fatalf("the restarted connect's welcome names %s, want acme", slugOf(n))
 	}
 	out := readFile(n.OutPath)
-	last := out[strings.LastIndex(out, "kontra connect: connected to"):]
+	last := out[strings.LastIndex(out, "kontrad: connected to"):]
 	if !strings.Contains(last, origin+"/agents/acme/hello") || strings.Contains(last, "anonymous session") || strings.Contains(last, anon) {
 		t.Errorf("the converted session's welcome:\n%s", last)
 	}

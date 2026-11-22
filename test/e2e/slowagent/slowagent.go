@@ -11,7 +11,7 @@
 // A first message whose text starts with "ask" stops at input-required; the follow-up that answers it
 // streams the chunks and completes (spec §7). CancelTask ends a task canceled at once, whatever it is
 // doing (spec §8), and is recorded with the task it names and the Host it arrived with, so a test can tell
-// a cancel forwarded through `kontra connect` (the target's Host, no X-Forwarded-*) from any other. With
+// a cancel forwarded through `kontrad` (the target's Host, no X-Forwarded-*) from any other. With
 // FirstEventDelay a task's first turn yields nothing for that long, so its upstream task id stays unknown
 // to the gate meanwhile (the tunnel tests' before-the-first-upstream-id variants, spec §6.4). With TalksAfterCancel the agent is a service that ignores its own cancel: the stream that
 // carried the canceled status goes on with one more chunk and a completed status, which a2a-go itself

@@ -1,12 +1,12 @@
 # agents/hello-exec
 
 The README demo service: a2a-cli v0.3.1's exec mode, `a2a server --exec 'echo Hello World'`, served behind the
-gate as a **direct backend** (M1) and, from M2, through `kontra connect` (the tunnel). The service is unmodified
+gate as a **direct backend** (M1) and, from M2, through `kontrad` (the tunnel). The service is unmodified
 and imports nothing from Kontra.
 
 Status: works end to end with the M1 gate (`kontra-gate migrate`, `enroll --api-key` and `serve`): the polling
 fallback, streaming with `SERVICE_CHUNK`, and a cancel forwarded to the service. Since M2 the same works through
-`kontra connect` (`kontra-tunnel.yaml`, [Through the tunnel](#through-the-tunnel-m2)).
+`kontrad` (`kontra-tunnel.yaml`, [Through the tunnel](#through-the-tunnel-m2)).
 
 ## What the service is
 
@@ -109,7 +109,7 @@ end (or until `drain_timeout`, 10 minutes by default), and then the gate exits (
 
 ## Through the tunnel (M2)
 
-The same service, hosted through the tunnel: the gate never connects to it. `kontra connect`, running next to
+The same service, hosted through the tunnel: the gate never connects to it. `kontrad`, running next to
 it, dials the gate once (outbound, WebSocket), proves its identity key, and from then on the gate sends each
 request for `hello` over that connection; the node forwards it to the `--serve` URL and nowhere else
 (spec/tunnel.md §8.2). `kontra-tunnel.yaml` is `kontra.yaml` with `hello` as a tunnel service
@@ -119,15 +119,15 @@ request for `hello` over that connection; the node forwards it to the `--serve` 
 examples/agents/hello-exec/run.sh &       # a2a server --exec 'echo Hello World' --host 127.0.0.1 --port 9999
 
 docker compose -f compose.dev.yaml up -d --wait
-go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontrad ./cmd/kontrad
 
 ./kontra-gate migrate -f examples/agents/hello-exec/kontra-tunnel.yaml
 export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/agents/hello-exec/kontra-tunnel.yaml --api-key demo)"
 ./kontra-gate serve -f examples/agents/hello-exec/kontra-tunnel.yaml &
 
-./kontra connect --gate http://localhost:8080 --serve a2a:hello=http://localhost:9999 \
+./kontrad --gate http://localhost:8080 --serve a2a:hello=http://localhost:9999 \
   --enroll "$(./kontra-gate enroll -f examples/agents/hello-exec/kontra-tunnel.yaml hello)" &
-#  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
+#  kontrad: connected to http://localhost:8080 as k1_… (tenant default, session …)
 #    a2a hello  http://localhost:8080/agents/hello
 
 a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "hi"
@@ -138,7 +138,7 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "
   the service in the database, so run it once the gate has started with `kontra-tunnel.yaml`. In the node's
   first handshake the token binds the node's key (`k1_…`, in `~/.kontra/identity.key`, created on first run) to
   `hello`; after that the key alone gets the node in (spec/tunnel.md §5).
-- Restart `kontra connect` with the same command, `--enroll` included: `~/.kontra/credentials` records the token
+- Restart `kontrad` with the same command, `--enroll` included: `~/.kontra/credentials` records the token
   as used, so it is not sent again. Keep the two files together (one persistent volume in a container).
 - `--serve` names the service's root URL; a URL with a path is refused in M2 (conflict C1 of the M2 plan).
 - Everything above works the same through the tunnel: the polling fallback (the gate logs `the upstream refused
@@ -148,9 +148,9 @@ a2a send -a http://localhost:8080/agents/hello --auth "Bearer $KONTRA_API_KEY" "
 What a lost node or service does to a running task (here `SERVICE_CMD='sleep 20; echo done'`, sent with
 `a2a send --async -o json` for its id; exec mode refuses streaming, so the gate polls the service's task):
 
-- **`kontra connect` is killed:** the gate loses the session and the task fails at once with `kontra.failure:
+- **`kontrad` is killed:** the gate loses the session and the task fails at once with `kontra.failure:
   tunnel_lost` ("the tunnel session to the service was lost"); the service already had it, so it is not
-  retried (spec/relay.md §6.4). Restarting `kontra connect` reconnects, and the next task completes.
+  retried (spec/relay.md §6.4). Restarting `kontrad` reconnects, and the next task completes.
 - **The service stops, the node stays up:** a cancel sent now answers `Error: … the service could not be reached
   to cancel the task` and the task goes on `working`: the cancel was not delivered. At the gate's next poll
   the node answers for the service (`502`, `Kontra-Node: target_unreachable`), and the task fails `tunnel_lost`

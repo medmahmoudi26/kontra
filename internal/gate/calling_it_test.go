@@ -33,7 +33,7 @@ import (
 )
 
 // helloExec stands for the README's hello-exec service (a2a-cli's exec mode answers "Hello World"), an a2a-go
-// v2.7.0 agent behind `kontra connect`: "hi" completes with Hello World; a message whose first part is raw bytes
+// v2.7.0 agent behind `kontrad`: "hi" completes with Hello World; a message whose first part is raw bytes
 // completes with an artifact holding those bytes again. It records the parts it received.
 type helloExec struct {
 	mu    sync.Mutex
@@ -103,7 +103,7 @@ func (b *syncBuf) String() string {
 	return b.buf.String()
 }
 
-// runNode is an in-process `kontra connect`, its command line parsed as the CLI parses it, HOME its own.
+// runNode is an in-process `kontrad`, its command line parsed as the CLI parses it, HOME its own.
 type runNode struct {
 	n      *node.Node
 	out    *syncBuf
@@ -113,7 +113,7 @@ type runNode struct {
 	key    string // its identity key file
 }
 
-var callingAt = regexp.MustCompile(`kontra connect: calling at http://localhost:(\d+) `)
+var callingAt = regexp.MustCompile(`kontrad: calling at http://localhost:(\d+) `)
 
 func startNode(t *testing.T, home string, args ...string) *runNode {
 	t.Helper()
@@ -146,7 +146,7 @@ func (rn *runNode) stop(t *testing.T) {
 	case err := <-rn.done:
 		rn.done <- err
 	case <-time.After(20 * time.Second):
-		t.Error("kontra connect did not stop")
+		t.Error("kontrad did not stop")
 	}
 }
 
@@ -159,7 +159,7 @@ func (rn *runNode) local(t *testing.T) string {
 		if m != nil {
 			port = m[1]
 		}
-		return m != nil && strings.Contains(rn.out.String(), "kontra connect: connected to")
+		return m != nil && strings.Contains(rn.out.String(), "kontrad: connected to")
 	})
 	return "http://127.0.0.1:" + port
 }
@@ -363,13 +363,13 @@ services:
 	}
 
 	// A key admitted call-only never calls as node:<key_id> (spec/tunnel.md §12; M3 WP-03 review): node B's key
-	// without its API key (a fresh HOME, the key file kept) is refused unknown_key, and kontra connect retries.
+	// without its API key (a fresh HOME, the key file kept) is refused unknown_key, and kontrad retries.
 	nodeB.stop(t)
 	nodeB2 := startNode(t, t.TempDir(), "--gate", a.url, "--name", "node-b", "--key", nodeB.key)
 	eventually(t, 20*time.Second, "node B's key refused without its API key", func() bool {
 		return strings.Contains(nodeB2.logs.String(), "a node that only calls is admitted on an --api-key")
 	})
-	if strings.Contains(nodeB2.out.String(), "kontra connect: connected to") {
+	if strings.Contains(nodeB2.out.String(), "kontrad: connected to") {
 		t.Fatalf("node B's key was welcomed without its API key: %s", nodeB2.out.String())
 	}
 	nodeB2.stop(t)
@@ -463,7 +463,7 @@ services:
 
 	// A reconnect after auth_revoked (a network blip: the gate closes node A's session) carries no API key: node A
 	// is welcomed again, goes on hosting, and calls as node:<key_id> (§9, §12, §13). With the revoked key in its
-	// hello it would be refused auth_invalid, which §4 makes final, and kontra connect would stop.
+	// hello it would be refused auth_invalid, which §4 makes final, and kontrad would stop.
 	sessA := scalar[uuid.UUID](t, e.pool, `select session_id from kontra.tunnels where key_id = $1`, kidA)
 	sa, ok := a.r.Tunnels().Get(sessA)
 	if !ok {
@@ -473,13 +473,13 @@ services:
 		t.Fatal(err)
 	}
 	eventually(t, 20*time.Second, "node A welcomed again", func() bool {
-		return strings.Count(nodeA.out.String(), "kontra connect: connected to") >= 2 &&
+		return strings.Count(nodeA.out.String(), "kontrad: connected to") >= 2 &&
 			scalar[int](t, e.pool, `select count(*) from kontra.tunnels where key_id = $1 and session_id <> $2`, kidA, sessA) == 1
 	})
 	select {
 	case err := <-nodeA.done:
 		nodeA.done <- err
-		t.Fatalf("kontra connect stopped after auth_revoked and a reconnect: %v", err)
+		t.Fatalf("kontrad stopped after auth_revoked and a reconnect: %v", err)
 	default:
 	}
 	again := sendMessage(t, cc, text("hi"), false)

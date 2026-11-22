@@ -63,19 +63,19 @@ func TestSkippedUsedTokenReadsTheRestartedLaunch(t *testing.T) {
 	if err := n.markLaunch(); err != nil { // the first launch: no log yet
 		t.Fatal(err)
 	}
-	appendLine("kontra connect starting")
+	appendLine("kontrad starting")
 	appendLine("the gate confirmed the enrollment: its tokens are not sent again")
 	if err := n.markLaunch(); err != nil { // the restart
 		t.Fatal(err)
 	}
-	appendLine("kontra connect starting")
+	appendLine("kontrad starting")
 	if skippedUsedToken(n) {
 		t.Fatal("the first launch's confirmation passed for the restarted launch's report")
 	}
-	if got := n.LaunchLog("kontra connect starting"); len(got) != 1 {
+	if got := n.LaunchLog("kontrad starting"); len(got) != 1 {
 		t.Fatalf("LaunchLog read %d lines of the restarted launch's one", len(got))
 	}
-	if got := n.Log("kontra connect starting"); len(got) != 2 {
+	if got := n.Log("kontrad starting"); len(got) != 2 {
 		t.Fatalf("Log read %d lines of both launches' two", len(got))
 	}
 	appendLine("an --enroll token this node already enrolled with at this gate is not sent again")

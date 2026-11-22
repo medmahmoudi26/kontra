@@ -37,7 +37,7 @@ go run ./examples/agents/tck --port 9996     # prints http://127.0.0.1:9996; JSO
 
 `--port 0` takes any free port; the first line on standard output is the root URL. Behind a gate it is a direct
 backend (`backend: { a2a: { url: "http://127.0.0.1:9996", allow_private: true } }`) or hosted through the tunnel
-(`kontra connect --serve a2a:tck=http://127.0.0.1:9996`); `test/tck/gate-*.yaml` are the configurations `make tck`
+(`kontrad --serve a2a:tck=http://127.0.0.1:9996`); `test/tck/gate-*.yaml` are the configurations `make tck`
 uses. The TCK can also run against it alone, as M0 measured a2a-go:
 
 ```sh

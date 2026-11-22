@@ -52,16 +52,19 @@ type Dialed struct {
 	CBValue []byte // the TLS exporter of this connection; nil over plain http (localhost)
 }
 
-// UserAgent is the User-Agent of the upgrade and hello's agent (§3, §4): kontra/<version> (<os>/<arch>).
+// Binary is the node's program name (D364): the prefix of its messages and the product of its User-Agent.
+const Binary = "kontrad"
+
+// UserAgent is the User-Agent of the upgrade and hello's agent (§3, §4): kontrad/<version> (<os>/<arch>).
 func UserAgent(version string) string {
 	if version == "" {
 		version = "dev"
 	}
-	return fmt.Sprintf("kontra/%s (%s/%s)", version, runtime.GOOS, runtime.GOARCH)
+	return fmt.Sprintf("%s/%s (%s/%s)", Binary, version, runtime.GOOS, runtime.GOARCH)
 }
 
 // Dial opens GET {gate}/v1/tunnel with Upgrade: websocket, Sec-WebSocket-Protocol: kontra-tunnel.v1 and
-// User-Agent: kontra/<version> (<os>/<arch>), no credential in any header (§3). It closes a connection on
+// User-Agent: kontrad/<version> (<os>/<arch>), no credential in any header (§3). It closes a connection on
 // which the gate did not select the subprotocol, and sets the 16 KiB handshake read limit.
 //
 // It is Dialer{UserAgent: userAgent}.Dial: the system's roots and proxy settings, no redirects.

@@ -14,7 +14,7 @@ import (
 	"kontra.sh/kontra/internal/tenant"
 )
 
-// D213, D231 through a real gate and an in-process `kontra connect` (relay.md §11.2, tunnel.md §10): a stdio
+// D213, D231 through a real gate and an in-process `kontrad` (relay.md §11.2, tunnel.md §10): a stdio
 // service at --max-sessions 2 and max_sessions_per_principal 2. One principal's third initialize while its sessions
 // are in recent use is refused 429 by the gate, closing nothing; once they have been idle for the gate's EvictIdle,
 // the third closes the longest idle, whose upstream DELETE stops that child before the new initialize reaches the

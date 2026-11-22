@@ -3,7 +3,7 @@
 The session fixture `stack` builds kontra-gate, kontra, the example agents a2ui and ap2-merchant and test/browser's
 echoagent; starts a Temporal development server from $KONTRA_TEMPORAL_CLI, a fresh database on $KONTRA_TEST_PG, the gate
 (profile: local, traffic kept forever, a configured service `notes` whose tasks are kept forever), the agents, and one
-`kontra connect` with no credential serving booking-form (a2ui), merchant (ap2-merchant), notes (echoagent) and the MCP
+`kontrad` with no credential serving booking-form (a2ui), merchant (ap2-merchant), notes (echoagent) and the MCP
 service files (@modelcontextprotocol/server-filesystem 1.0.0 over stdio, installed from examples/mcp/fs-stdio's lock).
 Everything runs on loopback ports of its own and is stopped when the session ends.
 """
@@ -189,7 +189,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
     d.mkdir(parents=True, exist_ok=True)
     bindir = d / "bin"
     go = os.environ.get("GO", "go")
-    subprocess.run([go, "build", "-o", str(bindir) + "/", "./cmd/kontra-gate", "./cmd/kontra", "./examples/agents/a2ui",
+    subprocess.run([go, "build", "-o", str(bindir) + "/", "./cmd/kontra-gate", "./cmd/kontrad", "./examples/agents/a2ui",
                     "./examples/agents/ap2-merchant", "./test/browser/echoagent"], cwd=ROOT, check=True)
 
     db = "kontra_browser_" + uuid.uuid4().hex[:10]
@@ -246,7 +246,7 @@ def stack(tmp_path_factory: pytest.TempPathFactory):
             s.mcp = True
         home = d / "home"
         home.mkdir()
-        s.start("node", [str(bindir / "kontra"), "connect", "--gate", s.base, *serves, "--listen", "off", "--name", "dev"],
+        s.start("node", [str(bindir / "kontrad"), "--gate", s.base, *serves, "--listen", "off", "--name", "dev"],
                 env={"HOME": str(home), "KONTRA_KEY": str(home / "identity.key")})
 
         def reachable():

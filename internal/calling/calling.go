@@ -1,4 +1,4 @@
-// Package calling is the calling side of kontra connect (spec/tunnel.md §9, D34): the node serves
+// Package calling is the calling side of kontrad (spec/tunnel.md §9, D34): the node serves
 // 127.0.0.1:7777 (--listen) to local clients and forwards each request on a stream it opens in its own tunnel,
 // preamble {"v": 1, "op": "http"}, path unchanged: /agents/…, /mcp/…, /mcp and /.well-known/…; anything else is
 // 404. A local client never sends a credential to the node, and the node never sends one the gate did not
@@ -66,7 +66,7 @@ const (
 	openTimeout = 15 * time.Second
 )
 
-// Config is the calling side's part of the kontra connect command line.
+// Config is the calling side's part of the kontrad command line.
 type Config struct {
 	Listen       string   // --listen
 	LocalToken   string   // --local-token <file>, read; required when Listen is not loopback
@@ -367,7 +367,7 @@ func (s *Server) Handler() http.Handler {
 		if !callingPath(r.URL.Path) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusNotFound)
-			_, _ = io.WriteString(w, "kontra connect forwards /agents/…, /mcp/…, /mcp and /.well-known/… only\n")
+			_, _ = io.WriteString(w, "kontrad forwards /agents/…, /mcp/…, /mcp and /.well-known/… only\n")
 			return
 		}
 		svc := ServicePath(r.URL.Path)
@@ -375,7 +375,7 @@ func (s *Server) Handler() http.Handler {
 			strings.HasPrefix(r.URL.Path, "/.well-known/")) {
 			// The gate has no such route (a /.well-known/ document is read, never posted; /agents/ needs a service): a
 			// message sent there would go unsealed, whatever service it was meant for (D247).
-			refuse(w, r, http.StatusNotFound, "kontra connect: no service at this path")
+			refuse(w, r, http.StatusNotFound, "kontrad: no service at this path")
 			return
 		}
 		if seal := s.sealing(); seal != nil {
@@ -425,7 +425,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 				"run with --local-token to serve this machine's users (spec/tunnel.md §9)")
 		}
 		if os.Getuid() == overflowUID {
-			s.log.Warn("kontra connect runs as the overflow uid, which the node attributes to no one: every local "+
+			s.log.Warn("kontrad runs as the overflow uid, which the node attributes to no one: every local "+
 				"connection will be closed; run with --local-token (spec/tunnel.md §9)", "uid", overflowUID)
 		}
 		ln = &peerListener{Listener: ln, uid: os.Getuid(), log: s.log}
@@ -501,7 +501,7 @@ func CheckLocal(r *http.Request, cfg Config) (status int, err error) {
 		}
 	}
 	if r.Method == http.MethodOptions {
-		return http.StatusMethodNotAllowed, errors.New("kontra connect answers no CORS preflight")
+		return http.StatusMethodNotAllowed, errors.New("kontrad answers no CORS preflight")
 	}
 	return 0, nil
 }
@@ -570,7 +570,7 @@ func (s *Server) sealRefused(w http.ResponseWriter, r *http.Request, err error) 
 	msg := err.Error()
 	var ce *pins.ChangeError
 	if errors.As(err, &ce) {
-		msg = "kontra connect: " + ce.Detail(pins.Options{})
+		msg = "kontrad: " + ce.Detail(pins.Options{})
 	}
 	s.log.Warn("a request to a sealed service is refused here", "status", status, "path", clip(r.URL.Path), "reason", tunnel.Printable(msg))
 	refuse(w, r, status, tunnel.Printable(msg))
@@ -585,7 +585,7 @@ func refuse(w http.ResponseWriter, r *http.Request, status int, msg string) {
 		h.Set("Allow", "GET, POST, DELETE")
 	}
 	if status == http.StatusUnauthorized {
-		h.Set("WWW-Authenticate", `Bearer realm="kontra connect"`)
+		h.Set("WWW-Authenticate", `Bearer realm="kontrad"`)
 	}
 	if isMCPPath(r.URL.Path) {
 		h.Set("Content-Type", "application/json")
@@ -612,19 +612,19 @@ func (s *Server) proxyError(w http.ResponseWriter, r *http.Request, err error) {
 	if job, _ := r.Context().Value(jobKey{}).(*sealing.Job); job != nil {
 		job.Release() // no answer: a new task's provisional key goes (ext-sealed.md §5; tunnel.md §2.3)
 	}
-	status, msg := http.StatusBadGateway, "kontra connect: the gate's answer could not be forwarded"
+	status, msg := http.StatusBadGateway, "kontrad: the gate's answer could not be forwarded"
 	switch {
 	case errors.Is(err, ErrBusy):
-		status, msg = http.StatusTooManyRequests, "kontra connect: as many requests are in flight on the tunnel as the gate allows; try again"
+		status, msg = http.StatusTooManyRequests, "kontrad: as many requests are in flight on the tunnel as the gate allows; try again"
 		w.Header().Set("Retry-After", "1")
 	case errors.Is(err, errNoSession):
-		status, msg = http.StatusServiceUnavailable, "kontra connect: no tunnel session to the gate right now; try again"
+		status, msg = http.StatusServiceUnavailable, "kontrad: no tunnel session to the gate right now; try again"
 	case errors.Is(err, ErrCardNotVerified):
-		msg = "kontra connect: the gate's card signature does not verify; the card is not served"
+		msg = "kontrad: the gate's card signature does not verify; the card is not served"
 	case errors.Is(err, errRedirect):
 		// The node's own 502, an A2A or MCP error body, with no Location (D258).
 		s.log.Warn("the gate answered with a redirect: refused (D258)", "path", clip(r.URL.Path))
-		refuse(w, r, http.StatusBadGateway, "kontra connect: the gate answered with a redirect, which kontra connect never follows or relays")
+		refuse(w, r, http.StatusBadGateway, "kontrad: the gate answered with a redirect, which kontrad never follows or relays")
 		return
 	case r.Context().Err() != nil:
 		s.log.Debug("local client left before the answer", "err", err)

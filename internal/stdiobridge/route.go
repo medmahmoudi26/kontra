@@ -231,7 +231,7 @@ func (c *child) post(w http.ResponseWriter, r *http.Request, body []byte, m *mcp
 func (c *child) refuseSend(w http.ResponseWriter, m *mcpwire.Message, err error) {
 	if errors.Is(err, errBusy) {
 		c.log.Warn("a client message is refused: the stdio server does not read its stdin")
-		nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, m.ID, "kontra connect: the stdio server does not read its input")
+		nodeAnswer(w, http.StatusServiceUnavailable, tunnel.NodeFull, m.ID, "kontrad: the stdio server does not read its input")
 		return
 	}
 	sessionNotFound(w, m.ID)

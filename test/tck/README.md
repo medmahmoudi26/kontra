@@ -8,7 +8,7 @@ D279, D291): `make tck VARIANT=direct|tunnel|caddy|auth` ([`scripts/tck.sh`](../
 | Variant | What the TCK talks to | Named test |
 |---|---|---|
 | `direct` | the gate itself, `tck` on the direct backend (`gate-direct.yaml`) | `tck_jsonrpc`, `tck_rest` |
-| `tunnel` | the gate itself, `tck` hosted through `kontra connect` (`gate-tunnel.yaml`) | `tck_jsonrpc`, `tck_rest` |
+| `tunnel` | the gate itself, `tck` hosted through `kontrad` (`gate-tunnel.yaml`) | `tck_jsonrpc`, `tck_rest` |
 | `caddy` | [`examples/front/caddy`](../../examples/front/caddy/README.md) terminating TLS, the direct backend behind it (`gate-caddy.yaml`) | `tck_behind_caddy` |
 | `auth` | a loopback Caddy that adds `Authorization: Bearer <a tck API key>` (`front-auth.Caddyfile`, `gate-auth.yaml`) | nightly: ListTasks and push |
 

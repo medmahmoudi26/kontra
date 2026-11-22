@@ -10,7 +10,7 @@
 //
 // It is an example service (examples/README.md): a plain A2A agent that imports nothing from Kontra and has no
 // Kontra-specific endpoint. It serves its card at /.well-known/agent-card.json, JSON-RPC at its root and HTTP+JSON
-// under /rest, all under one root URL, so that `kontra connect --serve a2a:a2ui=http://127.0.0.1:9995` can host it.
+// under /rest, all under one root URL, so that `kontrad --serve a2a:a2ui=http://127.0.0.1:9995` can host it.
 //
 //	a2ui [--host 127.0.0.1] [--port 9995]
 //

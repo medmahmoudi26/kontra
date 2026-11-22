@@ -48,7 +48,7 @@ func (c *convertEnv) anonymous(k *testKey, services ...tunnel.Service) *Decision
 	return d
 }
 
-// withAuth is the hello kontra connect sends after kontra login: no anonymous field, the API key as auth.
+// withAuth is the hello kontrad sends after kontra login: no anonymous field, the API key as auth.
 func withAuth(k *testKey, key string, services ...tunnel.Service) *tunnel.Hello {
 	h := hello(k, services...)
 	h.Auth = key

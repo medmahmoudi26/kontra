@@ -1,4 +1,4 @@
-// Package tunnel is what the node (`kontra connect`) and the gate (`kontra-gate serve`) share over the one
+// Package tunnel is what the node (`kontrad`) and the gate (`kontra-gate serve`) share over the one
 // WebSocket the node opens (spec/tunnel.md): the four handshake messages and their error codes (§4), the
 // HPKE proof of possession and its transcript (§4.1, D30), the key id (§2.2), the origin rules (§3), the
 // stream preamble (§8.1), the control stream's JSON lines (§13), the yamux configuration both sides use

@@ -14,7 +14,7 @@
 #   docker compose up -d --build --wait
 #   docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml --api-key me     # an API key, once
 #   docker compose exec gate kontra-gate enroll -f /etc/kontra/kontra.yaml hello            # a node's token
-#   kontra connect --gate https://<public_url host> --enroll <token> --serve a2a:hello=http://127.0.0.1:9999
+#   kontrad --gate https://<public_url host> --enroll <token> --serve a2a:hello=http://127.0.0.1:9999
 #   docker compose down            # -v also drops the databases and the ACME cache
 #
 # Settings, from the environment or an .env file beside this one:

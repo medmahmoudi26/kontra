@@ -1,6 +1,6 @@
 # The end-to-end tests (`make test-e2e`, test/e2e; spec/relay.md §16, D80; spec/tunnel.md §16, D154): two gate
 # replicas as processes, a Temporal development server from the pinned CLI, Postgres 17, the tunnel tests'
-# `kontra connect` nodes, and the a2a-samples helloworld service, fetched at its pinned commit into
+# `kontrad` nodes, and the a2a-samples helloworld service, fetched at its pinned commit into
 # KONTRA_A2A_SAMPLES and run by TestHelloworldTunnel with uv (examples/agents/helloworld/run.sh;
 # KONTRA_REQUIRE_HELLOWORLD makes a missing prerequisite fail that test instead of skipping it), and the M3 tests'
 # stock MCP servers on Node 22 (server-everything@1.0.0, server-filesystem@1.0.0, installed by npm from

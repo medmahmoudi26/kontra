@@ -188,14 +188,14 @@ func TestCancelForwardedTunnel(t *testing.T) {
 	checkHistory(t, h, down.ID, "e2e_cancel_tunnel_not_delivered", tunnelForbidden(h)...)
 
 	// The gate never opened a connection to the node, and the node dials only the gate and its targets.
-	socks := checkNoListener(t, n.Pid(), "kontra connect")
+	socks := checkNoListener(t, n.Pid(), "kontrad")
 	peers := []string{h.Front.Addr, strings.TrimPrefix(slow.URL(), "http://"), strings.TrimPrefix(talky.URL(), "http://"), cut.Addr}
 	for _, s := range socks {
 		if !slices.Contains(peers, s.Remote) {
-			t.Fatalf("kontra connect holds a TCP socket to %s, which is neither the gate (the Front) nor a --serve target: %+v", s.Remote, socks)
+			t.Fatalf("kontrad holds a TCP socket to %s, which is neither the gate (the Front) nor a --serve target: %+v", s.Remote, socks)
 		}
 	}
-	t.Logf("kontra connect's TCP sockets: %+v", socks)
+	t.Logf("kontrad's TCP sockets: %+v", socks)
 
 	// (e) The node is gone: the cancel of a waiting task cancels it at once.
 	res, err = caller.Client(t, h.Gates[0], "").SendMessage(ctx, newMessage(slowagent.AskPrefix+" cancel, session gone"))

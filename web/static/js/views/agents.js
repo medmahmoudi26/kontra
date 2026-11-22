@@ -59,7 +59,7 @@ function card(s) {
   const title = (a && a.name) || s.name;
   const said = s.kind === "mcp"
     ? "An MCP server: its tools are in tools/list."
-    : a ? (a.description || "An A2A agent.") : "No card yet: is its node connected (kontra connect)?";
+    : a ? (a.description || "An A2A agent.") : "No card yet: is its node connected (kontrad)?";
   const desc = h("p", { class: "desc plain", text: said });
   const details = h("div", { class: "details stack", hidden: true }, skills.filter(hasDetail).map(skillDetail));
   const arrow = h("button", { class: "expand", type: "button", "aria-expanded": "false", "aria-label": `More about ${title}`, title: "More", hidden: true }, [icon("chev", 14)]);
@@ -122,7 +122,7 @@ export async function showCards() {
   if (mine !== generation) return () => {};
   const items = Array.isArray(got) ? got : Array.isArray(got && got.items) ? got.items : [];
   if (!items.length) {
-    fill(root, [h("p", { class: "empty", text: "No service yet: configure one, or connect a node with kontra connect." })]);
+    fill(root, [h("p", { class: "empty", text: "No service yet: configure one, or connect a node with kontrad." })]);
     return () => {};
   }
   const cards = items.map(card);

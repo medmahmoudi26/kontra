@@ -66,7 +66,7 @@ func TestTunnelReattach(t *testing.T) {
 			t.Fatalf("the waiting status on the caller's stream: %s", w.Data)
 		}
 		t.Logf("the waiting status reached the caller %.1f s after the kill", time.Since(killed).Seconds())
-		if !strings.Contains(stdout(n), "kontra connect: lost the gate") {
+		if !strings.Contains(stdout(n), "kontrad: lost the gate") {
 			// The killed process printed nothing; the restarted one prints "back after" (checked below).
 			t.Log("the killed node printed no loss line (SIGKILL), as expected")
 		}
@@ -120,7 +120,7 @@ func TestTunnelReattach(t *testing.T) {
 		t.Logf("the task completed %.1f s after A's SIGKILL", time.Since(killed).Seconds())
 		completedOnce(t, ctx, h, task, req, onB)
 		checkHistory(t, h, task, "e2e_reconnect_replica_killed", tunnelForbidden(h)...)
-		if out := stdout(n); !strings.Contains(out, "kontra connect: lost the gate") || !strings.Contains(out, "kontra connect: back after") {
+		if out := stdout(n); !strings.Contains(out, "kontrad: lost the gate") || !strings.Contains(out, "kontrad: back after") {
 			t.Fatalf("the node did not say it lost the gate and came back:\n%s", out)
 		}
 

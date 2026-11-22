@@ -112,7 +112,7 @@ func TestAnonymousKeyIsNotRotated(t *testing.T) {
 		return e.count(`select count(*) from kontra.tunnel_keys where tenant_id = '` + tenantID.String() + `'`)
 	}
 	for _, mk := range []func(k *testKey) *tunnel.Hello{
-		func(k *testKey) *tunnel.Hello { return hello(k, a2a("hello")) },     // what kontra connect --rotate sends
+		func(k *testKey) *tunnel.Hello { return hello(k, a2a("hello")) },     // what kontrad --rotate sends
 		func(k *testKey) *tunnel.Hello { return anonHello(k, a2a("hello")) }, // with anonymous: true too
 		func(k *testKey) *tunnel.Hello { return hello(k) },                   // declaring nothing
 	} {

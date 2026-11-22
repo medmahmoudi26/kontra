@@ -186,7 +186,7 @@ func outcomes(as []Attempt) []string {
 
 // TestNodeRotateAfterLeak is the binary-level rotation after a leak (spec/tunnel.md §12, §15; the
 // SPEC-CONFLICT on a rotate_from the gate refuses, M2 WP-06 review): a node's key K1 leaked, so its operator
-// rotates it while the gate is unreachable (`kontra connect --rotate`, which writes K2 above K1 and cannot
+// rotates it while the gate is unreachable (`kontrad --rotate`, which writes K2 above K1 and cannot
 // reach the gate to carry the rotation), then revokes K1 at the gate (`kontra-gate enroll --revoke K1`).
 //
 // Restarted without --enroll, the node names K1 in rotate_from, is refused (K1 is revoked), sends the hello

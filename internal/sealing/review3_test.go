@@ -368,7 +368,7 @@ func TestReview3SessionIDCollidesWithA2APath(t *testing.T) {
 }
 
 // r3-calling-10 (D242): an MCP session the client left without a DELETE, with no job (an unsealed service's), is
-// forgotten once idle past its bound: kontra connect does not grow with every session.
+// forgotten once idle past its bound: kontrad does not grow with every session.
 func TestReview3UnsealedSessionEntryIsSwept(t *testing.T) {
 	f := newFixture(t)
 	hr := newCallingNode(t, f, pins.Options{})

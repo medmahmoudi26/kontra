@@ -20,14 +20,14 @@ import (
 )
 
 // TestMCPHosting is MCP hosting on the node (spec/tunnel.md §8.2, §10; M3 WP-05) at the binary level, with no
-// Postgres or Temporal: the FakeGate admits the real `kontra connect` for two MCP services, web (mcp:web=<url>, a Go
+// Postgres or Temporal: the FakeGate admits the real `kontrad` for two MCP services, web (mcp:web=<url>, a Go
 // Streamable HTTP double at its /mcp endpoint on 127.0.0.1) and fs (mcp:fs=stdio:<the Go stdio double>, with
 // --roots and the run's marker variables passed by --env, D185). Over streams the FakeGate opens as a gate does, each
 // answers an initialize and a tools/call; the stdio child sees the node's roots, not the client's (D173), and only
 // PATH, HOME, LANG and the --env names; the URL double sees its endpoint path and the node's roots capability.
 func TestMCPHosting(t *testing.T) {
 	if testing.Short() {
-		t.Skip("e2e: runs the kontra connect binary; skipped under -short")
+		t.Skip("e2e: runs the kontrad binary; skipped under -short")
 	}
 	root, err := TempRoot()
 	if err != nil {
@@ -211,7 +211,7 @@ func TestMCPHosting(t *testing.T) {
 	}
 	for _, pid := range pids {
 		if syscall.Kill(pid, 0) == nil {
-			t.Errorf("the stdio child %d outlived kontra connect", pid)
+			t.Errorf("the stdio child %d outlived kontrad", pid)
 		}
 	}
 }

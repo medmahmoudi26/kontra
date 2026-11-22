@@ -3,7 +3,7 @@
 # `make tck VARIANT=direct|tunnel|caddy|auth|local`, or scripts/tck.sh <variant>.
 #
 #   direct  the `tck` service on the direct backend, the TCK talking to the gate itself (tck_jsonrpc, tck_rest)
-#   tunnel  the same service hosted through `kontra connect` (tck_jsonrpc, tck_rest on the tunnel backend)
+#   tunnel  the same service hosted through `kontrad` (tck_jsonrpc, tck_rest on the tunnel backend)
 #   caddy   the direct backend behind examples/front/caddy, TLS terminated by Caddy (tck_behind_caddy)
 #   auth    the direct backend behind a loopback Caddy that adds `Authorization: Bearer <a tck API key>` to every
 #           request, so the TCK runs as an API key's principal and reaches ListTasks and push configs, which the
@@ -14,7 +14,7 @@
 # One run: the TCK's environment synced (uv sync --frozen, before anything starts); a fresh database on
 # $KONTRA_TEST_PG (a server where the user may create databases) or, when it is unset, a postgres:17-alpine
 # container; a Temporal development server from $KONTRA_TEMPORAL_CLI (the pinned CLI 1.9.1, Server 1.32) on free
-# loopback ports; kontra-gate, the service (examples/agents/tck) and, for tunnel, kontra (`kontra connect`, enrolled
+# loopback ports; kontra-gate, the service (examples/agents/tck) and, for tunnel, kontra (`kontrad`, enrolled
 # with a service token) built from this checkout; Caddy ($KONTRA_CADDY, the pinned 2.11.7) for caddy and auth. Every
 # process runs from the run's directory and in a process group of its own. Then the self-tests of test/tck (the
 # plugins, the template fill, this script), and the TCK once per binding (--transport jsonrpc, then http_json), each
@@ -171,7 +171,7 @@ wait_for() {
 # --- binaries, run from the run's directory (so pgrep on it finds every process the run started) ---
 mkdir -p "$run/bin" "$reports"
 "$GO" build -o "$run/bin/kontra-gate" ./cmd/kontra-gate
-"$GO" build -o "$run/bin/kontra" ./cmd/kontra
+"$GO" build -o "$run/bin/kontrad" ./cmd/kontrad
 "$GO" build -o "$run/bin/tck" ./examples/agents/tck
 ln -s "$(command -v "$KONTRA_TEMPORAL_CLI")" "$run/bin/temporal"
 [[ -n "$caddy" ]] && ln -s "$(command -v "$caddy")" "$run/bin/caddy"
@@ -233,14 +233,14 @@ fi
 start gate "$run/bin/kontra-gate" serve -f "$run/kontra.yaml" --log-level info
 wait_for "the gate on $gate" 90 "${pids[gate]}" curl -fsS -o /dev/null "$gate/healthz"
 
-# --- the node (tunnel): kontra connect, enrolled for tck with a service token, its ~/.kontra in the run ---
+# --- the node (tunnel): kontrad, enrolled for tck with a service token, its ~/.kontra in the run ---
 if [[ "$variant" == tunnel ]]; then
   token="$("$run/bin/kontra-gate" enroll -f "$run/kontra.yaml" tck 2>>"$run/enroll.log")"
   mkdir -p "$run/node-home"
-  HOME="$run/node-home" start node "$run/bin/kontra" connect --gate "$public" --name tck-node --log json \
+  HOME="$run/node-home" start node "$run/bin/kontrad" --gate "$public" --name tck-node --log json \
     --listen 127.0.0.1:0 --serve "a2a:tck=$service" --enroll "$token"
   unset token
-  wait_for "kontra connect" 60 "${pids[node]}" grep -q '^kontra connect: connected to ' "$run/node.out"
+  wait_for "kontrad" 60 "${pids[node]}" grep -q '^kontrad: connected to ' "$run/node.out"
 fi
 
 # --- the front (caddy: examples/front/caddy as an operator runs it; auth: test/tck/front-auth.Caddyfile) ---

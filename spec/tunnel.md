@@ -13,7 +13,7 @@ the resource an authorization server issues a key for (§6.3; D305). Revision 7 
 (§6.4; D323), decided under the owner's standing instruction. Revision 8 (9 Nov, the owner's decision) withdraws
 escrow: a job key is deleted at terminal, and a listing has no price (§2.3, §6.4; D351). Normative. RFC 2119 key words.
 
-The tunnel is how a node (`kontra connect`) and a gate (`kontra-gate`) talk: one outbound connection from the
+The tunnel is how a node (`kontrad`) and a gate (`kontra-gate`) talk: one outbound connection from the
 node, over which the gate sends HTTP requests to services on the node's localhost (hosting) and the node sends
 HTTP requests to the gate (calling). It is a reverse HTTP proxy over a multiplexed WebSocket. It carries
 ordinary HTTP/1.1 exchanges and does not care whether their bytes are A2A JSON-RPC, A2A HTTP+JSON or MCP
@@ -37,18 +37,27 @@ notes are cited as **D*n*** ([`../docs/decisions.md`](../docs/decisions.md)).
 
 ## 1. Roles
 
-| | Node (`kontra connect`) | Gate (`kontra-gate serve`) |
+| | Node (`kontrad`) | Gate (`kontra-gate serve`) |
 |---|---|---|
 | Opens the TCP/TLS/WebSocket connection | **always** | **never**: the gate never initiates a connection to a node (PRD §12) |
 | yamux role | `yamux.Client` | `yamux.Server` |
 | Opens streams | for **calling** (§9) and blob fetches (§8.3) | for **hosting** (§8): each inbound request to a service on the node |
 | Holds keys | its identity key and per-job keys (private halves) | public keys only |
 
+**The node's binary (D364).** The node is the binary `kontrad`. It takes the node's flags directly, with no
+subcommand: `kontrad [--gate <url>] [--serve …] …`. `kontrad version` prints its version, `kontrad -h` its usage
+(exit 0); any other positional argument, `connect` included, is a usage error (exit 2) that starts nothing. Its
+messages begin `kontrad:`, and it keeps its state in `~/.kontra/` (§2), so a node that ran as `kontra connect`
+keeps its identity, credentials, pins and job keys. `kontra connect`, whatever its arguments, exits 2 printing
+`kontra connect was renamed: run kontrad with the same flags (D364)`: it starts no node, binds no port, dials
+nothing and reads or writes nothing under `~/.kontra/`. It is not an alias. The `kontra` binary keeps `login`
+(§6.3), `publish` (§6.4), `seal` ([`ext-sealed.md`](ext-sealed.md) §5.1) and `version`.
+
 ## 2. Identity and credentials
 
 ### 2.1 The identity key
 
-On first run `kontra connect` creates `~/.kontra/identity.key` (file mode `0600`, directory `~/.kontra` mode
+On first run `kontrad` creates `~/.kontra/identity.key` (file mode `0600`, directory `~/.kontra` mode
 `0700`; `--key` or `KONTRA_KEY` overrides the path, e.g. a mounted secret in a container). It is an age identity
 file, the same format `age-keygen` writes:
 
@@ -107,7 +116,7 @@ file (D124).
 ## 3. Connection
 
 `GET {gate}/v1/tunnel` with `Upgrade: websocket`, `Sec-WebSocket-Protocol: kontra-tunnel.v1` and
-`User-Agent: kontra/<version> (<os>/<arch>)`. No credential travels in a header: credentials go in the
+`User-Agent: kontrad/<version> (<os>/<arch>)` (D364). No credential travels in a header: credentials go in the
 handshake, inside TLS, so they never reach a proxy's access log.
 
 - `{gate}` is the gate's `public_url` (`--gate`, default `https://gateway.kontra.sh`). It must be `https://`,
@@ -139,7 +148,7 @@ closes the connection.
  "rotate_from": {"kid": "k1_…", "recipient": "age1…"},
  "public": ["hello"],
  "anonymous": true,
- "agent": "kontra/4.0.0 (linux/amd64)"}
+ "agent": "kontrad/4.0.0 (linux/amd64)"}
 ```
 
 | Field | Rule |
@@ -152,8 +161,8 @@ closes the connection.
 | `auth` | Optional. An API key: the principal for calling (§9), and with an `enroll:` scope also the authority to enroll (§5) and to convert an anonymous key (§6.3). |
 | `rotate_from` | Optional. The key this one replaces (§12). |
 | `public` | Optional, anonymous sessions only: services that accept unauthenticated callers (§6.1). Each must be one of `services` (else `service_denied`); on any other session it is ignored. |
-| `anonymous` | Optional, `true` only: the node asks for an anonymous session (§6, D285). `kontra connect` sends it only when it holds no API key and no pending or consumed enrollment token for this origin and was given neither `--enroll` nor `--api-key`; a probe (§2.4) never sends it. Without it an unknown key is `unknown_key`; a gate without `tunnel.anonymous` answers it, from a key it does not know, `anonymous_unavailable`. |
-| `agent` | CLI version and platform, shown in the operator's view of nodes. |
+| `anonymous` | Optional, `true` only: the node asks for an anonymous session (§6, D285). `kontrad` sends it only when it holds no API key and no pending or consumed enrollment token for this origin and was given neither `--enroll` nor `--api-key`; a probe (§2.4) never sends it. Without it an unknown key is `unknown_key`; a gate without `tunnel.anonymous` answers it, from a key it does not know, `anonymous_unavailable`. |
+| `agent` | The node's program, version and platform (`kontrad/<version> (<os>/<arch>)`, D364), shown in the operator's view of nodes. The gate stores and logs it and decides nothing on it: any string without NUL is accepted, `kontra/…` from a node built before D364 included. |
 
 **M2, gate → node (`challenge`):**
 
@@ -304,7 +313,7 @@ tenant is admitted as §5 says, for its existing bindings, with or without the f
   reserved: a tenant is anonymous if and only if its slug is `anon-` and 16 lowercase hex digits (a CHECK, migration
   0003; D287), so an account can never take such a name. The services are at `{public_url}/agents/anon-…/<name>`
   and `/mcp/anon-…/<name>`, with `allow: [org:anon-…]` (the session's own node), plus `anonymous` for those listed in
-  M1's `public` (`kontra connect --public <name>`): a shareable, ngrok-style URL anyone may call, within the limits
+  M1's `public` (`kontrad --public <name>`): a shareable, ngrok-style URL anyone may call, within the limits
   below. They are never `listed`.
 - The same key reconnecting before expiry gets the same tenant back (the gate looks the key up first). The
   services it declares then are created, bound or enabled again within the services limit, which counts the
@@ -403,7 +412,7 @@ relay's `429`. The network is stored as a CIDR (`tenants.created_from`), never t
 ### 6.3 `kontra login` (D278)
 
 `kontra login [--gate URL] [--no-browser]` gets an API key for a gate from its operator's sign-in and keeps it as
-that origin's API key in `~/.kontra/credentials` (§2.4), which `kontra connect` then sends as `auth`:
+that origin's API key in `~/.kontra/credentials` (§2.4), which `kontrad` then sends as `auth`:
 
 1. It reads `{gate}/.well-known/oauth-protected-resource/mcp` ([`relay.md`](relay.md) §12.1), whose `resource` must be
    the gate's origin followed by `/mcp` (RFC 9728 §3.3: a document for another resource is not used), compared as an
@@ -445,7 +454,7 @@ are created in the account where they do not exist, under the same names, with `
 one of another kind is `kind_mismatch`, and nothing moves); the key moves to the account with bindings to them; and
 the anonymous tenant expires at once (§6.1). `welcome` names the account's URLs and has no `anonymous`. The anonymous
 URLs answer `404` and their tasks in flight fail `service_unavailable`: a converted service is a new service at a new
-URL. An `audit` row records the conversion. A running `kontra connect` converts at its next handshake; `kontra login`
+URL. An `audit` row records the conversion. A running `kontrad` converts at its next handshake; `kontra login`
 tells the person to restart it. Otherwise the binding is §5's, through the API key's `enroll:*` scope (D296): an
 existing account service is bound, not created again, and one that is disabled or not a tunnel service is
 `service_denied`; a declared name the session does not serve and the account does not have is `service_denied` (only a
@@ -548,7 +557,7 @@ The node is a **fixed-target reverse proxy**, not a SOCKS proxy (`sidecar_not_a_
   interface, which already holds the base, [`relay.md`](relay.md) §6.2), and answers `400` if the result is not
   under that base path. An MCP target may name its endpoint path (MCP has one endpoint; `server-everything`
   serves `/mcp`), and the gate's `/`, where it sends every MCP exchange, goes to that endpoint exactly as
-  `--serve` names it; `kontra connect` still refuses an A2A target with a path (D123, D210).
+  `--serve` names it; `kontrad` still refuses an A2A target with a path (D123, D210).
 - `Host` is set to the target's host. `Origin` is removed (MCP servers on loopback refuse a foreign `Host` and
   may refuse a browser `Origin`).
 - Hop-by-hop headers are removed. `CONNECT` and requests with `Upgrade` are refused with `400`. `TRACE` is
@@ -700,7 +709,7 @@ started with by the client's roots, so roots from the remote client, or from the
 node's filesystem exposes.
 
 - `--roots <name>=<dir>` names one root of the service `<name>`: an absolute path to a directory that exists when
-  `kontra connect` starts. The flag is repeatable, one directory per flag (`--roots fs=/a --roots fs=/b`),
+  `kontrad` starts. The flag is repeatable, one directory per flag (`--roots fs=/a --roots fs=/b`),
   and a service's roots are those of every flag naming it, in order; a name that no `--serve mcp:` serves is a
   usage error. None by default.
 - In the `initialize` it forwards, the node replaces the client's `capabilities.roots` with its own: `{}` (no
@@ -766,7 +775,7 @@ node's filesystem exposes.
   Hosting on the session is unaffected.
 - NOTIFY only shortens the delay: each replica re-reads revocations since its last check whenever its `LISTEN`
   connection (re)connects and at least every 5 s ([`relay.md`](relay.md) §2.3).
-- **Rotate** (`kontra connect --rotate`): the node writes a new first line to `identity.key` (the old one stays
+- **Rotate** (`kontrad --rotate`): the node writes a new first line to `identity.key` (the old one stays
   below it, decrypt-only) and connects with the new key and `rotate_from` naming the old one, proving both (§4.1).
   No token is needed: holding the enrolled old key is the authority. `rotate_from` must name a key of this gate
   that is neither revoked nor already rotated (a revoked one is `revoked`, a rotated one `enroll_invalid`; the
@@ -806,7 +815,7 @@ exponentially from 1 s to 60 s with full jitter, reset after a session that live
 tasks it was serving and holds no task state: the gate waits for it. A task whose session is lost after its first
 upstream task id waits `task.reattach_grace` (15 minutes by default) for a session of the same key, or of a key it
 was rotated to (§12), and resumes on it; its caller is told it waits ([`relay.md`](relay.md) §6.4, D340). The gate
-never dials the node. `kontra connect` prints that it lost the gate and is reconnecting with the next wait, each
+never dials the node. `kontrad` prints that it lost the gate and is reconnecting with the next wait, each
 failed attempt with the next wait, and when it is back after how long (D349), a wait under a second in milliseconds
 ("at once" for none); the services of the welcome only when they changed.
 
@@ -858,6 +867,6 @@ compressed where a row waits on a clock, in the tests' own configuration.
 | `replica_kill` | §11; [`relay.md`](relay.md) §14.2 |
 | `anon_limits` | §6.2: a 4th anonymous tenant from one /24 is `rate_limited`, and a 4th from one IPv6 /48; one past `max_tenants` is `anonymous_unavailable`; a 5th declared service is `service_denied`, with nothing enrolled, and reconnecting with new names never takes the tenant past 4 services; a 5th concurrent task is `429`, as host and as caller; a 9th concurrent plain MCP call to the tenant's services is `429`, and so is a 9th relayed request or open `GET` stream of any other kind (D304); a 9th calling stream is `429`; a caller's parts over the tenant's total are `InvalidParams` before any task row, an upstream's fail the task `upstream_error`; the services are absent from `search`; at `expires_at` the session closes `revoked` and the URLs answer `404` |
 | `anon_lifecycle` | §6.1: the same key before expiry gets its tenant back; a `--public` service answers a caller without a credential and a service not public answers `404` to it and to another node; `expiring` arrives before the end; at the end a task in flight fails `tunnel_lost` once an upstream task exists and `service_unavailable` at its next dispatch otherwise (D297), the node exits saying so, and the key's next hello opens a new tenant with a new slug; a probe after an enrollment that did not commit still gets `unknown_key`, and its tokens are sent again (D285); `enroll` from an anonymous key converts it; after `purge_after` the tenant's keys, services, enrollments, tasks, calls, MCP sessions and bucket objects are gone, its row is a tombstone with `created_from` a CIDR, and no table holds the client's address in any form; an `anon-…` slug is refused for an account tenant |
-| `login_converts` | §6.3, against an in-repository authorization server: `kontra login --no-browser` registers once, sends PKCE `S256` and `resource` = the gate's origin, accepts the code on its loopback port only, stores the `kk_` key for that origin only (0600), and refuses an access token that is not an API key; `kontra connect` with it converts the tenant: `welcome` has no `anonymous` and names the account's URLs, the services stop expiring, the anonymous URLs answer `404`, and an `audit` row records it; a gate without `auth.mcp_oauth` makes `kontra login` exit 1 naming `--api-key` |
+| `login_converts` | §6.3, against an in-repository authorization server: `kontra login --no-browser` registers once, sends PKCE `S256` and `resource` = the gate's origin, accepts the code on its loopback port only, stores the `kk_` key for that origin only (0600), and refuses an access token that is not an API key; `kontrad` with it converts the tenant: `welcome` has no `anonymous` and names the account's URLs, the services stop expiring, the anonymous URLs answer `404`, and an `audit` row records it; a gate without `auth.mcp_oauth` makes `kontra login` exit 1 naming `--api-key` |
 | `local_rebinding` | §9: `Host: evil.example:7777` or `Origin: http://evil.example:7777` on `/mcp/…`, `/agents/…` and `/.well-known/…` gets `403` and opens no stream |
 | `stdio_roots` | §10: `server-filesystem@1.0.0` over stdio, started with one directory and served with `--roots` naming another; a client that declares roots of `file:///` gets its first `tools/call` answered in under 2 s and never receives `roots/list`; the server's `list_allowed_directories` names only the node's configured root, and a read of `~/.kontra/identity.key` is refused (D173) |

@@ -23,18 +23,18 @@ import (
 // ErrRevoked ends Run when the gate revokes the node's key ({"t": "revoked"} on a control stream, §12,
 // §13): the node does not redial, since the next handshake would be refused revoked; its operator must
 // enroll a new key.
-var ErrRevoked = errors.New("node: the gate revoked this node's key (spec/tunnel.md §12); kontra connect does not redial")
+var ErrRevoked = errors.New("node: the gate revoked this node's key (spec/tunnel.md §12); kontrad does not redial")
 
 // ErrAnonymousExpired is wrapped by Run's error when the gate ends the node's anonymous session at its end (spec/tunnel.md
-// §6.1: {"t": "revoked"} at expires_at, or the session closed then): kontra connect exits saying so. The key is not
-// revoked: the next kontra connect opens a new anonymous session, with a new slug.
+// §6.1: {"t": "revoked"} at expires_at, or the session closed then): kontrad exits saying so. The key is not
+// revoked: the next kontrad opens a new anonymous session, with a new slug.
 var ErrAnonymousExpired = errors.New("node: the anonymous session expired")
 
 // AnonymousExpiredError is the end of an anonymous session (ErrAnonymousExpired), naming when it ended.
 type AnonymousExpiredError struct{ At time.Time }
 
 func (e *AnonymousExpiredError) Error() string {
-	return fmt.Sprintf("the anonymous session expired at %s (spec/tunnel.md §6.1): its URLs answer 404 now; run kontra connect "+
+	return fmt.Sprintf("the anonymous session expired at %s (spec/tunnel.md §6.1): its URLs answer 404 now; run kontrad "+
 		"again for a new anonymous session (new URLs), or kontra login to keep the services under an account",
 		e.At.UTC().Format(time.RFC3339))
 }
@@ -45,7 +45,7 @@ func (e *AnonymousExpiredError) Is(target error) bool { return target == ErrAnon
 // or a close of the session is taken for its end rather than a revocation or a redial.
 const expirySlack = time.Minute
 
-// How often a running node looks at its key file: a rotation another `kontra connect` made (one process
+// How often a running node looks at its key file: a rotation another `kontrad` made (one process
 // per gate, §2.1) is carried to this gate soon (rotate_from on a new session, make-before-break), and a
 // rotated key is pruned once its 24 h overlap has passed (§12).
 const (
@@ -88,16 +88,16 @@ func (n *Node) Run(ctx context.Context) error {
 	defer tick.Stop()
 
 	// Calling (§9): the local endpoint is bound before the first dial, so that a --listen another process holds
-	// stops kontra connect at once; its requests wait for a session. --listen off binds nothing: a node that only
+	// stops kontrad at once; its requests wait for a session. --listen off binds nothing: a node that only
 	// hosts offers its calling principal to no local process, and a second node on the host needs no port of its own
 	// (D208).
 	if n.cfg.Listen == calling.ListenOff {
-		fmt.Fprintln(n.out, "kontra connect: calling is off (--listen off): this node only hosts")
+		fmt.Fprintln(n.out, "kontrad: calling is off (--listen off): this node only hosts")
 		n.logger.Info("calling: off (--listen off)")
 	} else {
 		ln, err := calling.Listen(n.cfg.Listen) // a loopback --listen on both loopback families (D262)
 		if err != nil {
-			return fmt.Errorf("node: --listen %s: %w (another kontra connect may hold it: pass --listen 127.0.0.1:<port>, "+
+			return fmt.Errorf("node: --listen %s: %w (another kontrad may hold it: pass --listen 127.0.0.1:<port>, "+
 				"or --listen off for a node that only hosts)", n.cfg.Listen, err)
 		}
 		hdone := make(chan struct{})
@@ -109,7 +109,7 @@ func (n *Node) Run(ctx context.Context) error {
 		}()
 		defer func() { cancel(); <-hdone }()
 		_, port, _ := net.SplitHostPort(ln.Addr().String())
-		fmt.Fprintf(n.out, "kontra connect: calling at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
+		fmt.Fprintf(n.out, "kontrad: calling at http://localhost:%s (%s; local clients only, spec/tunnel.md §9)\n", port, ln.Addr())
 		n.logger.Info("calling: serving local clients", "listen", ln.Addr().String())
 	}
 
@@ -150,7 +150,7 @@ func (n *Node) Run(ctx context.Context) error {
 			n.logger.Info("redialing the gate after a wait", "wait", wait.Round(time.Millisecond), "err", err)
 			if !n.lostAt.IsZero() {
 				n.redials++
-				fmt.Fprintf(n.out, "kontra connect: reconnect attempt %d failed; next %s\n", n.redials, waitText(wait))
+				fmt.Fprintf(n.out, "kontrad: reconnect attempt %d failed; next %s\n", n.redials, waitText(wait))
 			}
 			continue
 		}
@@ -182,12 +182,12 @@ func (n *Node) Run(ctx context.Context) error {
 				if s.anonymousOver() {
 					// An anonymous session that closed at its end, whether or not its {"t": "revoked"} arrived: it is
 					// over (§6.1), and a redial would open another one with new URLs.
-					s.log.Error("the anonymous session ended: kontra connect stops", "expires_at", s.anonEnd)
+					s.log.Error("the anonymous session ended: kontrad stops", "expires_at", s.anonEnd)
 					n.stop(&AnonymousExpiredError{At: s.anonEnd})
 					return n.stopError()
 				}
 				if s.replaced.Load() {
-					// The gate revoked the key of this session, which another `kontra connect` has rotated
+					// The gate revoked the key of this session, which another `kontrad` has rotated
 					// since it was dialed (keyRevoked): the active key's session is dialed at once.
 					s.log.Info("tunnel session of a rotated key closed: dialing a session of the active key at once",
 						"lived", lived.Round(time.Second))
@@ -199,7 +199,7 @@ func (n *Node) Run(ctx context.Context) error {
 					"wait", wait.Round(time.Millisecond))
 				// The tasks it served wait for this node to come back (relay.md §6.4): say so, briefly.
 				n.lostAt, n.redials = time.Now(), 0
-				fmt.Fprintf(n.out, "kontra connect: lost the gate %s; reconnecting %s (tasks in flight wait for this node)\n",
+				fmt.Fprintf(n.out, "kontrad: lost the gate %s; reconnecting %s (tasks in flight wait for this node)\n",
 					n.origin, waitText(wait))
 				break watch
 			case ev := <-s.events:
@@ -367,7 +367,7 @@ func (n *Node) connect(ctx context.Context) (*session, next, error) {
 		}
 		n.refused(kid, herr, h, sent, log)
 		if !herr.Code.Retryable() {
-			log.Error("the gate refused the handshake; kontra connect does not retry this without a change by its operator",
+			log.Error("the gate refused the handshake; kontrad does not retry this without a change by its operator",
 				"code", herr.Code, "message", herr.Message)
 			if names, only := notEnrolled(herr, h.Services); len(names) > 0 {
 				log.Warn(addServiceHint(names, only && len(names) < len(h.Services)), "services", names)
@@ -663,7 +663,7 @@ func addServiceHint(names []string, others bool) string {
 	}
 	hint := fmt.Sprintf("to add %s to this node, get an enrollment token that names %s (Kontra Cloud: the console's "+
 		"Network page, the node's Add a service, or Add a node naming only %s; a self-hosted gate: %s, once its "+
-		"services: has %s), then run kontra connect again with --enroll <token> and every --serve flag: the node's "+
+		"services: has %s), then run kontrad again with --enroll <token> and every --serve flag: the node's "+
 		"key keeps the services it is already enrolled for", list, it, list, mint, it)
 	if others {
 		hint += "; until then, the same command without " + without + " serves the others"
@@ -825,11 +825,11 @@ func (n *Node) printWelcome(w *tunnel.Welcome, id *nodekey.Identity) {
 	back := !n.lostAt.IsZero()
 	if back {
 		// A reconnect (§13): how long the node was away, and the services only when they changed.
-		fmt.Fprintf(&b, "kontra connect: back after %s (attempt %d); tasks in flight resume\n",
+		fmt.Fprintf(&b, "kontrad: back after %s (attempt %d); tasks in flight resume\n",
 			durationText(time.Since(n.lostAt)), n.redials+1)
 		n.lostAt, n.redials = time.Time{}, 0
 	}
-	fmt.Fprintf(&b, "kontra connect: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
+	fmt.Fprintf(&b, "kontrad: connected to %s as %s (tenant %s, session %s)\n", n.origin, id.KeyID(), p(w.Tenant), p(w.Session))
 	if !back || svc.String() != n.lastWelcome || w.Anonymous != nil {
 		b.WriteString(svc.String())
 	}
@@ -874,14 +874,14 @@ func (n *Node) closeAll() {
 // its key's overlap is over, and the new key's session goes on.
 //
 // The key the node uses is the key file's active key (activeRecipient), not the key of its last dial: another
-// `kontra connect` may have rotated the shared file since, and this process sees it only at its next
+// `kontrad` may have rotated the shared file since, and this process sees it only at its next
 // maintain tick, up to a minute later. A revocation of the old key in that window (rotate after a leak,
 // then revoke the old key: D125, D128) closes the old key's session, which Run then replaces at once with a
 // session of the new key (session.replaced), as maintain would have (M2 review, tunnel-spec-2).
 func (n *Node) keyRevoked(s *session) {
 	if s.revokeEndsAnonymous() {
 		// §6.1: at an anonymous session's end the gate sends {"t": "revoked"} and closes it; the key is not revoked.
-		s.log.Error("the gate ended the anonymous session at its end: kontra connect stops", "expires_at", s.anonEnd)
+		s.log.Error("the gate ended the anonymous session at its end: kontrad stops", "expires_at", s.anonEnd)
 		n.stop(&AnonymousExpiredError{At: s.anonEnd})
 		_ = s.mux.Close()
 		return
@@ -892,7 +892,7 @@ func (n *Node) keyRevoked(s *session) {
 		_ = s.mux.Close()
 		return
 	}
-	s.log.Error("the gate revoked this node's key: kontra connect stops and does not redial (§12)")
+	s.log.Error("the gate revoked this node's key: kontrad stops and does not redial (§12)")
 	n.stop(ErrRevoked)
 }
 
@@ -900,7 +900,7 @@ func (n *Node) keyRevoked(s *session) {
 // session's hello carried, its calling principal. The session's calling requests are 401 from now on, and its
 // hosting goes on. The key is dropped from this origin's credentials (when it is still the one stored) and so
 // from every later hello: otherwise the next handshake (a network blip, a replica's restart, the make-before-break
-// dial of a drain) would carry it and be refused auth_invalid, which §4 makes final, and kontra connect would stop
+// dial of a drain) would carry it and be refused auth_invalid, which §4 makes final, and kontrad would stop
 // hosting. Later sessions call as node:<key_id> (§9); a key that only calls is refused until its operator gives a
 // new --api-key (enroll.Admit).
 func (n *Node) authRevoked(s *session) {
@@ -950,7 +950,7 @@ func (n *Node) activeRecipient() string {
 
 // maintain runs every maintainEvery: it prunes rotated keys hourly, and reports whether the key file's
 // active key replaced the key cur was opened with and this gate has not confirmed that rotation (another
-// `kontra connect` rotated the shared key file): a session of the new key must then be dialed, with
+// `kontrad` rotated the shared key file): a session of the new key must then be dialed, with
 // rotate_from.
 func (n *Node) maintain(cur *session) bool {
 	now := n.now()

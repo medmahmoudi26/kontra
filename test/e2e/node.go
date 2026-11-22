@@ -28,7 +28,7 @@ import (
 // M2 harness (WP-08). The replicas share one public_url, which a node's hello must name as its origin
 // (spec/tunnel.md §4: bad_origin otherwise), so the public port is a Front: a TCP proxy that forwards each
 // new connection to the replica the test chose (Front.Route), replica A by default. Tunnel services are
-// services with backend tunnel, each served by a `kontra connect` subprocess (a Node) of the binary built
+// services with backend tunnel, each served by a `kontrad` subprocess (a Node) of the binary built
 // once from ./cmd/kontra, with its own HOME under the run's directory (its identity key and credentials)
 // and a slowagent (or the helloworld service) as its --serve target. Every Node carries KONTRA_E2E_RUN and
 // the script's KONTRA_E2E_SESSION, so scripts/test_e2e.sh can prove none outlived the run.
@@ -256,39 +256,50 @@ func (f *Front) Close() {
 	}
 }
 
-// --- the node binary ---
+// --- the binaries ---
+
+// built is one binary of this module, built once per test binary under TempRoot.
+type built struct {
+	once sync.Once
+	path string
+	err  error
+}
 
 var (
-	nodeBuildOnce sync.Once
-	nodeBin       string
-	nodeBuildErr  error
+	kontradBin built // ./cmd/kontrad: the nodes (D364)
+	kontraBin  built // ./cmd/kontra: kontra login and kontra seal
 )
 
-// nodeBinary builds ./cmd/kontra once per test binary, under TempRoot.
-func nodeBinary() (string, error) {
-	nodeBuildOnce.Do(func() {
+func (b *built) get(name string) (string, error) {
+	b.once.Do(func() {
 		root, err := TempRoot()
 		if err != nil {
-			nodeBuildErr = err
+			b.err = err
 			return
 		}
 		dir, err := os.MkdirTemp(root, "bin-")
 		if err != nil {
-			nodeBuildErr = err
+			b.err = err
 			return
 		}
-		nodeBin = filepath.Join(dir, "kontra")
-		cmd := exec.Command("go", "build", "-o", nodeBin, "kontra.sh/kontra/cmd/kontra")
+		b.path = filepath.Join(dir, name)
+		cmd := exec.Command("go", "build", "-o", b.path, "kontra.sh/kontra/cmd/"+name)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			nodeBuildErr = fmt.Errorf("e2e: build kontra: %v\n%s", err, out)
+			b.err = fmt.Errorf("e2e: build %s: %v\n%s", name, err, out)
 		}
 	})
-	return nodeBin, nodeBuildErr
+	return b.path, b.err
 }
+
+// nodeBinary is kontrad, the node.
+func nodeBinary() (string, error) { return kontradBin.get("kontrad") }
+
+// kontraBinary is kontra, for kontra login and kontra seal.
+func kontraBinary() (string, error) { return kontraBin.get("kontra") }
 
 // --- nodes ---
 
-// NodeOptions configure one `kontra connect`.
+// NodeOptions configure one `kontrad`.
 type NodeOptions struct {
 	Name   string            // --name, and the HOME directory's name under the run's (default node-<n>)
 	Serves map[string]string // service name → target URL (--serve a2a:<name>=<url>)
@@ -306,7 +317,7 @@ type NodeOptions struct {
 	Args   []string // extra flags
 }
 
-// Node is one `kontra connect` subprocess. Its stdout (the welcome lines) goes to OutPath and its JSON log
+// Node is one `kontrad` subprocess. Its stdout (the welcome lines) goes to OutPath and its JSON log
 // to LogPath, both appended to across restarts: Log reads every launch's lines, LaunchLog only the current
 // launch's.
 type Node struct {
@@ -329,8 +340,8 @@ type Node struct {
 	logFrom int64    // LogPath's size when the current launch began: where its lines start
 }
 
-// welcomeRE is the line `kontra connect` prints on stdout for each welcome (internal/node printWelcome).
-var welcomeRE = regexp.MustCompile(`^kontra connect: connected to (\S+) as (k1_[a-z2-7]{26}) \(tenant (\S+), session ([0-9a-f-]{36})\)$`)
+// welcomeRE is the line `kontrad` prints on stdout for each welcome (internal/node printWelcome).
+var welcomeRE = regexp.MustCompile(`^kontrad: connected to (\S+) as (k1_[a-z2-7]{26}) \(tenant (\S+), session ([0-9a-f-]{36})\)$`)
 
 // LaunchNode starts a node and returns at once, without waiting for a welcome (a node the gate refuses).
 func (h *Harness) LaunchNode(o NodeOptions) (*Node, error) {
@@ -378,7 +389,7 @@ func (h *Harness) LaunchNode(o NodeOptions) (*Node, error) {
 
 // args is the node's command line.
 func (n *Node) args() []string {
-	args := []string{"connect", "--gate", n.opts.Gate, "--name", n.Name, "--log", "json"}
+	args := []string{"--gate", n.opts.Gate, "--name", n.Name, "--log", "json"}
 	for _, name := range slices.Sorted(mapKeys(n.opts.Serves)) {
 		args = append(args, "--serve", "a2a:"+name+"="+n.opts.Serves[name])
 	}
@@ -507,8 +518,8 @@ func (n *Node) Session() string {
 	return ws[len(ws)-1].Session
 }
 
-// callingAtRE is the line `kontra connect` prints on stdout when its calling endpoint listens (internal/node run.go).
-var callingAtRE = regexp.MustCompile(`kontra connect: calling at http://localhost:(\d+) `)
+// callingAtRE is the line `kontrad` prints on stdout when its calling endpoint listens (internal/node run.go).
+var callingAtRE = regexp.MustCompile(`kontrad: calling at http://localhost:(\d+) `)
 
 // Local waits for the current launch's calling endpoint (spec/tunnel.md §9) and returns its base URL,
 // http://127.0.0.1:<port>.
@@ -646,7 +657,7 @@ func (n *Node) Kill() error {
 	}
 }
 
-// Term sends SIGTERM to the node and returns its exit code (0: kontra connect stops cleanly on SIGTERM).
+// Term sends SIGTERM to the node and returns its exit code (0: kontrad stops cleanly on SIGTERM).
 func (n *Node) Term() (int, error) {
 	n.mu.Lock()
 	cmd := n.cmd

@@ -50,7 +50,7 @@ func (h *callRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(seen)
 }
 
-var callingLineRE = regexp.MustCompile(`kontra connect: calling at http://localhost:(\d+) `)
+var callingLineRE = regexp.MustCompile(`kontrad: calling at http://localhost:(\d+) `)
 
 // localPort is the port of the node's calling endpoint, from the line it prints.
 func (tn *testNode) localPort(t *testing.T) string {

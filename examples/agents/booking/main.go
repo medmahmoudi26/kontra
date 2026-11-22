@@ -5,7 +5,7 @@
 // It is the examples' input-required service (examples/README.md, spec/relay.md §7): a plain A2A agent that
 // imports nothing from Kontra and has no Kontra-specific endpoint. It serves its card at
 // /.well-known/agent-card.json, JSON-RPC at its root and HTTP+JSON under /rest, all under one root URL, so that
-// `kontra connect --serve a2a:booking=http://127.0.0.1:9998` can host it (an M2 node hosts an agent at its root
+// `kontrad --serve a2a:booking=http://127.0.0.1:9998` can host it (an M2 node hosts an agent at its root
 // URL only).
 //
 //	booking [--host 127.0.0.1] [--port 9998] [--binding both|jsonrpc|http+json]

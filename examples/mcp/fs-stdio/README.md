@@ -1,22 +1,22 @@
 # mcp/fs-stdio
 
-`@modelcontextprotocol/server-filesystem@1.0.0` over stdio, bridged by `kontra connect` (M3): the node owns the
+`@modelcontextprotocol/server-filesystem@1.0.0` over stdio, bridged by `kontrad` (M3): the node owns the
 server process, one per MCP session, and the gate sees a Streamable HTTP MCP endpoint like any other
 (spec/tunnel.md §10). The server is unmodified and imports nothing from Kontra; `package-lock.json` pins it and
 everything it depends on.
 
 ## What the node does for it
 
-- `--serve 'mcp:fs=stdio:<command line>'` is one argument. `kontra connect` splits it into words (POSIX quotes and
+- `--serve 'mcp:fs=stdio:<command line>'` is one argument. `kontrad` splits it into words (POSIX quotes and
   backslashes, a leading `~/` expanded) and runs it **without a shell**, so a pipe, a redirection or a `$VAR`
   is refused: quote it, or run a script.
 - Each `initialize` starts one process, and its MCP session ends with it: `DELETE`, `--session-idle` (default 1 h),
-  a crash, a tunnel session that closes, or `kontra connect` stopping. A stopped process gets its stdin closed,
+  a crash, a tunnel session that closes, or `kontrad` stopping. A stopped process gets its stdin closed,
   then its whole process group `SIGTERM` 5 s later and `SIGKILL` 5 s after that, so `npx`'s `node` never outlives
   it (D184).
 - At most `--max-sessions` processes (default 8) run per service; one more `initialize` gets `503` until one ends.
   A durable task holds one too, for as long as it runs (its dispatch opens its own session, D22).
-- The process gets `PATH`, `HOME` and `LANG` from `kontra connect`'s environment, and the variables `--env NAME`
+- The process gets `PATH`, `HOME` and `LANG` from `kontrad`'s environment, and the variables `--env NAME`
   names; nothing else. Its stderr goes to the node's log, at most 1 MiB a minute.
 - **Roots stay on the node** (D173). `server-filesystem@1.0.0` replaces the directories it was started with by the
   client's roots, so a caller (or the gate) that declared `file:///` would read and write the whole machine:
@@ -38,16 +38,16 @@ is meant to be written. The commands below run from the repository root.
 mkdir -p /srv/kontra-fs                                     # a dedicated directory: the only one the server sees
 
 docker compose -f compose.dev.yaml up -d --wait
-go build -o kontra-gate ./cmd/kontra-gate && go build -o kontra ./cmd/kontra
+go build -o kontra-gate ./cmd/kontra-gate && go build -o kontrad ./cmd/kontrad
 ./kontra-gate migrate -f examples/mcp/fs-stdio/kontra.yaml
 export KONTRA_API_KEY="$(./kontra-gate enroll -f examples/mcp/fs-stdio/kontra.yaml --api-key demo)"
 ./kontra-gate serve -f examples/mcp/fs-stdio/kontra.yaml &
 
-./kontra connect --gate http://localhost:8080 \
+./kontrad --gate http://localhost:8080 \
   --serve "mcp:fs=stdio:$PWD/examples/mcp/fs-stdio/node_modules/.bin/mcp-server-filesystem /srv/kontra-fs" \
   --roots fs=/srv/kontra-fs \
   --enroll "$(./kontra-gate enroll -f examples/mcp/fs-stdio/kontra.yaml fs)" &
-#  kontra connect: connected to http://localhost:8080 as k1_… (tenant default, session …)
+#  kontrad: connected to http://localhost:8080 as k1_… (tenant default, session …)
 #    mcp fs  http://localhost:8080/mcp/fs
 ```
 

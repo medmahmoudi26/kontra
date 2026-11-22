@@ -6370,3 +6370,29 @@ The decisions before this one keep their words: read hire as call (or `send_mess
 buyer as caller and seller as service. Migrations 0001 to 0008 keep theirs too, byte for byte, since goose checks
 applied files, and so do the run records (`docs/gate-runs-m4.md`, `docs/pentest-m3.md`), which quote commands and
 output as they ran.
+
+### D364. The node is its own binary, `kontrad`; `kontra connect` is retired with no alias — **decided by the owner, 19 Nov**
+
+The node is a long-running daemon, yet it shipped as a subcommand of the person's CLI, `kontra connect`. The owner
+named it `kontrad` and chose a hard rename, as for D363: the old command fails loudly and names the new one, with no
+alias (OpenSpec change `kontrad-rename`). "Connector" was considered and dropped: MCP clients use the word for the
+calling side.
+
+| Before | After |
+|---|---|
+| `kontra connect [flags]` (`cmd/kontra`) | `kontrad [flags]` (`cmd/kontrad`): the same flags, defaults and exit codes, with no subcommand; `kontrad version`; any other positional argument, `connect` included, is a usage error |
+| `kontra connect …` | exits 2 printing `kontra connect was renamed: run kontrad with the same flags (D364)`; starts, binds, dials, reads and writes nothing |
+| `User-Agent` and hello `agent`: `kontra/<version> (<os>/<arch>)` | `kontrad/<version> (<os>/<arch>)` ([`spec/tunnel.md`](../spec/tunnel.md) §3, §4) |
+| Messages `kontra connect: …` | `kontrad: …` |
+| `go install kontra.sh/kontra/cmd/kontra@latest` for a node | `go install kontra.sh/kontra/cmd/kontrad@latest`; `cmd/kontra` for `login`, `publish` and `seal` |
+
+What stays, on purpose. `~/.kontra/` (`identity.key`, `credentials`, `pins`, `jobs/`, `hosted/`) and `KONTRA_KEY`, so
+that an upgraded node keeps its identity and pins with no migration. The word node for the enrolled identity: the
+principal `node:<kid>`, enrollment and the operator's view of nodes are names of the wire and of Cloud's API. The gate
+binary, `kontra-gate`. `kontra publish` still sends `User-Agent: kontra/<version>`, since `kontra` sends it. The gate
+reads the hello's `agent` for nothing but its record and its log, so nodes built before this decision keep
+connecting, and the tunnel's byte transcript vector and fuzz seeds keep their `kontra/4.0.0`: any agent string is valid
+input.
+
+The decisions before this one keep `kontra connect`: read it as `kontrad`. So do the run records
+(`docs/gate-runs-m4.md`, `docs/pentest-m3.md`), which quote commands and output as they ran.

@@ -571,7 +571,7 @@ func TestOutcomeCarriesNoTerminalEscapes(t *testing.T) {
 		}
 	}
 
-	_, err := ParseOutcome([]byte(`{"t":"error","v":1,"code":"bad_origin\u001b[31m","message":"go to \u001b]8;;https://evil.example\u0007here\u001b]8;;\u0007 \u202eexe.\nkontra connect: connected"}`))
+	_, err := ParseOutcome([]byte(`{"t":"error","v":1,"code":"bad_origin\u001b[31m","message":"go to \u001b]8;;https://evil.example\u0007here\u001b]8;;\u0007 \u202eexe.\nkontrad: connected"}`))
 	var he *HandshakeError
 	if !errors.As(err, &he) {
 		t.Fatalf("a refusal: %v", err)

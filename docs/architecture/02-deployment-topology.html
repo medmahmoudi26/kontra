@@ -159,7 +159,7 @@ a{color:var(--data)} :focus-visible{outline:2px solid var(--accent);outline-offs
 <h2>2. Playing with it: five minutes, zero infrastructure</h2>
 <pre><code>brew install kontra
 a2a serve --exec 'echo Hello World' --port 9999         <span class="c"># or your own agent, in docker or not</span>
-kontra connect --serve a2a:hello=http://localhost:9999   <span class="c"># --gate defaults to gateway.kontra.sh</span>
+kontrad --serve a2a:hello=http://localhost:9999   <span class="c"># --gate defaults to gateway.kontra.sh</span>
 <span class="c">#  → anonymous session · https://gateway.kontra.sh/agents/anon-7f3a/hello · expires in 2 h
 #  → console http://localhost:7778</span>
 a2a send http://localhost:7777/agents/anon-7f3a/hello "hi"
@@ -170,7 +170,7 @@ a2a send http://localhost:7777/agents/anon-7f3a/hello "hi"
 <h3>Agent in Docker</h3>
 <pre><code><span class="c"># CLI on the host, agent in a container with a published port</span>
 docker run -p 9999:9999 my/agent
-kontra connect --serve a2a:hello=http://localhost:9999
+kontrad --serve a2a:hello=http://localhost:9999
 
 <span class="c"># or the CLI as a sidecar in the same compose, no published port at all</span>
 services:
@@ -204,7 +204,7 @@ services:
               command: serve -f /etc/kontra.yaml, depends_on: [temporal, postgres] }
   temporal: { image: temporalio/auto-setup, environment: { DB: postgres12, POSTGRES_SEEDS: postgres } }
   postgres: { image: postgres:17, volumes: ["pg:/var/lib/postgresql/data"] }</code></pre>
-<p>That is the whole self-host story: a VPS, one command, then everyone on the team runs the same <code>kontra connect --gate https://gate.team.internal</code> they would run against the public gate. One identity key, enrolled at each gate separately.</p>
+<p>That is the whole self-host story: a VPS, one command, then everyone on the team runs the same <code>kontrad --gate https://gate.team.internal</code> they would run against the public gate. One identity key, enrolled at each gate separately.</p>
 
 <h3>Contributors to the gate itself</h3>
 <p>Working on the gate's code still needs a Temporal and a Postgres nearby. That is the contributor compose in the repo, started with <code>docker compose -f compose.dev.yaml up</code>, plus <code>go run ./cmd/kontra-gate</code>. It is tooling for building Kontra, not for using it, and no one who only runs the CLI ever sees it.</p>
@@ -228,7 +228,7 @@ services:
 <h2>5. Open</h2>
 <ul>
 <li>Anonymous session TTL and caps: 2 h and a handful of concurrent tasks is the starting point; tune against abuse.</li>
-<li>Whether the public gate should offer a pinned-version <code>kontra connect --sandbox</code> that lands on a separate, throwaway tenant pool, so marketplace tenants never share a replica with anonymous traffic.</li>
+<li>Whether the public gate should offer a pinned-version <code>kontrad --sandbox</code> that lands on a separate, throwaway tenant pool, so marketplace tenants never share a replica with anonymous traffic.</li>
 <li>Helm chart layout: one chart with Temporal and Postgres as optional dependencies, or the Cloud split (<code>kontra-platform</code> + <code>kontra</code>) reused as is.</li>
 </ul>
 </section>
