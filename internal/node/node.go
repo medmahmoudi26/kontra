@@ -509,9 +509,9 @@ func New(cfg Config, logger *slog.Logger) (*Node, error) {
 	if cfg.KeyPath == "" || cfg.CredentialsPath == "" {
 		return nil, errors.New("node: no key or credentials path")
 	}
-	out := cfg.Out
-	if out == nil {
-		out = io.Discard
+	var out io.Writer = io.Discard
+	if cfg.Out != nil {
+		out = &lockedWriter{w: cfg.Out}
 	}
 	log := logger.With("component", "node", "gate", origin)
 	proxy, err := NewMCPProxy(cfg.Serves, cfg.MaxInflight, MCPOptions{Env: cfg.Env, SessionIdle: cfg.SessionIdle,
@@ -655,4 +655,17 @@ func (n *Node) dropService(name string) {
 		n.logger.Warn("the gate revoked this node's binding to a service: it is no longer served or declared, "+
 			"until --serve changes", "service", name)
 	}
+}
+
+// lockedWriter serializes the node's writes to Out: the run loop and each session's control stream write
+// from their own goroutines, and Out may be any io.Writer (a test's bytes.Buffer, say).
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
